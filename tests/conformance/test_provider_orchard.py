@@ -71,6 +71,14 @@ class TestOrchardProvider(ProviderConformance):
         return await super().request(**overrides)
 
     @pytest.mark.asyncio
+    async def test_a_sandbox_lost_to_its_own_memory_says_so(self) -> None:
+        pytest.skip(
+            "a macOS guest whose processes fill its memory and its disk's swap freezes with "
+            "nothing in it or on the Host to say why, and may press the Host's own memory "
+            "(Orchard's AGENTS.md)"
+        )
+
+    @pytest.mark.asyncio
     async def test_large_replies_arrive_whatever_python_the_image_configures(self) -> None:
         """Without the image's PYTHON* variables: Orchard refuses any from a request."""
         async with await self.provider.create(await self.request()) as sandbox:

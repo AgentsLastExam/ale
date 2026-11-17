@@ -73,6 +73,7 @@ from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.providers.runner import (
     HOST_IP,
+    Console,
     connect_guest,
     free_port,
     is_blank,
@@ -145,8 +146,10 @@ DISK_RECORD = "disk.json"
 GATEWAY_CHAIN = "ALE_GATEWAY"
 
 
-async def _connect(host_port: int, token: str) -> GuestClient:
-    return await connect_guest(host_port, token, timeout_sec=BOOT_TIMEOUT_SEC, interval_sec=0.1)
+async def _connect(host_port: int, token: str, console: Console) -> GuestClient:
+    return await connect_guest(
+        host_port, token, timeout_sec=BOOT_TIMEOUT_SEC, interval_sec=0.1, console=console
+    )
 
 
 async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
@@ -679,9 +682,10 @@ class FirecrackerProvider(Provider):
             raise
 
         clients: list[GuestClient] = []
+        console = Console(container, request.resources.memory_mb)
         try:
             host_ip = await self._wire_network(container, request)
-            client = await self._first_connection(container, host_port, token)
+            client = await self._first_connection(container, host_port, token, console)
             clients.append(client)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
             storage_mb = await self._root_capacity_mb(client, request.resources.storage_mb)
@@ -695,7 +699,7 @@ class FirecrackerProvider(Provider):
                 client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
             )
             await verify_identities(client, agent_user, sudo=request.sudo)
-            file_client = await _connect(host_port, token)
+            file_client = await _connect(host_port, token, console)
             clients.append(file_client)
         except BaseException:
             await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
@@ -899,13 +903,15 @@ class FirecrackerProvider(Provider):
         if code != 0:
             raise ProviderStartError(f"could not start the Firecracker runner: {stderr.strip()}")
 
-    async def _first_connection(self, container: str, host_port: int, token: str) -> GuestClient:
+    async def _first_connection(
+        self, container: str, host_port: int, token: str, console: Console
+    ) -> GuestClient:
         """The guest service's first connection, or the console's last lines if the VM stopped.
 
         A microVM whose init fails resets at once, and its runner exits; waiting out the
         boot deadline would hide why.
         """
-        connecting = asyncio.ensure_future(_connect(host_port, token))
+        connecting = asyncio.ensure_future(_connect(host_port, token, console))
         stopped = asyncio.ensure_future(
             _run("docker", "wait", container, timeout=BOOT_TIMEOUT_SEC + 30)
         )
@@ -1222,12 +1228,13 @@ class FirecrackerProvider(Provider):
             raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
         token = read_guest_token(storage)
         attached_request = request.model_copy(update={"role": SandboxRole(role)})
-        client = await _connect(host_port, token)
+        console = Console(container, allocation.memory_mb)
+        client = await _connect(host_port, token, console)
         try:
             agent_user, agent_home, _ = await self._read_guest_contract(client, attached_request)
             # A later run reaches its own Gateway at the same address.
             host_ip = await self._wire_network(container, attached_request)
-            file_client = await _connect(host_port, token)
+            file_client = await _connect(host_port, token, console)
         except BaseException:
             await client.close()
             raise

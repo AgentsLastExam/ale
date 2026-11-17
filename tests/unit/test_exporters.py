@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ale.core.result import ResultRecord
+from ale.core.result import FailureInfo, ResultRecord
 from ale.core.trajectory import (
     AtifAgent,
     AtifAudioSource,
@@ -210,3 +210,30 @@ def test_prime_verifiers_record_preserves_subagent_branch_parentage() -> None:
 def test_scalar_export_requires_an_explicit_policy() -> None:
     _, result = fixture()
     assert scalar_reward(result, lambda rewards: rewards["correctness"]) == 1.0
+
+
+@pytest.mark.parametrize("status", [Status.TIMEOUT, Status.MEMORY_EXHAUSTED])
+def test_the_agents_own_outcome_without_rewards_scores_zero(status: Status) -> None:
+    """A Sandbox lost to memory leaves nothing to verify; the agent still failed."""
+    _, completed = fixture()
+    lost = completed.model_copy(
+        update={
+            "status": status,
+            "rewards": None,
+            "failure": FailureInfo(error_type="MemoryExhaustedError", message="OOM kill"),
+        }
+    )
+    assert scalar_reward(lost, lambda rewards: rewards["correctness"]) == 0.0
+
+
+def test_an_environment_failure_has_no_score() -> None:
+    _, completed = fixture()
+    failed = completed.model_copy(
+        update={
+            "status": Status.ENV_ERROR,
+            "rewards": None,
+            "failure": FailureInfo(error_type="GuestUnreachableError", message="lost"),
+        }
+    )
+    with pytest.raises(ValueError, match="env_error episode has no score"):
+        scalar_reward(failed, lambda rewards: rewards["correctness"])

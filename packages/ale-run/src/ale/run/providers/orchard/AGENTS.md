@@ -83,3 +83,32 @@ left off, and a proxy the account never set comes back off, with the relay's add
 in it, unused. A proxy that required authentication comes back without it, since
 `networksetup` sets one without credentials. Measured with Safari on the Tahoe base: the
 declared host loads and another is refused.
+
+## A macOS VM that runs out of its memory
+
+**Problem.** ALE cannot tell a macOS Sandbox lost to memory from one lost otherwise, so
+such a loss stays an environment error, which is retried.
+
+**Context.** Measured on a 16 GB Mac mini on macOS 27, with Orchard 0.58, and a 4096 MiB VM
+(November 2026):
+- macOS swaps to the guest's own disk, about 11 GB free at boot. One process, writing
+  incompressible memory, ran to 13.7 to 18.4 GiB before macOS killed it
+  (`memorystatus: triggering no paging space action`), after 25 to 50 s; `exec` returned
+  exit -9 and the VM answered at once.
+- 400 processes of 16 MiB lived on in swap. 400 of 48 MiB, past memory and free disk, froze
+  the guest at about 12 GiB: guestd, a new SSH session and Tart's guest agent stopped
+  answering, the VM's two vCPUs ran flat out, Orchard reported it running, and the Host
+  itself reached memory pressure after five minutes. ALE's command ended after its timeout,
+  or with `GuestUnreachableError` once Orchard dropped guestd's channel.
+- A RAM disk needs no privilege (`hdiutil attach -nomount ram://...`) and fills to its size
+  or until macOS drops it (at 12 GiB of 20), swapped like any memory; the VM lived.
+- Nothing outside the guest records why: Orchard's VM log and the worker's log are empty,
+  and Tart keeps no console.
+
+**Solution.** None: a lost macOS Sandbox is an environment error, and the shared
+conformance test of such a loss is skipped for Orchard.
+
+**Decisions.**
+- No attribution from pressure readings: a watcher in the guest saw pressure level 4 and
+  shrinking disk for 30 s before the freeze, but pressure is no exhausted limit, and the
+  readings stop with the guest.

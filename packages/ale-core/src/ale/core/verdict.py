@@ -13,7 +13,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-__all__ = ["FailureInfo", "Rewards", "Status", "Verdict"]
+__all__ = ["FINAL_STATUSES", "FailureInfo", "Rewards", "Status", "Verdict"]
 
 
 class Status(StrEnum):
@@ -37,12 +37,29 @@ class Status(StrEnum):
     BUDGET_EXCEEDED = "budget_exceeded"
     """A turn, token or model-call ceiling stopped the episode."""
 
+    MEMORY_EXHAUSTED = "memory_exhausted"
+    """The Sandbox the agent ran in was lost after an OOM kill in it."""
+
     CANCELLED = "cancelled"
     """An operator or a signal stopped the episode."""
 
     REFUSED = "refused"
     """The agent declined the task."""
 
+
+#: The measured agent's own outcomes, which another attempt must not replace: a completed
+#: zero is a score, and a limit, a Sandbox lost to memory, or a refusal ends the agent's
+#: work, so retrying would grant a fresh limit or fresh memory. One of them without rewards,
+#: its Sandbox gone before verification, scores zero.
+FINAL_STATUSES = frozenset(
+    {
+        Status.COMPLETED,
+        Status.TIMEOUT,
+        Status.BUDGET_EXCEEDED,
+        Status.MEMORY_EXHAUSTED,
+        Status.REFUSED,
+    }
+)
 
 Rewards = dict[str, float]
 """Named scores. ALE preserves the map and does not select an aggregate."""

@@ -72,7 +72,14 @@ def write_result(
     [
         status
         for status in Status
-        if status not in {Status.COMPLETED, Status.TIMEOUT, Status.BUDGET_EXCEEDED, Status.REFUSED}
+        if status
+        not in {
+            Status.COMPLETED,
+            Status.TIMEOUT,
+            Status.BUDGET_EXCEEDED,
+            Status.MEMORY_EXHAUSTED,
+            Status.REFUSED,
+        }
     ],
 )
 async def test_retry_preserves_failed_evidence_and_stops_on_completed_zero(
@@ -105,6 +112,7 @@ async def test_retry_preserves_failed_evidence_and_stops_on_completed_zero(
     [
         (Status.TIMEOUT, "PhaseTimeoutError"),
         (Status.BUDGET_EXCEEDED, "BudgetExceededError"),
+        (Status.MEMORY_EXHAUSTED, "MemoryExhaustedError"),
         (Status.REFUSED, "AgentRefusalError"),
     ],
 )

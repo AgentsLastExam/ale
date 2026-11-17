@@ -21,7 +21,12 @@ import ale.run
 import ale.run.providers.docker.provider as docker_provider
 from ale.core.capability import GpuHold, GpuModel
 from ale.core.config import ProviderId
-from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
+from ale.core.errors import (
+    GuestUnreachableError,
+    MemoryExhaustedError,
+    ProviderCapabilityError,
+    ProviderStartError,
+)
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
@@ -36,6 +41,7 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd, iptables
+from ale.run.providers import memory
 from ale.run.providers.docker import gpu_sharing, gvisor, kata, subnets, tc
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
@@ -231,6 +237,7 @@ def _sandbox() -> DockerSandbox:
     sandbox._client = SimpleNamespace(close=close)  # type: ignore[assignment]
     sandbox._file_client = SimpleNamespace(close=close)  # type: ignore[assignment]
     sandbox._sessions = ()  # type: ignore[assignment]
+    sandbox._watcher = None
     sandbox._watchdog = gpu_sharing.Watchdog()
     sandbox._context = contextvars.copy_context()
     sandbox.container_id = "f" * 64
@@ -910,35 +917,60 @@ def test_the_gvisor_build_ale_runs_is_the_one_its_build_script_makes() -> None:
         assert named and set(named) == {version}, f"{path} names {sorted(set(named))}"
 
 
+#: What a container's state then says, as ``docker inspect`` reports it.
+_KILLED, _RUNS = {"Running": False, "ExitCode": 137}, {"Running": True, "ExitCode": 0}
+_OOM_KILL = "after an OOM kill in it (its Task declares 512 MiB): Docker recorded OOMKilled"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("waited", "state", "died"),
+    ("waited", "state", "lost"),
     [
-        (0, {"Running": False, "OOMKilled": True, "ExitCode": 137}, "exceeded its memory limit"),
-        (0, {"Running": False, "OOMKilled": False, "ExitCode": 137}, "killed from outside"),
-        (0, {"Running": False, "OOMKilled": False, "ExitCode": 3}, "exited with code 3"),
-        # Docker keeps OOMKilled once the OOM killer took any process, as a gVisor sandbox
-        # survives; the main process exited later of its own.
+        # An OOM kill in it, which Docker keeps from its start: lost to memory, whatever
+        # ended it then.
         (
             0,
-            {"Running": False, "OOMKilled": True, "ExitCode": 3},
-            "exited with code 3; the OOM killer had taken a process of it earlier",
+            {**_KILLED, "OOMKilled": True},
+            f"MemoryExhaustedError: the sandbox itself died {_OOM_KILL}, and its main process "
+            "exited with code 137",
         ),
-        # The OOM killer took a process and the container lives on: no death.
-        (0, {"Running": True, "OOMKilled": True, "ExitCode": 0}, None),
-        (None, None, None),  # still running when the wait gave up
-        (1, None, None),  # docker wait failed: the container is gone, ALE's to explain
+        (
+            0,
+            {"Running": False, "ExitCode": 139, "OOMKilled": True},
+            f"MemoryExhaustedError: the sandbox itself died {_OOM_KILL}, and its main process "
+            "exited with code 139",
+        ),
+        # Only guestd went, and the Sandbox runs on: still memory.
+        (
+            None,
+            {**_RUNS, "OOMKilled": True},
+            f"MemoryExhaustedError: guestd in the sandbox ended {_OOM_KILL}",
+        ),
+        (
+            0,
+            {**_KILLED, "OOMKilled": False},
+            "GuestUnreachableError: the sandbox itself died: it was killed from outside",
+        ),
+        (
+            0,
+            {"Running": False, "ExitCode": 3, "OOMKilled": False},
+            "GuestUnreachableError: the sandbox itself died: its main process exited with code 3",
+        ),
+        (0, {**_RUNS, "OOMKilled": False}, None),  # running again by the time it was read
+        (None, {**_RUNS, "OOMKilled": False}, None),  # still running when the wait gave up
+        (1, None, None),  # docker wait failed: the container is gone
     ],
 )
 async def test_a_sandbox_that_died_says_why_when_its_session_ends(
     monkeypatch: pytest.MonkeyPatch,
     waited: int | None,
     state: dict[str, object] | None,
-    died: str | None,
+    lost: str | None,
 ) -> None:
     """One wait, which returns at once for a stopped container, then its state; no polling.
     It runs when the stream of a session that answered ends, as the client asks the session
-    to explain the end: a real process answers and ends it here."""
+    to explain the end: a real process answers and ends it here. Docker's record of an OOM
+    kill then decides between memory, a kill from outside and an exit code."""
     calls: list[tuple[str, ...]] = []
     deadlines: list[float] = []
 
@@ -957,18 +989,74 @@ async def test_a_sandbox_that_died_says_why_when_its_session_ends(
         return 0, json.dumps(state), ""
 
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    session = _Session(["sh", "-c", "echo {}; sleep 0.2; echo urpc EOF >&2"], "ale-e1")
+    session = _Session(["sh", "-c", "echo {}; sleep 0.2; echo urpc EOF >&2"], "ale-e1", 512)
     await session.start()
     assert await session.recv() == "{}"
     with pytest.raises(GuestUnreachableError) as ended:
         await session.recv()
     assert calls == []
-    message = str(await session.explain(ended.value))
-    assert ("the sandbox itself died" in message) is (died is not None)
-    assert died is None or died in message
-    assert "guest session closed: urpc EOF" in message
-    assert [call[0] for call in calls] == (["wait", "inspect"] if waited == 0 else ["wait"])
+    explained = await session.explain(ended.value)
+    if lost is None:
+        assert explained is ended.value
+    else:
+        named = f"{type(explained).__name__}: {explained}"
+        assert named == f"{lost} (guest session closed: urpc EOF)"
+        assert isinstance(explained, MemoryExhaustedError) is lost.startswith("Memory")
+    assert [call[0] for call in calls] == (["wait"] if waited == 1 else ["wait", "inspect"])
     assert deadlines == [30.0]
+    assert await session.explain(ended.value) is explained  # asked once, then kept
+    assert len(calls) == (1 if waited == 1 else 2)
+
+
+@pytest.mark.asyncio
+async def test_a_kata_sandbox_lost_after_an_oom_kill_in_its_guest_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker records no OOM kill in a Kata guest: its watcher's session, a process here that
+    writes what the watcher in the guest would and then ends with it, counts them from the
+    Sandbox's start."""
+
+    async def docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
+        if argv[0] == "wait":
+            return 0, "255\n", ""
+        return 0, json.dumps({"Running": False, "ExitCode": 255, "OOMKilled": False}), ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    watcher = await memory.GuestEvents.start(
+        ["sh", "-c", "echo oom 0 oom_kill 0; sleep 0.3; echo oom 0 oom_kill 13"]
+    )
+    session = _Session(["sh", "-c", "echo {}; sleep 0.1"], "ale-e1", 512, watcher)
+    await session.start()
+    assert await session.recv() == "{}"
+    with pytest.raises(GuestUnreachableError) as ended:
+        await session.recv()
+    explained = await session.explain(ended.value)
+    await watcher.close()
+    assert isinstance(explained, MemoryExhaustedError)
+    assert str(explained) == (
+        "the sandbox itself died after an OOM kill in it (its Task declares 512 MiB): its "
+        "cgroup counted 13 OOM kills and 0 times its memory reached its limit, and its main "
+        "process exited with code 255 (guest session closed)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_ale_stopped_is_no_memory_death_whatever_its_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The GPU watchdog's stop of a gVisor Sandbox whose GPU memory limit failed is ALE's
+    doing, whatever Docker recorded."""
+    calls = _scripted(monkeypatch)
+    session = _Session(["sh", "-c", "echo {}"], "ale-e1", 512)
+    session.stopped_for = "ALE's GPU memory watchdog stopped it"
+    await session.start()
+    assert await session.recv() == "{}"
+    with pytest.raises(GuestUnreachableError) as ended:
+        await session.recv()
+    explained = await session.explain(ended.value)
+    assert type(explained) is GuestUnreachableError
+    assert str(explained) == "the sandbox itself died: ALE's GPU memory watchdog stopped it"
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -987,7 +1075,7 @@ async def test_a_death_is_explained_whatever_the_timeout_of_the_call_it_ended(
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     reply = json.dumps({"id": 1, "ok": True, "data": {}})
     guestd = f"read request; echo '{reply}'; read request; echo urpc EOF >&2"
-    session = _Session(["sh", "-c", guestd], "ale-e1")
+    session = _Session(["sh", "-c", guestd], "ale-e1", 512)
     client = GuestClient(session)
     await session.start()
     try:
@@ -1015,14 +1103,15 @@ async def test_a_guestd_that_fails_to_start_says_why_at_once(
         raise ProviderStartError(f"docker {argv[0]} timed out after {timeout:g}s")
 
     class Failing(_Session):
-        def __init__(self, _argv: list[str], container: str) -> None:
-            super().__init__(["sh", "-c", "echo 'guestd: bad interpreter' >&2; exit 1"], container)
+        def __init__(self, _argv: list[str], container: str, *args: Any) -> None:
+            argv = ["sh", "-c", "echo 'guestd: bad interpreter' >&2; exit 1"]
+            super().__init__(argv, container, *args)
 
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr("ale.run.providers.docker.provider._Session", Failing)
     started = time.monotonic()
     with pytest.raises(ProviderStartError) as failed:
-        await DockerProvider()._connect("ale-e1", "user")
+        await DockerProvider()._connect("ale-e1", "user", 512)
     assert str(failed.value) == (
         "guest service did not answer: guest session closed: guestd: bad interpreter"
     )
@@ -1036,11 +1125,11 @@ async def test_a_session_ale_ends_or_that_never_answered_is_no_death(
     """Closing it, as ALE does before it destroys, keeps or snapshots a Sandbox, or using it
     unstarted asks nothing of Docker."""
     calls = _scripted(monkeypatch)
-    unstarted = _Session(["cat"], "ale-e1")
+    unstarted = _Session(["cat"], "ale-e1", 512)
     with pytest.raises(GuestUnreachableError, match="transport is not started") as raised:
         await unstarted.recv()
     assert await unstarted.explain(raised.value) is raised.value
-    session = _Session(["sh", "-c", "echo {}; cat"], "ale-e1")
+    session = _Session(["sh", "-c", "echo {}; cat"], "ale-e1", 512)
     await session.start()
     assert await session.recv() == "{}"
     pending = asyncio.ensure_future(session.recv())
@@ -1064,7 +1153,7 @@ async def test_guestd_is_reached_isolated_in_the_root_directory_through_a_sessio
 
     monkeypatch.setattr(_Session, "start", started)
     monkeypatch.setattr("ale.run.transport.GuestClient.health", healthy)
-    transport = await DockerProvider()._connect("ale-e1", "user")
+    transport = await DockerProvider()._connect("ale-e1", "user", 512)
     assert transport.client._transport is transport and transport.container == "ale-e1"
     assert transport._argv == [
         "docker", "exec", "-i", "--user", "0", "--env", "ALE_AGENT_USER=user",
@@ -1206,17 +1295,21 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
         relays.append(proxy)
         return "127.0.0.1:41999" if proxy else None
 
-    async def connect(_provider: DockerProvider, _container: str, _user: str) -> _Session:
-        session = _Session([], "ale-e1")
+    async def connect(_provider: DockerProvider, _container: str, *_: object) -> _Session:
+        session = _Session([], "ale-e1", 1024)
         session.client = SimpleNamespace(exec=guest_exec, close=close, egress_relay=egress_relay)  # type: ignore[assignment]
         return session
 
     async def contract(_provider: DockerProvider, _client: object) -> tuple[str, bool]:
         return "/home/user", False
 
+    async def no_watcher(*_: object) -> None:
+        """Kata's memory watcher, which runs in the guest."""
+
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr(DockerProvider, "_connect", connect)
     monkeypatch.setattr(DockerProvider, "_guest_contract", contract)
+    monkeypatch.setattr("ale.run.providers.docker.provider._watcher", no_watcher)
     network = (
         NetworkPolicy(mode=mode, allowed_hosts=("a.b",))
         if mode is NetworkMode.ALLOWLIST

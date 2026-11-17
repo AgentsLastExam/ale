@@ -161,11 +161,17 @@ class DaytonaApi:
         )
 
     async def delete_sandbox(self, sandbox_id: str, *, timeout_sec: float = 120) -> None:
-        """Idempotent: a sandbox that is already gone is success. Waits until it is."""
+        """Idempotent: a sandbox that is already gone, or that Daytona is already
+        destroying, as it does one whose processes all died, is success. Waits until it is
+        gone."""
         try:
             await self.request("DELETE", f"/sandbox/{sandbox_id}", accept=(200, 202, 204))
         except DaytonaError as exc:
-            if exc.status != 404:
+            if exc.status == 409:
+                data = await self.get_sandbox(sandbox_id)
+                if data is not None and data.get("desiredState") != "destroyed":
+                    raise
+            elif exc.status != 404:
                 raise
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_sec

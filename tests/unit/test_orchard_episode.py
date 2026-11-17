@@ -16,16 +16,19 @@ from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
+from test_runtime_contracts import make_lock
 from tests.support import edit_task_config, write_task
 
 from ale.core.config import RunConfig, RunTimeouts
-from ale.core.errors import GuestUnreachableError
+from ale.core.errors import GuestUnreachableError, MemoryExhaustedError
+from ale.core.lock import LimitTermination
 from ale.core.verdict import Status
 from ale.run import guestd
 from ale.run.episode import run_episode
 from ale.run.framework import MACOS_PYTHON
 from ale.run.harnesses.builtin import NopHarness, OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
+from ale.run.provenance import ProvenanceInputs
 from ale.run.providers import ProviderRegistry, privileges
 from ale.run.providers.orchard import OrchardProvider
 from ale.run.providers.orchard import provider as orchard
@@ -49,6 +52,7 @@ class MemoryGuest:
         wait_oracle: bool = False,
         timeout_oracle: bool = False,
         verify_failure: str | None = None,
+        run_out: str | None = None,
         shared: MemoryGuest | None = None,
         user: str = "user",
     ) -> None:
@@ -64,6 +68,8 @@ class MemoryGuest:
         self.wait_oracle = wait_oracle
         self.timeout_oracle = timeout_oracle
         self.verify_failure = verify_failure
+        #: The stage in which the Sandbox runs out of its memory and is lost.
+        self.run_out = run_out
         self.oracle_started = asyncio.Event()
         self._upload: tuple[int, str] | None = None
         self._buffer = bytearray()
@@ -210,13 +216,13 @@ class MemoryGuest:
             assert not any(path.startswith("/opt/ale/tests/") for path in self.files)
             assert not any(".ale-solution" in path for path in self.files)
             assert env["ALE_HOME"] == "/Users/user"
-            self.stages.append("setup")
+            self._stage("setup")
             return (17 if self.fail_setup else 0), b""
         if argv == ["bash", "/Users/user/.ale-solution/solve.sh"]:
             assert params["run_as"] == "user"
             assert argv[1] in self.files
             assert not any(path.startswith("/opt/ale/tests/") for path in self.files)
-            self.stages.append("oracle")
+            self._stage("oracle")
             self.oracle_started.set()
             self.files[OUTPUT] = b"hello macOS"
             self.modes[OUTPUT] = 0o640
@@ -225,7 +231,7 @@ class MemoryGuest:
             return 0, b"oracle finished\n"
         if argv == ["bash", "test.sh"] and cwd == "/opt/ale/tests":
             assert "run_as" not in params
-            self.stages.append("verify")
+            self._stage("verify")
             assert not any(path.startswith("/opt/ale/logs/verifier/") for path in self.files)
             score = float(self.files.get(OUTPUT) == b"hello macOS")
             self.files["/opt/ale/logs/verifier/verification.json"] = json.dumps(
@@ -281,8 +287,19 @@ class MemoryGuest:
             return 0, b""
         raise AssertionError(f"Unexpected guest command: {argv[0:2]}, cwd={cwd}")
 
+    def _stage(self, stage: str) -> None:
+        self.stages.append(stage)
+        if stage == self.run_out:
+            self.closed = True
+            raise MemoryExhaustedError(
+                "the sandbox itself died after an OOM kill in it (its Task declares 4096 MiB)"
+            )
+
     async def recv(self) -> str:
         return await self.responses.get()
+
+    async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
+        return error
 
     async def close(self) -> None:
         self.closed = True
@@ -661,4 +678,113 @@ async def test_macos_verifier_failure_does_not_accept_a_written_reward(
     assert result.verdict.status is expected
     assert result.verdict.rewards is None
     assert not (result.run_dir / "verification.json").exists()
+    assert controller.deleted == controller.created
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "status"),
+    [
+        # Before the agent: the Task's own preparation ran out, a Task defect.
+        ("setup", Status.TASK_ERROR),
+        # The agent's, here the oracle's: no retry, no score.
+        ("oracle", Status.MEMORY_EXHAUSTED),
+        # The shared Sandbox holds what the agent left, in memory too.
+        ("verify", Status.MEMORY_EXHAUSTED),
+    ],
+)
+async def test_a_sandbox_that_runs_out_of_memory_is_charged_to_whose_code_ran_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, status: Status
+) -> None:
+    """Any Provider's loss, which the in-memory Orchard guest stands in for here to run a
+    whole episode: setup, the oracle, and shared verification."""
+    guest = MemoryGuest(run_out=stage)
+    task, providers, controller = episode_fixture(tmp_path, monkeypatch, guest)
+    recorded = make_lock()
+    loaded = load_tasks(task)[0]
+    result = await run_episode(
+        loaded,
+        EpisodeProtocol(OracleHarness()),
+        providers,
+        run_dir=tmp_path / "runs",
+        provenance=ProvenanceInputs(
+            source=recorded.task.source,
+            agent=recorded.agent,
+            gateway=recorded.gateway,
+            config_hash=recorded.config_hash,
+            framework=recorded.framework,
+        ),
+    )
+    assert result.verdict.status is status
+    assert result.lock is not None
+    assert result.lock.termination == (
+        LimitTermination(
+            layer="sandbox",
+            name="memory_mb",
+            configured_value=loaded.spec.resources.memory_mb,
+            reason="MemoryExhaustedError",
+        )
+        if status is Status.MEMORY_EXHAUSTED
+        else None
+    )
+    assert result.verdict.rewards is None
+    failure = result.record.failure
+    assert failure is not None and failure.error_type == "MemoryExhaustedError"
+    assert failure.phase == ("agent" if stage == "oracle" else stage)
+    assert "after an OOM kill in it (its Task declares 4096 MiB)" in failure.message
+    assert guest.stages[-1] == stage
+    assert controller.deleted == controller.created
+
+
+@pytest.mark.asyncio
+async def test_a_separate_verifier_that_runs_out_of_memory_is_the_tasks_defect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It holds the solver's files alone, restored from the Host, and runs the Task's code."""
+    solver = MemoryGuest()
+    task, providers, solver_controller = episode_fixture(tmp_path, monkeypatch, solver)
+    edit_task_config(
+        task,
+        {"verifier": {"environment": {"image": IMAGE, "cpus": 2, "memory_mb": 4096}}},
+    )
+    verifier = MemoryGuest(run_out="verify")
+    verifier_controller = MemoryOrchard(verifier)
+    monkeypatch.setattr(
+        providers.get("orchard"),
+        "_local_orchard",
+        SimpleNamespace(
+            client=lambda: verifier_controller if solver_controller.created else solver_controller
+        ),
+    )
+    result = await run_episode(
+        load_tasks(task)[0],
+        EpisodeProtocol(OracleHarness()),
+        providers,
+        run_dir=tmp_path / "runs",
+        collect_artifacts=True,
+    )
+    assert result.verdict.status is Status.TASK_ERROR
+    assert result.record.failure is not None
+    assert result.record.failure.error_type == "MemoryExhaustedError"
+    assert result.record.failure.phase == "verify"
+    assert verifier.stages == ["verify"]
+
+
+@pytest.mark.asyncio
+async def test_what_stopped_the_agent_stands_when_its_sandbox_runs_out_of_memory_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent that timed out ends as a timeout, though its Sandbox ran out of memory in
+    the verification that followed."""
+    guest = MemoryGuest(wait_oracle=True, timeout_oracle=True, run_out="verify")
+    task, providers, controller = episode_fixture(tmp_path, monkeypatch, guest)
+    result = await run_episode(
+        load_tasks(task)[0],
+        EpisodeProtocol(OracleHarness(), timeouts=RunTimeouts(agent=0.05)),
+        providers,
+        run_dir=tmp_path / "runs",
+    )
+    assert result.verdict.status is Status.TIMEOUT
+    assert result.verdict.rewards is None
+    assert guest.stages[-1] == "verify"
     assert controller.deleted == controller.created

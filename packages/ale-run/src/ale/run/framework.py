@@ -151,7 +151,9 @@ MACOS_DRIVER_SOCKET = "/tmp/ale-cua-driver.sock"
 #: Run as root on the Mac to install the macOS framework into a stopped VM's disk.
 MACOS_FRAMER = Path(__file__).with_name("framework_macos.sh")
 
-#: How a prepared VM disk starts the guest service at boot.
+#: How a prepared VM disk starts the guest service at boot. The commands it runs are in its
+#: unit, and one the kernel's OOM killer ends is that command's alone: systemd's default
+#: ``OOMPolicy=stop`` would stop the unit, guestd and every other command with it.
 _GUEST_UNIT = f"""\
 [Unit]
 Description=ALE guest service
@@ -161,6 +163,7 @@ After=network.target
 Environment=ALE_AGENT_USER={{user}}
 WorkingDirectory=/
 ExecStart={guestd.PYTHON["linux"]} -I /opt/ale/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
+OOMPolicy=continue
 Restart=always
 RestartSec=1
 

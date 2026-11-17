@@ -80,6 +80,7 @@ from ale.run.providers.docker.provider import only_vanished
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.providers.runner import (
     HOST_IP,
+    Console,
     connect_guest,
     free_port,
     is_blank,
@@ -153,8 +154,8 @@ class _VfioGpu:
     group: str
 
 
-async def _connect(host_port: int, token: str) -> GuestClient:
-    return await connect_guest(host_port, token, timeout_sec=BOOT_TIMEOUT_SEC)
+async def _connect(host_port: int, token: str, console: Console) -> GuestClient:
+    return await connect_guest(host_port, token, timeout_sec=BOOT_TIMEOUT_SEC, console=console)
 
 
 async def _managed_gpu_ids() -> set[str]:
@@ -810,9 +811,10 @@ class QemuProvider(Provider):
             raise
 
         clients: list[GuestClient] = []
+        console = Console(container, request.resources.memory_mb)
         try:
             host_ip = await self._wire_network(container, request)
-            client = await _connect(host_port, guest_token)
+            client = await _connect(host_port, guest_token, console)
             clients.append(client)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
             effective_storage_mb = await self._prepare_root_storage(
@@ -835,7 +837,7 @@ class QemuProvider(Provider):
                     client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
                 )
                 await verify_identities(client, agent_user, sudo=request.sudo)
-            file_client = await _connect(host_port, guest_token)
+            file_client = await _connect(host_port, guest_token, console)
             clients.append(file_client)
         except BaseException:
             await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
@@ -1481,7 +1483,8 @@ class QemuProvider(Provider):
             raise ProviderCapabilityError(f"{handle!r} has no guest service port") from exc
 
         token = read_guest_token(Path(storage))
-        client = await _connect(host_port, token)
+        console = Console(container, allocation.memory_mb)
+        client = await _connect(host_port, token, console)
         attached_request = request.model_copy(update={"role": SandboxRole(role)})
         try:
             agent_user, agent_home, _ = await self._read_guest_contract(client, attached_request)
@@ -1491,7 +1494,7 @@ class QemuProvider(Provider):
             # allowlist agent's commands need the proxy only then.
             isolated = request.network.mode is not NetworkMode.OPEN
             sealed = isolated and await _runner_sealed(container)
-            file_client = await _connect(host_port, token)
+            file_client = await _connect(host_port, token, console)
         except BaseException:
             await client.close()
             raise

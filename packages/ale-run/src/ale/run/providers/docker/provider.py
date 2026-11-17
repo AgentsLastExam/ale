@@ -37,12 +37,17 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from ipaddress import IPv4Network
 from pathlib import Path, PurePosixPath
-from typing import Literal, Self
+from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
 from ale.core.capability import CapabilityProfile, GpuHold, GpuModel, SandboxNeeds, accepts_model
 from ale.core.config import GPU_MEMORY_MARGIN_MB
-from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
+from ale.core.errors import (
+    GuestUnreachableError,
+    MemoryExhaustedError,
+    ProviderCapabilityError,
+    ProviderStartError,
+)
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
@@ -72,7 +77,7 @@ from ale.run.gpu import parse_nvidia_smi
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.iptables import GATEWAY_CHAIN
 from ale.run.process import run
-from ale.run.providers import machine_arch, relay
+from ale.run.providers import machine_arch, memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import gpu_sharing, gvisor, kata, subnets, tc
 from ale.run.providers.privileges import set_elevation, verify_identities
@@ -853,6 +858,9 @@ class Runtime:
     banner: str = ""
     """What the kernel log of each of its Sandboxes starts with, which shows a Sandbox runs
     on it, together with Docker seeing what the Sandbox writes."""
+    guest_kernel: bool = False
+    """Whether each of its Sandboxes runs a kernel of its own, whose OOM kills Docker does not
+    record ([memory](../memory.py))."""
     gpu_memory_flag: str = ""
     """For a runtime that can hold a Sandbox to so many bytes of device memory on each of its
     GPUs, its flag that does, which ``<runtime> flags`` lists and a Sandbox's annotation
@@ -915,6 +923,7 @@ RUNTIMES: dict[str, Runtime] = {
         confinement=_KataConfinement,
         devices=("/dev/kvm",),
         memory_mb=kata.memory_mb,
+        guest_kernel=True,
     ),
     "gvisor": Runtime(
         gvisor.RUNTIME,
@@ -949,18 +958,35 @@ def _runtime_named(registered: str) -> Runtime:
 #: sandbox died has stopped, or stops within seconds: under rootless Docker ``docker wait``
 #: returned up to 10.5 s after the session ended. One still running lost only the session.
 _DEATH_SEC = 30.0
+#: How long a lost session then waits for a guest's memory watcher to end too, as its
+#: session does once its container is gone, so that what it saw last has arrived.
+_SETTLE_SEC = 5.0
 
 
 class _Session(StdioTransport):
     """guestd over ``docker exec -i``, with the client that speaks to it, whose stream ending
-    unasked, once guestd has answered, says whether the sandbox died."""
+    unasked, once guestd has answered, says whether the sandbox died and whether an OOM kill
+    came first."""
 
-    def __init__(self, argv: Sequence[str], container: str) -> None:
+    def __init__(
+        self,
+        argv: Sequence[str],
+        container: str,
+        memory_mb: int,
+        watcher: memory.GuestEvents | None = None,
+    ) -> None:
         super().__init__(argv)
         self.container = container
+        #: The memory its Task declares.
+        self.memory_mb = memory_mb
+        #: Under a runtime that boots a kernel of its own, what counts the OOM kills there,
+        #: which Docker does not record.
+        self.watcher = watcher
         self.client = GuestClient(self)
         self._answered = False
         self._closing = False
+        #: What the end of its stream was found to mean, which a later call then raises too.
+        self._explained: GuestUnreachableError | None = None
         #: Why ALE itself stopped the Sandbox, which the end of the stream then reports.
         self.stopped_for: str | None = None
 
@@ -977,41 +1003,72 @@ class _Session(StdioTransport):
 
     async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
         """A guestd that never answered failed to start, which its stderr, in ``error``,
-        says at once; a session that did and ended unasked may have lost its sandbox, or ALE
-        stopped it."""
+        says at once; a session that did and ended unasked lost its sandbox, or guestd in
+        it, which is a loss to memory after an OOM kill in it; or ALE stopped it."""
         if self.stopped_for is not None:
             return GuestUnreachableError(f"the sandbox itself died: {self.stopped_for}")
-        if self._closing or not self._answered or not (died := await _death(self.container)):
+        if self._closing or not self._answered:
             return error
-        explained = GuestUnreachableError(f"the sandbox itself died: {died} ({error})")
+        if self._explained is None:
+            self._explained = await self._explain(error)
+        return self._explained
+
+    async def _explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
+        if (state := await _state(self.container)) is None:
+            return error
+        running, code = bool(state.get("Running")), state.get("ExitCode")
+        lost = "guestd in the sandbox ended" if running else "the sandbox itself died"
+        exited = "" if running else f", and its main process exited with code {code}"
+        if self.watcher is not None:
+            await self.watcher.settled(_SETTLE_SEC)
+            evidence = self.watcher.oom_killed()
+        else:
+            evidence = "Docker recorded OOMKilled" if state.get("OOMKilled") else None
+        if evidence is not None:
+            explained: GuestUnreachableError = MemoryExhaustedError(
+                f"{lost} after an OOM kill in it (its Task declares {self.memory_mb} MiB): "
+                f"{evidence}{exited} ({error})"
+            )
+        elif running:
+            return error
+        elif code == 137:
+            explained = GuestUnreachableError(f"{lost}: it was killed from outside ({error})")
+        else:
+            explained = GuestUnreachableError(
+                f"{lost}: its main process exited with code {code} ({error})"
+            )
         explained.__cause__ = error
         return explained
 
 
-async def _death(container: str) -> str | None:
-    """Why ``container`` stopped, once it has; None while it runs.
+async def _state(container: str) -> dict[str, Any] | None:
+    """Docker's state of ``container`` once it has stopped, or once it has run on for
+    :data:`_DEATH_SEC`; None once it is gone.
 
     ``docker wait`` returns once it has stopped, while its state, read when the session
-    ended, could still say it runs. ``OOMKilled`` alone is no death: Docker keeps it once
-    the OOM killer has taken any process of the container, as a gVisor sandbox survives.
+    ended, could still say it runs.
     """
     try:
         code, _, _ = await _docker("wait", container, timeout=_DEATH_SEC)
     except ProviderStartError:
-        return None
+        code = 0  # still running: only guestd was lost
     if code != 0:
         return None
     code, raw, _ = await _docker("inspect", "--format", "{{json .State}}", container, timeout=30)
-    if code != 0:
+    return json.loads(raw) if code == 0 else None
+
+
+async def _watcher(container: str, runtime: Runtime) -> memory.GuestEvents | None:
+    """What counts the OOM kills in ``container`` where Docker records none: under a runtime
+    that boots a kernel of its own, a watcher in it."""
+    if not runtime.guest_kernel:
         return None
-    state = json.loads(raw)
-    if state.get("Running"):
-        return None
-    exited, oom = state.get("ExitCode"), state.get("OOMKilled")
-    if exited == 137:
-        return "it exceeded its memory limit" if oom else "it was killed from outside"
-    earlier = "; the OOM killer had taken a process of it earlier" if oom else ""
-    return f"its main process exited with code {exited}{earlier}"
+    return await memory.GuestEvents.start(
+        [
+            "docker", "exec", "-i", "--user", "0", "--workdir", "/", container,
+            guestd.PYTHON["linux"], "-I", "-c", memory.WATCHER,
+        ]
+    )  # fmt: skip
 
 
 def _verify_docker_gpu(
@@ -1067,6 +1124,9 @@ class DockerSandbox(Sandbox):
         self._file_client = file_session.client
         #: The guestd sessions of both clients, whose end says why ALE stopped the Sandbox.
         self._sessions = (session, file_session)
+        #: What counts the OOM kills in it where Docker records none, which both sessions
+        #: consult.
+        self._watcher = session.watcher
         #: The watchdog of its Provider, which watches it while it shares GPUs and this
         #: process drives it.
         self._watchdog = watchdog
@@ -1077,6 +1137,15 @@ class DockerSandbox(Sandbox):
         #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
         self._relay: str | None = None
         self.state = SandboxState.READY
+
+    async def _release(self) -> None:
+        """Stop watching it, then end its sessions: ALE's own end is no death."""
+        self._unwatch()
+        await asyncio.gather(
+            self._client.close(), self._file_client.close(), return_exceptions=True
+        )
+        if self._watcher is not None:
+            await self._watcher.close()
 
     def _as(self, identity: Identity) -> str | None:
         """The unix user for a role, or ``None`` to keep the container's default.
@@ -1273,10 +1342,7 @@ class DockerSandbox(Sandbox):
         if self.state is SandboxState.DESTROYED:
             return
         self.state = SandboxState.DESTROYED
-        self._unwatch()
-        await asyncio.gather(
-            self._client.close(), self._file_client.close(), return_exceptions=True
-        )
+        await self._release()
         try:
             code, _, stderr = await _docker("rm", "-f", "-v", self.container, timeout=_REMOVE_SEC)
             if code != 0:
@@ -1290,10 +1356,7 @@ class DockerSandbox(Sandbox):
     async def retain(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
-        self._unwatch()
-        await asyncio.gather(
-            self._client.close(), self._file_client.close(), return_exceptions=True
-        )
+        await self._release()
         gpu_devices = (
             self.allocation.gpu.provider_addresses if self.allocation.gpu is not None else ()
         )
@@ -1318,10 +1381,7 @@ class DockerSandbox(Sandbox):
         # The relay ends with this container; the image keeps the account's own settings.
         await relay.stop(self._client, self.request)
         self._relay = None
-        self._unwatch()
-        await asyncio.gather(
-            self._client.close(), self._file_client.close(), return_exceptions=True
-        )
+        await self._release()
         code, _, stderr = await _docker("stop", "--time", "30", self.container, timeout=120)
         if code != 0:
             raise ProviderStartError(f"could not stop {self.container}: {stderr.strip()}")
@@ -1598,6 +1658,7 @@ class DockerProvider(Provider):
         confinement: _Confinement | None = None
         admitted: tuple[GpuDevice, ...] = ()
         sessions: list[_Session] = []
+        watcher: memory.GuestEvents | None = None
         try:
             # Its network, if it has one of its own, is created here, so that every failure
             # from now on removes it.
@@ -1678,8 +1739,9 @@ class DockerProvider(Provider):
                 runtime_identity = f"docker-engine/{version.strip()}"
 
             await confinement.wire(container, request)
+            watcher = await _watcher(container, runtime)
             agent_user = request.user
-            session = await self._connect(container, agent_user)
+            session = await self._connect(container, agent_user, resources.memory_mb, watcher)
             sessions.append(session)
             client = session.client
             if isolated:
@@ -1698,11 +1760,15 @@ class DockerProvider(Provider):
                 desktop = await require_resolution(
                     client, request.desktop_resolution, container=True
                 )
-            sessions.append(await self._connect(container, agent_user))
+            sessions.append(
+                await self._connect(container, agent_user, resources.memory_mb, watcher)
+            )
         except BaseException:
             await asyncio.gather(
                 *(session.client.close() for session in sessions), return_exceptions=True
             )
+            if watcher is not None:
+                await watcher.close()
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_docker("rm", "-f", "-v", container, timeout=_REMOVE_SEC))
             if confinement is not None:
@@ -1890,7 +1956,13 @@ class DockerProvider(Provider):
             f"the desktop did not come up within {timeout_sec:g}s; last attempt: {last}"
         )
 
-    async def _connect(self, container: str, agent_user: str) -> _Session:
+    async def _connect(
+        self,
+        container: str,
+        agent_user: str,
+        memory_mb: int,
+        watcher: memory.GuestEvents | None = None,
+    ) -> _Session:
         session = _Session(
             [
                 "docker",
@@ -1914,6 +1986,8 @@ class DockerProvider(Provider):
                 "--stdio",
             ],
             container,
+            memory_mb,
+            watcher,
         )
         try:
             await session.start()
@@ -2128,12 +2202,18 @@ class DockerProvider(Provider):
         await confinement.wire(container, request, reattached=True)
         sealed = isolated and await confinement.sealed(container, attached)
         agent_user = request.user
-        session = await self._connect(container, agent_user)
+        watcher = await _watcher(container, runtime)
+        memory_mb = allocation.memory_mb
+        session: _Session | None = None
         try:
+            session = await self._connect(container, agent_user, memory_mb, watcher)
             agent_home, _ = await self._guest_contract(session.client)
-            file_session = await self._connect(container, agent_user)
+            file_session = await self._connect(container, agent_user, memory_mb, watcher)
         except BaseException:
-            await session.client.close()
+            if session is not None:
+                await session.client.close()
+            if watcher is not None:
+                await watcher.close()
             raise
         sandbox = DockerSandbox(
             sandbox_id=container.removeprefix("ale-"),
@@ -2155,9 +2235,7 @@ class DockerProvider(Provider):
                 # This run's proxy and token, through a guestd of this run's own.
                 await sandbox._start_relay()
             except BaseException:
-                await asyncio.gather(
-                    session.client.close(), file_session.client.close(), return_exceptions=True
-                )
+                await sandbox._release()
                 raise
         # The allocation its first run recorded says what it reserved.
         sandbox.watch()

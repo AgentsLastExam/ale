@@ -156,6 +156,8 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
     assert "Environment=ALE_AGENT_USER=app" in str(seen["unit"])
     assert f"ExecStart={guestd.PYTHON['linux']} -I /opt/ale/guestd/main.py" in str(seen["unit"])
     assert "WorkingDirectory=/\n" in str(seen["unit"])
+    # A command the OOM killer ends goes alone; systemd's default would stop guestd too.
+    assert "OOMPolicy=continue\n" in str(seen["unit"])
 
 
 @pytest.mark.asyncio

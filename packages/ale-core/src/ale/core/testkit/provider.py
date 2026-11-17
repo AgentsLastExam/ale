@@ -21,7 +21,12 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from ale.core.errors import AleError, ProviderCapabilityError
+from ale.core.errors import (
+    AleError,
+    GuestUnreachableError,
+    MemoryExhaustedError,
+    ProviderCapabilityError,
+)
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
@@ -45,6 +50,39 @@ __all__ = ["ProviderConformance"]
 
 #: An address off every host, reached by IP so no resolver is involved.
 INTERNET = "1.1.1.1:443"
+
+#: One process takes memory 8 MiB at a time until the kernel ends it, each a copy of random
+#: bytes, which a kernel that compresses memory, as macOS does, cannot shrink.
+_ALLOCATE = """
+import os
+block, held = os.urandom(8 << 20), []
+while True:
+    held.append(bytearray(block))
+"""
+
+#: Processes of 16 MiB of random bytes each, three times the Sandbox's memory of them, which
+#: then end.
+_MANY = """
+import os, signal, sys, time
+children = []
+for _ in range(int(sys.argv[1]) * 3 // 16):
+    child = os.fork()
+    if child == 0:
+        os.close(1), os.close(2)
+        held = bytearray()
+        for _ in range(16):
+            held += os.urandom(1 << 20)
+        time.sleep(600)
+        os._exit(0)
+    children.append(child)
+    time.sleep(0.02)
+time.sleep(5)
+for child in children:
+    try:
+        os.kill(child, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+"""
 
 #: Reports, per ``kind=address`` argument, whether the sandbox reached it: ``http`` gets an
 #: answer, ``tls`` completes a handshake (verified against the address), ``tcp`` connects.
@@ -615,6 +653,37 @@ class ProviderConformance:
             await self.provider.destroy_retained(retained.handle)
         listed = {record["handle"] for record in await self.provider.list_retained()}
         assert retained.handle not in listed
+
+    @pytest.mark.asyncio
+    async def test_one_process_past_the_sandboxs_memory_dies_alone(self) -> None:
+        """The kernel ends the process that takes more than the memory the Task declares, and
+        the Sandbox goes on, as its episode does."""
+        async with await self.provider.create(await self.request()) as sandbox:
+            result = await sandbox.exec(
+                ["python3", "-c", _ALLOCATE], identity=Identity.AGENT, timeout_sec=900
+            )
+            assert not result.ok and not result.timed_out
+            assert (await sandbox.exec(["true"])).ok
+
+    @pytest.mark.asyncio
+    async def test_a_sandbox_lost_to_its_own_memory_says_so(self) -> None:
+        """Processes that together take more than its memory may end the whole Sandbox, or
+        the guest service in it, or only themselves; a Sandbox lost after the OOM kills
+        raises :class:`MemoryExhaustedError`, never a bare lost connection, which a retry
+        answers. Which a Provider's Sandbox does is the kernel's; a backend's own suite
+        asserts the loss where it was measured."""
+        request = await self.request()
+        async with await self.provider.create(request) as sandbox:
+            try:
+                await sandbox.exec(
+                    ["python3", "-c", _MANY, str(request.resources.memory_mb)],
+                    identity=Identity.AGENT,
+                    timeout_sec=900,
+                )
+            except GuestUnreachableError as lost:
+                assert isinstance(lost, MemoryExhaustedError), lost
+                return
+            assert (await sandbox.exec(["true"])).ok
 
     @pytest.mark.asyncio
     async def test_destroy_is_idempotent(self) -> None:

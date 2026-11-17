@@ -1,7 +1,8 @@
 """Typed error taxonomy.
 
 Every failure in ALE maps to exactly one class here, and every class maps to exactly
-one terminal :class:`~ale.core.verdict.Status`. That mapping is what lets the run layer
+one terminal :class:`~ale.core.verdict.Status`, but a Sandbox lost to memory, which is the
+agent's or the Task's by whose code ran there. That mapping is what lets the run layer
 decide retries, and what makes "why did this run stop?" answerable from a record rather
 than from a log.
 
@@ -24,6 +25,7 @@ __all__ = [
     "GuestUnreachableError",
     "HarnessLimitError",
     "IncompleteTrainingDataError",
+    "MemoryExhaustedError",
     "NativeContinuationError",
     "OutputStreamError",
     "PhaseTimeoutError",
@@ -125,6 +127,12 @@ class ProviderStartError(EnvironmentError_):
 
 class GuestUnreachableError(EnvironmentError_):
     """The guest service stopped answering mid-episode."""
+
+
+class MemoryExhaustedError(GuestUnreachableError):
+    """The Sandbox, or the guest service in it, was lost after an OOM kill in it, for the
+    memory its Task declares or for the memory around it: the agent's result in the Sandbox
+    it ran in from its phase on, and a Task defect in setup or in a separate verifier."""
 
 
 class SubscriptionProfileError(EnvironmentError_):

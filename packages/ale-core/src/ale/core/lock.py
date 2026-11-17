@@ -279,7 +279,7 @@ class GatewayProvenance(BaseModel):
 class LimitTermination(BaseModel):
     model_config = _FROZEN
 
-    layer: Literal["gateway", "harness"]
+    layer: Literal["gateway", "harness", "sandbox"]
     name: str
     configured_value: int | float | Literal["unlimited"]
     observed_value: int | float | None = None

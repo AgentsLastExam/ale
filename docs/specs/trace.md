@@ -163,7 +163,11 @@ Canonical JSON never embeds base64. No blob manifest exists.
 finite named reward map and no failure. A failed result has failure information, and has
 rewards exactly when verification still completed after the agent
 [stopped early](episode-protocol.md#agent-or-oracle). ALE supplies no primary reward or
-aggregation policy.
+aggregation policy. Where a result becomes one number, as in an export for training, a
+final status without rewards, the agent's own outcome whose Sandbox went before verification
+such as `memory_exhausted`, counts as zero, since the agent failed the Task; any other
+result without rewards, such as an `env_error` or a `task_error`, has no score, since the
+environment or the Task failed rather than the agent.
 
 `runs/<run>/ledger.db` is a rebuildable run-level projection for queued/running/current
 phase/terminal/interrupted state. It uses WAL and stores bounded failures and final reward
@@ -185,9 +189,12 @@ incomplete episode; its default is zero. `ale run --episode-retries N` and
 `--set episode_retries=N` override the run TOML. Each attempt runs in fresh Sandboxes
 with a new Gateway session and trajectory, preserving the logical episode ID and seed.
 Only `status=completed` stops retries successfully; a completed zero score is still a
-completed episode. `status=timeout` and `status=budget_exceeded` are limit terminations
-and terminal without retry: the timed-out phase and its deadline, or the exhausted limit,
-remain in the failure details, and another attempt would grant a fresh limit.
+completed episode. `status=timeout`, `status=budget_exceeded` and `status=memory_exhausted`
+are limit terminations and terminal without retry: the timed-out phase and its deadline,
+the exhausted limit, or the phase in which the agent's Sandbox was lost to memory, remain
+in the failure details, and another attempt would grant a fresh limit. The RunLock's
+`termination` names a Gateway or Harness limit, or the `sandbox` layer's `memory_mb`
+([Episode protocol](episode-protocol.md#agent-or-oracle)).
 `status=refused` is also terminal, as the agent's own decision. Judge infrastructure failures stop without another episode attempt;
 their internal retry budget is defined in [Verification](verification.md). Host cancellation
 interrupts the loop immediately. Missing results
