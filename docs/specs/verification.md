@@ -10,14 +10,14 @@ The verifier writes Harbor's reward file, `/logs/verifier/reward.json`
 (`C:\logs\verifier\reward.json` on Windows; on macOS, whose root volume is read-only,
 `/opt/ale/logs/verifier/reward.json`): a flat JSON object whose values are numbers.
 Its `reward` must be a finite number from 0 through 1; booleans and numeric strings are not
-numbers. ALE interprets only `reward` and never averages or treats other values as rewards.
+numbers. ALE scores only `reward` and never averages or treats other values as rewards.
 Beside it, `verification.json` may hold the complete result: any JSON object, nested values
 included, whose `reward` equals `reward.json`'s. NaN, infinity and duplicate object keys
 make either file invalid.
 
 After checking the range, ALE rounds `reward` to two decimal places using decimal
 round-half-up: `0.994` becomes `0.99`, `0.995` and `0.999` become `1.0`, and `0.004`
-becomes `0.0`. This same value is saved and used by `run`, `reverify`, and `validate`.
+becomes `0.0`. This same value is saved and used by `run`, `reverify`, and `calibrate`.
 Other fields and Judge responses keep their original precision; rounding never makes an
 out-of-range score valid.
 
@@ -41,7 +41,9 @@ verifier directory, which only the framework can then write
 
 On the host, `verification.json` contains the complete result, which is `reward.json`'s
 object when the verifier wrote no `verification.json`. Episode rewards contain only
-`reward`; the episode status and failure remain in `result.json`.
+`reward`; the episode status and failure remain in `result.json`. `ale calibrate` reads the
+result's other top-level numbers only to check a
+[calibration case](task-authoring.md#calibration)'s expectation, never to score.
 
 ## Judge tools
 

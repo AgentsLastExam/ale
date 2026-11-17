@@ -154,7 +154,7 @@ def _separate_gpu_task(root: Path) -> Path:
             "verifier": {"environment": {"cpus": 1, "memory_mb": 1024, "gpus": 1}},
         },
     )
-    (task / "solution/solve.sh").write_text(
+    (task / "calibration/solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         "nvidia-smi --query-gpu=uuid --format=csv,noheader > "
         "/home/user/output/solver-gpu.txt\n"

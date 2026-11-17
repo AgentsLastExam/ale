@@ -16,6 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ale.core.errors import AssetError
+from ale.core.task import CALIBRATION_DIR
 from ale.run.assets import (
     ASSET_ROOTS,
     AssetLocation,
@@ -26,6 +27,7 @@ from ale.run.assets import (
     _replace_selected_assets,
     _repository_lock,
     asset_repo_id,
+    asset_roots,
     ensure_asset_repository,
     observe_task_assets,
     validate_asset_paths,
@@ -115,7 +117,13 @@ def _selection(task: Path) -> AssetRepositorySelection:
 
 
 def _paths(checkpoint: AssetCheckpoint) -> list[str]:
-    return [f"{checkpoint.task_path}/{root}" for root in ASSET_ROOTS]
+    """Pathspecs covering every asset root of the Task in the dataset.
+
+    ``git ls-tree`` matches no wildcard, so the calibration cases' roots are covered by the
+    directory above them, which the dataset fills with nothing else.
+    """
+    task = checkpoint.task_path
+    return [*(f"{task}/{root}" for root in ASSET_ROOTS), f"{task}/{CALIBRATION_DIR}"]
 
 
 def _metadata(workspace: Path) -> Path:
@@ -201,7 +209,8 @@ def checkpoint_assets(
             return checkpoint.model_copy(update={"commit": head})
         destination = workspace / checkpoint.task_path
         validate_asset_paths(destination)
-        for root in ASSET_ROOTS:
+        # A case's assets the Task no longer has go, as a fixed root's do.
+        for root in sorted({*asset_roots(task), *asset_roots(destination)}):
             source = task / root
             target = destination / root
             shutil.rmtree(target, ignore_errors=True)
@@ -312,7 +321,7 @@ def materialize_assets(checkpoint: AssetCheckpoint, output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     with _materialized(checkpoint) as root:
         validate_asset_paths(root / checkpoint.task_path)
-        for relative in ASSET_ROOTS:
+        for relative in asset_roots(root / checkpoint.task_path):
             source = root / checkpoint.task_path / relative
             if source.exists():
                 list(_regular_files(source))
@@ -333,7 +342,7 @@ def restore_assets(task: Path, checkpoint: AssetCheckpoint) -> None:
         _repository_lock(selection.repository_root, exclusive=True),
     ):
         _replace_selected_assets(selection.tasks, root)
-        _mark_clean(selection, checkpoint.commit or "")
+        _mark_clean(selection, checkpoint.commit or "", root)
 
 
 def diff_assets(before: AssetCheckpoint, after: AssetCheckpoint) -> list[str]:

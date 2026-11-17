@@ -61,7 +61,8 @@ see or control the desktop.
 ## Guest contract
 
 - Task configuration: `[environment].os = "windows"`.
-- Stage entries: `environment/setup/setup.ps1`, `solution/solve.ps1`, and `tests/test.ps1`.
+- Stage entries: `environment/setup/setup.ps1`, `calibration/solution/solve.ps1`, and
+  `tests/test.ps1`.
 - Framework root: `C:\ProgramData\ALE`; agent home: `C:\Users\user`.
 - The base signs the agent account in automatically (Winlogon `AutoAdminLogon` and
   `DefaultUserName`) and keeps UAC on. ALE checks those, and that the agent account

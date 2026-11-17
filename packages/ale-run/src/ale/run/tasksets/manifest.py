@@ -12,8 +12,10 @@ from pydantic import ValidationError
 
 from ale.core.episode import EpisodeContext
 from ale.core.errors import TaskDefinitionError
-from ale.core.task import Stage, Task, TaskSourceContext
+from ale.core.ids import content_hash
+from ale.core.task import CALIBRATION_DIR, Stage, Task, TaskSourceContext, case_entry
 from ale.core.taskspec import (
+    SOLUTION_CASE,
     ImageKind,
     ImageSpec,
     OperatingSystem,
@@ -26,7 +28,7 @@ from ale.core.taskspec import (
     VerifySpec,
 )
 from ale.core.verdict import Rewards
-from ale.run.assets import ASSET_ROOTS
+from ale.run.assets import asset_roots
 from ale.run.content import tree_digest
 
 __all__ = [
@@ -58,7 +60,8 @@ _OS_LABELS = {
     OperatingSystem.WINDOWS: "Windows",
     OperatingSystem.MACOS: "macOS",
 }
-_SOURCE_EXCLUDES = (*ASSET_ROOTS, ".ale-cache")
+#: Generated state, never Task source.
+_CACHE_DIR = ".ale-cache"
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -117,6 +120,11 @@ class TaskFolder:
         directory = self.stage_dir(stage)
         return _file(directory / stage.entry(operating_system)) if directory else None
 
+    def case_dir(self, case: str) -> Path | None:
+        """The directory of the solution a calibration case runs, ``calibration/<case>/``."""
+        path = self.root / CALIBRATION_DIR / case
+        return path if path.is_dir() else None
+
     def image_source_digest(self, image: ImageSpec) -> str | None:
         """What a solver image is built from: its build context, without assets."""
         if image.ref is not None:
@@ -130,16 +138,29 @@ class TaskFolder:
 
     @cached_property
     def content_digest(self) -> str:
-        return tree_digest(self.root, exclude=_SOURCE_EXCLUDES)
+        return tree_digest(self.root, exclude=(*asset_roots(self.root), _CACHE_DIR))
 
-    @cached_property
-    def non_verifier_digest(self) -> str:
-        """Identity of everything a solver depends on, read once per folder.
+    def non_verifier_digest(self, config: TaskConfig) -> str:
+        """Identity of everything an evaluated agent's episode depends on.
 
-        Asset bytes are left to their own commit identity rather than hashed on every load;
-        reverification compares that commit separately.
+        Verification and the calibration cases, the reference solution among them, never reach
+        an evaluated agent, so ``tests/``, ``calibration/`` and ``task.toml``'s ``[solution]``
+        and ``[[calibration]]`` tables are left out: changing them keeps a retained solver
+        reverifiable. Asset bytes are left to their own commit identity rather than hashed
+        on every load; reverification compares that commit separately.
         """
-        return tree_digest(self.root, exclude=(Stage.TESTS, *_SOURCE_EXCLUDES))
+        files = tree_digest(
+            self.root,
+            exclude=(
+                TASK_CONFIG,
+                Stage.TESTS,
+                CALIBRATION_DIR,
+                *asset_roots(self.root),
+                _CACHE_DIR,
+            ),
+        )
+        configuration = config.model_dump(mode="json", exclude={"solution", "calibration"})
+        return content_hash({"files": files, TASK_CONFIG: configuration})
 
     @cached_property
     def source(self) -> TaskSourceContext:
@@ -204,13 +225,13 @@ def _repository_name(root: Path) -> str:
 class ManifestTask(Task):
     folder: TaskFolder
 
-    def __init__(self, spec: TaskSpec, folder: TaskFolder) -> None:
+    def __init__(self, spec: TaskSpec, folder: TaskFolder, config: TaskConfig) -> None:
         super().__init__(
             spec,
             folder=folder,
             source=folder.source,
             task_digest=folder.content_digest,
-            non_verifier_digest=folder.non_verifier_digest,
+            non_verifier_digest=folder.non_verifier_digest(config),
             image_source_digest=folder.image_source_digest(spec.image),
             verifier_image_source_digest=folder.verifier_image_source_digest(spec.verify.image),
         )
@@ -277,14 +298,14 @@ def _load_folder(folder: TaskFolder) -> ManifestTask:
         config = TaskConfig.model_validate(_read_toml(path))
     except ValidationError as exc:
         raise TaskDefinitionError(f"invalid {path}: {describe(exc)}") from exc
-    _require_files(folder, config.environment.os)
+    _require_files(folder, config)
     try:
         spec = _spec(config, folder)
     except ValidationError as exc:
         raise TaskDefinitionError(f"invalid Task {folder.root}: {describe(exc)}") from exc
     except TaskDefinitionError as exc:
         raise TaskDefinitionError(f"invalid Task {folder.root}: {exc}") from exc
-    return ManifestTask(spec, folder)
+    return ManifestTask(spec, folder, config)
 
 
 def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
@@ -326,6 +347,7 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
                 if server.headers
             },
         ),
+        calibration=config.calibration_cases,
         metadata=config.metadata,
     )
 
@@ -424,15 +446,36 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     return VerifySpec(environment_mode=VerificationMode.SEPARATE, image=image, resources=resources)
 
 
-def _require_files(folder: TaskFolder, operating_system: OperatingSystem) -> None:
+def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
+    """The stage entries a Task runs, and one ``calibration/`` directory per case.
+
+    A calibration case runs as the oracle, so its directory holds ``solve.sh``, or
+    ``solve.ps1`` on Windows. ``calibration/solution/`` is the reference solution every Task
+    has; any other directory there needs a ``[[calibration]]`` entry.
+    """
+    # Harbor's reference solution is solution/: say where ALE's is, not only that it is missing.
+    if (folder.root / "solution").is_dir():
+        raise TaskDefinitionError(
+            f"{folder.root}: solution/ is not a Task directory; the reference solution lives in "
+            f"{CALIBRATION_DIR}/{SOLUTION_CASE}/"
+        )
+    operating_system = config.environment.os
+    solve = case_entry(operating_system)
+    cases = [case.name for case in config.calibration_cases]
     required = (
         folder.root / TASK_CONFIG,
         folder.root / INSTRUCTION,
         folder.root / Stage.TESTS / Stage.TESTS.entry(operating_system),
-        folder.root / Stage.SOLUTION / Stage.SOLUTION.entry(operating_system),
+        *(folder.root / CALIBRATION_DIR / name / solve for name in cases),
     )
     missing = [path.relative_to(folder.root).as_posix() for path in required if not path.is_file()]
     if missing:
         raise TaskDefinitionError(
             f"{folder.root} is missing required Task file(s): {', '.join(missing)}"
         )
+    for name in sorted(path.name for path in (folder.root / CALIBRATION_DIR).glob("*/")):
+        if name not in cases:
+            raise TaskDefinitionError(
+                f"{folder.root}: {CALIBRATION_DIR}/{name}/ needs a [[calibration]] entry "
+                f'named "{name}"'
+            )

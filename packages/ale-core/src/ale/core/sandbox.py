@@ -168,7 +168,7 @@ class Identity(StrEnum):
 
     AGENT = "agent"
     """The thing being measured — and the oracle that stands in for it, so that
-    validation meets the same limits a real run will."""
+    calibration meets the same limits a real run will."""
 
 
 class DesktopResolution(BaseModel):

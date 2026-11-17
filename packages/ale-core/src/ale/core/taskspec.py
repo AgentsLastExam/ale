@@ -3,24 +3,38 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import re
 from collections.abc import Iterable, Mapping
+from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal, NamedTuple, Self
 from urllib.parse import urlsplit
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from ale.core.ids import TaskId, content_hash
 
 __all__ = [
+    "DEFAULT_SOLUTION",
     "SCHEMA_VERSION",
+    "SOLUTION_CASE",
     "AgentTable",
     "Artifact",
     "Author",
+    "CalibrationCase",
     "ContainerFeature",
     "EnvironmentTable",
+    "Expectation",
     "ImageKind",
     "ImageSpec",
     "McpHeaders",
@@ -495,6 +509,78 @@ def _valid_headers(headers: dict[str, str]) -> dict[str, str]:
 McpHeaders = Annotated[dict[str, str], AfterValidator(_valid_headers)]
 
 
+def _expectation(value: Any) -> Any:
+    """A number, or a closed interval ``[lo, hi]`` of numbers; a boolean is neither."""
+    interval = isinstance(value, list | tuple)
+    bounds = value if interval else (value,)
+    if interval and len(bounds) != 2:
+        raise ValueError("an interval is written [lo, hi]")
+    for bound in bounds:
+        if isinstance(bound, bool) or not isinstance(bound, int | float):
+            raise ValueError("expected a number or an interval [lo, hi] of numbers")
+        if not math.isfinite(bound):
+            raise ValueError("expected a finite number")
+    if interval and bounds[0] > bounds[1]:
+        raise ValueError(f"the interval [{bounds[0]}, {bounds[1]}] needs lo <= hi")
+    return tuple(float(bound) for bound in bounds) if interval else float(value)
+
+
+#: What a calibration case expects of one value: that number exactly, or a closed interval.
+Expectation = Annotated[float | tuple[float, float], BeforeValidator(_expectation)]
+
+#: A calibration case's name: a lowercase slug, as each part of a Task id is.
+_CASE_NAME = r"^[a-z0-9][a-z0-9_-]*$"
+#: The precision of a stored reward.
+_CENT = Decimal("0.01")
+#: The case of the Task's reference solution, ``calibration/solution/``.
+SOLUTION_CASE = "solution"
+
+
+class CalibrationCase(BaseModel):
+    """One ``[[calibration]]`` entry: a known final state and the scores it must receive."""
+
+    model_config = _FROZEN
+
+    name: str = Field(pattern=_CASE_NAME)
+    expect: dict[Annotated[str, Field(min_length=1)], Expectation]
+    """``reward`` and any other top-level number of the Verification Result, each with the
+    number it must equal or the closed interval it must fall in."""
+
+    def admits(self, key: str, value: float) -> bool:
+        """Whether ``value`` is what this case expects of ``key``."""
+        expected = self.expect[key]
+        if isinstance(expected, tuple):
+            return expected[0] <= value <= expected[1]
+        return value == expected
+
+    # --- validation ---
+
+    @field_validator("expect")
+    @classmethod
+    def _reward(
+        cls, expect: dict[str, float | tuple[float, float]]
+    ) -> dict[str, float | tuple[float, float]]:
+        reward = expect.get("reward")
+        if reward is None:
+            raise ValueError("must include reward")
+        bounds = reward if isinstance(reward, tuple) else (reward,)
+        if not all(0 <= bound <= 1 for bound in bounds):
+            raise ValueError("reward must lie from 0 through 1")
+        # A stored reward has two decimals, so a reward with more, or an interval holding
+        # none with two, could never match.
+        low, high = (Decimal(repr(bound)) for bound in (bounds[0], bounds[-1]))
+        if not isinstance(reward, tuple) and low != low.quantize(_CENT):
+            raise ValueError("an exact reward has at most two decimals, as a stored reward does")
+        if low.quantize(_CENT, rounding=ROUND_CEILING) > high:
+            raise ValueError(f"the reward interval {list(reward)} holds no two-decimal value")
+        return expect
+
+
+#: The case of the reference solution, which every Task has, as it is unless a
+#: ``[[calibration]]`` entry named ``solution`` says otherwise: it earns full marks.
+DEFAULT_SOLUTION = CalibrationCase(name=SOLUTION_CASE, expect={"reward": 1.0})
+
+
 class TaskVariables(BaseModel):
     """Environment variables a Task declares, by the ``task.toml`` table declaring them.
 
@@ -552,6 +638,8 @@ class TaskSpec(BaseModel):
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
     variables: TaskVariables = TaskVariables()
+    calibration: tuple[CalibrationCase, ...] = (DEFAULT_SOLUTION,)
+    """Every calibration case, in the order ``ale calibrate`` runs them."""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
@@ -858,8 +946,9 @@ class TaskConfig(BaseModel):
     """The strict authored shape of ``task.toml``.
 
     A Harbor field keeps Harbor's meaning. A field ALE adds sits in the Harbor table of what
-    it configures, under a name Harbor gives no other meaning. Only ``schema_version`` and
-    ``[task].name`` are required.
+    it configures, under a name Harbor gives no other meaning, except ``[[calibration]]``,
+    which no Harbor table configures. Only ``schema_version`` and ``[task].name`` are
+    required.
     """
 
     model_config = _FROZEN
@@ -872,6 +961,18 @@ class TaskConfig(BaseModel):
     agent: AgentTable = AgentTable()
     verifier: VerifierTable = VerifierTable()
     solution: SolutionTable = SolutionTable()
+    calibration: tuple[CalibrationCase, ...] = ()
+    """``[[calibration]]`` as written; ``calibration_cases`` adds the default ``solution``."""
+
+    @property
+    def calibration_cases(self) -> tuple[CalibrationCase, ...]:
+        """``solution``, as declared or by default, then the other declared cases in the order
+        they are written."""
+        declared = {case.name: case for case in self.calibration}
+        return (
+            declared.get(SOLUTION_CASE, DEFAULT_SOLUTION),
+            *(case for case in self.calibration if case.name != SOLUTION_CASE),
+        )
 
     # --- validation ---
 
@@ -907,6 +1008,9 @@ class TaskConfig(BaseModel):
         names = [server.name for server in environment.mcp_servers]
         if len(names) != len(set(names)):
             raise ValueError("[[environment.mcp_servers]] names must be unique")
+        cases = [case.name for case in self.calibration]
+        if len(cases) != len(set(cases)):
+            raise ValueError("[[calibration]] names must be unique")
         skills_dir = environment.skills_dir
         if skills_dir is not None and not _task_path(skills_dir, environment.os).is_absolute():
             raise ValueError("[environment].skills_dir must be an absolute path")

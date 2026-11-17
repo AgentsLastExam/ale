@@ -9,23 +9,25 @@ nothing here may depend on a third-party evaluation framework (Constitution I:
 contracts first).
 """
 
-from ale.core.taskspec import ImageKind, ImageSpec
-from ale.core.validation import (
-    TaskValidationObservation,
-    ValidationAttempt,
-    ValidationEngine,
-    ValidationNotice,
-    ValidationObservation,
+from ale.core.calibration import (
+    CalibrationAttempt,
+    CalibrationEngine,
+    CalibrationNotice,
+    CalibrationObservation,
+    CaseCalibrationObservation,
+    TaskCalibrationObservation,
 )
+from ale.core.taskspec import ImageKind, ImageSpec
 
 __all__ = [
+    "CalibrationAttempt",
+    "CalibrationEngine",
+    "CalibrationNotice",
+    "CalibrationObservation",
+    "CaseCalibrationObservation",
     "ImageKind",
     "ImageSpec",
-    "TaskValidationObservation",
-    "ValidationAttempt",
-    "ValidationEngine",
-    "ValidationNotice",
-    "ValidationObservation",
+    "TaskCalibrationObservation",
     "__version__",
 ]
 

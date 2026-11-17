@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ALE Validation Observation",
+  "title": "ALE Calibration Observation",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "engine", "tasks"],
@@ -110,31 +110,45 @@
         "message": {"type": "string", "minLength": 1}
       }
     },
+    "expectation": {
+      "oneOf": [
+        {"type": "number"},
+        {
+          "type": "array",
+          "prefixItems": [{"type": "number"}, {"type": "number"}],
+          "minItems": 2,
+          "maxItems": 2
+        }
+      ]
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "expect", "attempt", "observed", "failures", "passed"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "expect": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/expectation"}
+        },
+        "attempt": {"$ref": "#/$defs/attempt"},
+        "observed": {
+          "type": "object",
+          "additionalProperties": {"type": ["number", "null"]}
+        },
+        "failures": {"type": "array", "items": {"$ref": "#/$defs/notice"}},
+        "passed": {"type": "boolean"}
+      }
+    },
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "name",
-        "spec_hash",
-        "untouched",
-        "oracle",
-        "reward_names",
-        "warnings",
-        "failures",
-        "passed"
-      ],
+      "required": ["name", "spec_hash", "cases", "passed"],
       "properties": {
         "name": {"type": "string", "minLength": 1},
         "spec_hash": {"$ref": "#/$defs/sha256"},
-        "untouched": {"$ref": "#/$defs/attempt"},
-        "oracle": {"$ref": "#/$defs/attempt"},
-        "reward_names": {
-          "type": "array",
-          "items": {"type": "string", "minLength": 1},
-          "uniqueItems": true
-        },
-        "warnings": {"type": "array", "items": {"$ref": "#/$defs/notice"}},
-        "failures": {"type": "array", "items": {"$ref": "#/$defs/notice"}},
+        "cases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}},
         "passed": {"type": "boolean"}
       }
     }

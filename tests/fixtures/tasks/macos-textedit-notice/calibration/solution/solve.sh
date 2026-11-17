@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Reference final state for outcome-verifier validation, not a desktop rollout.
+# Reference final state for calibrating the outcome verifier, not a desktop rollout.
 test "$ALE_HOME" = /Users/admin
 cat > /Users/admin/output/notice.rtf <<'RTF'
 {\rtf1\ansi\deff0{\fonttbl{\f0 Helvetica;}}

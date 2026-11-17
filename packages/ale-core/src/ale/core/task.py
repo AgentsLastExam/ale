@@ -17,12 +17,14 @@ if TYPE_CHECKING:
     from ale.core.episode import EpisodeContext
 
 __all__ = [
+    "CALIBRATION_DIR",
     "ResolvedVariables",
     "Stage",
     "Task",
     "TaskAssetObservation",
     "TaskFolder",
     "TaskSourceContext",
+    "case_entry",
 ]
 
 
@@ -56,16 +58,26 @@ class TaskAssetObservation:
     dirty: bool
 
 
+#: The directory of a Task folder holding one directory per calibration case: ``solution``,
+#: the reference solution every Task has, and each further declared case.
+CALIBRATION_DIR = "calibration"
+
+
+def case_entry(operating_system: OperatingSystem) -> str:
+    """The script a calibration case's directory holds and the oracle runs: ``solve.sh``, or
+    ``solve.ps1`` on Windows."""
+    return "solve.ps1" if operating_system is OperatingSystem.WINDOWS else "solve.sh"
+
+
 class Stage(StrEnum):
     """A Task stage, named as its directory is in the sandbox."""
 
     SETUP = "setup"
     TESTS = "tests"
-    SOLUTION = "solution"
 
     def entry(self, operating_system: OperatingSystem) -> str:
         """The script a stage runs: ``test.sh``, or ``test.ps1`` on Windows."""
-        name = {Stage.SETUP: "setup", Stage.TESTS: "test", Stage.SOLUTION: "solve"}[self]
+        name = {Stage.SETUP: "setup", Stage.TESTS: "test"}[self]
         return f"{name}.ps1" if operating_system is OperatingSystem.WINDOWS else f"{name}.sh"
 
 
@@ -90,6 +102,8 @@ class TaskFolder(Protocol):
     def stage_entry(
         self, stage: Stage, operating_system: OperatingSystem = OperatingSystem.LINUX
     ) -> Path | None: ...
+
+    def case_dir(self, case: str) -> Path | None: ...
 
 
 class Task(ABC):

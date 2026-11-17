@@ -110,7 +110,7 @@ def test_pull_rolls_back_every_selected_root_when_replacement_fails(
 ) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
     task = repository / "tasks/one"
-    roots = ("environment/assets", "tests/assets", "solution/assets")
+    roots = ("environment/assets", "tests/assets", "calibration/solution/assets")
     for relative in roots:
         root = task / relative
         root.mkdir(parents=True)

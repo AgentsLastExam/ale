@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.support import edit_task_config
 
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
@@ -13,10 +14,8 @@ pytestmark = pytest.mark.unit
     "relative",
     [
         "instruction.md",
-        "task.toml",
         "environment/Dockerfile",
         "environment/setup/setup.sh",
-        "solution/solve.sh",
         "other.txt",
     ],
 )
@@ -29,13 +28,33 @@ def test_non_verifier_change_requires_new_solver(tmp_path: Path, relative: str):
     assert load_tasks(root)[0].non_verifier_digest != before
 
 
+def test_calibration_cases_preserve_source_identity(tmp_path: Path):
+    """No case, the reference solution included, reaches an evaluated agent, so a cheating
+    case added while tests/ is fixed leaves the runs that exposed the cheat reverifiable."""
+    root = scaffold_task(tmp_path / "task")
+    before = load_tasks(root)[0].non_verifier_digest
+    (root / "calibration/solution/solve.sh").write_text("#!/usr/bin/env bash\ntrue\n")
+    edit_task_config(
+        root,
+        {
+            "solution": {"env": {"REGION": "eu"}},
+            "calibration": [{"name": "hardcoded-output", "expect": {"reward": 0}}],
+        },
+    )
+    (root / "calibration/hardcoded-output").mkdir(parents=True)
+    (root / "calibration/hardcoded-output/solve.sh").write_text("true\n")
+    assert load_tasks(root)[0].non_verifier_digest == before
+    edit_task_config(root, {"agent": {"timeout_sec": 301}})
+    assert load_tasks(root)[0].non_verifier_digest != before
+
+
 @pytest.mark.parametrize(
     "relative",
     [
         "tests/test.sh",
         "tests/assets/input",
         "environment/assets/input",
-        "solution/assets/input",
+        "calibration/solution/assets/input",
     ],
 )
 def test_verifier_and_asset_changes_preserve_source_identity(tmp_path: Path, relative: str):

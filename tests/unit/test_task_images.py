@@ -172,7 +172,7 @@ def windows_task(write_task_repo) -> Task:  # type: ignore[no-untyped-def]
     (folder / "environment").mkdir()
     (folder / "environment/build.ps1").write_text("Write-Output 'installed'\n")
     (folder / "tests/test.sh").rename(folder / "tests/test.ps1")
-    (folder / "solution/solve.sh").rename(folder / "solution/solve.ps1")
+    (folder / "calibration/solution/solve.sh").rename(folder / "calibration/solution/solve.ps1")
     return load_tasks(folder)[0]
 
 

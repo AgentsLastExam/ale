@@ -10,7 +10,8 @@ The format is based on Harbor's task format (`task.toml`, `environment/`, `tests
 `solution/`). A field ALE implements as Harbor does keeps Harbor's name, table and meaning.
 A field ALE adds sits in the Harbor table of what it configures, under a name Harbor gives
 no other meaning: a separate namespace would not stop one name meaning two things, and would
-have to mirror every table it extends. `schema_version` is the ALE version in which the
+have to mirror every table it extends. The exception is `[[calibration]]`, which no Harbor
+table configures. `schema_version` is the ALE version in which the
 format last changed, and ALE accepts exactly that value, so a file written for another
 format fails as it loads instead of being read with a different meaning.
 
@@ -30,13 +31,18 @@ my-task/
 │   ├── test.sh                # test.ps1 on Windows
 │   ├── verify.py
 │   └── Dockerfile             # optional separate-verifier image (context tests/)
-└── solution/                  # known-good solution for validation
-    └── solve.sh               # solve.ps1 on Windows
+└── calibration/               # ALE; known final states and the scores they must receive
+    ├── solution/              # the reference solution, Harbor's solution/
+    │   └── solve.sh           # solve.ps1 on Windows
+    └── missing-summary/       # one directory per further case
+        └── solve.sh
 ```
 
-Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
-Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` and
-`solve.ps1` on Windows. `[environment].image` and `environment/` decide the solver's image:
+Required files are `task.toml`, `instruction.md`, and the tests and reference solution
+entries for the Task OS: `tests/test.sh` and `calibration/solution/solve.sh` on Linux and
+macOS, `test.ps1` and `solve.ps1` on Windows; every further
+[calibration case](#calibration)'s directory holds the same entry. `[environment].image` and
+`environment/` decide the solver's image:
 
 - `environment/Dockerfile` builds a Linux container. It names its base in `FROM`, so an
   `image` beside it fails, and any `build.sh` beside it is only a file in its context.
@@ -124,6 +130,10 @@ env = {}                                    # replaces [environment].env
 
 [solution]
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
+
+[[calibration]]                             # ALE; one per added case or changed default
+name = "missing-summary"                    # lowercase slug: calibration/missing-summary/
+expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or [lo, hi]
 ```
 
 `[agent].workdir` is below the agent's home when relative, so a Task need not spell its home
@@ -154,6 +164,9 @@ These values differ from Harbor's:
   and an empty value counts as unset; see [Variables](#variables).
 - A `skills_dir` that does not exist fails the Episode.
 - `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
+- The reference solution is `calibration/solution/`, one [calibration case](#calibration)
+  among the others, where Harbor's is `solution/`, so a Harbor conversion moves it; a Task
+  still holding `solution/` fails as it loads.
 - `gpu_types` holds at least one name and requires `gpus`, and every Provider honors it,
   where Harbor's Docker environment ignores it; see [GPUs](#gpus).
 - `allowed_hosts` refuses entries that reach the Host; see [Resources and network](#resources-and-network).
@@ -182,7 +195,7 @@ Copying uses the framework's privileged identity on every supported OS; see
 Separate verification always transfers the declared artifacts to its verifier through the
 Host, as in Harbor. Run-level `artifacts.collect` decides only whether the episode keeps a
 copy: the default `"none"` keeps none, and `"host"` keeps them in either mode. `run`,
-`validate`, and `reverify` use the same policy. Separate-verifier images must not contain
+`calibrate`, and `reverify` use the same policy. Separate-verifier images must not contain
 prepopulated candidate answers; tasks that grade original links or live state should use
 shared verification.
 
@@ -312,10 +325,11 @@ table. Names beginning with `ALE_` are the framework's.
 A value is a literal or a whole-value reference, `${NAME}` or `${NAME:-default}`. References
 resolve from the checkout's `.env` (`ALE_ENV_FILE` overrides) and nothing else: a variable
 only exported in the operator's shell, such as their own `GITHUB_TOKEN`, never reaches a
-Sandbox by accident. An empty value counts as unset, as in a shell. `run`, `validate` and
+Sandbox by accident. An empty value counts as unset, as in a shell. `run`, `calibrate` and
 `reverify` resolve every selected Task before any image is built, Sandbox started or model
 called, and fail naming each Task's missing variables; `[solution].env` is resolved only for
-the oracle. As in Harbor, `${...}` inside other text is not a reference and stays as written.
+the [oracle](#calibration). As in Harbor, `${...}` inside other text is not a reference and
+stays as written.
 Values travel in each command's environment through the guest service, never in an image, a
 Sandbox's configuration or a Host command line, so container and VM, Linux, Windows and
 macOS receive them the same way.
@@ -490,7 +504,7 @@ own when it has one, since that is where the Task installs what `verify.py` impo
 otherwise the framework's own. It stages `ale_verify` and its schema validator into that
 interpreter's site-packages, checks the import, then sets `ALE_VERIFY_PYTHON` in the
 entrypoint's process environment.
-It is available to the tests and their child processes, including during `validate` and
+It is available to the tests and their child processes, including during `calibrate` and
 `reverify`; it is not initialized by the image build, setup stage, or SDK import.
 ALE does not install Python into the image's environment or replace the solver's default
 interpreter.
@@ -512,11 +526,53 @@ exit $LASTEXITCODE
 
 APIs, scoring, and record behavior are defined in [Verification](verification.md).
 
-## solution/
+## calibration/
 
-`solution/solve.sh` (or Windows `solution/solve.ps1`) supplies a successful final state for
-validation. It may execute a solution normally or write that state directly from reference
-data it carries. The solution is absent during evaluated-agent execution.
+Calibration cases are known final states with the scores each must receive, as a grader
+reads anchor essays before marking: when `tests/` changes, `ale calibrate` shows at once
+whether every case still scores as declared, and reviewers can judge the cases and their
+expected scores without running anything. An attempt to cheat is a case like any other,
+expected to earn 0. `[[calibration]]` is a top-level table, laid out as Harbor's `[[steps]]`
+with `steps/<name>/` is.
 
-Validation's untouched and oracle reward requirements are defined in
-[the episode protocol](episode-protocol.md#validation).
+```toml
+[[calibration]]
+name = "missing-summary"                    # runs calibration/missing-summary/
+expect = { reward = [0.4, 0.6] }            # a closed interval
+
+[[calibration]]
+name = "hardcoded-output"
+expect = { reward = 0 }
+
+[[calibration]]
+name = "solution"                           # replaces the default { reward = 1 }
+expect = { reward = [0.0, 0.05], tflops = [600, 680] }
+```
+
+Every Task has the case `solution`, its reference solution in `calibration/solution/`. It
+expects `{ reward = 1 }`, and an entry of that name only replaces the expectation, so the
+directory needs none. An open-ended Task whose reference solution is its baseline rather
+than a full-marks answer declares what that baseline earns, as the last entry above does:
+almost no reward, at a throughput between 600 and 680 TFLOPS. Any other `name`, a lowercase
+slug unique among the entries, is the directory `calibration/<name>/`. To check that the
+start state earns nothing, declare a case whose `solve.sh` does nothing and that expects
+`{ reward = 0 }`.
+
+In each case, its directory's `solve.sh` (`solve.ps1` on Windows) supplies the case's final
+state: it may execute a solution normally or write that state directly from reference data
+it carries. It runs as the oracle, with `[solution].env`, and like `tests/` it is absent
+while an evaluated agent works. `calibration/` holds only case directories, and `ale lint`
+refuses any other entry there, a link included. A directory there other than `solution`
+without an entry fails the Task as it loads, so a case cannot exist without its
+expectation.
+
+`expect` includes `reward`. Each value is a number the result must equal, or `[lo, hi]`, a
+closed interval it must lie in, which needs lo ≤ hi; booleans, strings, NaN and infinity
+fail. `reward` is compared with the stored reward, which lies from 0 through 1 with two
+decimals ([Result](verification.md#result)), so an expected reward lies in that range, an
+exact one has at most two decimals, and an interval holds at least one two-decimal value.
+Any other key names a top-level number of the Episode's
+[Verification Result](verification.md#result), compared as written, so a measured value
+takes an interval; a missing key, or a value that is not a number, fails the case. How
+`ale calibrate` runs the cases is defined in
+[the episode protocol](episode-protocol.md#calibration).

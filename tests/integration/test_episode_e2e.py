@@ -172,6 +172,7 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
 ) -> None:
     class FailsOnceOracle(OracleHarness):
         def __init__(self) -> None:
+            super().__init__()
             self.sandbox_ids: list[str] = []
 
         async def launch(

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 from test_runtime_contracts import make_lock
+from tests.support import edit_task_config
 from typer.testing import CliRunner
 
 from ale.core.config import RunConfig, SandboxRetentionConfig
@@ -458,11 +459,14 @@ async def test_reverification_retries_only_with_fresh_verifiers(
 
 
 @pytest.mark.asyncio
-async def test_validation_projects_only_final_episode_attempts(
+async def test_calibration_projects_only_final_episode_attempts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task_cli = import_module("ale.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
+    edit_task_config(task_path, {"calibration": [{"name": "start-state", "expect": {"reward": 0}}]})
+    (task_path / "calibration/start-state").mkdir()
+    (task_path / "calibration/start-state/solve.sh").write_text("#!/usr/bin/env bash\n")
     counts: Counter[str] = Counter()
     lock = make_lock()
 
@@ -479,16 +483,16 @@ async def test_validation_projects_only_final_episode_attempts(
 
     async def execute(_task, protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
         assert str(kwargs["desktop_resolution"]) == "1366x768"
-        name = "oracle" if protocol.agent_enabled else "untouched"
+        name = protocol.harness.case
         counts[name] += 1
-        failed = name == "oracle" and counts[name] == 1
+        failed = name == "solution" and counts[name] == 1
         result = write_result(
             kwargs["run_dir"] / kwargs["episode_id"],
             Status.ENV_ERROR if failed else Status.COMPLETED,
             counts[name],
         )
         if not failed:
-            rewards = {"reward": 1.0 if name == "oracle" else 0.0}
+            rewards = {"reward": 1.0 if name == "solution" else 0.0}
             result.record = result.record.model_copy(update={"rewards": rewards})
             result.verdict = Verdict.completed(rewards)
             atomic_write_json(result.run_dir / "result.json", result.record)
@@ -499,14 +503,14 @@ async def test_validation_projects_only_final_episode_attempts(
     monkeypatch.setattr(task_cli, "_prepare_images", prepare)
     monkeypatch.setattr(task_cli, "run_episode", execute)
     assert (
-        await task_cli._validate(
+        await task_cli._calibrate(
             str(task_path),
             RunConfig(episode_retries=1, desktop_resolution="1366x768"),  # type: ignore[arg-type]
             tmp_path / "runs",
         )
         == 0
     )
-    assert counts == {"untouched": 1, "oracle": 2}
+    assert counts == {"solution": 2, "start-state": 1}
     assert len(list((tmp_path / "runs").glob("*/*/result.json"))) == 2
 
 
@@ -609,7 +613,7 @@ def test_reuse_hash_ignores_only_scheduling_settings() -> None:
     assert RunConfig(timeouts={"agent": 60}).reuse_hash != base.reuse_hash
 
 
-@pytest.mark.parametrize("command", ["run", "reverify", "validate"])
+@pytest.mark.parametrize("command", ["run", "reverify", "calibrate"])
 def test_retry_configuration_and_cli_precedence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
@@ -623,12 +627,12 @@ def test_retry_configuration_and_cli_precedence(
         seen.append(settings.episode_retries)
         return 0
 
-    for name in ("_run_one", "_reverify", "_validate"):
+    for name in ("_run_one", "_reverify", "_calibrate"):
         monkeypatch.setattr(cli, name, workflow)
     argv = [command, "task"] + (["source"] if command == "reverify" else [])
     argv += ["--config", str(config)]
     cases = [([], 2), (["--set", "episode_retries=3"], 3)]
-    if command != "validate":
+    if command != "calibrate":
         cases.append((["--set", "episode_retries=3", "--episode-retries", "1"], 1))
     for flags, expected in cases:
         result = CliRunner().invoke(cli.app, [*argv, *flags])

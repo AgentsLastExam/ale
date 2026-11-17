@@ -115,7 +115,7 @@ async def test_the_network_is_open_for_setup_and_closed_for_the_agent(
         "else echo blocked > /home/user/output/setup_net; fi\n"
         "chown -R user:user /home/user/output\n"
     )
-    (task_root / "solution" / "solve.sh").write_text(
+    (task_root / "calibration/solution" / "solve.sh").write_text(
         textwrap.dedent(f"""\
         #!/usr/bin/env bash
         set -uo pipefail
@@ -141,7 +141,7 @@ async def test_an_allowlisted_task_reaches_its_host_through_the_proxy_and_nothin
         config={"agent": {"network_mode": "allowlist", "allowed_hosts": ["example.com"]}},
     )
     whole_gib(task_root)
-    oracle = task_root / "solution" / "solve.sh"
+    oracle = task_root / "calibration/solution" / "solve.sh"
     oracle.write_text(
         oracle.read_text()
         + textwrap.dedent("""
@@ -173,7 +173,7 @@ async def test_a_gpu_task_runs_on_the_gpu_its_lock_records(
         task_root,
         {"environment": {"cpus": 2, "memory_mb": 8192, "gpus": 1, "gpu_types": ["H100"]}},
     )
-    oracle = task_root / "solution" / "solve.sh"
+    oracle = task_root / "calibration/solution" / "solve.sh"
     oracle.write_text(
         oracle.read_text()
         + "\nnvidia-smi --query-gpu=uuid --format=csv,noheader > /home/user/output/gpu.txt\n"

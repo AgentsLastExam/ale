@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
+from importlib import import_module
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from tests.support import write_task
+from typer.testing import CliRunner
 
+from ale.core.config import RunConfig
 from ale.core.episode import Phase
 from ale.core.errors import ConfigError, TaskDefinitionError
 from ale.core.sandbox import ExecResult
 from ale.core.task import ResolvedVariables
 from ale.core.taskspec import OperatingSystem, TaskVariables, VerificationMode, VerifySpec
 from ale.core.trace import read_jsonl
+from ale.run.cli.main import app
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import NopHarness
 from ale.run.lint import lint_repository
@@ -255,7 +260,7 @@ def test_mcp_headers_fail_with_the_other_variables_and_only_for_an_agent(
     config = _with_headers({"Authorization": "Bearer ${SEARCH_TOKEN}"})
     with pytest.raises(ConfigError, match=r"SEARCH_TOKEN \(MCP server search header"):
         _resolved(tmp_path / "agent", config, oracle=False)
-    # An oracle has no MCP client, so validating a Task does not need the agent's credential.
+    # An oracle has no MCP client, so calibrating a Task does not need the agent's credential.
     task = _resolved(tmp_path / "oracle", config, oracle=True)
     assert task.variables is not None
     assert task.variables.values.mcp_headers == {}
@@ -404,3 +409,25 @@ async def test_stage_output_never_records_a_secret(tmp_path: Path) -> None:
         if record["kind"] == "command_finished"
     ]
     assert finished["stdout"]["inline"] == "setup saw [REDACTED]\n"
+
+
+def test_every_command_reads_the_selected_credential_file_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    task_cli = import_module("ale.run.cli.tasks")
+    credential_file = tmp_path / "judge.env"
+    credential_file.write_text("TEST_CALIBRATION_JUDGE_KEY=test-secret\n")
+    monkeypatch.setenv("ALE_ENV_FILE", str(credential_file))
+    monkeypatch.delenv("TEST_CALIBRATION_JUDGE_KEY", raising=False)
+
+    def inspect_environment(settings: RunConfig) -> None:
+        assert os.environ["TEST_CALIBRATION_JUDGE_KEY"] == "test-secret"
+        raise RuntimeError("credential loading verified before provisioning")
+
+    monkeypatch.setattr(task_cli, "ProviderRegistry", inspect_environment)
+    try:
+        result = CliRunner().invoke(app, ["calibrate", str(tmp_path / "task")])
+    finally:
+        os.environ.pop("TEST_CALIBRATION_JUDGE_KEY", None)
+    assert isinstance(result.exception, RuntimeError), result.output
+    assert "credential loading verified" in str(result.exception)

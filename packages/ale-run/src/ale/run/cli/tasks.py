@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 import os
 import uuid
 from collections.abc import Awaitable, Callable
@@ -13,6 +14,14 @@ from pathlib import Path
 
 import typer
 
+from ale.core.calibration import (
+    CalibrationAttempt,
+    CalibrationEngine,
+    CalibrationNotice,
+    CalibrationObservation,
+    CaseCalibrationObservation,
+    TaskCalibrationObservation,
+)
 from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.fleet import RunPlan
@@ -29,15 +38,8 @@ from ale.core.sandbox import (
     SandboxRole,
 )
 from ale.core.task import Stage, TaskAssetObservation
-from ale.core.taskspec import VerificationMode
+from ale.core.taskspec import CalibrationCase, Expectation, VerificationMode
 from ale.core.trajectory import AtifTrajectory
-from ale.core.validation import (
-    TaskValidationObservation,
-    ValidationAttempt,
-    ValidationEngine,
-    ValidationNotice,
-    ValidationObservation,
-)
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
@@ -941,7 +943,8 @@ def _check_reportable(result: EpisodeResult) -> bool:
     return not problems
 
 
-async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
+async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
+    """Run every calibration case of every selected Task, and record what each scored."""
     providers = ProviderRegistry(settings)
     try:
         resolved = resolve(reference)
@@ -959,22 +962,22 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
     proxy = None
     try:
         proxy, sessions = await _egress_proxy(tasks, gateway)
-        run_id = f"validate-{uuid.uuid4().hex[:8]}"
+        run_id = f"calibrate-{uuid.uuid4().hex[:8]}"
         run_dir = runs_dir / run_id
         ledger = Ledger(run_dir)
         ledger.open_run(run_id, settings.config_hash)
         resources = EffectiveAgentResources()
         failures = 0
-        observations: list[TaskValidationObservation] = []
+        observations: list[TaskCalibrationObservation] = []
         try:
             for task in tasks:
                 spec = task.spec
-                results = {}
-                for pass_name, harness, agent_enabled in (
-                    ("untouched", NopHarness(), False),
-                    ("oracle", OracleHarness(), True),
-                ):
-                    episode_id = f"{task_component(spec.name)}-{pass_name}-{uuid.uuid4().hex[:8]}"
+                cases: list[CaseCalibrationObservation] = []
+                for case in spec.calibration:
+                    # Every case is an oracle run of its directory: the same protocol, limits
+                    # and [solution].env as the Task's reference solution.
+                    harness = OracleHarness(case.name)
+                    episode_id = f"{task_component(spec.name)}-{case.name}-{uuid.uuid4().hex[:8]}"
                     inputs = ProvenanceInputs(
                         source=resolved.source,
                         agent=agent_provenance(
@@ -991,7 +994,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                         spec,
                         task_digest=task.task_digest,
                         image_digest=task.prepared_image.prepared_identity,
-                        agent=f"validation-{pass_name}@{harness.version()}",
+                        agent=f"calibration-{case.name}@{harness.version()}",
                         seed=settings.seed,
                         reuse_hash=settings.reuse_hash,
                         assets=task.asset_observation,
@@ -1006,8 +1009,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
 
                     async def execute(
                         task: ManifestTask = task,
-                        harness: Harness = harness,
-                        agent_enabled: bool = agent_enabled,
+                        harness: OracleHarness = harness,
                         episode_id: str = episode_id,
                         inputs: ProvenanceInputs = inputs,
                     ) -> EpisodeResult:
@@ -1015,7 +1017,6 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                             task,
                             EpisodeProtocol(
                                 harness,
-                                agent_enabled=agent_enabled,
                                 max_steps=settings.agent.max_steps,
                                 timeouts=settings.timeouts,
                             ),
@@ -1044,44 +1045,47 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
                         execute, retries=settings.episode_retries, on_retry=_report_retry
                     )
                     ledger.finish_episode(episode_id, result.record)
-                    results[pass_name] = result
+                    observed, case_failures = _calibration_check(
+                        case, result.verdict, result.run_dir
+                    )
+                    cases.append(
+                        CaseCalibrationObservation(
+                            name=case.name,
+                            expect=case.expect,
+                            attempt=_calibration_attempt(result, run_dir),
+                            observed=observed,
+                            failures=case_failures,
+                            passed=not case_failures,
+                        )
+                    )
+                    typer.echo(_case_line(str(spec.name), cases[-1]))
 
-                zero_result = results["untouched"]
-                one_result = results["oracle"]
-                reward_names, warnings, task_failures = _validation_notices(
-                    zero_result.verdict,
-                    one_result.verdict,
-                )
-                passed = not task_failures
+                passed = all(case.passed for case in cases)
                 observations.append(
-                    TaskValidationObservation(
+                    TaskCalibrationObservation(
                         name=str(spec.name),
                         spec_hash=spec.spec_hash,
-                        untouched=_validation_attempt(zero_result, run_dir),
-                        oracle=_validation_attempt(one_result, run_dir),
-                        reward_names=reward_names,
-                        warnings=warnings,
-                        failures=task_failures,
+                        cases=tuple(cases),
                         passed=passed,
                     )
                 )
                 failures += 0 if passed else 1
-                mark = "WARN" if warnings else ("ok  " if passed else "FAIL")
+                as_expected = sum(case.passed for case in cases)
                 typer.echo(
-                    f"{mark}  {spec.name}: untouched={_validation_outcome(zero_result.verdict)}, "
-                    f"oracle={_validation_outcome(one_result.verdict)}"
+                    f"{'ok  ' if passed else 'FAIL'}  {spec.name}: "
+                    f"{as_expected}/{len(cases)} cases as expected"
                 )
         finally:
             ledger.close()
 
         framework = framework_provenance()
-        observation = ValidationObservation(
+        observation = CalibrationObservation(
             run_id=run_id,
-            engine=ValidationEngine(version=framework.version, commit=framework.commit),
+            engine=CalibrationEngine(version=framework.version, commit=framework.commit),
             tasks=tuple(observations),
         )
-        atomic_write_json(run_dir / "validation.json", observation.model_dump(mode="json"))
-        typer.echo(f"validation run: {run_dir}")
+        atomic_write_json(run_dir / "calibration.json", observation.model_dump(mode="json"))
+        typer.echo(f"calibration run: {run_dir}")
         return 0 if failures == 0 else EXIT_SOME_FAILED
     finally:
         await providers.close()
@@ -1276,63 +1280,53 @@ def _reused_result(
     )
 
 
-def _is_full_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and rewards.get("reward") == 1.0
+def _calibration_check(
+    case: CalibrationCase, verdict: Verdict, episode_dir: Path
+) -> tuple[dict[str, float | None], tuple[CalibrationNotice, ...]]:
+    """What a case's episode observed of each value the case expects, and how it differs.
+
+    ``reward`` is the episode's stored reward, already rounded to two decimals; any other key
+    names a top-level number of the Verification Result in ``episode_dir``, read only for
+    this comparison. An episode that did not complete fails its case, since a failure is not
+    a score.
+    """
+    if verdict.status is not Status.COMPLETED or verdict.rewards is None:
+        message = f"the episode ended with {_episode_outcome(verdict)}"
+        return {}, (CalibrationNotice(code="not_completed", message=message),)
+    values: dict[str, object] = {}
+    if any(key != "reward" for key in case.expect):
+        path = episode_dir / "verification.json"
+        values = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    values["reward"] = verdict.rewards.get("reward")
+    observed: dict[str, float | None] = {}
+    failures: list[CalibrationNotice] = []
+    for key, expected in case.expect.items():
+        value = values.get(key)
+        if key not in values:
+            observed[key] = None
+            message = f"{key} in the Verification Result is missing"
+            failures.append(CalibrationNotice(code="missing_value", message=message))
+            continue
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            observed[key] = None
+            message = f"{key} in the Verification Result is not a number: {value!r:.80}"
+            failures.append(CalibrationNotice(code="not_a_number", message=message))
+            continue
+        observed[key] = float(value)
+        if not case.admits(key, value):
+            message = f"{key} is {value}, expected {_expectation_text(expected)}"
+            failures.append(CalibrationNotice(code="unexpected_value", message=message))
+    return observed, tuple(failures)
 
 
-def _is_zero_reward_map(rewards: dict[str, float] | None) -> bool:
-    return bool(rewards) and rewards.get("reward") == 0.0
+def _expectation_text(expected: Expectation) -> str:
+    return f"[{expected[0]}, {expected[1]}]" if isinstance(expected, tuple) else str(expected)
 
 
-def _validation_notices(
-    untouched: Verdict,
-    oracle: Verdict,
-) -> tuple[
-    tuple[str, ...],
-    tuple[ValidationNotice, ...],
-    tuple[ValidationNotice, ...],
-]:
-    failures: list[ValidationNotice] = []
-    if untouched.status is not Status.COMPLETED:
-        failures.append(
-            ValidationNotice(
-                code="untouched_not_completed",
-                message=f"untouched episode ended with {untouched.status.value}",
-            )
-        )
-    elif not _is_zero_reward_map(untouched.rewards):
-        failures.append(
-            ValidationNotice(
-                code="untouched_nonzero",
-                message=f"untouched reward must be zero, got {untouched.rewards}",
-            )
-        )
-
-    if oracle.status is not Status.COMPLETED:
-        failures.append(
-            ValidationNotice(
-                code="oracle_not_completed",
-                message=f"oracle episode ended with {oracle.status.value}",
-            )
-        )
-    elif not _is_full_reward_map(oracle.rewards):
-        failures.append(
-            ValidationNotice(
-                code="oracle_not_full",
-                message=(
-                    "oracle reward must be one after rounding to two decimals, "
-                    f"got {oracle.rewards}"
-                ),
-            )
-        )
-
-    return ("reward",), (), tuple(failures)
-
-
-def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttempt:
+def _calibration_attempt(result: EpisodeResult, run_dir: Path) -> CalibrationAttempt:
     result_path = result.run_dir / "result.json"
     lock_path = result.run_dir / "lock.json" if result.lock is not None else None
-    return ValidationAttempt(
+    return CalibrationAttempt(
         episode_id=result.episode_id,
         status=result.verdict.status,
         rewards=result.verdict.rewards if result.verdict.status is Status.COMPLETED else None,
@@ -1344,10 +1338,19 @@ def _validation_attempt(result: EpisodeResult, run_dir: Path) -> ValidationAttem
     )
 
 
-def _validation_outcome(verdict: Verdict) -> object:
+def _case_line(task: str, case: CaseCalibrationObservation) -> str:
+    """One case: the values it observed when it passed, or each way it failed."""
+    if case.passed:
+        outcome = ", ".join(f"{key}={value}" for key, value in case.observed.items())
+    else:
+        outcome = "; ".join(notice.message for notice in case.failures)
+    return f"{'ok  ' if case.passed else 'FAIL'}  {task} {case.name}: {outcome}"
+
+
+def _episode_outcome(verdict: Verdict) -> str:
     if verdict.failure is not None:
         return f"{verdict.status.value} ({verdict.failure.error_class}: {verdict.failure.message})"
-    return verdict.rewards if verdict.rewards is not None else verdict.status.value
+    return verdict.status.value
 
 
 async def _plan_on_fleet(

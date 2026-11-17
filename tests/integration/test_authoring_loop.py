@@ -31,7 +31,7 @@ async def run(task_path: Path, run_dir: Path, harness: object):  # type: ignore[
 
 
 @pytest.mark.asyncio
-async def test_scaffold_lints_validates_and_survives_relocation(tmp_path: Path) -> None:
+async def test_scaffold_lints_solves_and_survives_relocation(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "collection" / "first")
     assert lint_repository(task) == []
 

@@ -9,7 +9,7 @@ import pytest
 
 from ale.core.errors import AssetError
 from ale.run.assets import (
-    ASSET_ROOTS,
+    asset_roots,
     asset_status,
     pull_assets,
     push_assets,
@@ -36,7 +36,7 @@ def _clean_copy(task: Path, tmp_path: Path) -> Path:
     )
     subprocess.run(["git", "init", "-q", str(clone)], check=True)
     copied = clone / relative
-    for root in ASSET_ROOTS:
+    for root in asset_roots(copied):
         shutil.rmtree(copied / root, ignore_errors=True)
     return copied
 
@@ -55,7 +55,7 @@ def test_authenticated_push_and_pinned_private_pull_round_trip(tmp_path: Path) -
     assert (clean_task / "environment/assets/public.txt").is_file()
     assert (clean_task / "environment/assets/service-response.txt").is_file()
     assert (clean_task / "tests/assets/expected.json").is_file()
-    assert (clean_task / "solution/assets/result.json").is_file()
+    assert (clean_task / "calibration/solution/assets/result.json").is_file()
 
 
 @pytest.mark.needs_hf_write

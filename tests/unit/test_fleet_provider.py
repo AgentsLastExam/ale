@@ -663,7 +663,7 @@ class TestImageKeys:
         first = self.key(folder)
         (folder / "environment" / "setup").mkdir()
         (folder / "environment" / "setup" / "setup.sh").write_text("echo setup\n")
-        (folder / "solution" / "solve.sh").write_text("echo other\n")
+        (folder / "calibration/solution" / "solve.sh").write_text("echo other\n")
         assert self.key(folder) == first
         (folder / "environment" / "Dockerfile").write_text("FROM busybox\n")
         assert self.key(folder) != first

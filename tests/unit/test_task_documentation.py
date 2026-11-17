@@ -107,7 +107,7 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
         "[environment].image",
         "environment/setup/",
         "tests/test.sh",
-        "solution/solve.sh",
+        "calibration/solution/solve.sh",
         "skills_dir",
         "[[environment.mcp_servers]]",
         'environment_mode = "separate"',
@@ -147,13 +147,13 @@ def test_task_quality_standard_owns_only_semantic_quality() -> None:
         "task.toml",
         "assets/",
         "requirement matrix",
-        "ale validate",
+        "ale calibrate",
         "Required final response",
     ):
         assert implementation_detail not in text
     verification = (ROOT / "docs/specs/verification.md").read_text(encoding="utf-8")
     assert "finite number from 0 through 1" in verification
-    assert "ALE interprets only `reward`" in verification
+    assert "ALE scores only `reward`" in verification
 
 
 @pytest.mark.parametrize(

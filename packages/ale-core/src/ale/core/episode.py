@@ -127,7 +127,7 @@ class EpisodeContext:
     episode_id: str
     spec: TaskSpec
     task_dir: Path
-    """Host-side task folder: configuration, environment, tests and solution."""
+    """Host-side task folder: configuration, environment, tests and calibration cases."""
 
     run_dir: Path
     """Host-side output directory for this episode."""

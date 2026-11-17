@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from tests.support import edit_task_config
 
+from ale.core.errors import AssetError
 from ale.run.assets import (
     _mark_clean,
     asset_status,
     observe_task_assets,
+    pull_assets,
     select_asset_repositories,
 )
 from ale.run.tasksets.manifest import load_tasks
@@ -98,7 +103,7 @@ def test_old_marker_without_inventory_is_dirty(write_task_repo) -> None:  # type
 
 def test_status_does_not_read_asset_bytes(write_task_repo, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
-    asset = repository / "tasks/one/solution/assets/reference.bin"
+    asset = repository / "tasks/one/calibration/solution/assets/reference.bin"
     asset.parent.mkdir()
     asset.write_bytes(b"large")
 
@@ -116,3 +121,74 @@ def test_status_does_not_read_asset_bytes(write_task_repo, monkeypatch: pytest.M
 def test_no_assets_task_has_no_public_asset_record(write_task_repo) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
     assert asset_status([repository / "tasks/one"]) == ()
+
+
+class _Dataset:
+    """A Hugging Face dataset at one commit, served through the Hub's client functions."""
+
+    commit = "c" * 40
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self.files = files
+        self.patterns: list[str] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sha = self.commit
+        monkeypatch.setattr(
+            "huggingface_hub.HfApi",
+            lambda *, token: SimpleNamespace(repo_info=lambda *_a, **_k: SimpleNamespace(sha=sha)),
+        )
+        monkeypatch.setattr("huggingface_hub.snapshot_download", self.download)
+
+    def download(self, **kwargs: object) -> str:
+        self.patterns = list(kwargs["allow_patterns"])  # type: ignore[call-overload]
+        local = Path(str(kwargs["local_dir"]))
+        for path, text in self.files.items():
+            if any(fnmatch.fnmatch(path, pattern) for pattern in self.patterns):
+                (local / path).parent.mkdir(parents=True, exist_ok=True)
+                (local / path).write_text(text)
+        return str(local)
+
+
+def _declare_case(task: Path, name: str) -> None:
+    edit_task_config(task, {"calibration": [{"name": name, "expect": {"reward": 0.5}}]})
+    (task / "calibration" / name).mkdir(parents=True, exist_ok=True)
+    (task / "calibration" / name / "solve.sh").write_text("true\n")
+
+
+def test_pull_replaces_a_case_s_assets_only_with_force_and_only_for_its_cases(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    task = write_task_repo("ale-tasks-demo", tasks=("one",)) / "tasks/one"
+    _declare_case(task, "partial")
+    local = task / "calibration/partial/assets/local.txt"
+    local.parent.mkdir()
+    local.write_text("local")
+    dataset = _Dataset(
+        {
+            "tasks/one/calibration/partial/assets/answer.txt": "remote",
+            "tasks/one/calibration/solution/assets/answer.txt": "reference",
+            "tasks/one/calibration/gone/assets/answer.txt": "a case the Task no longer has",
+        }
+    )
+    dataset.install(monkeypatch)
+
+    with pytest.raises(AssetError, match=r"calibration/partial/assets.*--force"):
+        pull_assets([task])
+    assert local.read_text() == "local"
+
+    pull_assets([task], force=True)
+    assert dataset.patterns == [
+        "tasks/one/environment/assets/**",
+        "tasks/one/tests/assets/**",
+        "tasks/one/calibration/*/assets/**",
+    ]
+    assert not local.exists()
+    assert (task / "calibration/partial/assets/answer.txt").read_text() == "remote"
+    assert (task / "calibration/solution/assets/answer.txt").read_text() == "reference"
+    assert not (task / "calibration/gone").exists()
+    (status,) = asset_status([task])
+    assert (status.commit, status.dirty) == (_Dataset.commit, False)
+
+    (task / "calibration/partial/assets/answer.txt").write_text("edited")
+    assert asset_status([task])[0].dirty

@@ -80,7 +80,7 @@ def test_run_file_selects_agent_when_cli_option_is_absent(tmp_path: Path) -> Non
     assert settings.sandbox.providers == ("docker:kata", "docker:runc")
 
 
-@pytest.mark.parametrize("command", ["run", "validate", "prepare", "reverify"])
+@pytest.mark.parametrize("command", ["run", "calibrate", "prepare", "reverify"])
 def test_cli_inherits_runtime_configuration_with_explicit_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
@@ -99,7 +99,7 @@ def test_cli_inherits_runtime_configuration_with_explicit_overrides(
         captured.append(next(value for value in args if isinstance(value, RunConfig)))
         return 0
 
-    for name in ("_run_one", "_validate", "_prepare_only", "_reverify"):
+    for name in ("_run_one", "_calibrate", "_prepare_only", "_reverify"):
         monkeypatch.setattr(main, name, workflow)
     argv = [command, "tasks/example"]
     if command == "reverify":
@@ -118,12 +118,12 @@ def test_cli_inherits_runtime_configuration_with_explicit_overrides(
         assert judge.reasoning_effort == "medium"
 
 
-def test_bad_runtime_configuration_fails_without_starting_validation(
+def test_bad_runtime_configuration_fails_without_starting_calibration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime_config = tmp_path / "missing.toml"
     monkeypatch.setenv("ALE_RUN_CONFIG", str(runtime_config))
-    result = CliRunner().invoke(main.app, ["validate", "tasks/example"])
+    result = CliRunner().invoke(main.app, ["calibrate", "tasks/example"])
     assert result.exit_code == 3
     assert "configuration error: config file not found" in result.output
 

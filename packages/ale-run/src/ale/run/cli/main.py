@@ -29,11 +29,11 @@ from ale.run.assets import (
 from ale.run.cli.assets import assets_app
 from ale.run.cli.tasks import (
     EXIT_BAD_REFERENCE,
+    _calibrate,
     _config,
     _prepare_only,
     _reverify,
     _run_one,
-    _validate,
 )
 from ale.run.lint import lint_repository
 from ale.run.providers import RETAINING_PROVIDERS, provider_named
@@ -72,7 +72,7 @@ def root(
         ),
     ] = False,
 ) -> None:
-    """Run, validate and author ALE evaluation tasks."""
+    """Run, calibrate and author ALE evaluation tasks."""
     # Credentials come from the checkout's .env, read once here for every command. A
     # variable already set in the environment, such as `KEY=... ale run` or a CI secret,
     # takes precedence.
@@ -175,18 +175,20 @@ def run(
 
 
 @app.command()
-def validate(
+def calibrate(
     reference: Annotated[str, typer.Argument(help="Task or Task collection path")],
     config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
     runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
 ) -> None:
-    """Require untouched all-zero and record oracle quality for every task.
+    """Score every calibration case of every task and check it against its expectation.
 
-    Verification uses the same run-level judge configuration as an ordinary episode.
+    The reference solution and each further case under calibration/ run as
+    fresh episodes. Verification uses the same run-level judge configuration as
+    an ordinary episode.
     """
     settings = _config(config, overrides, agent="oracle", model="")
-    exit_code = run_async(_validate(reference, settings, runs_dir))
+    exit_code = run_async(_calibrate(reference, settings, runs_dir))
     raise typer.Exit(exit_code)
 
 
@@ -231,7 +233,7 @@ def lint(
     """Check tasks without starting a container.
 
     The cheap half of admission: everything answerable from the files alone. Run it on
-    every save; run `ale validate` when you want a task actually solved.
+    every save; run `ale calibrate` when you want a task actually solved.
     """
     findings = lint_repository(reference)
     for finding in findings:
@@ -289,7 +291,7 @@ def new_task(
 
     The folder name is the Task's name, in the `agentslastexam` organization. The scaffold
     solves itself: its solution writes what its tests expect, so a new task starts from a
-    green `ale validate` and the author changes one thing at a time from a known-good state.
+    green `ale calibrate` and the author changes one thing at a time from a known-good state.
     """
     try:
         created = scaffold_task(path, force=force)
@@ -297,7 +299,7 @@ def new_task(
         typer.echo(f"{error}", err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
     typer.echo(f"created {created}")
-    typer.echo(f"next: ale lint {created}  &&  ale validate {created}")
+    typer.echo(f"next: ale lint {created}  &&  ale calibrate {created}")
 
 
 @assets_app.command("status")
