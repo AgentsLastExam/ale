@@ -1,7 +1,11 @@
-"""What tells an OOM kill in a Sandbox from inside it, the counts its cgroup keeps from its
-start, and the end of a guest connection that says so."""
+"""What tells an OOM kill in a Sandbox from inside it, the counts its cgroup, or gVisor's
+Sentry, keeps from its start, and the end of a guest connection that says so."""
 
 from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -29,7 +33,7 @@ async def test_a_guest_watcher_counts_every_oom_kill_since_its_sandbox_started(
     started counts as well, since the cgroup counts from the Sandbox's start: here the only
     line it writes."""
     watcher = await memory.GuestEvents.start(
-        ["sh", "-c", f"echo {counts} oom_group_kill 0; sleep 0.2"]
+        ["sh", "-c", f"echo {counts} oom_group_kill 0; sleep 0.2"], counter="its cgroup"
     )
     try:
         await watcher.settled(5)
@@ -41,9 +45,33 @@ async def test_a_guest_watcher_counts_every_oom_kill_since_its_sandbox_started(
 
 
 @pytest.mark.asyncio
+async def test_a_guest_watcher_reads_again_a_file_whose_changes_nothing_announces(
+    tmp_path: Path,
+) -> None:
+    """The Sentry's ``memory.oom_control`` announces no change, as a regular file does not:
+    the watcher reads it again every second and writes each change once. The Sentry counts
+    no ``oom``."""
+    counts = tmp_path / "memory.oom_control"
+    counts.write_text("oom_kill_disable 0\nunder_oom 0\noom_kill 0\n")
+    watcher = await memory.GuestEvents.start(
+        [sys.executable, "-I", "-c", memory.WATCHER, str(counts)], counter="the Sentry"
+    )
+    try:
+        assert watcher.oom_killed() is None
+        counts.write_text("oom_kill_disable 0\nunder_oom 0\noom_kill 2\n")
+        deadline = asyncio.get_running_loop().time() + 5
+        while watcher.oom_killed() is None:
+            assert asyncio.get_running_loop().time() < deadline, "the count never changed"
+            await asyncio.sleep(0.05)
+        assert watcher.oom_killed() == "the Sentry counted 2 OOM kills"
+    finally:
+        await watcher.close()
+
+
+@pytest.mark.asyncio
 async def test_a_guest_watcher_that_never_writes_fails_the_start() -> None:
     with pytest.raises(ProviderStartError, match="could not watch the guest's memory: absent"):
-        await memory.GuestEvents.start(["sh", "-c", "echo absent >&2"])
+        await memory.GuestEvents.start(["sh", "-c", "echo absent >&2"], counter="its cgroup")
 
 
 @pytest.mark.asyncio

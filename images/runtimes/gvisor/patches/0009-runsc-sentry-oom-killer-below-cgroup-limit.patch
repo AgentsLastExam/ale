@@ -1,0 +1,998 @@
+runsc: keep the sandbox below its cgroup's memory limit and kill in the Sentry
+
+What: when the host memory cgroup that contains the sandbox is cgroup v2, has a
+limit and cannot swap, runsc gives the Sentry that cgroup's memory.current,
+memory.stat and memory.max. The Sentry's MemoryFile then refuses an allocation
+that would take memory.current, less the cgroup's file cache (active_file +
+inactive_file, which the host can reclaim), within --memory-limit-headroom
+(default 16 MiB) of memory.max. A refusal starts a round of the Sentry's OOM
+killer: it waits for the MemoryFile's releaser to decommit freed pages, and if
+the allocation still does not fit, it kills the application process with the
+highest badness, computed as Linux's oom_badness() does (resident set in pages
+plus oom_score_adj thousandths of the limit in pages), and waits until its tasks
+have released their memory and the releaser has decommitted it. Like Linux,
+which spares the global init, it never chooses the root PID namespace's init,
+whose end ends the sandbox, nor a process whose oom_score_adj is -1000; with
+nothing left to kill, it lets the next 16 MiB be allocated, so that allocations
+go on to the host's limit. The task whose page fault or system call was refused
+waits for the round and retries, so it dies if it was chosen; a copy to
+application memory that the Sentry makes for a system call or to deliver a
+signal reports the refusal rather than EFAULT, so that it is retried the same
+way. Each kill is counted, as Linux counts its own, in oom_kill of cgroup v1's
+memory.oom_control, which this patch adds to every memory cgroup, for the
+victim's cgroup and its ancestors. The cgroup on the host is read only when an
+allocation would use more than half of the room left at the last reading, or
+every allocation once within the headroom.
+
+Nothing changes when the cgroup has no limit, when it may swap (memory.swap.max
+is not 0 and the host has swap), when it is not cgroup v2, or with
+--memory-limit-headroom=0, which a dev.gvisor.flag.memory-limit-headroom
+annotation may also set.
+
+Why: the application's memory is in the Sentry's memory file, a memfd that the
+host charges to the cgroup as shmem. The stubs map it; they do not own it. When
+the cgroup is full and cannot swap, the host's OOM killer takes the stub that
+maps the most, and that frees nothing: the memory stays charged until the Sentry
+has noticed the stub's death (3.5-5.5 ms after the kill), torn its process down
+and punched the pages out of the memory file (the first decommit ends about 20 ms
+after the kill; 540 MB took until 55-75 ms). Any charge in that window invokes
+the OOM killer again. In 5 of 6 traced runs the Sentry's own Go heap faulted in a
+new page 16-17 ms after the kill; a new process touching its memory faults again
+every few milliseconds. Each further kill takes another stub (oom_score_adj 500
+from patch 0002, against the Sentry's -998) and frees nothing either, until the
+kernel kills a stub whose loss ends the container, such as its init's, or the
+Sentry itself. With swap the host reclaims the memory file to swap instead, until
+swap fills too: with Docker's default swap allowance, 7 of 20 sandboxes were lost
+that way.
+
+The copies matter as much as the faults: reported as EFAULT, a signal frame the
+limit refused became a forced SIGSEGV, which ended the sandbox when it hit its
+init (supervisord, taking SIGCHLD from the children the Sentry killed, in 2 of
+13 runs of 400 processes beside a desktop), and a system call whose copy was
+refused failed with EFAULT; Linux retries a fault in copy_to_user after its OOM
+killer has run.
+
+Keeping a headroom below the limit and choosing the victim in the Sentry is what
+a guest kernel does in a VM: the application's memory never reaches the host's
+limit, and the Sentry frees the victim's memory itself before anything else
+needs it. Freeing a stub's memory faster after a host kill cannot close the
+window, since the Sentry allocates while it handles the death. Returning the
+Sentry's free heap to the host before each kill (runtime/debug.FreeOSMemory)
+left what a process got unchanged, in alternating runs at 512 MiB and 4 GiB. 16
+MiB of headroom covers what the Sentry charges between two readings: with 4 MiB,
+300 processes of 16 MiB took the cgroup to its limit in 3 of 20 runs (peak
+memory.current 568-572 MiB of 572), with 16 MiB in none (peak 556-562). A kill
+the Sentry makes is no OOM kill of the host cgroup: its memory.events counts no
+oom or oom_kill and Docker does not report the container as OOMKilled, so
+memory.oom_control is where a reader in the sandbox learns of it, and sparing
+init keeps the sandbox, and that record, alive after every kill the Sentry
+makes.
+
+gVisor issue 2533 (open since 2020) describes this race; upstream says an
+in-sandbox OOM killer is being worked on (2026-11-17), and PR 17505 adds
+allocation-time memory accounting for it. This patch goes once upstream ships
+one.
+
+Verified: with ALE's flags (--memory M + 60 + M/1024 MiB with M = 512, i.e.
+572m, --memory-swap equal to it, --oom-score-adj 500) in python:3.12-slim, the
+workload started by docker exec, against runc with --memory 512m and
+--memory-swap 512m; "before" is ALE's runsc without this patch. "Lost" means the
+container stopped; "host kills" are the OOM kills counted in the container's
+cgroup on the host; "held" is what the allocator, touching 8 MiB at a time, held
+when it was killed; "2nd" is a small process started beside the workload.
+
+superserver: rootful Docker 29.1.3, Linux 7.0, cgroup v2; before = ALE's 0.1.0,
+whose out-of-memory code 0.1.1 shares:
+
+  workload, M=512                 before               this patch           runc
+  one process allocating from     3/30 lost; 2nd host  0/20 lost; 0 host    0/20 lost;
+  the container's start           kill invoked by the  kills; held 520-528  held 504
+                                  Sentry in 19/30;
+                                  held 544
+  300 processes of 16 MiB         6/20 lost; 2nd dead  0/20 lost; 2nd alive 0/20 lost;
+                                  in 13 more           20/20; 278-280       2nd alive 20/20
+                                                       killed by the
+                                                       Sentry; 0 host kills
+  /dev/shm written full with      13/20 lost           0/20 lost; writer    0/20 lost;
+  write(2)                                             killed at 518-526;   writer killed at
+                                                       2nd dead in 8;       501-505; 2nd dead
+                                                       0 host kills         in 20
+
+g2: rootless Docker 29.9.3, Linux 6.12, cgroup v2, no swap on the host; before =
+ALE's 0.1.1:
+
+  one process allocating from     0/10 lost; held      0/20 lost; 0 host    0/10 lost;
+  the container's start           528-544              kills; held 496-512  held 504
+  300 processes of 16 MiB         10/10 lost, at the   0/20 lost; 2nd alive 0/10 lost;
+                                  21st-23rd process    20/20; 279-281       2nd alive 10/10
+                                                       killed by the
+                                                       Sentry; 0 host kills
+  /dev/shm written full with      10/10 lost           0/20 lost; writer    0/10 lost;
+  write(2)                                             killed at 496-513;   writer killed at
+                                                       2nd dead in 9;       501-506; 2nd dead
+                                                       0 host kills         in 9
+
+Away from the limit, touching 1 GiB and 100000 4 KiB writes to /dev/shm took as
+long with this patch as without it (g2, alternating, 5 runs each: 0.53-0.58 s
+and 0.69-0.80 s with it, 0.54-0.58 s and 0.68-0.81 s without).
+
+Not covered: memory the Sentry allocates on its own heap for the application
+(socket and pipe buffers), the stubs' page tables, and pages the host commits
+later into ranges allocated earlier but left untouched (anonymous memory is
+allocated 2 MiB at a time and committed on first touch) are not seen at
+allocation; if they reach the limit, the host's OOM killer acts as before. A
+single allocation larger than the room left, such as fallocate(2) or
+MAP_POPULATE of a large range, is refused whole: the round kills one process per
+retry until it fits. A system call refused at the limit is run again from the
+start after the round: what it had done before the refused copy stays done, and
+its result for that is lost, as when EFAULT ended it. Killing processes frees
+none of a tmpfs's memory: a tmpfs written full leaves the Sentry killing every
+process but init and those at -1000, as Linux's OOM killer would, and then the
+host's OOM killer. A process keeps about the headroom less memory than without
+this patch (16-32 MiB by the medians, with the default headroom and the
+allocator's 8 MiB steps). gVisor's cgroup v1 memory.oom_control is read-only:
+the OOM killer cannot be disabled.
+
+diff --git a/pkg/sentry/fsimpl/cgroupfs/memory.go b/pkg/sentry/fsimpl/cgroupfs/memory.go
+index b8e73b2..a564492 100644
+--- a/pkg/sentry/fsimpl/cgroupfs/memory.go
++++ b/pkg/sentry/fsimpl/cgroupfs/memory.go
+@@ -88,6 +88,7 @@ func (c *memoryController) AddControlFiles(ctx context.Context, creds *auth.Cred
+ 	contents["memory.soft_limit_in_bytes"] = c.fs.newStubControllerFile(ctx, creds, &c.softLimitBytes, true)
+ 	contents["memory.move_charge_at_immigrate"] = c.fs.newStubControllerFile(ctx, creds, &c.moveChargeAtImmigrate, true)
+ 	contents["memory.pressure_level"] = c.fs.newStaticControllerFile(ctx, creds, linux.FileMode(0644), fmt.Sprintf("%d\n", c.pressureLevel))
++	contents["memory.oom_control"] = c.fs.newControllerFile(ctx, creds, &memoryOOMControlData{memCg: &memoryCgroup{cg}}, true)
+ }
+ 
+ // Enter implements controller.Enter.
+@@ -158,3 +159,21 @@ func (d *memoryUsageInBytesData) Generate(ctx context.Context, buf *bytes.Buffer
+ 	fmt.Fprintf(buf, "%d\n", totalBytes)
+ 	return nil
+ }
++
++// memoryOOMControlData implements vfs.DynamicBytesSource for memory.oom_control.
++// As in Linux, oom_kill counts the processes of the cgroup and its descendants
++// that the kernel's OOM killer ended; the OOM killer cannot be disabled.
++//
++// +stateify savable
++type memoryOOMControlData struct {
++	memCg *memoryCgroup
++}
++
++// Generate implements vfs.DynamicBytesSource.Generate.
++func (d *memoryOOMControlData) Generate(ctx context.Context, buf *bytes.Buffer) error {
++	k := kernel.KernelFromContext(ctx)
++	memCgIDs := make(map[uint32]struct{})
++	d.memCg.collectMemCgIDs(memCgIDs)
++	fmt.Fprintf(buf, "oom_kill_disable 0\nunder_oom 0\noom_kill %d\n", k.OOMKills(memCgIDs))
++	return nil
++}
+diff --git a/pkg/sentry/kernel/BUILD b/pkg/sentry/kernel/BUILD
+index d746c2d..0dd02e6 100644
+--- a/pkg/sentry/kernel/BUILD
++++ b/pkg/sentry/kernel/BUILD
+@@ -273,6 +273,7 @@ go_library(
+         "kernel_opts.go",
+         "kernel_restore.go",
+         "kernel_state.go",
++        "oom.go",
+         "pending_signals.go",
+         "pending_signals_list.go",
+         "pending_signals_state.go",
+diff --git a/pkg/sentry/kernel/kernel.go b/pkg/sentry/kernel/kernel.go
+index 49b0228..7457ecc 100644
+--- a/pkg/sentry/kernel/kernel.go
++++ b/pkg/sentry/kernel/kernel.go
+@@ -174,6 +174,9 @@ type Kernel struct {
+ 	// mf provides application memory.
+ 	mf *pgalloc.MemoryFile `state:"nosave"`
+ 
++	// oom is the OOM killer enabled by EnableOOMKiller, or nil.
++	oom *oomKiller `state:"nosave"`
++
+ 	// See InitKernelArgs for the meaning of these fields.
+ 	featureSet           cpuid.FeatureSet
+ 	timekeeper           *Timekeeper
+diff --git a/pkg/sentry/kernel/oom.go b/pkg/sentry/kernel/oom.go
+new file mode 100644
+index 0000000..cd3af74
+--- /dev/null
++++ b/pkg/sentry/kernel/oom.go
+@@ -0,0 +1,248 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package kernel
++
++import (
++	"time"
++
++	"gvisor.dev/gvisor/pkg/abi/linux"
++	"gvisor.dev/gvisor/pkg/hostarch"
++	"gvisor.dev/gvisor/pkg/log"
++	"gvisor.dev/gvisor/pkg/sentry/mm"
++	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
++	"gvisor.dev/gvisor/pkg/sync"
++)
++
++// oomKiller ends the application process that uses the most memory when an
++// allocation is refused by the MemoryFile's pgalloc.HostMemoryLimit, as a
++// guest kernel's OOM killer would, so that the host's OOM killer, whose
++// victims free nothing until the Sentry releases their memory, is not the one
++// that acts.
++//
++// Each round kills at most one thread group and waits until its memory is
++// released; tasks whose allocation was refused wait for the round and retry.
++type oomKiller struct {
++	k     *Kernel
++	limit *pgalloc.HostMemoryLimit
++	kick  chan struct{}
++
++	mu sync.Mutex
++	// done is closed when the round in progress ends. It is nil when no
++	// round is in progress.
++	done chan struct{}
++	// kills counts the thread groups killed, by the memory cgroup ID of each
++	// victim's leader when it was killed.
++	kills map[uint32]uint64
++}
++
++// OOMKills returns how many processes the OOM killer ended in the memory
++// cgroups with the given IDs, as cgroup v1's memory.oom_control reports
++// oom_kill.
++func (k *Kernel) OOMKills(memCgIDs map[uint32]struct{}) uint64 {
++	o := k.oom
++	if o == nil {
++		return 0
++	}
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	var n uint64
++	for id := range memCgIDs {
++		n += o.kills[id]
++	}
++	return n
++}
++
++// EnableOOMKiller makes the kernel kill application processes when mf's host
++// memory limit refuses an allocation. It must be called before the
++// application starts.
++func (k *Kernel) EnableOOMKiller() {
++	limit := k.mf.HostMemoryLimit()
++	if limit == nil {
++		return
++	}
++	o := &oomKiller{k: k, limit: limit, kick: make(chan struct{}, 1), kills: make(map[uint32]uint64)}
++	limit.SetOnExceeded(func() { o.request() })
++	k.oom = o
++	go o.run() // S/R-SAFE: no state is kept across rounds.
++}
++
++// request returns a channel that is closed when the round in progress, or the
++// one this starts, ends. It does not block.
++func (o *oomKiller) request() chan struct{} {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.done == nil {
++		o.done = make(chan struct{})
++		select {
++		case o.kick <- struct{}{}:
++		default:
++		}
++	}
++	return o.done
++}
++
++// waitForOOMKill blocks t until the OOM killer has freed memory after one of
++// t's allocations was refused with pgalloc.ErrMemoryLimit. It returns false if
++// the kernel has no OOM killer, in which case the caller must fail as before.
++func (t *Task) waitForOOMKill() bool {
++	o := t.k.oom
++	if o == nil {
++		return false
++	}
++	// A SIGKILL, such as the OOM killer's, interrupts the wait.
++	t.BlockWithTimeout(o.request(), true, 2*time.Second)
++	return true
++}
++
++func (o *oomKiller) run() {
++	for range o.kick {
++		o.round()
++		o.mu.Lock()
++		close(o.done)
++		o.done = nil
++		o.mu.Unlock()
++	}
++}
++
++// round frees memory for the last refused allocation, killing one thread group
++// if waiting for the MemoryFile's releaser is not enough.
++func (o *oomKiller) round() {
++	mf := o.k.mf
++	if !o.released(mf, 500*time.Millisecond) {
++		return
++	}
++	current, limit := o.limit.Usage()
++	totalPages := limit / hostarch.PageSize
++	victim := o.selectVictim(totalPages)
++	if victim == nil {
++		// Nothing to kill: let allocations reach the host's limit, as
++		// without this OOM killer.
++		log.Warningf("Out of memory: no process to kill; memory.current %d of %d", current, limit)
++		o.limit.Allow(16 << 20)
++		return
++	}
++	log.Warningf("Out of memory: Killed process %d (%s) rss:%dkB oom_score_adj:%d points:%d; host cgroup memory.current %d of %d",
++		victim.pid, victim.name, victim.rss>>10, victim.adj, victim.points, current, limit)
++	// Counted before the kill, so that whoever sees the victim gone also sees
++	// the count.
++	o.mu.Lock()
++	o.kills[victim.memCgID]++
++	o.mu.Unlock()
++	victim.tg.SendSignal(&linux.SignalInfo{
++		Signo: int32(linux.SIGKILL),
++		Code:  linux.SI_KERNEL,
++	})
++	start := time.Now()
++	for !victim.tg.oomVictimGone() {
++		if time.Since(start) > 2*time.Second {
++			log.Warningf("OOM victim %d has not exited after %v", victim.pid, time.Since(start))
++			return
++		}
++		time.Sleep(time.Millisecond)
++	}
++	o.released(mf, 500*time.Millisecond)
++	log.Infof("OOM victim %d gone after %v", victim.pid, time.Since(start))
++}
++
++// released waits up to timeout for mf's releaser to decommit freed memory and
++// returns true if the last refused allocation still does not fit.
++func (o *oomKiller) released(mf *pgalloc.MemoryFile, timeout time.Duration) bool {
++	start := time.Now()
++	for mf.HasWaste() && time.Since(start) < timeout {
++		time.Sleep(time.Millisecond)
++	}
++	return o.limit.Exceeded(0)
++}
++
++type oomCandidate struct {
++	tg      *ThreadGroup
++	mm      *mm.MemoryManager
++	pid     ThreadID
++	name    string
++	memCgID uint32
++	adj     int32
++	rss     uint64
++	points  int64
++}
++
++// selectVictim returns the thread group with the highest badness, computed as
++// Linux's oom_badness() does: its resident set in pages plus oom_score_adj
++// thousandths of the memory limit in pages. As Linux spares the global init,
++// it never chooses the root PID namespace's init, whose end ends the sandbox,
++// nor a process whose oom_score_adj is -1000.
++func (o *oomKiller) selectVictim(totalPages uint64) *oomCandidate {
++	ts := o.k.tasks
++	var cands []oomCandidate
++	ts.mu.RLock()
++	for tg, pid := range ts.Root.tgids {
++		adj := tg.oomScoreAdj.Load()
++		if adj == -1000 || pid == initTID {
++			continue
++		}
++		if sh := tg.signalHandlers; sh != nil {
++			sh.mu.Lock()
++			exiting := tg.exiting
++			sh.mu.Unlock()
++			if exiting {
++				continue
++			}
++		}
++		var m *mm.MemoryManager
++		var name string
++		for t := tg.tasks.Front(); t != nil && m == nil; t = t.Next() {
++			t.mu.Lock()
++			if tm := t.image.MemoryManager; tm != nil && tm.IncUsers() {
++				m = tm
++				name = t.image.Name
++			}
++			t.mu.Unlock()
++		}
++		if m == nil {
++			continue
++		}
++		var memCgID uint32
++		if tg.leader != nil {
++			memCgID = tg.leader.memCgID.Load()
++		}
++		cands = append(cands, oomCandidate{tg: tg, mm: m, pid: pid, name: name, memCgID: memCgID, adj: adj})
++	}
++	ts.mu.RUnlock()
++
++	ctx := o.k.SupervisorContext()
++	var best *oomCandidate
++	for i := range cands {
++		c := &cands[i]
++		c.rss = c.mm.ResidentSetSize()
++		c.points = int64(c.rss/hostarch.PageSize) + int64(c.adj)*int64(totalPages)/1000
++		c.mm.DecUsers(ctx)
++		c.mm = nil
++		if best == nil || c.points > best.points {
++			best = c
++		}
++	}
++	return best
++}
++
++// oomVictimGone returns true if every task in tg has released its resources.
++func (tg *ThreadGroup) oomVictimGone() bool {
++	tg.pidns.owner.mu.RLock()
++	defer tg.pidns.owner.mu.RUnlock()
++	for t := tg.tasks.Front(); t != nil; t = t.Next() {
++		if t.exitStateLocked() < TaskExitZombie {
++			return false
++		}
++	}
++	return true
++}
+diff --git a/pkg/sentry/kernel/task_run.go b/pkg/sentry/kernel/task_run.go
+index d13f9cc..23fbb28 100644
+--- a/pkg/sentry/kernel/task_run.go
++++ b/pkg/sentry/kernel/task_run.go
+@@ -27,6 +27,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/arch"
+ 	"gvisor.dev/gvisor/pkg/sentry/ktime"
+ 	"gvisor.dev/gvisor/pkg/sentry/memmap"
++	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+ 	"gvisor.dev/gvisor/pkg/sentry/platform"
+ )
+ 
+@@ -315,6 +316,11 @@ func (app *runApp) execute(t *Task) taskRunState {
+ 				// We can resume running the application.
+ 				return (*runApp)(nil)
+ 			}
++			if err == pgalloc.ErrMemoryLimit && t.waitForOOMKill() {
++				// The OOM killer has freed memory or killed this task;
++				// fault again.
++				return (*runApp)(nil)
++			}
+ 
+ 			// Is this a vsyscall that we need emulate?
+ 			//
+diff --git a/pkg/sentry/kernel/task_signals.go b/pkg/sentry/kernel/task_signals.go
+index 2eaf996..2e424cc 100644
+--- a/pkg/sentry/kernel/task_signals.go
++++ b/pkg/sentry/kernel/task_signals.go
+@@ -27,6 +27,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/arch"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+ 	ucspb "gvisor.dev/gvisor/pkg/sentry/kernel/uncaught_signal_go_proto"
++	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+ 	"gvisor.dev/gvisor/pkg/waiter"
+ )
+ 
+@@ -281,7 +282,13 @@ func (t *Task) deliverSignal(info *linux.SignalInfo, act linux.SigAction) taskRu
+ 		// Linux filters a restart_syscall that follows a handled signal, so a
+ 		// handler abandons a checkpoint-armed bypass.
+ 		t.bypassSeccompRestartSyscall = false
+-		if err := t.deliverSignalToHandler(info, act); err != nil {
++		err := t.deliverSignalToHandler(info, act)
++		for err == pgalloc.ErrMemoryLimit && t.waitForOOMKill() && !t.Killed() {
++			// The signal frame's stack page was refused at the memory
++			// limit: try again once the OOM killer has freed memory.
++			err = t.deliverSignalToHandler(info, act)
++		}
++		if err != nil {
+ 			// This is not a warning, it can occur during normal operation.
+ 			t.Debugf("Failed to deliver signal %+v to user handler: %v", info, err)
+ 
+diff --git a/pkg/sentry/kernel/task_syscall.go b/pkg/sentry/kernel/task_syscall.go
+index 151d831..95a1cda 100644
+--- a/pkg/sentry/kernel/task_syscall.go
++++ b/pkg/sentry/kernel/task_syscall.go
+@@ -29,6 +29,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/metric"
+ 	"gvisor.dev/gvisor/pkg/sentry/arch"
+ 	"gvisor.dev/gvisor/pkg/sentry/memmap"
++	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+ 	"gvisor.dev/gvisor/pkg/sentry/platform"
+ 	"gvisor.dev/gvisor/pkg/sentry/seccheck"
+ 	pb "gvisor.dev/gvisor/pkg/sentry/seccheck/points/points_go_proto"
+@@ -333,6 +334,11 @@ func (t *Task) doSyscallInvoke(sysno uintptr, args arch.SyscallArguments) taskRu
+ 		if ctrl.next != nil {
+ 			return ctrl.next
+ 		}
++	} else if err == pgalloc.ErrMemoryLimit && t.waitForOOMKill() {
++		// The syscall made no progress because an allocation was refused at
++		// the memory limit; run it again now that the OOM killer has freed
++		// memory, unless it killed this task.
++		return (*runSyscallReinvoke)(nil)
+ 	} else if err != nil {
+ 		t.Arch().SetReturn(uintptr(-ExtractErrno(err, int(sysno))))
+ 		t.haveSyscallReturn = true
+diff --git a/pkg/sentry/mm/io.go b/pkg/sentry/mm/io.go
+index baa06da..408edb1 100644
+--- a/pkg/sentry/mm/io.go
++++ b/pkg/sentry/mm/io.go
+@@ -22,6 +22,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/hostarch"
+ 	"gvisor.dev/gvisor/pkg/safemem"
+ 	"gvisor.dev/gvisor/pkg/sentry/memmap"
++	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+ 	"gvisor.dev/gvisor/pkg/sentry/platform"
+ 	"gvisor.dev/gvisor/pkg/sync"
+ 	"gvisor.dev/gvisor/pkg/usermem"
+@@ -102,6 +103,11 @@ func translateIOError(ctx context.Context, err error) error {
+ 	if err == nil {
+ 		return nil
+ 	}
++	if err == pgalloc.ErrMemoryLimit {
++		// The caller waits for the sandbox's OOM killer and tries again, as
++		// Linux retries a fault in copy_to_user after its OOM killer has run.
++		return err
++	}
+ 	if logIOErrors {
+ 		ctx.Debugf("MM I/O error: %v", err)
+ 	}
+diff --git a/pkg/sentry/pgalloc/BUILD b/pkg/sentry/pgalloc/BUILD
+index e18eed2..b60c963 100644
+--- a/pkg/sentry/pgalloc/BUILD
++++ b/pkg/sentry/pgalloc/BUILD
+@@ -163,6 +163,7 @@ go_library(
+         "debug.go",
+         "evictable_range.go",
+         "evictable_range_set.go",
++        "limit.go",
+         "memacct_set.go",
+         "memory_file_mutex.go",
+         "pgalloc.go",
+@@ -175,9 +176,11 @@ go_library(
+     deps = [
+         ":pgalloc_metadata_go_proto",
+         "//pkg/abi/linux",
++        "//pkg/abi/linux/errno",
+         "//pkg/atomicbitops",
+         "//pkg/bitmap",
+         "//pkg/context",
++        "//pkg/errors",
+         "//pkg/errors/linuxerr",
+         "//pkg/gohacks",
+         "//pkg/goid",
+diff --git a/pkg/sentry/pgalloc/limit.go b/pkg/sentry/pgalloc/limit.go
+new file mode 100644
+index 0000000..a03efa3
+--- /dev/null
++++ b/pkg/sentry/pgalloc/limit.go
+@@ -0,0 +1,204 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package pgalloc
++
++import (
++	"bytes"
++	"math"
++	"os"
++	"strconv"
++
++	"gvisor.dev/gvisor/pkg/abi/linux/errno"
++	"gvisor.dev/gvisor/pkg/atomicbitops"
++	"gvisor.dev/gvisor/pkg/errors"
++	"gvisor.dev/gvisor/pkg/log"
++	"gvisor.dev/gvisor/pkg/sync"
++)
++
++// ErrMemoryLimit is returned by MemoryFile.Allocate when the allocation would
++// take the host memory cgroup that contains the sandbox within the headroom
++// of its limit. The caller may wait for the kernel's OOM killer to free memory
++// (see HostMemoryLimit.OnExceeded) and retry.
++var ErrMemoryLimit = errors.New(errno.ENOMEM, "sandbox memory limit reached")
++
++// HostMemoryLimit keeps the memory charged to the host memory cgroup that
++// contains the sandbox below that cgroup's limit, minus a headroom.
++//
++// The application's memory is committed to the MemoryFile, which the host
++// charges to the cgroup but which only the Sentry can release. When the host's
++// OOM killer ends an application process (a stub) because the cgroup is full,
++// nothing is freed until the Sentry has torn the process down and decommitted
++// its memory; if anything in the cgroup charges memory meanwhile, as the
++// Sentry itself does, the host's OOM killer ends more stubs and then the
++// Sentry. Without swap the host cannot reclaim the MemoryFile, so the sandbox
++// must not let the application fill the cgroup: allocations stop at the
++// headroom, and the Sentry's own OOM killer frees memory first.
++type HostMemoryLimit struct {
++	current  *os.File
++	stat     *os.File
++	max      *os.File
++	headroom uint64
++
++	// onExceeded is called, without blocking, when an allocation is refused.
++	onExceeded func()
++
++	// budget is the number of bytes that may still be allocated before
++	// memory.current is read again.
++	budget atomicbitops.Int64
++
++	// refused is the length of the last refused allocation.
++	refused atomicbitops.Uint64
++
++	// mu serializes reads of the cgroup files.
++	mu sync.Mutex
++}
++
++// NewHostMemoryLimit returns a HostMemoryLimit for the cgroup whose
++// memory.current, memory.stat and memory.max are open in the given files.
++func NewHostMemoryLimit(current, stat, max *os.File, headroom uint64) *HostMemoryLimit {
++	return &HostMemoryLimit{current: current, stat: stat, max: max, headroom: headroom}
++}
++
++// SetOnExceeded sets the function called, without blocking and possibly with
++// locks held, when an allocation is refused.
++func (l *HostMemoryLimit) SetOnExceeded(f func()) {
++	l.onExceeded = f
++}
++
++// SetHostMemoryLimit makes f refuse allocations that would take the host
++// memory cgroup within the headroom of its limit.
++func (f *MemoryFile) SetHostMemoryLimit(l *HostMemoryLimit) {
++	f.hostLimit = l
++}
++
++// HostMemoryLimit returns the limit set by SetHostMemoryLimit, or nil.
++func (f *MemoryFile) HostMemoryLimit() *HostMemoryLimit {
++	return f.hostLimit
++}
++
++// check returns ErrMemoryLimit if allocating length bytes would take the
++// cgroup within the headroom of its limit.
++func (l *HostMemoryLimit) check(length uint64) error {
++	if l.budget.Add(-int64(length)) >= 0 {
++		return nil
++	}
++	if l.Exceeded(length) {
++		l.refused.Store(length)
++		if l.onExceeded != nil {
++			l.onExceeded()
++		}
++		return ErrMemoryLimit
++	}
++	return nil
++}
++
++// Exceeded reads the cgroup and returns true if allocating length more bytes
++// would take it within the headroom of its limit. Length 0 asks about the last
++// refused allocation instead.
++func (l *HostMemoryLimit) Exceeded(length uint64) bool {
++	if length == 0 {
++		length = l.refused.Load()
++	}
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	limit, ok := readCgroupUint(l.max)
++	if !ok || limit == math.MaxUint64 {
++		// No limit; look again after 64 MB.
++		l.budget.Store(64 << 20)
++		return false
++	}
++	current, ok := readCgroupUint(l.current)
++	if !ok {
++		l.budget.Store(64 << 20)
++		return false
++	}
++	threshold := int64(limit) - int64(l.headroom)
++	room := threshold - int64(current) - int64(length)
++	if room >= 0 {
++		// Read again after half the room: allocations are counted by
++		// length, but the Sentry's own memory is not.
++		l.budget.Store(room / 2)
++		return false
++	}
++	// Close to the limit, every allocation reads the cgroup.
++	l.budget.Store(0)
++	// The host can still reclaim the cgroup's file cache, which is on the
++	// file LRUs; the MemoryFile (shmem) is on the anonymous ones.
++	return room+int64(readReclaimable(l.stat)) < 0
++}
++
++// Allow lets the next n bytes be allocated without reading the cgroup.
++func (l *HostMemoryLimit) Allow(n int64) {
++	l.budget.Store(n)
++}
++
++// HasWaste returns true if f has freed pages that its releaser has not yet
++// decommitted.
++func (f *MemoryFile) HasWaste() bool {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return f.haveWaste
++}
++
++// Usage returns the cgroup's memory.current and memory.max.
++func (l *HostMemoryLimit) Usage() (current, limit uint64) {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	current, _ = readCgroupUint(l.current)
++	limit, _ = readCgroupUint(l.max)
++	return current, limit
++}
++
++var statBufPool = sync.Pool{New: func() any { b := make([]byte, 8192); return &b }}
++
++func readCgroupUint(f *os.File) (uint64, bool) {
++	var buf [32]byte
++	n, err := f.ReadAt(buf[:], 0)
++	if n == 0 {
++		log.Warningf("Reading %s: %v", f.Name(), err)
++		return 0, false
++	}
++	s := bytes.TrimSpace(buf[:n])
++	if string(s) == "max" {
++		return math.MaxUint64, true
++	}
++	v, err := strconv.ParseUint(string(s), 10, 64)
++	if err != nil {
++		log.Warningf("Parsing %s %q: %v", f.Name(), s, err)
++		return 0, false
++	}
++	return v, true
++}
++
++// readReclaimable returns the bytes on the cgroup's file LRUs.
++func readReclaimable(f *os.File) uint64 {
++	bp := statBufPool.Get().(*[]byte)
++	defer statBufPool.Put(bp)
++	n, _ := f.ReadAt(*bp, 0)
++	var total uint64
++	for _, line := range bytes.Split((*bp)[:n], []byte{'\n'}) {
++		key, value, ok := bytes.Cut(line, []byte{' '})
++		if !ok {
++			continue
++		}
++		switch string(key) {
++		case "active_file", "inactive_file":
++			if v, err := strconv.ParseUint(string(value), 10, 64); err == nil {
++				total += v
++			}
++		}
++	}
++	return total
++}
+diff --git a/pkg/sentry/pgalloc/pgalloc.go b/pkg/sentry/pgalloc/pgalloc.go
+index f5c5d16..5bdeff1 100644
+--- a/pkg/sentry/pgalloc/pgalloc.go
++++ b/pkg/sentry/pgalloc/pgalloc.go
+@@ -190,6 +190,11 @@ type MemoryFile struct {
+ 	// opts holds options passed to NewMemoryFile. opts is immutable.
+ 	opts MemoryFileOpts
+ 
++	// hostLimit, if not nil, refuses allocations that would take the host
++	// memory cgroup within its headroom of its limit. It is set once, before
++	// the application runs.
++	hostLimit *HostMemoryLimit
++
+ 	// savable is true if this MemoryFile will be saved via SaveTo() during
+ 	// the kernel's SaveTo operation.
+ 	savable atomicbitops.Bool
+@@ -624,6 +629,12 @@ func (f *MemoryFile) Allocate(length uint64, opts AllocOpts) (memmap.FileRange,
+ 		panic(fmt.Sprintf("invalid allocation length: %#x", length))
+ 	}
+ 
++	if f.hostLimit != nil {
++		if err := f.hostLimit.check(length); err != nil {
++			return memmap.FileRange{}, err
++		}
++	}
++
+ 	alloc := allocState{
+ 		length:     length,
+ 		opts:       opts,
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index 1f0e5f3..f1371d4 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -507,6 +507,10 @@ type Args struct {
+ 	PassFDs []sentryapi.FDMapping
+ 	// ExecFD is the host file descriptor used for program execution.
+ 	ExecFD int
++	// MemoryCgroupFDs are FDs to memory.current, memory.stat and memory.max of
++	// the host cgroup that limits the sandbox's memory, or empty.
++	MemoryCgroupFDs []int
++
+ 	// GoferFilestoreFDs are FDs to the regular files that will back the tmpfs or
+ 	// overlayfs mount for certain gofer mounts.
+ 	GoferFilestoreFDs []int
+@@ -846,6 +850,16 @@ func New(args Args) (*Loader, error) {
+ 		return nil, fmt.Errorf("creating memory file: %w", err)
+ 	}
+ 	l.k.SetMemoryFile(mf)
++	if len(args.MemoryCgroupFDs) == 3 && args.Conf.MemoryLimitHeadroom > 0 {
++		fds := args.MemoryCgroupFDs
++		mf.SetHostMemoryLimit(pgalloc.NewHostMemoryLimit(
++			os.NewFile(uintptr(fds[0]), "memory.current"),
++			os.NewFile(uintptr(fds[1]), "memory.stat"),
++			os.NewFile(uintptr(fds[2]), "memory.max"),
++			args.Conf.MemoryLimitHeadroom))
++		l.k.EnableOOMKiller()
++		log.Infof("Keeping %d bytes free below the host cgroup's memory limit", args.Conf.MemoryLimitHeadroom)
++	}
+ 	args.StartupTimer.Reached("memory file created")
+ 
+ 	// Create VDSO.
+diff --git a/runsc/cmd/sentry/sentrycmd/boot.go b/runsc/cmd/sentry/sentrycmd/boot.go
+index fed68ae..cad03ad 100644
+--- a/runsc/cmd/sentry/sentrycmd/boot.go
++++ b/runsc/cmd/sentry/sentrycmd/boot.go
+@@ -115,6 +115,10 @@ type Boot struct {
+ 	// overlayfs mount for certain gofer mounts.
+ 	goferFilestoreFDs sandboxsetup.IntFlags
+ 
++	// memoryCgroupFDs are FDs to memory.current, memory.stat and memory.max of
++	// the host cgroup that limits the sandbox's memory.
++	memoryCgroupFDs sandboxsetup.IntFlags
++
+ 	// goferMountConfs contains information about how the gofer mounts have been
+ 	// configured. The first entry is for rootfs and the following entries are
+ 	// for bind mounts in Spec.Mounts (in the same order).
+@@ -309,6 +313,7 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
+ 	f.Var(&b.stdioFDs, "stdio-fds", "list of FDs containing sandbox stdin, stdout, and stderr in that order")
+ 	f.Var(&b.passFDs, "pass-fd", "mapping of host to guest FDs. They must be in M:N format. M is the host and N the guest descriptor.")
+ 	f.IntVar(&b.execFD, "exec-fd", -1, "host file descriptor used for program execution.")
++	f.Var(&b.memoryCgroupFDs, "memory-cgroup-fds", "FDs to memory.current, memory.stat and memory.max of the host cgroup that limits the sandbox's memory.")
+ 	f.Var(&b.goferFilestoreFDs, "gofer-filestore-fds", "FDs to the regular files that will back the overlayfs or tmpfs mount if a gofer mount is to be overlaid.")
+ 	f.Var(&b.goferMountConfs, "gofer-mount-confs", "information about how the gofer mounts have been configured.")
+ 	f.IntVar(&b.userLogFD, "user-log-fd", 0, "file descriptor to write user logs to. 0 means no logging.")
+@@ -719,6 +724,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
+ 		PassFDs:             b.passFDs.GetArray(),
+ 		ExecFD:              b.execFD,
+ 		GoferFilestoreFDs:   b.goferFilestoreFDs.GetArray(),
++		MemoryCgroupFDs:     b.memoryCgroupFDs.GetArray(),
+ 		GoferMountConfs:     b.goferMountConfs.GetArray(),
+ 		NumCPU:              b.cpuNum,
+ 		LifecycleNumCPU:     b.lifecycleCPUNum,
+diff --git a/runsc/config/config.go b/runsc/config/config.go
+index eec6c9f..7ce0196 100644
+--- a/runsc/config/config.go
++++ b/runsc/config/config.go
+@@ -423,6 +423,13 @@ type Config struct {
+ 	// GPUs. 0 means no limit.
+ 	NVProxyGPUMemoryLimit uint64 `flag:"nvproxy-gpu-memory-limit"`
+ 
++	// MemoryLimitHeadroom is the memory, in bytes, that the sandbox keeps free
++	// below the memory limit of its host cgroup when the cgroup has no swap:
++	// an allocation that would take it closer makes the Sentry kill the
++	// application process that uses the most memory, as a guest kernel's OOM
++	// killer would. 0 leaves the limit to the host's OOM killer alone.
++	MemoryLimitHeadroom uint64 `flag:"memory-limit-headroom"`
++
+ 	// TPUProxy enables support for TPUs.
+ 	TPUProxy bool `flag:"tpuproxy"`
+ 
+diff --git a/runsc/config/flags.go b/runsc/config/flags.go
+index 6e95662..6ef8bf6 100644
+--- a/runsc/config/flags.go
++++ b/runsc/config/flags.go
+@@ -52,6 +52,7 @@ const (
+ 	flagQDiscTBFRate            = "qdisc-tbf-rate"
+ 	flagQDiscTBFBurst           = "qdisc-tbf-burst"
+ 	flagNVProxyGPUMemoryLimit   = "nvproxy-gpu-memory-limit"
++	flagMemoryLimitHeadroom     = "memory-limit-headroom"
+ 	flagInSandboxCgroup         = "in-sandbox-cgroup"
+ 	flagNetworkProxyPath        = "network-proxy-path"
+ 	flagNetgofer                = "netgofer"
+@@ -203,6 +204,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
+ 	flagSet.Bool("nvproxy-docker", false, "LEGACY: Injects nvidia-container-runtime-hook as a prestart hook. Try to use nvidia-container-runtime or `docker run --gpus` instead. Or manually add nvidia-container-runtime-hook as a prestart hook and set up NVIDIA_VISIBLE_DEVICES container environment variable.")
+ 	flagSet.String("nvproxy-driver-version", "", "NVIDIA driver ABI version to use. If empty, autodetect installed driver version. The special value 'latest' may also be used to use the latest ABI.")
+ 	flagSet.Bool("nvproxy-allow-unsupported-driver", false, "allow nvproxy to be initialized with an unsupported driver version.")
++	flagSet.Uint64(flagMemoryLimitHeadroom, 16<<20, "the memory, in bytes, that the sandbox keeps free below the memory limit of its host cgroup when the cgroup has no swap; an allocation that would take it closer makes the sandbox kill the application process that uses the most memory, as a guest kernel would. 0 leaves the limit to the host's OOM killer alone.")
+ 	flagSet.Uint64(flagNVProxyGPUMemoryLimit, 0, "the most device memory, in bytes, that the sandbox may allocate through nvproxy on each of its GPUs; an allocation beyond it fails as out of memory. Memory the driver allocates for itself and managed (unified) memory are not counted. 0 means no limit.")
+ 	flagSet.String("nvproxy-allowed-driver-capabilities", "utility,compute", "Comma separated list of NVIDIA driver capabilities that are allowed to be requested by the container. If 'all' is specified here, it is resolved to all driver capabilities supported in nvproxy. If 'all' is requested by the container, it is resolved to this list.")
+ 	flagSet.Bool("rdmaproxy", false, "WIP: enable RDMA support for containers with /dev/infiniband/uverbs* devices.")
+@@ -242,6 +244,7 @@ var overrideAllowlist = map[string]struct {
+ 	flagQDiscTBFRate:            {check: checkQDiscTBFRate},
+ 	flagQDiscTBFBurst:           {check: checkQDiscTBFBurst},
+ 	flagNVProxyGPUMemoryLimit:   {check: checkNVProxyGPUMemoryLimit},
++	flagMemoryLimitHeadroom:     {},
+ 	flagInSandboxCgroup:         {},
+ }
+ 
+diff --git a/runsc/sandbox/sandbox.go b/runsc/sandbox/sandbox.go
+index 94d0413..7726bdd 100644
+--- a/runsc/sandbox/sandbox.go
++++ b/runsc/sandbox/sandbox.go
+@@ -1607,6 +1607,11 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args) error {
+ 		if memLimit < mem {
+ 			mem = memLimit
+ 		}
++		if conf.MemoryLimitHeadroom > 0 && memLimit != math.MaxUint64 {
++			if files := memoryCgroupFiles(s.CgroupJSON.Cgroup); files != nil {
++				donations.DonateAndClose("memory-cgroup-fds", files...)
++			}
++		}
+ 	}
+ 	cmd.Args = append(cmd.Args, "--total-memory", strconv.FormatUint(mem, 10))
+ 
+@@ -3547,3 +3552,61 @@ func rootfsUpperTarFlags(p string) int {
+ 	}
+ 	return flags
+ }
++
++// memoryCgroupFiles opens memory.current, memory.stat and memory.max of the
++// cgroup v2 that limits the sandbox's memory, for the Sentry to keep its
++// memory below the limit (config.Config.MemoryLimitHeadroom). It returns nil
++// if the cgroup is not v2, or if it may swap: the host can then reclaim the
++// Sentry's memory file, and the host's OOM killer is left to act as before.
++func memoryCgroupFiles(cg cgroup.Cgroup) []*os.File {
++	dir := cg.MakePath("memory")
++	read := func(dir, name string) string {
++		data, err := os.ReadFile(filepath.Join(dir, name))
++		if err != nil {
++			return ""
++		}
++		return strings.TrimSpace(string(data))
++	}
++	if read(dir, "memory.current") == "" {
++		return nil
++	}
++	// As cgroup.MemoryLimit does: under systemd the limit may be on the
++	// parent.
++	if read(dir, "memory.max") == "max" {
++		if parent := filepath.Dir(dir); read(parent, "memory.max") != "" && read(parent, "memory.max") != "max" {
++			dir = parent
++		}
++	}
++	if swap := read(dir, "memory.swap.max"); swap != "" && swap != "0" && hostHasSwap() {
++		log.Infof("Memory cgroup %s may swap; leaving its limit to the host", dir)
++		return nil
++	}
++	var files []*os.File
++	for _, name := range []string{"memory.current", "memory.stat", "memory.max"} {
++		f, err := os.Open(filepath.Join(dir, name))
++		if err != nil {
++			log.Warningf("Cannot open %s: %v", filepath.Join(dir, name), err)
++			for _, f := range files {
++				f.Close()
++			}
++			return nil
++		}
++		files = append(files, f)
++	}
++	log.Infof("Sandbox keeps memory below the limit of %s", dir)
++	return files
++}
++
++// hostHasSwap returns true if the host has any swap space.
++func hostHasSwap() bool {
++	data, err := os.ReadFile("/proc/meminfo")
++	if err != nil {
++		return true
++	}
++	for _, line := range strings.Split(string(data), "\n") {
++		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "SwapTotal:" {
++			return fields[1] != "0"
++		}
++	}
++	return true
++}

@@ -859,7 +859,7 @@ class Daemon:
 
 def _starts(monkeypatch: pytest.MonkeyPatch, runtime: str) -> None:
     """A Sandbox that Docker started is driven through stand-ins: guestd, its contract, its
-    GPUs (G2 as nvproxy shows it) and its confinement."""
+    GPUs (G2 as nvproxy shows it), its confinement and its memory watcher."""
 
     async def connect(_provider: DockerProvider, container: str, *_: object) -> _Session:
         session = _Session([], container, 1024)
@@ -875,12 +875,16 @@ def _starts(monkeypatch: pytest.MonkeyPatch, runtime: str) -> None:
     async def nothing(*_: object, **__: object) -> None:
         return None
 
+    async def no_watcher(*_: object) -> None:
+        """gVisor's memory watcher, which runs in the sandbox."""
+
     monkeypatch.setattr(DockerProvider, "_connect", connect)
     monkeypatch.setattr(DockerProvider, "_guest_contract", contract)
     monkeypatch.setattr(DockerProvider, "_container_gpus", container_gpus)
     monkeypatch.setattr("ale.run.providers.docker.provider.set_elevation", nothing)
     monkeypatch.setattr("ale.run.providers.docker.provider.verify_identities", nothing)
     monkeypatch.setattr("ale.run.providers.docker.provider._GvisorConfinement.wire", nothing)
+    monkeypatch.setattr("ale.run.providers.docker.provider._watcher", no_watcher)
     # Inspected as Docker records the runtime the Sandbox was started under.
     _ = RUNTIME_NAMES[runtime]
 

@@ -31,6 +31,7 @@ __all__ = [
     "GPU_MEMORY_FLAG",
     "NESTED",
     "NET_RAW",
+    "OOM_KILLS",
     "RUNTIME",
     "SEAL_PROBE",
     "VERSION",
@@ -81,7 +82,7 @@ ENGINE_CAPABILITIES = ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE")
 ENGINE_STORAGE = ("/var/lib/docker", "/var/lib/containerd", "/var/lib/containers")
 #: The version of ALE's build of runsc this engine runs, ``VERSION`` in
 #: images/runtimes/gvisor/build.sh, and what ``runsc --version`` reports of it.
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 BUILD = f"+ale.{VERSION}"
 #: The ``runsc`` command that lists the NVIDIA driver versions nvproxy supports.
 DRIVERS = ("nvproxy", "list-supported-drivers")
@@ -95,6 +96,10 @@ GPU_MEMORY_FLAG = "nvproxy-gpu-memory-limit"
 #: run in a stub, must be the one the OOM killer takes rather than the Sentry, which holds
 #: the whole sandbox; under rootless Docker the default ties them.
 FLAGS = ("--oom-score-adj", "500")
+#: Where the Sentry counts, in ``oom_kill``, the processes it ended to keep the sandbox
+#: below its cgroup's limit on the Host (patch 0009): the root of the cgroup v1 memory
+#: hierarchy a Docker container sees, which the Host's cgroup never learns of.
+OOM_KILLS = "/sys/fs/cgroup/memory/memory.oom_control"
 #: The container's veth in the sandbox's network namespace. netstack sends every frame
 #: through it, so the seal is on its egress: tc's ingress runs after netstack's packet
 #: socket has already read a frame.
@@ -109,12 +114,13 @@ SEAL_PROBE = tc.show(VETH, "egress", _SEAL_DROP_PREF)
 def memory_mb(memory_mb: int) -> int:
     """The container memory that leaves a gVisor sandbox's processes what its Task declared.
 
-    The Sentry, the gofer and the stubs are charged to the container. Beside the framework's
-    processes alone, one process got 16 to 32 MiB less than under runc with 24 MiB and 1 MiB
-    per GiB added, at 512 MiB, 2, 4 and 8 GiB alike: 60 MiB covers the largest gap with 4 to
-    spare.
+    The Sentry, the gofer and the stubs are charged to the container, the Sentry keeps 16 MiB
+    of it free (patch 0009), and the memory watcher runs beside guestd. Beside the framework's
+    processes alone, one process got 24 to 72 MiB less than under runc with 60 MiB and 1 MiB
+    per GiB added, at 512 MiB, 2, 4 and 8 GiB alike, as the Sentry's own memory varied from
+    run to run: 108 MiB puts runc's share in the middle of that spread.
     """
-    return memory_mb + 60 + memory_mb // 1024
+    return memory_mb + 108 + memory_mb // 1024
 
 
 def filters(peers: tc.Peers, *, gateway_port: str, proxy_port: str, reattached: bool) -> list[str]:

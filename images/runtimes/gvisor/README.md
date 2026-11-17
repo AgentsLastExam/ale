@@ -14,6 +14,7 @@ sent upstream; a stock `runsc` lacks them.
 | `0006-nftables-batch-subsystem-in-host-byte-order` | The `iptables` 1.8.7 of Ubuntu 22.04, whose libnftnl writes a batch's subsystem id in host byte order, changes nf_tables instead of failing with `Invalid argument`, as Linux takes it. |
 | `0007-nftables-xt-tcp-udp-matches` | A rule that the `iptables` 1.8.7 of Ubuntu 22.04 writes with `--sport`, `--dport` or `--tcp-flags`, through the xtables `tcp` and `udp` matches, matches only the packets it names, instead of every one. |
 | `0008-netstack-nftables-connection-state-of-its-own` | Under `--TESTONLY-nftables`, a packet that iptables tracks and NATs, as once any of its tables is set, is tracked and NATed by nf_tables as well, each by its own rules, instead of the Sentry panicking (`packet already had NAT`) and ending the sandbox. |
+| `0009-runsc-sentry-oom-killer-below-cgroup-limit` | A container whose cgroup has a memory limit and no swap loses only the process the Sentry's own OOM killer chooses when its memory runs out, as under runc, instead of, at times, the whole sandbox; the Sentry counts its kills in `memory.oom_control` ([Out of memory](#out-of-memory)). |
 
 Each patch's header says what it changes, why, and how it was verified.
 
@@ -33,7 +34,7 @@ gVisor's release tarball:
 
 `runsc` and its sidecars come from one build and are installed together. The image's
 version is `VERSION` in [`build.sh`](build.sh), and `runsc --version` reports the release
-and that version, such as `release-20261109.0+ale.0.1.1`. Nothing in it depends on the
+and that version, such as `release-20261109.0+ale.0.1.2`. Nothing in it depends on the
 engine, so it has its own version, raised when the build changes.
 
 ## Install on a Host
@@ -42,7 +43,7 @@ Copy `/gvisor` into a directory of its own version, so that an upgrade never rep
 binaries of a sandbox that is running:
 
 ```bash
-version=0.1.1
+version=0.1.2
 dir=/usr/local/lib/ale-gvisor/$version
 id=$(docker create ghcr.io/agentslastexam/ale-gvisor:$version)
 sudo mkdir -p "$dir"
@@ -59,7 +60,7 @@ alone:
 {
   "runtimes": {
     "runsc": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.1/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -67,7 +68,7 @@ alone:
       ]
     },
     "runsc-net-raw": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.1/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -76,7 +77,7 @@ alone:
       ]
     },
     "runsc-nested": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.1/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -139,16 +140,59 @@ the session bus at `$DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`, els
 
 ## Out of memory
 
-A sandbox's processes start with the `oom_score_adj` of the containerd shim that starts
-them, one above containerd's own: -998 under rootful Docker, and under rootless Docker one
-above the user's containerd, such as 1 where it runs at 0. On the systrap platform, the
-default, the application runs in stub processes. Stock `runsc` gives the Sentry the
-container's value and leaves the stubs at the inherited one; with patch 0002 it gives the
-stubs the container's value and keeps the Sentry and the gofer at the inherited value, or
-at the container's where that is lower. On a platform without stubs, such as KVM, the Sentry
-gets the container's value.
+The application's memory is in the Sentry's memory file, which the Host charges to the
+container's cgroup; the stub processes that run the application on the systrap platform map
+it and do not own it. When the cgroup is full and cannot swap, the Host's OOM killer takes
+the stub that maps the most, and that frees nothing until the Sentry has torn its process
+down, 20 to 75 ms later. Whatever is charged meanwhile, the Sentry's own memory included,
+invokes the OOM killer again, until it takes a process whose loss ends the sandbox, such as
+the Sentry.
 
-Anonymous memory allocated past `--memory`, in steps, with this build:
+With patch 0009, when the container's cgroup v2 has a limit and no swap (`memory.swap.max`
+0, as `--memory-swap` equal to `--memory` sets, or no swap on the Host), the Sentry keeps the
+application's memory `--memory-limit-headroom`, 16 MiB by default, below that limit, counting
+the cgroup's memory less its file cache. An allocation that would go past it waits while the
+Sentry kills one process, the one Linux's OOM killer would choose (resident set plus
+`oom_score_adj` thousandths of the limit), and releases its memory, and is then tried again.
+Like Linux, which spares the global init, the Sentry never kills the sandbox's init or a
+process at `oom_score_adj` -1000; with nothing left to kill, allocations go on to the Host's
+limit. It counts each kill in `oom_kill` of `memory.oom_control`, which a container sees at
+`/sys/fs/cgroup/memory/memory.oom_control`, as Linux counts its own: the Host's cgroup counts
+no OOM for it, and Docker does not report the container as `OOMKilled`. Memory the Sentry
+does not see when it allocates, its own heap for sockets and pipes and the stubs' page
+tables, still reaches the Host's limit, where the Host's OOM killer acts as before, as it
+does in a cgroup that may swap.
+
+Measured in `python:3.12-slim` with `--memory 572m`, `--memory-swap` equal to it and
+`--oom-score-adj 500`, against runc with `--memory 512m` and no swap, 20 runs with the patch
+and 10 to 30 without; "lost" means the container stopped, "held" is what the process held,
+in 8 MiB steps, when it was killed, and a second, small process ran beside the 300 processes
+and the writer. Rootful is Docker 29.1.3 on Linux 7.0, without patch 0009 ALE's 0.1.0, whose
+out-of-memory code 0.1.1 shares; rootless is Docker 29.9.3 on Linux 6.12 with no swap on the
+Host, without patch 0009 ALE's 0.1.1:
+
+| Workload | Docker | Without patch 0009 | With patch 0009 | runc |
+|---|---|---|---|---|
+| One process allocating as the container starts | rootful | 3 of 30 lost; held 544 MiB | none lost, no OOM kill on the Host; held 520 to 528 MiB | none lost; held 504 MiB |
+| | rootless | none lost; held 528 to 544 MiB | none lost, no OOM kill on the Host; held 496 to 512 MiB | none of 10 lost; held 504 MiB |
+| 300 processes of 16 MiB | rootful | 6 of 20 lost, and the second process in 13 more | none lost, nor the second process; the Sentry ended 278 to 280 | none lost, nor the second process |
+| | rootless | 10 of 10 lost, at the 21st to 23rd process | none lost, nor the second process; the Sentry ended 279 to 281 | none of 10 lost, nor the second process; the OOM killer ended 270 |
+| `/dev/shm` written full with `write(2)` | rootful | 13 of 20 lost | none lost; the writer held 518 to 526 MiB; the second process ended in 8 | none lost; the writer held 501 to 505 MiB; the second process ended in all |
+| | rootless | 10 of 10 lost | none lost; the writer held 496 to 513 MiB; the second process ended in 9 | none of 10 lost; the writer held 501 to 506 MiB; the second process ended in 9 |
+
+A process holds 16 to 32 MiB less than without patch 0009, by the medians: the headroom and
+the allocation refused at it. Away from the limit, touching 1 GiB and 100000 4 KiB writes to
+`/dev/shm` took as long with the patch as without it.
+
+Where the Host's OOM killer acts, it chooses among the Sentry, the gofer and the stubs by
+`oom_score_adj`. A sandbox's processes start with the value of the containerd shim that
+starts them, one above containerd's own: -998 under rootful Docker, and under rootless
+Docker one above the user's containerd, such as 1 where it runs at 0. Stock `runsc` gives
+the Sentry the container's value and leaves the stubs at the inherited one; with patch 0002
+it gives the stubs the container's value and keeps the Sentry and the gofer at the inherited
+value, or at the container's where that is lower. On a platform without stubs, such as KVM,
+the Sentry gets the container's value. Anonymous memory allocated past `--memory` with
+Docker's default swap allowance, before patch 0009:
 
 | Docker | Container's `oom_score_adj` | Ranks | What the OOM killer took |
 |---|---|---|---|
@@ -157,21 +201,12 @@ Anonymous memory allocated past `--memory`, in steps, with this build:
 | Rootless (29.9.3, Linux 5.15, systemd 249) | 0, Docker's default | all 0, a tie | with the container base's desktop, the whole sandbox in 3 of 3, and once as the desktop started; in a bare Python image, only the allocating process in 3 of 3 |
 | Rootless | 500 | stubs 500; Sentry and gofer 1 | in 15 of 15, 10 of them with the desktop, neither the sandbox nor another process |
 
-Rootful Docker's default already ranks every stub above the Sentry, and these runs are too
-few to tell 0 from 500 there; rootless Docker's default ties them, and when the OOM killer
-takes the Sentry the sandbox ends. A gVisor container therefore needs `--oom-score-adj`
-above the inherited value; ALE passes 500. `runsc` cannot hold the Sentry lower instead: an
-unprivileged process cannot go below its `oom_score_adj_min`, the value its user's systemd
-manager was started with (`OOMScoreAdjust` of `user@.service`: 100 in systemd 259, unset
-and so 0 in systemd 249).
-
-Memory that the application writes into a tmpfs inside the sandbox, such as `/dev/shm`,
-with `write(2)` is mapped by the Sentry itself, so a container that fills its limit that
-way loses the whole sandbox whatever the ranks: under rootful Docker, 2 of 2 at 0 and 4 of
-4 at 500. Under runc the OOM killer ends its processes, largest first, until it reaches the
-writer. Written through `mmap`, it is the writer's, and the ranks decide: only the writer
-died under rootful Docker at 0 (3 of 3) and rootless Docker at 500 (2 of 2), and the whole
-sandbox under rootless Docker at 0 (2 of 2).
+Rootless Docker's default ties the stubs with the Sentry, and when the OOM killer takes the
+Sentry the sandbox ends, so a gVisor container needs `--oom-score-adj` above the inherited
+value; ALE passes 500. `runsc` cannot hold the Sentry lower instead: an unprivileged process
+cannot go below its `oom_score_adj_min`, the value its user's systemd manager was started
+with (`OOMScoreAdjust` of `user@.service`: 100 in systemd 259, unset and so 0 in systemd
+249).
 
 ## GPU memory limit
 
