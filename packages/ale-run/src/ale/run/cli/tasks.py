@@ -852,7 +852,9 @@ def _check_reportable(result: EpisodeResult) -> bool:
     return not problems
 
 
-async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
+async def _validate(
+    reference: str, settings: RunConfig, runs_dir: Path, run_id: str | None = None
+) -> int:
     providers = ProviderRegistry(settings)
     try:
         resolved = resolve(reference)
@@ -869,7 +871,7 @@ async def _validate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
     proxy = None
     try:
         proxy, sessions = await _egress_proxy(tasks, gateway)
-        run_id = f"validate-{uuid.uuid4().hex[:8]}"
+        run_id = run_id or f"validate-{uuid.uuid4().hex[:8]}"
         run_dir = runs_dir / run_id
         ledger = Ledger(run_dir)
         ledger.open_run(run_id, settings.config_hash)

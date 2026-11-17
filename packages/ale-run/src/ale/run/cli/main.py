@@ -18,6 +18,7 @@ from typing import Annotated, Any
 import typer
 
 from ale.core.errors import AleError, ProviderCapabilityError
+from ale.core.intake import DEFAULT_INTAKE_PORT, DEFAULT_MAX_SKEW_SEC, IntakeExecutionMode
 from ale.core.sandbox import Provider
 from ale.run import __version__
 from ale.run.assets import (
@@ -240,6 +241,98 @@ def lint(
         typer.echo(f"{len(findings)} problem(s)", err=True)
         raise typer.Exit(1)
     typer.echo("ok")
+
+
+@app.command("serve")
+def serve(
+    host: Annotated[str, typer.Option("--host", help="Address to listen on.")] = "0.0.0.0",
+    port: Annotated[
+        int, typer.Option("--port", min=1, max=65535, help="Port to listen on.")
+    ] = DEFAULT_INTAKE_PORT,
+    mode: Annotated[
+        IntakeExecutionMode,
+        typer.Option("--mode", help="Default intake mode: lint, prepare, validate, or run."),
+    ] = IntakeExecutionMode.VALIDATE,
+    state_dir: Annotated[
+        Path | None,
+        typer.Option("--state-dir", help="Ledger and unpacked task state directory."),
+    ] = None,
+    runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+    concurrency: Annotated[
+        int, typer.Option("--concurrency", min=1, help="Concurrent intake workers.")
+    ] = 1,
+    webhook_url: Annotated[
+        str,
+        typer.Option(
+            "--webhook-url",
+            help="Brewer status callback URL, or 'auto' to derive from artifact.download_url.",
+        ),
+    ] = "",
+    max_skew_sec: Annotated[
+        int,
+        typer.Option(
+            "--max-skew-sec",
+            min=0,
+            help="Maximum allowed HMAC timestamp skew in seconds (0 disables check).",
+        ),
+    ] = DEFAULT_MAX_SKEW_SEC,
+    config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
+    overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
+    agent: Annotated[str | None, typer.Option("--agent")] = None,
+    model: Annotated[str | None, typer.Option("--model")] = None,
+) -> None:
+    """Serve the RESTful task intake API for upstream task brewers."""
+    from ale.run.intake.server import serve_intake
+    from ale.run.intake.service import IntakeServerSettings
+    from ale.run.sources import cache_root
+
+    secret = os.environ.get("ALE_INTAKE_SECRET", "").strip()
+    token = os.environ.get("ALE_INTAKE_TOKEN", "").strip()
+    if not (secret or token):
+        typer.echo(
+            "ALE_INTAKE_SECRET or ALE_INTAKE_TOKEN is required to start the intake server",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    effective_webhook_url = (
+        webhook_url.strip() or os.environ.get("ALE_INTAKE_WEBHOOK_URL", "").strip()
+    )
+    webhook_secret = os.environ.get("ALE_INTAKE_WEBHOOK_SECRET", "").strip()
+    raw_origins = os.environ.get("ALE_INTAKE_ALLOWED_ORIGINS", "")
+    allowed_origins = tuple(item.strip() for item in raw_origins.split(",") if item.strip())
+    effective_state = state_dir or Path(
+        os.environ.get("ALE_INTAKE_STATE_DIR") or (cache_root() / "intake")
+    )
+    run_settings = None
+    if mode is IntakeExecutionMode.RUN:
+        if config is not None or overrides or agent is not None or model is not None:
+            run_settings = _config(config, overrides, agent=agent, model=model)
+    elif (
+        mode in {IntakeExecutionMode.PREPARE, IntakeExecutionMode.VALIDATE}
+        or config is not None
+        or overrides
+        or agent is not None
+    ):
+        run_settings = _config(config, overrides, agent=agent or "oracle", model=model or "")
+
+    settings = IntakeServerSettings(
+        host=host,
+        port=port,
+        state_dir=effective_state.expanduser().resolve(),
+        runs_dir=runs_dir.expanduser().resolve(),
+        secret=secret,
+        token=token,
+        webhook_url=effective_webhook_url,
+        webhook_secret=webhook_secret,
+        allowed_origins=allowed_origins,
+        execution_mode=mode,
+        concurrency=concurrency,
+        max_skew_sec=max_skew_sec,
+        run_settings=run_settings,
+    )
+    typer.echo(f"ale intake server listening on http://{host}:{port} (mode={mode.value})")
+    run_async(serve_intake(settings))
 
 
 @vm_image_app.command("push")

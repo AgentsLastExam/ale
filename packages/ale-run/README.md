@@ -30,6 +30,7 @@ uv run ale run NEXT_TASK --agent claude-code --continue-from runs/RUN/EPISODE
 uv run ale validate TASK
 uv run ale lint TASK
 uv run ale prepare TASK
+uv run ale serve --port 7472 --mode validate
 uv run ale sandbox list
 ```
 
