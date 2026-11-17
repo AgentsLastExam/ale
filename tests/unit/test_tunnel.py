@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import hashlib
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from ale.run.guestd import tunnel
 from ale.run.guestd.tunnel import CHUNK_BYTES, WINDOW_BYTES, Mux
 
 pytestmark = pytest.mark.unit
@@ -243,3 +245,89 @@ async def test_the_pipe_ending_closes_every_stream_and_stops_the_mux() -> None:
 
 def test_a_window_holds_several_frames() -> None:
     assert WINDOW_BYTES >= 2 * CHUNK_BYTES
+
+
+async def test_sandboxes_sharing_a_loopback_listen_on_one_port_at_their_own_addresses() -> None:
+    server, port = await serve(echo)
+    async with rig({0: port}) as r:
+        first = await r.guest.listen(0, 0, "127.0.0.2")
+        shared = first.sockets[0].getsockname()[1]
+        second = await r.guest.listen(shared, 0, "127.0.0.3")
+        try:
+            for address in ("127.0.0.2", "127.0.0.3"):
+                reader, writer = await asyncio.open_connection(address, shared)
+                writer.write(address.encode())
+                await writer.drain()
+                assert await asyncio.wait_for(reader.readexactly(9), 5) == address.encode()
+                writer.close()
+        finally:
+            first.close()
+            second.close()
+    server.close()
+
+
+@pytest.mark.parametrize("spec", ["7", "7:x", "-1:0", "7:256", "7:0:1"])
+def test_an_inherited_socket_that_is_not_socket_target_is_refused(spec: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        tunnel._socket(spec)
+    assert tunnel._socket("812:1") == (812, 1)
+
+
+async def test_the_threaded_pipe_a_windows_sandbox_uses_carries_streams_both_ways() -> None:
+    """Windows' loop cannot read a synchronous pipe, so threads carry the sandbox's stdio."""
+    to_guest, from_host = os.pipe()
+    to_host, from_guest = os.pipe()
+    loop = asyncio.get_running_loop()
+    host_reader = asyncio.StreamReader()
+    await loop.connect_read_pipe(
+        lambda: asyncio.StreamReaderProtocol(host_reader), os.fdopen(to_host, "rb", 0)
+    )
+    transport, protocol = await loop.connect_write_pipe(
+        asyncio.streams.FlowControlMixin, os.fdopen(from_host, "wb", 0)
+    )
+    host_writer = asyncio.StreamWriter(transport, protocol, host_reader, loop)
+    server, port = await serve(echo)
+
+    async def dial(index: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        return await asyncio.open_connection("127.0.0.1", port)
+
+    guest_reader, guest_writer = tunnel._threaded_pipe(to_guest, from_guest)
+    host, guest = Mux(host_reader, host_writer, dial=dial), Mux(guest_reader, guest_writer)
+    runners = [asyncio.ensure_future(host.run()), asyncio.ensure_future(guest.run())]
+    listener = await guest.listen(0, 0)
+    try:
+        local = listener.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", local)
+        payload = os.urandom(3 * WINDOW_BYTES)
+        writer.write(payload)
+        await writer.drain()
+        assert await asyncio.wait_for(reader.readexactly(len(payload)), 30) == payload
+        writer.close()
+        host_writer.close()  # the Host goes away: the sandbox side ends
+        await asyncio.wait_for(guest.closed.wait(), 5)
+    finally:
+        listener.close()
+        server.close()
+        for runner in runners:
+            runner.cancel()
+        await asyncio.gather(*runners, return_exceptions=True)
+        for descriptor in (to_guest, from_guest):
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize(
+    "spec,listener",
+    [("7412:0", ("127.0.0.1", 7412, 0)), ("127.0.3.1:7412:1", ("127.0.3.1", 7412, 1))],
+)
+def test_a_listener_names_its_address_or_takes_loopback(
+    spec: str, listener: tuple[str, int, int]
+) -> None:
+    assert tunnel._listener(spec) == listener
+
+
+@pytest.mark.parametrize(
+    "spec", ["7412", "7412:x", ":7412:0", "a:b:7412:0", "7412:256", "65536:0", "7412:-1"]
+)
+def test_a_listener_that_is_not_host_port_target_is_refused(spec: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        tunnel._listener(spec)

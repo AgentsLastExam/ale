@@ -1,8 +1,16 @@
-"""Launch an agent command with the interactive account's limited Windows token.
+"""Launch a command as the agent, with the limited Windows token of the agent's desktop.
 
-Executed by the elevated guest service as an isolated Python child. Keeping the launcher
-alive lets guestd stream output and terminate the entire command tree on timeout. Only
-the command, cwd and environment cross stdin; the service's token is never serialized.
+Executed by the elevated guest service as an isolated Python child, for agent commands and,
+when guestd runs as another account, for its own Cua Driver client (``gui.py``). Keeping the
+launcher alive lets guestd stream output and terminate the entire command tree on timeout.
+The request, the command with its cwd, the variables it sets and the Driver pipe it is to
+use, is the first line of stdin, and the rest of stdin is the command's own; the service's
+token is never serialized.
+
+guestd need not run as the agent: the system can serve another account's session. So the
+token of the session's shell is borrowed only when it belongs to the agent account, and the
+command's environment is the one Windows gives that account, with the request's variables:
+never guestd's own, which is the system's when guestd runs as the system.
 """
 
 from __future__ import annotations
@@ -14,6 +22,12 @@ import shutil
 import subprocess
 import sys
 from ctypes import wintypes as w
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from gui import desktop_account, require_own_pipe, token_account
 
 
 class StartupInfo(ctypes.Structure):
@@ -93,7 +107,7 @@ def main() -> int:
         if not ok:
             raise ctypes.WinError(ctypes.get_last_error())
 
-    request = json.load(sys.stdin)
+    request = _request(sys.stdin.fileno())
     token, primary = w.HANDLE(), w.HANDLE()
     shell_process = None
     process = ProcessInfo()
@@ -104,6 +118,7 @@ def main() -> int:
         shell_process = kernel.OpenProcess(0x1000, False, shell_pid)
         check(shell_process)
         check(security.OpenProcessToken(shell_process, 0x000A, ctypes.byref(token)))
+        _require_agent(token)
         elevated = w.DWORD()
         check(
             security.GetTokenInformation(
@@ -118,13 +133,20 @@ def main() -> int:
             raise PermissionError("the desktop agent token is elevated; enable UAC in the image")
         # Ask for the rights permitted by the desktop token's DACL (MAXIMUM_ALLOWED).
         check(security.DuplicateTokenEx(token, 0x02000000, None, 2, 1, ctypes.byref(primary)))
+        if request.get("pipe"):
+            require_own_pipe(request["pipe"], primary)
 
-        env = request["env"]
+        env = merged(_environment(primary), request.get("env") or {})
         if request.get("shell"):
             shell = os.path.join(os.environ["SYSTEMROOT"], "System32", "cmd.exe")
             command = f'{subprocess.list2cmdline([shell])} /d /s /c "{request["shell"]}"'
         else:
-            command = subprocess.list2cmdline(request["argv"])
+            argv = list(request["argv"])
+            if not os.path.dirname(argv[0]):
+                # CreateProcessWithTokenW would look in this launcher's own directory and
+                # search its PATH, the system's; the agent's program is on the agent's.
+                argv[0] = shutil.which(argv[0], path=_variable(env, "PATH")) or argv[0]
+            command = subprocess.list2cmdline(argv)
         environment = ctypes.create_unicode_buffer(
             "\0".join(f"{key}={value}" for key, value in sorted(env.items())) + "\0"
         )
@@ -132,31 +154,30 @@ def main() -> int:
         startup.cb = ctypes.sizeof(startup)
         startup.desktop = "winsta0\\default"
         startup.flags = 0x00000100  # STARTF_USESTDHANDLES
-        if request.get("shell") or _console_program(request["argv"][0], env):
+        if request.get("shell") or _console_program(argv[0], env):
             # It gets a console of its own, since this call cannot share guestd's; hidden, as
             # guestd's is, so nothing appears on the agent's desktop. A window program is
             # not hidden: the setting would apply to its first window.
             startup.flags |= 0x00000001  # STARTF_USESHOWWINDOW
             startup.show = 0  # SW_HIDE
+        startup.stdin = msvcrt.get_osfhandle(sys.stdin.fileno())
         startup.stdout = msvcrt.get_osfhandle(sys.stdout.fileno())
         startup.stderr = msvcrt.get_osfhandle(sys.stderr.fileno())
-        with open(os.devnull, "rb") as null:
-            startup.stdin = msvcrt.get_osfhandle(null.fileno())
-            for handle in (startup.stdin, startup.stdout, startup.stderr):
-                os.set_handle_inheritable(handle, True)
-            check(
-                security.CreateProcessWithTokenW(
-                    primary,
-                    0,
-                    None,
-                    ctypes.create_unicode_buffer(command),
-                    0x00000400 | 0x00000200,  # Unicode environment, new process group.
-                    environment,
-                    request.get("cwd"),
-                    ctypes.byref(startup),
-                    ctypes.byref(process),
-                )
+        for handle in (startup.stdin, startup.stdout, startup.stderr):
+            os.set_handle_inheritable(handle, True)
+        check(
+            security.CreateProcessWithTokenW(
+                primary,
+                0,
+                None,
+                ctypes.create_unicode_buffer(command),
+                0x00000400 | 0x00000200,  # Unicode environment, new process group.
+                environment,
+                request.get("cwd"),
+                ctypes.byref(startup),
+                ctypes.byref(process),
             )
+        )
         if kernel.WaitForSingleObject(process.process, 0xFFFFFFFF) == 0xFFFFFFFF:
             raise ctypes.WinError(ctypes.get_last_error())
         code = w.DWORD()
@@ -168,9 +189,59 @@ def main() -> int:
                 kernel.CloseHandle(handle)
 
 
+def _environment(token: Any) -> dict[str, str]:
+    """The environment Windows gives the account of ``token`` as it signs in."""
+    userenv = ctypes.WinDLL("userenv", use_last_error=True)
+    userenv.CreateEnvironmentBlock.argtypes = [ctypes.POINTER(w.LPVOID), w.HANDLE, w.BOOL]
+    userenv.DestroyEnvironmentBlock.argtypes = [w.LPVOID]
+    block = w.LPVOID()
+    if not userenv.CreateEnvironmentBlock(ctypes.byref(block), token, False):
+        raise ctypes.WinError(ctypes.get_last_error())
+    values: dict[str, str] = {}
+    try:
+        address = block.value or 0
+        while entry := ctypes.wstring_at(address):
+            key, _, value = entry.partition("=")
+            if key:
+                values[key] = value
+            address += (len(entry) + 1) * 2
+    finally:
+        userenv.DestroyEnvironmentBlock(block)
+    return values
+
+
+def merged(base: dict[str, str], variables: dict[str, str]) -> dict[str, str]:
+    """``base`` with ``variables`` set, each replacing the one ``base`` names in any case: a
+    Windows environment has one ``Path``, however a program spells it."""
+    names = {name.casefold() for name in variables}
+    return {
+        **{name: value for name, value in base.items() if name.casefold() not in names},
+        **variables,
+    }
+
+
+def _variable(env: dict[str, str], name: str) -> str | None:
+    return next((value for key, value in env.items() if key.casefold() == name.casefold()), None)
+
+
+def _request(stdin: int) -> dict[str, Any]:
+    """The first line of ``stdin``, read a byte at a time: the command inherits the rest."""
+    line = bytearray()
+    while not line.endswith(b"\n") and (byte := os.read(stdin, 1)):
+        line += byte
+    return json.loads(line)
+
+
+def _require_agent(token: Any) -> None:
+    """Refuse a desktop token that does not belong to the agent account."""
+    owner, agent = token_account(token), desktop_account()
+    if owner.casefold() != agent.casefold():
+        raise PermissionError(f"the desktop belongs to {owner!r}, not the agent account {agent!r}")
+
+
 def _console_program(name: str, env: dict[str, str]) -> bool:
     """Whether ``name`` runs in a console; a script or an unknown program is taken to."""
-    found = shutil.which(name, path=env.get("PATH") or env.get("Path"))
+    found = shutil.which(name, path=_variable(env, "PATH"))
     if not found or not found.lower().endswith(".exe"):
         return True
     try:

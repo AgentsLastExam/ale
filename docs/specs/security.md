@@ -202,11 +202,13 @@ Gateway this way. `[environment].env` reaches the agent, and the agent can read 
 
 The agent runs as the account the image declares, and so does the oracle that stands in for
 it during validation. Framework work runs as root on Linux and macOS and Administrator on
-Windows. Windows guestd stays in the interactive session but launches agent commands with
-the desktop's limited token. Only the Host's SMBIOS `ale-sudo` marker, supplied for
-`request.sudo`, permits elevated agent commands. The Provider verifies both tokens before
-Task code runs; image builds request elevation explicitly. Material visibility still follows
-phase ordering. See [Permissions](sandbox-image.md#permissions).
+Windows. Windows guestd stays in the agent's interactive session, whichever of the agent
+and the system it runs as, but launches agent commands with the limited token of the
+session's desktop, and only when that desktop is the agent's. Only the Host's SMBIOS
+`ale-sudo` marker, supplied for `request.sudo`, permits elevated agent commands. The
+Provider verifies both tokens before Task code runs; image builds request elevation
+explicitly. Material visibility still follows phase ordering. See
+[Permissions](sandbox-image.md#permissions).
 
 This is what stops an agent rewriting the network policy that isolates it, the clock its
 timeouts are measured against, or the guest service driving its own sandbox. None of that

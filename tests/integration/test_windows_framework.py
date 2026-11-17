@@ -90,3 +90,5 @@ async def test_a_bare_windows_disk_boots_with_the_framework_closed_to_the_agent(
         # Both on the framework's own Python, not on whatever Python the disk has.
         assert guestd.PYTHON["windows"] in found["service.py"]
         assert guestd.PYTHON["windows"] in found["main.py"]
+        # The Driver serves the pipe guestd names after the desktop's account.
+        assert rf"--socket \\.\pipe\ale-cua-driver-{user} " in found["cua-driver.exe"]

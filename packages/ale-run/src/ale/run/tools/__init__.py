@@ -35,7 +35,8 @@ def resolved_cua_desktop(
     # The server's settings travel in its environment: the values are not secret, and a CLI
     # that filters its MCP children's environment still passes what their configuration
     # names. On macOS the Provider starts the Driver, so the server is told where it is
-    # rather than starting its own.
+    # rather than starting its own. On Windows the server names the Driver's pipe after the
+    # account it runs as, so one server, and one digest, serves every account's desktop.
     environment = (
         {"ALE_CUA_DRIVER": MACOS_DRIVER, "ALE_CUA_DRIVER_SOCKET": MACOS_DRIVER_SOCKET}
         if operating_system is OperatingSystem.MACOS

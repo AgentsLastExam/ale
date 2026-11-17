@@ -512,8 +512,10 @@ their path the same way and leave its target alone; their parents, like an uploa
 are framework-chosen paths and resolve normally.
 
 Solver and oracle use the image's agent account. Windows guestd runs elevated in that
-account's interactive session and launches agent commands with the desktop's limited
-token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
+account's interactive session, as the account itself or as the system, and launches agent
+commands with the limited token of the session's desktop, which it refuses to borrow from
+any other account. Only a guestd that runs as the agent launches them with its own token
+instead, when the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
 desktop session are required; the Provider checks both framework and agent privileges
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
 disk named directly by `[environment].image` is framed like any other.

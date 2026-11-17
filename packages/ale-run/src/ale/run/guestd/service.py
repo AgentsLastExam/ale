@@ -4,9 +4,9 @@ The framework is installed into a disk offline, and a logon task can only be reg
 a running Windows, so this service starts the framework instead. Windows starts it at boot
 as LocalSystem, on the framework's own Python: ``python.exe -I -S service.py <agent account>
 <runner address>``. It waits for the agent to sign in, then starts guestd, on the same
-Python, and Cua Driver on the agent's desktop with the account's elevated token, and starts
-them again when they exit. Agent commands are launched unelevated by guestd itself
-(``windows.py``).
+Python, and Cua Driver, on the pipe named after the account, on the agent's desktop with the
+account's elevated token, and starts them again when they exit. Agent commands are launched
+unelevated by guestd itself (``windows.py``).
 
 An offline write leaves the files it makes readable and writable by everyone, so the
 service first limits the framework's files to SYSTEM and Administrators, leaving Cua Driver
@@ -28,12 +28,9 @@ ROOT = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ALE"
 PORT = 7411
 #: SMBIOS serial the Host sets when the Task grants the agent Administrator access.
 SUDO_SERIAL = "ale-sudo"
-#: Where Cua Driver serves guestd's calls; ``gui.py`` connects to the same pipe.
-CUA_DRIVER_PIPE = r"\\.\pipe\ale-cua-driver"
-_CUA_DRIVER_ARGS = (
-    f"serve --socket {CUA_DRIVER_PIPE} --permission-mode unrestricted "
-    "--dangerously-bypass-approvals"
-)
+#: Where Cua Driver serves the agent's desktop: ``gui.py`` names the same pipe after the
+#: desktop's account.
+CUA_DRIVER_PIPE = r"\\.\pipe\ale-cua-driver-{account}"
 _SYSTEM, _ADMINISTRATORS, _USERS = "*S-1-5-18", "*S-1-5-32-544", "*S-1-5-32-545"
 
 _STOP, _SHUTDOWN = 0x1, 0x4
@@ -196,7 +193,17 @@ class Service:
         self._open_port()
         sudo = "1" if self._serial() == SUDO_SERIAL else "0"
         guestd = f'"{sys.executable}" -I -S "{ROOT / "guestd" / "main.py"}" --tcp 0.0.0.0:{PORT}'
-        driver = f'"{ROOT / "cua-driver" / "cua-driver.exe"}" {_CUA_DRIVER_ARGS}'
+        driver = subprocess.list2cmdline(
+            [
+                str(ROOT / "cua-driver" / "cua-driver.exe"),
+                "serve",
+                "--socket",
+                CUA_DRIVER_PIPE.format(account=self.user),
+                "--permission-mode",
+                "unrestricted",
+                "--dangerously-bypass-approvals",
+            ]
+        )
         while not self.stopping.is_set():
             token = self._agent_token()
             if token is None:

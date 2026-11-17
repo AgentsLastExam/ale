@@ -822,6 +822,12 @@ into `C:\ProgramData\ALE`:
   waits for the agent's sign-in, and starts guestd and Cua Driver on the agent's desktop
   with the account's elevated token (the one UAC keeps beside the limited one), each in its
   own hidden console, restarting either that exits.
+- Cua Driver serves on `\\.\pipe\ale-cua-driver-<account>`, the pipe `guestd/gui.py`
+  names after the desktop's account, so that every account signed in to one machine has
+  its own. Cua Driver 0.38.0 lets only its own account open it (measured:
+  `D:P(A;;FA;;;<account SID>)`), so a guestd that runs as another account, such as the
+  system serving that account's session, calls it through `guestd/windows.py` with the
+  desktop's token, as it runs agent commands.
 - The service reads the Host's `ale-sudo` SMBIOS serial and passes it to guestd, which
   runs agent commands with the desktop's limited token unless it is set.
 - A Task image build (`QemuProvider.create_builder`) frames its own overlay on the base
