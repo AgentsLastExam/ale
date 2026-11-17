@@ -119,7 +119,7 @@ class TaskFolder:
 
     def image_source_digest(self, image: ImageSpec) -> str | None:
         """What a solver image is built from: its build context, without assets."""
-        if image.ref is not None:
+        if image.ref is not None or image.kind is ImageKind.STATION:
             return None
         return tree_digest(self.environment_dir, exclude=("assets", SETUP_DIR))
 
@@ -335,13 +335,22 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
 
     A Dockerfile builds a Linux container and names its base in ``FROM``. A build script
     (``build.ps1`` on Windows, ``build.sh`` elsewhere) builds a VM on ``image``. ``image``
-    alone is used directly.
+    alone is used directly. ``software`` names licensed software instead, which nothing
+    builds.
     """
     environment, user = config.environment, config.agent.user
     operating_system, image = environment.os, environment.image
     linux = operating_system is OperatingSystem.LINUX
     label, script = _OS_LABELS[operating_system], BUILD_SCRIPTS[operating_system]
     timeout = environment.build_timeout_sec
+    if environment.software is not None:
+        built = [folder.dockerfile, *(folder.build_script(system) for system in BUILD_SCRIPTS)]
+        for path in filter(None, built):
+            raise TaskDefinitionError(
+                "a Task that names [environment].software has no image to build; "
+                f"remove environment/{path.name}"
+            )
+        return ImageSpec(kind=ImageKind.STATION, software=environment.software)
     if operating_system is not OperatingSystem.WINDOWS and _file(
         folder.environment_dir / WINDOWS_BUILD
     ):

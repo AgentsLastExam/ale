@@ -98,7 +98,7 @@ async def test_shared_verification_has_no_second_prepared_image(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", tuple(ImageKind))
+@pytest.mark.parametrize("kind", [ImageKind.CONTAINER, ImageKind.VM])
 async def test_separate_verifier_reuses_solver_prepared_kind(
     tmp_path: Path, kind: ImageKind
 ) -> None:
@@ -130,7 +130,7 @@ async def test_separate_verifier_reuses_solver_prepared_kind(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", tuple(ImageKind))
+@pytest.mark.parametrize("kind", [ImageKind.CONTAINER, ImageKind.VM])
 async def test_external_separate_verifier_uses_matching_provider(
     tmp_path: Path, kind: ImageKind, framework_layer: None
 ) -> None:

@@ -1212,6 +1212,7 @@ async def _prepare_images(
                 "local": task.verifier_image_source_digest if own else task.image_source_digest,
                 "ref": spec.ref,
                 "base_ref": spec.base_ref,
+                "software": spec.software,
                 "user": spec.user,
             }
         )

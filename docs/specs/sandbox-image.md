@@ -1,7 +1,8 @@
 # Container and VM sandbox image specification
 
 Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
-in a container or a VM. A Linux container builds `environment/Dockerfile`; a VM builds
+in a container or a VM, except the solver of a Task that names licensed software instead of
+an image. A Linux container builds `environment/Dockerfile`; a VM builds
 `environment/build.sh` (`build.ps1` on Windows) on the VM image `[environment].image` names;
 an image named alone is used directly ([Source selection](#source-selection-and-identity)).
 
@@ -64,12 +65,12 @@ once its window manager or shell runs.
 
 ## What a Windows image needs
 
-A Windows Task builds `environment/build.ps1` on an ALE Windows base. The base signs its agent
-account in to a desktop automatically, with UAC on, and carries none of the framework; the
-Python it installs for all users is for Tasks and agents. ALE installs the framework offline
-into the build VM's disk, a layer on the base, before it boots, so the build talks to the
-same guestd as every later sandbox, and the Task's script cannot replace the framework's
-pieces:
+A Windows Task that does not name software builds `environment/build.ps1` on an ALE Windows
+base. The base signs its agent account in to a desktop automatically, with UAC on, and
+carries none of the framework; the Python it installs for all users is for Tasks and agents.
+ALE installs the framework offline into the build VM's disk, a layer on the base, before it
+boots, so the build talks to the same guestd as every later sandbox, and the Task's script
+cannot replace the framework's pieces:
 
 - the current guestd under `C:\ProgramData\ALE\guestd`, Cua Driver at the pinned version
   under `C:\ProgramData\ALE\cua-driver`, and the framework's own Python;
@@ -195,10 +196,15 @@ folder decides how:
 - A build script, `environment/build.sh` on Linux and macOS or `environment/build.ps1` on
   Windows, builds a VM on the VM image `[environment].image` names, which it requires.
 - `[environment].image` alone is used directly, resolved by the Provider selected for it.
+- `[environment].software` names licensed software instead, which only a machine its
+  operator keeps can run: a `station` image. ALE neither builds nor frames it; the Provider
+  selected for it resolves the names it lists, sorted and joined by commas, to that machine,
+  and a Run refuses the Task when no Provider it lists serves it.
 
 The Task folder decides every image's kind as the Task loads, so loading reads nothing
-else: Windows and macOS images are VMs, a Linux absolute path is a VM disk, and only a Linux
-image named alone by a registry reference may be either. Its manifest decides: an OCI
+else: software is a `station` image, other Windows and macOS images are VMs, a Linux
+absolute path is a VM disk, and only a Linux image named alone by a registry reference may
+be a container or a VM. Its manifest decides: an OCI
 manifest whose `artifactType` is `application/vnd.ale.vm-disk.v1` is an ALE VM disk, a
 container image's manifest or index (OCI or Docker) is a container, and anything else is
 refused, naming its type. The Run reads each such manifest once, with the Host's Docker
@@ -366,7 +372,9 @@ repository/content identity before solver execution.
 A verifier on another operating system than the Task's needs the first or the second, since
 the solver's image runs the Task's. Everything verification does in it, from its stage
 entry to its verifier directory and Python, follows its own system, and selection asks for
-a Provider of that system.
+a Provider of that system. The verifier of a Task that names software needs one of them
+too: verification never runs on the machine that has the software, which its operator
+keeps.
 
 Any verifier image must satisfy the same guest contract and permit ALE to stage
 `ale_verify`. Verification runs as framework-controlled Task code.

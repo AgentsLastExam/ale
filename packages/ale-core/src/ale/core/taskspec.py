@@ -59,6 +59,9 @@ _FROZEN = ConfigDict(frozen=True, extra="forbid")
 class ImageKind(StrEnum):
     CONTAINER = "container"
     VM = "vm"
+    STATION = "station"
+    """Licensed software installed on a machine its operator keeps, which a Task names by
+    ``[environment].software`` rather than builds: ALE neither builds nor frames it."""
 
 
 class OperatingSystem(StrEnum):
@@ -126,13 +129,31 @@ _HOST_NETWORKS = tuple(
 )
 
 
+def _distinct[T: str](values: tuple[T, ...]) -> tuple[T, ...]:
+    repeated = sorted({value for value in values if values.count(value) > 1})
+    if repeated:
+        raise ValueError(f"{', '.join(repeated)} listed more than once")
+    return tuple(sorted(values))
+
+
+#: Licensed software as a Task names it, each id at most once, kept sorted like container
+#: features. An id never holds a comma, which joins the ids in the reference a Provider
+#: resolves; ids of at most 64 characters, and at most 16 of them, are what one lease of a
+#: Station can name.
+_Software = Annotated[
+    tuple[Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")], ...],
+    Field(max_length=16),
+    AfterValidator(_distinct),
+]
+
+
 class ImageSpec(BaseModel):
     """A solver or dedicated-verifier image: an image used directly or a build's base.
 
     Without ``ref`` or ``base_ref``, a container image is built from the Task folder's
-    Dockerfile. ``kind`` is ``None`` only for a Linux image named by a registry reference
-    alone: what the registry holds decides it, before anything prepares or records the
-    image.
+    Dockerfile, and a ``station`` image is the ``software`` it names. ``kind`` is ``None``
+    only for a Linux image named by a registry reference alone: what the registry holds
+    decides it, before anything prepares or records the image.
     """
 
     model_config = _FROZEN
@@ -140,8 +161,11 @@ class ImageSpec(BaseModel):
     kind: ImageKind | None
     ref: str | None = Field(default=None, min_length=1)
     base_ref: str | None = Field(default=None, min_length=1)
+    software: _Software = ()
+    """The licensed software a ``station`` image is, which its Provider resolves."""
     user: str = Field(default="user", pattern=_ACCOUNT)
-    """The agent account. It must exist in the image; preparation fails if it does not."""
+    """The agent account. It must exist in the image; preparation fails if it does not. A
+    ``station`` image's machine decides it instead, so it keeps the default."""
     build_timeout_sec: float = Field(default=3600, gt=0)
     """How long the Task's own build may run. Not part of the image's identity."""
 
@@ -156,7 +180,12 @@ class ImageSpec(BaseModel):
 
     @model_validator(mode="after")
     def _valid_source(self) -> Self:
-        if self.base_ref is not None:
+        if self.kind is ImageKind.STATION:
+            if not self.software or self.ref is not None or self.base_ref is not None:
+                raise ValueError("a station image names software, and no image ref or base ref")
+        elif self.software:
+            raise ValueError("only a station image names software")
+        elif self.base_ref is not None:
             if self.ref is not None:
                 raise ValueError("an image ref and a base ref are mutually exclusive")
             if self.kind is not ImageKind.VM:
@@ -191,13 +220,6 @@ class ContainerFeature(StrEnum):
     """Creating user namespaces, as rootless containers and browser sandboxes do."""
     MOUNT = "mount"
     """Mounting file systems, and creating mount namespaces, as root."""
-
-
-def _distinct(features: tuple[ContainerFeature, ...]) -> tuple[ContainerFeature, ...]:
-    repeated = sorted({feature for feature in features if features.count(feature) > 1})
-    if repeated:
-        raise ValueError(f"{', '.join(repeated)} listed more than once")
-    return tuple(sorted(features))
 
 
 #: Container features as a Task lists them, each at most once. They are kept sorted, so
@@ -634,6 +656,33 @@ class TaskSpec(BaseModel):
                     f"the {role} image is a VM, which takes no container_features: "
                     "a VM has a kernel of its own"
                 )
+            if resources.container_features and image.kind is ImageKind.STATION:
+                raise ValueError(
+                    f"the {role} names software, which takes no container_features: "
+                    "its machine is no container"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _software_has_a_verifier_of_its_own(self) -> Self:
+        """The machine that has a Task's software decides the agent's account and home, so
+        the Task finds its outputs only below the start directory, and verifies them on a
+        verifier of its own rather than on that machine."""
+        if self.image.kind is not ImageKind.STATION:
+            return self
+        if self.verify.image is None:
+            raise ValueError(
+                "a Task that names software needs a separate verifier with an image of its own"
+            )
+        if self.workdir is not None and _anchored(self.workdir, self.os):
+            raise ValueError("a Task that names software needs a relative [agent].workdir")
+        anchored = [
+            artifact.source for artifact in self.artifacts if _anchored(artifact.source, self.os)
+        ]
+        if anchored:
+            raise ValueError(
+                f"a Task that names software has only relative artifacts, not {', '.join(anchored)}"
+            )
         return self
 
 
@@ -775,6 +824,8 @@ class EnvironmentTable(BaseModel):
     os: OperatingSystem = OperatingSystem.LINUX
     image: str | None = Field(default=None, min_length=1)
     """An image used directly, or the base ``environment/``'s build script builds on."""
+    software: _Software | None = Field(default=None, min_length=1)
+    """Licensed software the agent's machine has, which replaces an image."""
     build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
     cpus: int = Field(default=1, ge=1, strict=True)
     memory_mb: int = Field(default=4096, ge=1, strict=True)
@@ -953,6 +1004,15 @@ class TaskConfig(BaseModel):
         skills_dir = environment.skills_dir
         if skills_dir is not None and not _task_path(skills_dir, environment.os).is_absolute():
             raise ValueError("[environment].skills_dir must be an absolute path")
+        if environment.software is not None:
+            # The machine that has the software is the image, and it decides the account.
+            if environment.image is not None:
+                raise ValueError("[environment].software replaces an image; remove image")
+            if "user" in self.agent.model_fields_set:
+                raise ValueError(
+                    "[environment].software's machine decides the agent's account; "
+                    "remove [agent].user"
+                )
         for table, sized in (
             ("environment", environment),
             ("verifier.environment", verifier.environment),

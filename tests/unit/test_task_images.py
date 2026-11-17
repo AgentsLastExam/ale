@@ -1134,3 +1134,47 @@ async def test_an_undecided_kind_is_never_prepared(write_task_repo) -> None:  # 
         await prepare_task_image_result(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
     with pytest.raises(TaskDefinitionError, match="was not decided before its preparation"):
         await prepare_verifier_image_result(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_software_is_resolved_by_its_provider_and_neither_built_nor_framed(
+    write_task_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    async def classify(reference: str) -> ImageKind:
+        return ImageKind.CONTAINER
+
+    monkeypatch.setattr("ale.run.task_images.classify_image", classify)
+    monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda task: None)
+    repository = write_task_repo(
+        "ale-tasks-software",
+        tasks=("rhino", "studio"),
+        config={
+            "environment": {"software": ["rhino-7"]},
+            "agent": {"user": None},
+            "verifier": {"environment": {"image": "ghcr.io/acme/checker:1"}},
+        },
+        dockerfile=None,
+    )
+    edit_task_config(
+        repository / "tasks/studio",
+        {"environment": {"software": ["rhino-7", "materials-studio"]}},
+    )
+    tasks = load_tasks(repository / "tasks")
+    registry = _Registry()
+    registry.settings = RunConfig.model_validate(
+        {"sandbox": {"providers": ["qemu", "docker:runc"]}}
+    )
+    # No leaf serves software yet: one stands in for it under a leaf's id.
+    station = _Provider(ImageKind.STATION)
+    registry._instances["qemu"] = station  # type: ignore[assignment]
+
+    results = await _prepare_images(tasks, registry)  # type: ignore[arg-type]
+
+    # Each Task's own software, sorted, never shared with another's.
+    assert station.inputs == [
+        ImageRef(kind=ImageKind.STATION, reference="rhino-7"),
+        ImageRef(kind=ImageKind.STATION, reference="materials-studio,rhino-7"),
+    ]
+    solver = next(result for result in results if result.role == "solver")
+    assert [step.name for step in solver.steps] == ["lint", "software-resolution"]
+    assert all(not disk for *_, disk in LAYERED)

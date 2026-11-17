@@ -37,17 +37,19 @@ my-task/
 Required files are `task.toml`, `instruction.md`, the solution entry for the Task OS and the
 tests entry for the verifier's OS, the Task's unless a separate verifier names another:
 `solve.sh` and `test.sh` on Linux and macOS, `solve.ps1` and `test.ps1` on Windows.
-`[environment].image` and `environment/` decide the solver's image:
+The solver's image follows from `environment/` and `[environment]`'s `image` or `software`:
 
 - `environment/Dockerfile` builds a Linux container. It names its base in `FROM`, so an
   `image` beside it fails, and any `build.sh` beside it is only a file in its context.
 - `environment/build.sh` on Linux and macOS, `environment/build.ps1` on Windows, builds a VM
   on the VM image `image` names.
 - `image` alone is used directly.
+- `[environment].software` names licensed software instead of an image; see
+  [Software](#software).
 
-Windows and macOS Tasks run only in VMs, so a Dockerfile fails there. A Linux image used
-directly is a VM when `image` is an absolute path to a qcow2 or names an ALE VM disk, and a
-container when it names a container image
+Windows and macOS Tasks run in VMs, or on a machine that has the software they name, so a
+Dockerfile fails there. A Linux image used directly is a VM when `image` is an absolute path
+to a qcow2 or names an ALE VM disk, and a container when it names a container image
 ([Sandbox image](sandbox-image.md#source-selection-and-identity)). Every image build has
 `environment/` as its context, `setup/` excluded.
 
@@ -79,6 +81,7 @@ network_justification = "the Task reads one publisher's live catalog"
 [environment]                               # the solver's machine
 os = "linux"                                # linux | windows | macos; default linux
 # image = "registry.example/image:tag"      # ALE; used directly, or a build script's base
+# software = ["rhino-7"]                    # ALE; licensed software instead of an image
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
 cpus = 1                                    # whole CPUs; default 1
 memory_mb = 4096                            # default 4096
@@ -147,8 +150,9 @@ These values differ from Harbor's:
   it, so some defaults differ: `cpus` is 1, `memory_mb` 4096 and `[agent].timeout_sec` 900, where
   Harbor sets no limit; `[agent].user` is `user`, not the image's `USER`;
   `[agent].network_mode` is `no-network`, not `public`; `build_timeout_sec` is 3600, not 600.
-- `os = "windows"` is a VM with `.ps1` stage entries, because ALE runs Windows in VMs, where
-  PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
+- `os = "windows"` is a VM, or a machine that has the software the Task names, with `.ps1`
+  stage entries, because ALE runs Windows there, where PowerShell is always available;
+  Harbor's is a Windows container with `.bat` entries.
 - `os = "macos"` is ALE's: a macOS VM with `.sh` stage entries, which Harbor does not run.
 - `artifacts` may be globs, and nothing is collected undeclared, where Harbor always collects
   `/logs/artifacts`.
@@ -436,6 +440,21 @@ it, and the build fails if the account is missing or lives elsewhere. Such an ac
 sign in automatically with its first login settings done, as the
 [macOS guide](../guides/macos-orchard.md#choose-an-image) says.
 
+### Software
+
+A Task whose program cannot be put in an image, such as licensed software bound to the
+machine it is installed on, names it instead: `[environment].software = ["rhino-7"]` lists
+the ids of the software its agent needs, each once, as a Provider that serves software knows
+them. ALE builds nothing for it, so such a Task has no `environment/Dockerfile`, build
+script or `image`. The machine that has the software decides the agent's account and home,
+so the Task sets no `[agent].user`, declares only relative `artifacts` and a relative
+`[agent].workdir`, and its instruction may name paths relative to where the agent starts.
+A separate verifier with an image of its own, `[verifier.environment].image` or
+`tests/Dockerfile`, verifies it, often on another system
+([Verification topology](#verification-topology)), because verification never runs on the
+machine its operator keeps. A Run refuses the Task when no Provider it lists serves the
+software.
+
 ## environment/setup/
 
 `environment/setup/` is optional framework-controlled initialization executed after the
@@ -453,7 +472,9 @@ explicitly set required ownership, write and execute permissions instead of rely
 `instruction.md` is the evaluated-agent instruction, used verbatim. Its input and output paths
 refer to the declared initial environment and artifacts. Use literal sandbox paths:
 `/home/user/...` on Linux, `/Users/user/...` on macOS and `C:\Users\user\...` on Windows.
-ALE does not add or rewrite a workspace prefix.
+ALE does not add or rewrite a workspace prefix. A Task that names software, whose machine
+decides the agent's home, uses paths relative to where the agent starts instead
+([Software](#software)).
 
 ## Skills and MCP servers
 

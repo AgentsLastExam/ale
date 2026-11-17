@@ -138,11 +138,14 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             folder.dockerfile is not None or folder.build_script(operating_system) is None
         )
         script = BUILD_SCRIPTS[operating_system]
-        image_build = "the image's Dockerfile" if dockerfile else f"environment/{script}"
+        place = "in the image's Dockerfile" if dockerfile else f"in environment/{script}"
+        if isinstance(environment, dict) and "software" in environment:
+            # Nothing is built: the machine that has the software is the image.
+            place = "on the machine that has [environment].software"
         findings.append(
             Finding(
                 setup,
-                f"fixed installation or download belongs in {image_build}; "
+                f"fixed installation or download belongs {place}; "
                 "setup is for episode-dynamic initialization",
             )
         )
