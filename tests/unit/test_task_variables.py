@@ -315,8 +315,9 @@ def test_lint_refuses_written_credentials_and_explains_embedded_references(
 class _Sandbox:
     """Records each command's environment and answers with the given output."""
 
-    def __init__(self, stdout: str = "") -> None:
+    def __init__(self, stdout: str = "", *, agent_home: str = "/home/user") -> None:
         self.stdout = stdout
+        self.agent_home = agent_home
         self.envs: list[dict[str, str] | None] = []
 
     async def exec(self, argv, *, env=None, output_sink=None, **_: object) -> ExecResult:  # type: ignore[no-untyped-def]
@@ -361,14 +362,16 @@ async def test_each_stage_receives_its_tables_beneath_the_framework_variables(
         verifier_environment={"OWN": "own"},
     )
     ctx = _context(tmp_path, variables)
-    sandbox = _Sandbox()
+    solver, verifier = _Sandbox(), _Sandbox(agent_home="/srv/grader")
     protocol = EpisodeProtocol(NopHarness())
-    for phase in (Phase.SETUP, Phase.VERIFY):
+    for sandbox, phase in ((solver, Phase.SETUP), (verifier, Phase.VERIFY)):
         await protocol._run_stage(ctx, sandbox, PurePosixPath("/opt/ale/stage"), phase)  # type: ignore[arg-type]
-    setup, verify = sandbox.envs
+    (setup,), (verify,) = solver.envs, verifier.envs
     assert setup is not None and verify is not None
     assert {key: setup[key] for key in ("SHARED", "ONLY")} == variables.environment
     assert setup["ALE_STAGE_DIR"] == "/opt/ale/stage"
+    # Each stage is told the home of its own Sandbox's agent account.
+    assert (setup["ALE_HOME"], verify["ALE_HOME"]) == ("/home/user", "/srv/grader")
     # The separate verifier declared its own [verifier.environment].env.
     assert "ONLY" not in verify and verify["OWN"] == "own" and verify["SHARED"] == "verifier"
 

@@ -137,8 +137,13 @@ verification it inspects no artifact path and copies nothing.
 
 Shared verification uploads `tests/` into the completed solver sandbox. Separate
 verification first releases or retains the solver according to run policy, provisions a
-fresh verifier sandbox, restores captured artifacts to their original absolute paths,
-and uploads the same `tests/`. It never reruns setup or copies the solver filesystem.
+fresh verifier sandbox, restores the captured artifacts, and uploads the same `tests/`. It
+never reruns setup or copies the solver filesystem. An artifact declared by an absolute path
+returns to that path. One declared relative goes below the verifier's start directory, its
+agent account's home with `[agent].workdir` below it, as it was below the solver's, because
+the verifier's account need not have the solver's home. Every stage receives the home of
+the agent account in its own Sandbox as `ALE_HOME`, so separate verification finds those
+artifacts there.
 
 Verification runs as framework-controlled Task code with open egress and elevated privileges
 (root on Linux and macOS, Administrator on Windows), in both shared and separate modes. Task

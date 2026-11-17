@@ -339,7 +339,9 @@ class EpisodeProtocol:
                 await ctx.sandboxes.release(sandbox)
                 verifier = await self._provision_verifier(ctx)
                 try:
-                    await ctx.artifacts.restore(verifier)
+                    await ctx.artifacts.restore(
+                        verifier, ctx.spec.start_directory(verifier.agent_home)
+                    )
                     return await self._verify(task, ctx, verifier)
                 finally:
                     await self._sanitize_for_retention(ctx, verifier)
@@ -941,16 +943,12 @@ class EpisodeProtocol:
             self._parse_harness_trajectory(ctx, collection_failed=collection_failed)
 
         if ctx.artifacts.enabled:
-            for index, artifact in enumerate(ctx.spec.artifacts):
-                path = ctx.spec.artifact_path(artifact, ctx.home)
-                path_type = (
-                    PureWindowsPath if ctx.spec.os is OperatingSystem.WINDOWS else PurePosixPath
-                )
-                name = path_type(path).name or f"artifact-{index}"
-                await ctx.artifacts.collect(sandbox, path, name, artifact.exclude)
+            start = ctx.spec.start_directory(ctx.home)
+            for artifact in ctx.spec.artifacts:
+                await ctx.artifacts.collect(sandbox, artifact, start)
                 logger.info(
                     "artifact collection attempted",
-                    extra={"ale_data": {"source": path, "name": name}},
+                    extra={"ale_data": {"source": artifact.source, "start": start}},
                 )
 
         ctx.solver_evidence_captured = True
@@ -980,16 +978,17 @@ class EpisodeProtocol:
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return True
         # A retained solver may be handed to another agent, so no stage or result of this
-        # Task stays behind, only the agent's own state.
+        # Task stays behind, only the agent's own state, in its own account's home.
+        home = sandbox.agent_home
         result = await self._clear_stages(ctx, sandbox, (Stage.SETUP, Stage.TESTS))
         if result.ok:
             result = await self._remove_paths(
                 ctx,
                 sandbox,
                 (
-                    str(solution_dir(ctx.home, ctx.spec.os)),
-                    _sandbox_path(ctx.spec.os, ctx.home, ".codex", "auth.json"),
-                    _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
+                    str(solution_dir(home, ctx.spec.os)),
+                    _sandbox_path(ctx.spec.os, home, ".codex", "auth.json"),
+                    _sandbox_path(ctx.spec.os, home, ".claude", ".credentials.json"),
                 ),
             )
         if result.ok:
@@ -1182,7 +1181,9 @@ class EpisodeProtocol:
                 else variables.verification(ctx.spec.verify.environment_mode)
             ),
             "ALE_STAGE_DIR": str(directory),
-            "ALE_HOME": ctx.home,
+            # The home of the agent account in the Sandbox the stage runs in, a separate
+            # verifier's own: its start directory there holds the artifacts declared relative.
+            "ALE_HOME": sandbox.agent_home,
         }
         if phase is Phase.VERIFY:
             env.update(
@@ -1467,7 +1468,7 @@ class ReverificationProtocol(EpisodeProtocol):
         async def verify() -> dict[str, float]:
             verifier = await self._provision_verifier(ctx)
             try:
-                await ctx.artifacts.restore(verifier)
+                await ctx.artifacts.restore(verifier, ctx.spec.start_directory(verifier.agent_home))
                 return await self._verify(task, ctx, verifier)
             finally:
                 await self._sanitize_for_retention(ctx, verifier)

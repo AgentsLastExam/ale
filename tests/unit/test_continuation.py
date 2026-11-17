@@ -297,11 +297,12 @@ async def test_a_snapshot_continuation_boots_a_new_solver_and_claims_it(tmp_path
 
 
 def _retention_context(
-    os: OperatingSystem, home: str, record: list[tuple[bool, str | None]]
+    os: OperatingSystem, record: list[tuple[bool, str | None]]
 ) -> SimpleNamespace:
     return SimpleNamespace(
         spec=SimpleNamespace(os=os),
-        home=home,
+        # The solver's; a retained Sandbox is cleaned in its own account's home.
+        home="/elsewhere",
         episode_id="episode",
         sandboxes=SimpleNamespace(
             mark_sanitized=lambda _, *, succeeded, reason=None: record.append((succeeded, reason))
@@ -334,11 +335,12 @@ async def test_retention_removes_every_task_stage_and_names_the_agents_episode(
 
     sandbox = SimpleNamespace(
         request=_request(role).model_copy(update={"retention": "keep"}),
+        agent_home="/home/user",
         exec=exec,
         write_file=write_file,
     )
     sanitized: list[tuple[bool, str | None]] = []
-    ctx = _retention_context(OperatingSystem.LINUX, "/home/user", sanitized)
+    ctx = _retention_context(OperatingSystem.LINUX, sanitized)
     protocol = EpisodeProtocol(ClaudeCodeHarness(), agent_enabled=agent)
     assert await protocol._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
 
@@ -366,11 +368,12 @@ async def test_windows_retention_empties_the_bases_stage_directories() -> None:
 
     sandbox = SimpleNamespace(
         request=_request(SandboxRole.SOLVER).model_copy(update={"retention": "keep"}),
+        agent_home=r"C:\Users\user",
         exec=exec,
         write_file=write_file,
     )
     sanitized: list[tuple[bool, str | None]] = []
-    ctx = _retention_context(OperatingSystem.WINDOWS, r"C:\Users\user", sanitized)
+    ctx = _retention_context(OperatingSystem.WINDOWS, sanitized)
     protocol = EpisodeProtocol(ClaudeCodeHarness())
     assert await protocol._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
 
@@ -396,10 +399,11 @@ async def test_a_failed_stage_clearing_stops_retention_with_its_reason() -> None
 
     sandbox = SimpleNamespace(
         request=_request(SandboxRole.SOLVER).model_copy(update={"retention": "keep"}),
+        agent_home="/home/user",
         exec=exec,
     )
     sanitized: list[tuple[bool, str | None]] = []
-    ctx = _retention_context(OperatingSystem.LINUX, "/home/user", sanitized)
+    ctx = _retention_context(OperatingSystem.LINUX, sanitized)
     protocol = EpisodeProtocol(ClaudeCodeHarness())
     assert not await protocol._sanitize_for_retention(ctx, sandbox)  # type: ignore[arg-type]
     assert len(calls) == 1

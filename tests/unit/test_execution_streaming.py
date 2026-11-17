@@ -23,6 +23,8 @@ pytestmark = pytest.mark.unit
 
 
 class StageSandbox:
+    agent_home = "/home/user"
+
     def __init__(
         self,
         result: ExecResult,

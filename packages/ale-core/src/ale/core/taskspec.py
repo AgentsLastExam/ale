@@ -561,12 +561,9 @@ class TaskSpec(BaseModel):
         return content_hash(self.model_dump(mode="json"))
 
     def start_directory(self, home: str) -> str:
-        """Where the agent starts, given the agent's ``home``."""
+        """Where the agent starts, given the agent's ``home``: a relative artifact is below
+        it, and below the same directory of a separate verifier's account."""
         return str(_task_path(home, self.os) / (self.workdir or ""))
-
-    def artifact_path(self, artifact: Artifact, home: str) -> str:
-        """Where ``artifact`` is, given the agent's ``home``."""
-        return str(_task_path(self.start_directory(home), self.os) / artifact.source)
 
     # --- validation ---
 

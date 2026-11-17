@@ -166,7 +166,9 @@ that same destination; do not declare one path while instructing the agent to us
 ### Artifact copying
 
 `artifacts` accepts file paths, directory paths, and globs such as `*.sgf` or `**/*.json`. A
-relative path is below the directory the agent starts in. A table adds `exclude`, patterns that
+relative path is below the directory the agent starts in, and a separate verifier receives
+it below its own start directory, the same `[agent].workdir` below its own account's home;
+an absolute path is restored where it was. A table adds `exclude`, patterns that
 match as `tar --exclude` does, as in Harbor: `.venv` is that name at any depth and `*.pyc` every
 such file. ALE never walks what it leaves out, so a dependency tree costs nothing.
 
@@ -484,8 +486,10 @@ that run; the RunLock records what the run used. See
 whose root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
-directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
-absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
+directory as cwd. Stage code uses ordinary relative paths. It finds a solver output at the
+absolute path `artifacts` declares, or one declared relative below its start directory:
+`[agent].workdir` below `ALE_HOME`, the home of the agent account in the Sandbox it runs in.
+Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
 own when it has one, since that is where the Task installs what `verify.py` imports, and
 otherwise the framework's own. It stages `ale_verify` and its schema validator into that
 interpreter's site-packages, checks the import, then sets `ALE_VERIFY_PYTHON` in the

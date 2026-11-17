@@ -524,9 +524,7 @@ def test_artifacts_are_paths_or_tables_and_relative_ones_follow_the_agent() -> N
         artifacts=declared,
     )
     assert spec.start_directory("/home/user") == "/home/user/project"
-    assert spec.artifact_path(declared[0], "/home/user") == "/home/user/project/output"
-    assert spec.artifact_path(declared[1], "/home/user") == "/srv/app"
     windows = spec.model_copy(update={"os": OperatingSystem.WINDOWS})
-    assert windows.artifact_path(declared[0], r"C:\Users\user") == (r"C:\Users\user\project\output")
+    assert windows.start_directory(r"C:\Users\user") == r"C:\Users\user\project"
     assert spec.model_copy(update={"workdir": "/srv"}).start_directory("/home/user") == "/srv"
     assert spec.model_copy(update={"workdir": None}).start_directory("/home/user") == "/home/user"
