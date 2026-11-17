@@ -629,6 +629,8 @@ class FirecrackerProvider(Provider):
                 network_modes=frozenset(NetworkMode),
                 snapshot=True,
                 max_cpus=MAX_CPUS,
+                # Each microVM writes to a disk of its own, sized from storage_mb.
+                storage_limit=True,
                 container_features=FEATURES,
             ),
         )

@@ -33,7 +33,9 @@ from ale.core.errors import (
     MemoryExhaustedError,
     PhaseTimeoutError,
     ProviderCapabilityError,
+    ResourceExhaustedError,
     RetentionFinalizationError,
+    StorageExhaustedError,
     TaskDefinitionError,
     TaskError,
 )
@@ -52,7 +54,7 @@ from ale.core.sandbox import (
     SandboxRole,
 )
 from ale.core.task import ResolvedVariables, Task
-from ale.core.taskspec import NetworkMode, OperatingSystem, VerificationMode
+from ale.core.taskspec import NetworkMode, OperatingSystem, Resources, VerificationMode
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import FINAL_STATUSES, Status, Verdict
 from ale.run import artifact_files
@@ -83,6 +85,7 @@ _STATUS_BY_ERROR: tuple[tuple[type[BaseException], Status], ...] = (
     (AgentError, Status.AGENT_ERROR),
     (TaskError, Status.TASK_ERROR),
     (MemoryExhaustedError, Status.MEMORY_EXHAUSTED),
+    (StorageExhaustedError, Status.STORAGE_EXHAUSTED),
     (EnvironmentError_, Status.ENV_ERROR),
 )
 
@@ -90,11 +93,11 @@ _STATUS_BY_ERROR: tuple[tuple[type[BaseException], Status], ...] = (
 def status_for(error: BaseException, *, agents: bool = True) -> Status:
     """Map a raised error to the status a result should carry.
 
-    A Sandbox lost to memory is the agent's result only where ``agents``, that is, the
-    Sandbox the agent ran in, from its phase on; elsewhere the code that ran there was the
-    Task's.
+    A Sandbox lost to memory or storage is the agent's result only where ``agents``, that
+    is, the Sandbox the agent ran in, from its phase on; elsewhere the code that ran there
+    was the Task's.
     """
-    if isinstance(error, MemoryExhaustedError) and not agents:
+    if isinstance(error, ResourceExhaustedError) and not agents:
         return Status.TASK_ERROR
     for error_type, status in _STATUS_BY_ERROR:
         if isinstance(error, error_type):
@@ -744,12 +747,10 @@ async def run_episode(
             )
         phase = _phase_of(exc, ctx.failure_phase)
         status = status_for(exc, agents=_agents_sandbox(task, ctx, phase))
-        if status is Status.MEMORY_EXHAUSTED:
+        if (exhausted := _exhausted(status, task.spec.resources)) is not None:
+            name, declared = exhausted
             ctx.limit_termination = LimitTermination(
-                layer="sandbox",
-                name="memory_mb",
-                configured_value=task.spec.resources.memory_mb,
-                reason=type(exc).__name__,
+                layer="sandbox", name=name, configured_value=declared, reason=type(exc).__name__
             )
         verdict = Verdict.failed(
             status,
@@ -968,6 +969,16 @@ def _gateway_refusal(session: GatewaySession | None) -> LimitTermination | None:
         observed_value=refusal.observed,
         reason="the Gateway refused a model call",
     )
+
+
+def _exhausted(status: Status, resources: Resources) -> tuple[str, int] | None:
+    """The resource ``status`` records the agent's Sandbox was lost to, with the value its
+    Task declares, which the RunLock's termination names; None for any other status."""
+    if status is Status.MEMORY_EXHAUSTED:
+        return "memory_mb", resources.memory_mb
+    if status is Status.STORAGE_EXHAUSTED and resources.storage_mb is not None:
+        return "storage_mb", resources.storage_mb
+    return None
 
 
 def _agents_sandbox(task: Task, ctx: EpisodeContext, phase: str | None) -> bool:

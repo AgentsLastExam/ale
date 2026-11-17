@@ -690,6 +690,8 @@ class QemuProvider(Provider):
                 gui=True,
                 network_modes=frozenset(NetworkMode),
                 snapshot=True,
+                # Each guest writes to an overlay of its own, sized from storage_mb.
+                storage_limit=True,
                 # The models of a VFIO pool are known once a guest sees them.
                 gpus=bool(self.gpu_devices),
             )

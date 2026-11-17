@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 #: Peers speaking another version refuse each other instead of guessing.
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 #: A Node name: it appears in URLs, Sandbox records and operator commands.
 NODE_NAME = r"^[a-z0-9][a-z0-9-]{0,62}$"

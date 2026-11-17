@@ -528,19 +528,20 @@ unchanged wherever a Provider serves it. A Provider is one of two classes. A
 [leaf](lexicon.md) starts Sandboxes on the machine it runs on, and declares each real
 combination it can start as a [capability profile](lexicon.md): kind, operating system,
 architecture, desktop, network modes, snapshots, GPUs, their models and memory and how it
-shares them, CPU and memory limits, and container features. A scheduler places Sandboxes on
-machines it manages, which start them with the leaves there, and offers what those leaves
-do: the Fleet those of the leaves its registered Nodes lend, Daytona the one of its own
-Sandboxes. Which leaves a scheduler uses, and in which order, is its own configuration,
-never a Run's.
+shares them, CPU and memory limits, whether it holds a Sandbox to its `storage_mb`, and
+container features. A scheduler places Sandboxes on machines it manages, which start them
+with the leaves there, and offers what those leaves do: the Fleet those of the leaves its
+registered Nodes lend, Daytona the one of its own Sandboxes. Which leaves a scheduler uses,
+and in which order, is its own configuration, never a Run's.
 
 A Sandbox needs its image's kind and operating system, the architecture that system implies
-(arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, GPUs,
-the models it accepts and the memory it needs on each, container features), and snapshots
-when it saves or boots from one. One rule compares needs with a profile, naming each need
-the profile misses, wherever a Provider or Node is chosen: in a Run's selection, in every
-leaf's `create`, and in the Fleet's placement, so a Sandbox is accepted or refused the same
-way wherever it is asked for. A leaf may also refuse by rules no profile states
+(arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, the
+storage it may write, GPUs, the models it accepts and the memory it needs on each, container
+features), and snapshots when it saves or boots from one. One rule compares needs with a
+profile, naming each need the profile misses, wherever a Provider or Node is chosen: in a
+Run's selection, in every leaf's `create`, and in the Fleet's placement, so a Sandbox is
+accepted or refused the same way wherever it is asked for. A leaf may also refuse by rules
+no profile states
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)
 lists them); they hold wherever it runs, so selection asks them of a leaf, and of the
 leaves a scheduler would use, by the method `create` asks. A request that `create` would
@@ -599,6 +600,7 @@ Task content (the engine).
 | Resources are applied or rejected; the RunLock records the observed image and allocation, with the Provider selected for the Sandbox and the leaf whose profile served it | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
 | A container Sandbox that asks for the container features a profile declares has each of them, as root | Provider in `create`; the Run's preflight on the Host | `test_gives_every_container_feature_it_declares` |
 | A process past the memory the Task declares is ended alone where the kernel can, and the Sandbox goes on; a Sandbox, or its guest service, lost after an OOM kill in it since it started raises `MemoryExhaustedError`, whether the kill was for the Sandbox's memory or the Host's, with what showed it; where nothing records the kill, the loss is a lost guest ([how each Provider tells](../../packages/ale-run/src/ale/run/providers/README.md#memory)) | Provider, explaining a lost guest connection | `test_one_process_past_the_sandboxs_memory_dies_alone`, `test_a_sandbox_lost_to_its_own_memory_says_so` |
+| A Sandbox that names `storage_mb` is held to it, or refused: by writable storage of its own, at least that size, where a write past it fails as on a full disk and the Sandbox goes on; or by measuring from outside the Sandbox, never by asking it, all that has been written over its image, and ending it once that passes `storage_mb`, after which its calls raise `StorageExhaustedError` ([how each Provider does](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)) | Provider, outside the agent's reach | `test_a_sandbox_is_held_to_its_storage` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
 | A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/ale-run/src/ale/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
 | A snapshot holds the disk, any number of Sandboxes boot from it, and it is listed and destroyed through its Provider; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |

@@ -6,6 +6,7 @@ from ale.core.errors import (
     MemoryExhaustedError,
     PhaseTimeoutError,
     ProviderStartError,
+    StorageExhaustedError,
     VerificationAdapterError,
     VerificationConfigurationError,
     VerificationProviderError,
@@ -36,11 +37,25 @@ def test_verification_failures_remain_distinct_terminal_failures(
     assert status_for(error) is status
 
 
-def test_a_sandbox_out_of_memory_is_the_agents_result_or_a_task_defect() -> None:
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (
+            MemoryExhaustedError("the sandbox itself died after an OOM kill in it"),
+            Status.MEMORY_EXHAUSTED,
+        ),
+        (
+            StorageExhaustedError("ALE stopped the sandbox: it wrote 1025 MiB over its image"),
+            Status.STORAGE_EXHAUSTED,
+        ),
+    ],
+)
+def test_a_sandbox_that_exhausts_a_resource_is_the_agents_result_or_a_task_defect(
+    error: Exception, status: Status
+) -> None:
     """The agent's where its code ran, the Task's in setup or a separate verifier; never an
-    environment error, which a retry would answer with fresh memory."""
-    error = MemoryExhaustedError("the sandbox itself died after an OOM kill in it")
-    assert status_for(error) is Status.MEMORY_EXHAUSTED
+    environment error, which a retry would answer with fresh memory or storage."""
+    assert status_for(error) is status
     assert status_for(error, agents=False) is Status.TASK_ERROR
 
 

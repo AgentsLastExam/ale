@@ -25,6 +25,7 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
+from ale.core.trace import ExecutionLog
 from ale.run import ale_image
 from ale.run.providers import ProviderRegistry, machine_arch
 
@@ -625,3 +626,15 @@ class MemoryProvider(Provider):
             sandbox.files = dict(self.snapshots[request.snapshot])
         self.sandboxes.append(sandbox)
         return sandbox
+
+
+class TraceSink:
+    """An episode's execution trace, as the episode's logging writes it."""
+
+    def __init__(self) -> None:
+        self.events: list[ExecutionLog] = []
+
+    def append(self, event: object, *, durable: bool = False) -> int:
+        assert isinstance(event, ExecutionLog)
+        self.events.append(event)
+        return len(self.events)

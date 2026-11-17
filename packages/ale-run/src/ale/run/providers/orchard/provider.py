@@ -721,6 +721,7 @@ class OrchardProvider(Provider):
                 gui=True,
                 network_modes=frozenset(modes),
                 snapshot=True,
+                storage_limit=True,  # the VM's disk
             ),
         )
 

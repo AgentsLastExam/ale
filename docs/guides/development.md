@@ -99,6 +99,11 @@ it and kills a process past it; the Run names each Task it watches at its start.
 whose GPUs other users' jobs share, raise the margin to what their jobs grow by after they
 start ([GPU memory](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory)).
 
+A Docker leaf holds a Task's `storage_mb` by measuring what its Sandbox writes and ending
+the Sandbox once that passes the limit, so leave the Host's disk room for what Sandboxes
+write between two measurements, a few GiB at a fast disk's speed
+([Docker writable storage](../../packages/ale-run/src/ale/run/providers/README.md#docker-writable-storage)).
+
 | Provider id | Starts |
 |---|---|
 | `docker:runc` | Linux containers in local Docker |

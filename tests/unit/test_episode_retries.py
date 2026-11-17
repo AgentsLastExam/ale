@@ -78,6 +78,7 @@ def write_result(
             Status.TIMEOUT,
             Status.BUDGET_EXCEEDED,
             Status.MEMORY_EXHAUSTED,
+            Status.STORAGE_EXHAUSTED,
             Status.REFUSED,
         }
     ],
@@ -113,6 +114,7 @@ async def test_retry_preserves_failed_evidence_and_stops_on_completed_zero(
         (Status.TIMEOUT, "PhaseTimeoutError"),
         (Status.BUDGET_EXCEEDED, "BudgetExceededError"),
         (Status.MEMORY_EXHAUSTED, "MemoryExhaustedError"),
+        (Status.STORAGE_EXHAUSTED, "StorageExhaustedError"),
         (Status.REFUSED, "AgentRefusalError"),
     ],
 )

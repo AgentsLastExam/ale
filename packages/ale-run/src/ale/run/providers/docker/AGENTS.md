@@ -367,7 +367,8 @@ its own.
   A commit keeps no volume, so the profile for container engines takes no snapshots,
   rather than lose the engine's images and containers in one: an engine's layers,
   whiteouts among them, cannot be part of an image's layer, whose whiteouts would read as
-  the layer's own.
+  the layer's own. Nor does it hold a Sandbox to `storage_mb`, since what is written to a
+  volume is not measured ([Writable storage](#writable-storage)).
 - gVisor's own gaps are closed as ALE patches that do what Linux does, rather than worked
   around in the Sandbox, so that a Task needs nothing for gVisor.
 - ALE's chains stay in iptables rather than move to nf_tables, whose gVisor implementation
@@ -463,8 +464,10 @@ also waits on its container and ends guestd's sessions once it stops.
   watcher is in the sandbox, where root could end it; that only hides an exhaustion behind a
   lost session, as root ending guestd does. A hypervisor the Host's OOM killer ends leaves
   no record in the guest, and its loss stays a lost guest.
-- A stop by ALE's GPU watchdog stays an environment error, its memory notwithstanding: ALE
-  stopped it.
+- A stop by ALE, by its GPU watchdog or its storage watch
+  ([Writable storage](#writable-storage)), is reported as what ALE stopped the Sandbox for,
+  without reading its state: an earlier OOM kill of one process, after which the Sandbox
+  went on, leaves `OOMKilled` set, which would make ALE's stop a loss to memory.
 
 ## guestd's replies under gVisor
 
@@ -557,3 +560,67 @@ error.
   streak of failed looks rather than at every look.
 - Managed memory is seen by neither the limit nor the watchdog (it appears in no process's
   row); admission sees it as memory no longer free.
+
+## Writable storage
+
+**Problem.** A Task's `storage_mb` became `--storage-opt size`, which the containerd image
+store, a fresh Docker 29's default, accepts and ignores: a Sandbox wrote past its limit
+unnoticed and could fill the Host's disk. The classic `overlay2` driver refuses the option
+under rootless Docker and off xfs mounted with `pquota`, so there such a Sandbox failed at
+`docker run`.
+
+**Context.** Measured in November 2026:
+- Under the containerd store, Docker 29.1.3 rootful and 29.9.3 rootless, both on ext4, let
+  a container of 64 MiB write 200 MiB; overlay2 refused the option on ext4, on xfs without
+  `pquota`, and under rootless Docker 29.1.3 on xfs with `pquota`. Moby's containerd image
+  service creates a snapshot without the container's storage options
+  (`daemon/containerd/image_snapshot.go`, v29.1.3).
+- `SizeRw` of `docker container inspect --size` is the blocks of the container's writable
+  layer, as containerd's snapshotter (or the classic driver) walks it on the Host. It counts
+  what runc, gVisor registered with `--overlay2=none` and Kata (virtio-fs, `cache=auto`)
+  write alike, by the next read, under rootful Docker 29.1.3 and rootless 29.9.3 alike; not
+  a volume, a tmpfs, the holes of a sparse file, nor a file deleted while still open. The
+  README has the table, and the costs: a walk takes about 1 s of the daemons' CPU per
+  100,000 files, rootful or rootless, and a Sandbox wrote at up to 0.95 GB/s to an NVMe
+  disk.
+- A ready Sandbox of the container base holds 3.4 MiB in its layer, and 16 MiB 30 s later.
+
+**Solution.** Every Docker leaf holds a Sandbox that names `storage_mb` to it by measuring:
+[`storage.py`](storage.py) reads its `SizeRw` every 5 s while this process drives it, and
+past `storage_mb` MiB the Sandbox kills the container, logs the stop to the execution trace
+as the GPU watchdog logs a kill, and has its sessions raise `StorageExhaustedError`, which
+the episode records as `storage_exhausted`. Only the profile for container engines, whose
+storage is on volumes, declares no `storage_limit`. What measuring leaves to the agent is
+[issue #152](https://github.com/AgentsLastExam/ale/issues/152).
+
+**Decisions.**
+- Measure, as Kubernetes measures `ephemeral-storage`, rather than limit: it works the same
+  on every daemon, rootful or rootless, either store, and under every runtime, with
+  nothing asked of the Host.
+- From outside the Sandbox, by the daemon's count, never by asking the Sandbox, whose root
+  the agent may hold.
+- Everything over the image counts, from the start, what ALE and the image write included,
+  as on a disk of that size: a baseline taken when the Sandbox is ready would leave out
+  3.4 MiB, and what the framework and the desktop write after it would count anyway.
+- Every 5 s, not Kubernetes' 10 s: a Sandbox writing at the disk's 0.95 GB/s overshoots by
+  about 5 GiB rather than 10, at about 1 s of the daemons' CPU per 100,000 files measured
+  per measurement, 1 core for 50 Sandboxes of 10,000 files each.
+- One task per Sandbox, so that a layer of many files, slow to walk, delays no other
+  Sandbox's measurement; and `inspect` per container, which ran 51 of them in 0.6 s where
+  one `inspect` naming all 51 took 3.1 s and `docker ps --size` 1.3 s.
+- Kill the container, as the GPU watchdog stops a gVisor Sandbox, rather than stop it
+  gracefully: a Sandbox past its limit should write nothing more.
+- No measure of volumes: `docker system df -v`, Docker's only report of a volume's size,
+  sizes every volume and layer of the daemon (4 to 6 s with 80 volumes) and failed when a
+  container went meanwhile, so the profile for container engines declares no limit.
+- Alternatives measured and not taken:
+  - gVisor's root overlay with a size (`dev.gvisor.flag.overlay2=root:self,size=N`): `df`
+    shows the limit and a write past it fails with `ENOSPC`, rootful and rootless, but every
+    file's metadata stays in the Sentry's memory, which it does not reclaim (about 1.7 KiB a
+    file: 100,000 empty files took 164 MiB of the Sandbox's memory), `docker commit` and
+    `docker cp` no longer see what the Sandbox writes, and an image whose `/tmp` is empty
+    gets a memory-backed `/tmp` beside the limit; and it serves `docker:gvisor` alone.
+  - Docker's own `--storage-opt size`: enforced only by the classic `overlay2` driver on
+    xfs mounted with `pquota`, rootful, which a Host would have to switch to.
+  - Firecracker, which gives each Sandbox a disk of its size: it attaches no GPU and needs
+    `/dev/kvm`.

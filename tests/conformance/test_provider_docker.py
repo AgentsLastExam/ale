@@ -19,7 +19,7 @@ from ale.core.testkit import NESTED_CHECKS, ProviderConformance
 from ale.run import guestd
 from ale.run.framework import framework_identity
 from ale.run.providers import missing_features
-from ale.run.providers.docker import gvisor, kata
+from ale.run.providers.docker import gvisor, kata, storage
 from ale.run.providers.docker.provider import (
     DockerProvider,
     DockerSandbox,
@@ -54,6 +54,8 @@ class TestDockerProvider(ProviderConformance):
     #: The base carries no framework; the Provider adds it.
     framework = framework_identity(user="user", vm=False)
     missing_features = staticmethod(missing_features)
+    #: A measurement after the write, and its kill, on a loaded Host.
+    storage_sec = storage.WATCH_SEC + 15
 
 
 @pytest.mark.needs_kvm

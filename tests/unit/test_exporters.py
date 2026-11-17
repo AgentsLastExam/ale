@@ -212,9 +212,11 @@ def test_scalar_export_requires_an_explicit_policy() -> None:
     assert scalar_reward(result, lambda rewards: rewards["correctness"]) == 1.0
 
 
-@pytest.mark.parametrize("status", [Status.TIMEOUT, Status.MEMORY_EXHAUSTED])
+@pytest.mark.parametrize(
+    "status", [Status.TIMEOUT, Status.MEMORY_EXHAUSTED, Status.STORAGE_EXHAUSTED]
+)
 def test_the_agents_own_outcome_without_rewards_scores_zero(status: Status) -> None:
-    """A Sandbox lost to memory leaves nothing to verify; the agent still failed."""
+    """A Sandbox lost to memory or storage leaves nothing to verify; the agent still failed."""
     _, completed = fixture()
     lost = completed.model_copy(
         update={

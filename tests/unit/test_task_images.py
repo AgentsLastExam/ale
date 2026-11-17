@@ -118,6 +118,7 @@ class _Provider:
                 arch=Arch.of(system),
                 gui=True,
                 network_modes=frozenset(NetworkMode),
+                storage_limit=True,
                 container_features=self.features,
             )
             for system in OperatingSystem

@@ -26,6 +26,7 @@ from ale.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
+    StorageExhaustedError,
 )
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -82,6 +83,30 @@ for child in children:
         os.kill(child, signal.SIGKILL)
     except ProcessLookupError:
         pass
+"""
+
+#: The MiB free to the agent on the filesystem that holds ``$1``.
+_FREE = "import shutil, sys; print(shutil.disk_usage(sys.argv[1]).free >> 20)"
+
+#: Writes ``$2`` MiB of random bytes, which no filesystem compresses, to ``$1`` in blocks of
+#: 1 MiB, and says how many MiB it wrote: all of them, or as many as fitted before the disk
+#: was full.
+_FILL = """
+import errno, os, sys
+block, written = os.urandom(1 << 20), 0
+try:
+    with open(sys.argv[1], "wb") as target:
+        while written < int(sys.argv[2]):
+            target.write(block)
+            written += 1
+        target.flush()
+        os.fsync(target.fileno())
+except OSError as error:
+    if error.errno != errno.ENOSPC:
+        raise
+    print("full", written)
+else:
+    print("wrote", written)
 """
 
 #: Reports, per ``kind=address`` argument, whether the sandbox reached it: ``http`` gets an
@@ -234,6 +259,10 @@ class ProviderConformance:
     Every sandbox carries it in ``/opt/ale/framework`` whatever image it was handed. The
     suite depends on no engine package, so a backend's suite supplies the value; ``None``
     skips the check."""
+
+    storage_sec: float = 60.0
+    """How long after it wrote past its ``storage_mb`` a Sandbox that a Provider holds to it by
+    measuring what it writes may go on before it ends."""
 
     missing_features: (
         Callable[[Sandbox, Iterable[ContainerFeature]], Awaitable[Mapping[ContainerFeature, str]]]
@@ -438,6 +467,59 @@ class ProviderConformance:
             assert sandbox.allocation.sudo is True
             elevated = await sandbox.exec(["sudo", "-n", "true"], identity=Identity.AGENT)
             assert elevated.ok
+        finally:
+            await sandbox.destroy()
+
+    @pytest.mark.asyncio
+    async def test_a_sandbox_is_held_to_its_storage(self) -> None:
+        """A Sandbox that names ``storage_mb`` cannot fill the Host's disk. Either it writes
+        to storage of its own no larger than its allocation records, where a write past the
+        free space fails as on a full disk and the Sandbox goes on; or it sees more room
+        than that, and once it writes past its allocation the Provider ends it within
+        :attr:`storage_sec`, its calls raising :class:`StorageExhaustedError`. A Provider
+        that does neither refuses the Sandbox."""
+        resources = Resources(cpus=1, memory_mb=1024, storage_mb=512)
+        try:
+            sandbox = await self.provider.create(await self.request(resources=resources))
+        except ProviderCapabilityError:
+            return
+        fill = str(PurePosixPath(sandbox.agent_home) / "fill")
+        try:
+            allotted = sandbox.allocation.storage_mb
+            assert allotted is not None and allotted >= 512
+            free = await sandbox.exec(
+                ["python3", "-c", _FREE, sandbox.agent_home], identity=Identity.AGENT
+            )
+            assert free.ok, free.stderr
+            own = int(free.stdout) <= allotted
+            if own and int(free.stdout) > 4096:
+                return  # its own disk bounds it; filling that much proves no more
+            size = int(free.stdout) + 64 if own else allotted + 256
+            try:
+                result = await sandbox.exec(
+                    ["python3", "-c", _FILL, fill, str(size)],
+                    identity=Identity.AGENT,
+                    timeout_sec=600,
+                )
+            except StorageExhaustedError as ended:
+                assert not own and f"{allotted} MiB" in str(ended), ended
+                return
+            assert result.ok, result.stderr
+            outcome, count = result.stdout.split()
+            if own:
+                assert outcome == "full", f"wrote {count} MiB, past what df said was free"
+                assert (await sandbox.exec(["rm", "-f", fill])).ok
+                return
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self.storage_sec
+            while loop.time() < deadline:
+                try:
+                    await sandbox.exec(["true"], timeout_sec=30)
+                except StorageExhaustedError as ended:
+                    assert f"{allotted} MiB" in str(ended), ended
+                    return
+                await asyncio.sleep(1)
+            pytest.fail(f"it wrote {count} MiB, past its storage_mb of {allotted}, and went on")
         finally:
             await sandbox.destroy()
 

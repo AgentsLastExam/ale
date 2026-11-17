@@ -20,7 +20,12 @@ from test_runtime_contracts import make_lock
 from tests.support import edit_task_config, write_task
 
 from ale.core.config import RunConfig, RunTimeouts
-from ale.core.errors import GuestUnreachableError, MemoryExhaustedError
+from ale.core.errors import (
+    GuestUnreachableError,
+    MemoryExhaustedError,
+    ResourceExhaustedError,
+    StorageExhaustedError,
+)
 from ale.core.lock import LimitTermination
 from ale.core.verdict import Status
 from ale.run import guestd
@@ -53,6 +58,7 @@ class MemoryGuest:
         timeout_oracle: bool = False,
         verify_failure: str | None = None,
         run_out: str | None = None,
+        exhausted: ResourceExhaustedError | None = None,
         shared: MemoryGuest | None = None,
         user: str = "user",
     ) -> None:
@@ -68,8 +74,11 @@ class MemoryGuest:
         self.wait_oracle = wait_oracle
         self.timeout_oracle = timeout_oracle
         self.verify_failure = verify_failure
-        #: The stage in which the Sandbox runs out of its memory and is lost.
+        #: The stage in which the Sandbox is lost to memory or storage, by default memory.
         self.run_out = run_out
+        self.exhausted = exhausted or MemoryExhaustedError(
+            "the sandbox itself died after an OOM kill in it (its Task declares 4096 MiB)"
+        )
         self.oracle_started = asyncio.Event()
         self._upload: tuple[int, str] | None = None
         self._buffer = bytearray()
@@ -291,9 +300,7 @@ class MemoryGuest:
         self.stages.append(stage)
         if stage == self.run_out:
             self.closed = True
-            raise MemoryExhaustedError(
-                "the sandbox itself died after an OOM kill in it (its Task declares 4096 MiB)"
-            )
+            raise self.exhausted
 
     async def recv(self) -> str:
         return await self.responses.get()
@@ -681,25 +688,46 @@ async def test_macos_verifier_failure_does_not_accept_a_written_reward(
     assert controller.deleted == controller.created
 
 
+#: Each resource a Sandbox may be lost to, with the error that says so and the agent's status.
+EXHAUSTED: dict[str, tuple[type[ResourceExhaustedError], str, Status]] = {
+    "memory_mb": (
+        MemoryExhaustedError,
+        "the sandbox itself died after an OOM kill in it (its Task declares 4096 MiB)",
+        Status.MEMORY_EXHAUSTED,
+    ),
+    "storage_mb": (
+        StorageExhaustedError,
+        "ALE stopped the sandbox: it wrote 8193 MiB over its image, past the 8192 MiB its Task "
+        "declares",
+        Status.STORAGE_EXHAUSTED,
+    ),
+}
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("resource", sorted(EXHAUSTED))
 @pytest.mark.parametrize(
-    ("stage", "status"),
+    ("stage", "agents"),
     [
-        # Before the agent: the Task's own preparation ran out, a Task defect.
-        ("setup", Status.TASK_ERROR),
+        # Before the agent: the Task's own preparation exhausted it, a Task defect.
+        ("setup", False),
         # The agent's, here the oracle's: no retry, no score.
-        ("oracle", Status.MEMORY_EXHAUSTED),
-        # The shared Sandbox holds what the agent left, in memory too.
-        ("verify", Status.MEMORY_EXHAUSTED),
+        ("oracle", True),
+        # The shared Sandbox holds what the agent left, in memory and on disk.
+        ("verify", True),
     ],
 )
-async def test_a_sandbox_that_runs_out_of_memory_is_charged_to_whose_code_ran_there(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, status: Status
+async def test_a_sandbox_that_exhausts_a_resource_is_charged_to_whose_code_ran_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource: str, stage: str, agents: bool
 ) -> None:
     """Any Provider's loss, which the in-memory Orchard guest stands in for here to run a
     whole episode: setup, the oracle, and shared verification."""
-    guest = MemoryGuest(run_out=stage)
+    kind, message, exhausted = EXHAUSTED[resource]
+    error = kind(message)
+    status = exhausted if agents else Status.TASK_ERROR
+    guest = MemoryGuest(run_out=stage, exhausted=error)
     task, providers, controller = episode_fixture(tmp_path, monkeypatch, guest)
+    edit_task_config(task, {"environment": {"storage_mb": 8192}})
     recorded = make_lock()
     loaded = load_tasks(task)[0]
     result = await run_episode(
@@ -717,21 +745,23 @@ async def test_a_sandbox_that_runs_out_of_memory_is_charged_to_whose_code_ran_th
     )
     assert result.verdict.status is status
     assert result.lock is not None
+    resources = loaded.spec.resources
+    declared = {"memory_mb": resources.memory_mb, "storage_mb": resources.storage_mb}[resource]
     assert result.lock.termination == (
         LimitTermination(
             layer="sandbox",
-            name="memory_mb",
-            configured_value=loaded.spec.resources.memory_mb,
-            reason="MemoryExhaustedError",
+            name=resource,
+            configured_value=declared,
+            reason=type(error).__name__,
         )
-        if status is Status.MEMORY_EXHAUSTED
+        if agents
         else None
     )
     assert result.verdict.rewards is None
     failure = result.record.failure
-    assert failure is not None and failure.error_type == "MemoryExhaustedError"
+    assert failure is not None and failure.error_type == type(error).__name__
     assert failure.phase == ("agent" if stage == "oracle" else stage)
-    assert "after an OOM kill in it (its Task declares 4096 MiB)" in failure.message
+    assert failure.message == message
     assert guest.stages[-1] == stage
     assert controller.deleted == controller.created
 

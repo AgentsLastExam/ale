@@ -724,6 +724,7 @@ class DaytonaProvider(Provider):
                 gui=True,  # depends on the image, as for Docker
                 network_modes=frozenset(NetworkMode),
                 gpus=True,
+                storage_limit=True,  # the Sandbox's disk
                 container_features=FEATURES,
             ),
         )

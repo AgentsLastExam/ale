@@ -18,7 +18,9 @@ holds all that differs between them: its grants, GPUs, size, ``docker run`` flag
 confinement.
 
 A Sandbox takes its GPUs whole, or shares each with others by the device memory its Task
-names, admitted by what is free and watched while it lives (``gpu_sharing.py``). Under rootless
+names, admitted by what is free and watched while it lives (``gpu_sharing.py``). One that
+names ``storage_mb`` is measured while it lives, and stopped once it has written more
+(``storage.py``). Under rootless
 Docker, whose bridges are in a network namespace of rootlesskit's, a listener there relays
 each of its connections to the Host's Gateway and proxy (``rootless.py``).
 """
@@ -49,6 +51,7 @@ from ale.core.errors import (
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
+    StorageExhaustedError,
 )
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -81,7 +84,7 @@ from ale.run.iptables import GATEWAY_CHAIN
 from ale.run.process import run
 from ale.run.providers import machine_arch, memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, subnets, tc
+from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, storage, subnets, tc
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -260,10 +263,6 @@ def _gpu_run_args(uuids: tuple[str, ...]) -> list[str]:
         "--env",
         "NVIDIA_DRIVER_CAPABILITIES=all",
     ]
-
-
-def _storage_run_args(storage_mb: int) -> list[str]:
-    return ["--storage-opt", f"size={storage_mb}M"]
 
 
 async def _in_namespace(container: str, script: str) -> tuple[int, str, str]:
@@ -1009,8 +1008,14 @@ class _Session(StdioTransport):
         self._closing = False
         #: What the end of its stream was found to mean, which a later call then raises too.
         self._explained: GuestUnreachableError | None = None
-        #: Why ALE itself stopped the Sandbox, which the end of the stream then reports.
-        self.stopped_for: str | None = None
+        #: What ALE itself stopped the Sandbox for, which the end of the stream then raises.
+        self.stopped: GuestUnreachableError | None = None
+
+    async def send(self, data: bytes) -> None:
+        # Nothing more is asked of a Sandbox ALE stops, while the stop takes effect.
+        if self.stopped is not None:
+            raise self.stopped
+        await super().send(data)
 
     async def recv(self) -> str:
         line = await super().recv()
@@ -1033,8 +1038,8 @@ class _Session(StdioTransport):
         """A guestd that never answered failed to start, which its stderr, in ``error``,
         says at once; a session that did and ended unasked lost its sandbox, or guestd in
         it, which is a loss to memory after an OOM kill in it; or ALE stopped it."""
-        if self.stopped_for is not None:
-            return GuestUnreachableError(f"the sandbox itself died: {self.stopped_for}")
+        if self.stopped is not None:
+            return self.stopped
         if self._closing or not self._answered:
             return error
         if self._explained is None:
@@ -1160,10 +1165,14 @@ class DockerSandbox(Sandbox):
         #: The watchdog of its Provider, which watches it while it shares GPUs and this
         #: process drives it.
         self._watchdog = watchdog
+        #: What measures what it writes while it names ``storage_mb`` and this process drives
+        #: it.
+        self._storage: storage.Watch | None = None
         #: The Host's ports of its Provider, of which it holds its own until it ends here.
         self._host_ports = host_ports
         #: The context of the phase that last ran a command in it, in which what the watchdog
-        #: does to it is logged, so that the episode's execution trace records it.
+        #: and the storage watch do to it is logged, so that the episode's execution trace
+        #: records it.
         self._context = contextvars.copy_context()
         self._sealed = sealed
         #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
@@ -1315,15 +1324,52 @@ class DockerSandbox(Sandbox):
         )
 
     def watch(self) -> None:
-        """Have the watchdog watch what it uses of its GPUs, when it shares them."""
+        """Have the watchdog watch what it uses of its GPUs, when it shares them, and measure
+        what it writes, when it names ``storage_mb``."""
         gpu = self.allocation.gpu
         if gpu is not None and gpu.memory_mb is not None:
             self._watchdog.watch(
                 gpu_sharing.Watched(self.container_id, gpu.memory_mb, self.overran)
             )
+        if self.allocation.storage_mb is not None:
+            self._storage = storage.Watch(
+                self.container_id, self.allocation.storage_mb, self.wrote_past
+            )
 
     def _unwatch(self) -> None:
         self._watchdog.unwatch(self.container_id)
+        if self._storage is not None:
+            self._storage.stop()
+
+    def _stop_for(self, reason: GuestUnreachableError) -> None:
+        """Have every call from now on, and each that waits on it now, raise ``reason``:
+        ALE is about to stop the Sandbox."""
+        for session in self._sessions:
+            session.stopped = reason
+
+    async def wrote_past(self, written: int) -> None:
+        """Act on the storage watch's finding that it wrote more over its image than its
+        Task's ``storage_mb``: log so in the phase of the command that ran last, and kill it,
+        so that its next call, and one that waits on it now, raises
+        :class:`StorageExhaustedError`.
+
+        Logged before the kill, which ends the episode's command at once: the episode may
+        destroy the Sandbox before the kill returns.
+        """
+        storage_mb = self.allocation.storage_mb
+        written_mb = -(-written >> 20)  # rounded up, so that it shows past the limit
+        found = (
+            f"it wrote {written_mb} MiB over its image, past the {storage_mb} MiB its Task declares"
+        )
+        message = f"ALE's storage watch stopped the Sandbox: {found}"
+        _log.info("%s: %s", self.container, message)
+        data = {"written_mb": written_mb, "storage_mb": storage_mb}
+        self._context.run(
+            logging.getLogger("ale.execution").warning, message, extra={"ale_data": data}
+        )
+        self._watchdog.unwatch(self.container_id)
+        self._stop_for(StorageExhaustedError(f"ALE stopped the sandbox: {found}"))
+        await _docker("kill", self.container, timeout=60)
 
     async def overran(self, overrun: gpu_sharing.Overrun) -> None:
         """Act on the watchdog's finding that it uses more device memory on a GPU than it
@@ -1345,11 +1391,12 @@ class DockerSandbox(Sandbox):
         )
         if gpu.hold is GpuHold.LIMIT:
             self._unwatch()
-            for session in self._sessions:
-                session.stopped_for = (
-                    f"ALE's GPU memory watchdog stopped it: {found}, past "
-                    f"{self.allocation.leaf}'s limit"
+            self._stop_for(
+                GuestUnreachableError(
+                    f"the sandbox itself died: ALE's GPU memory watchdog stopped it: {found}, "
+                    f"past {self.allocation.leaf}'s limit"
                 )
+            )
             await _docker("kill", self.container, timeout=60)
             return
         # Logged in the phase of the command that ran when the watchdog found it: the helper
@@ -1500,7 +1547,9 @@ class DockerProvider(Provider):
         models = await self._models() if runtime.gpus else ()
         profiles = []
         for features in runtime.feature_sets:
-            # A commit keeps no volume, so a Sandbox with storage on one saves no snapshot.
+            # A commit keeps no volume and what a Sandbox writes to one is not measured
+            # (storage.py), so a Sandbox with storage on one saves no snapshot and is held to
+            # no storage_mb.
             on_volumes = any(runtime.grants[feature].volumes for feature in features)
             profiles.append(
                 CapabilityProfile(
@@ -1514,6 +1563,7 @@ class DockerProvider(Provider):
                     gpus=bool(models),
                     gpu_models=models,
                     gpu_hold=runtime.gpu_hold if models else GpuHold.WHOLE,
+                    storage_limit=not on_volumes,
                     container_features=features,
                 )
             )
@@ -1712,8 +1762,6 @@ class DockerProvider(Provider):
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
         argv += ["-e", f"{CONTAINER_VARIABLE}={request.desktop_resolution}"]
-        if resources.storage_mb is not None:
-            argv += _storage_run_args(resources.storage_mb)
 
         confinement: _Confinement | None = None
         admitted: tuple[GpuDevice, ...] = ()
@@ -1762,11 +1810,6 @@ class DockerProvider(Provider):
                     *argv, resolved_image.observed_ref, timeout=_START_SEC
                 )
             if code != 0:
-                if resources.storage_mb is not None:
-                    raise ProviderCapabilityError(
-                        "Docker could not enforce the requested writable-layer quota "
-                        f"({resources.storage_mb} MB): {stderr.strip()}"
-                    )
                 if resources.gpus:
                     raise ProviderCapabilityError(
                         "Docker could not inject the selected NVIDIA GPUs through its "
