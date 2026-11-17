@@ -238,6 +238,7 @@ def _sandbox() -> DockerSandbox:
     sandbox._file_client = SimpleNamespace(close=close)  # type: ignore[assignment]
     sandbox._sessions = ()  # type: ignore[assignment]
     sandbox._watcher = None
+    sandbox._stopping = None
     sandbox._watchdog = gpu_sharing.Watchdog()
     sandbox._context = contextvars.copy_context()
     sandbox.container_id = "f" * 64
@@ -2043,3 +2044,33 @@ async def test_a_sandbox_started_under_another_runtime_is_refused_and_removed(
 def test_a_kata_vm_holds_the_declared_memory_and_its_guests_own() -> None:
     assert kata.memory_mb(512) == 620
     assert kata.memory_mb(8192) == 8492
+
+
+@pytest.mark.asyncio
+async def test_a_kata_sandbox_that_stopped_ends_its_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A microVM killed from outside, as by the Host's OOM killer, stops its container while
+    ``docker exec`` runs on: the sessions end once ``docker wait`` returns, and say why."""
+
+    async def docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
+        if argv[0] == "wait":
+            return 0, "255\n", ""
+        assert argv == ("inspect", "--format", "{{json .State}}", "ale-e1")
+        return 0, json.dumps({"Running": False, "ExitCode": 255}), ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    session = _Session(["sh", "-c", "echo {}; exec sleep 60"], "ale-e1", 1024)
+    await session.start()
+    assert await session.recv() == "{}"
+    pending = asyncio.ensure_future(session.recv())
+    sandbox = DockerSandbox.__new__(DockerSandbox)
+    sandbox.container = "ale-e1"
+    sandbox._sessions = (session, session)
+    await asyncio.wait_for(sandbox._end_sessions(), timeout=10)
+    with pytest.raises(GuestUnreachableError) as ended:
+        await asyncio.wait_for(pending, timeout=10)
+    explained = await session.explain(ended.value)
+    assert str(explained).startswith(
+        "the sandbox itself died: its main process exited with code 255"
+    )

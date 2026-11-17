@@ -1001,6 +1001,12 @@ class _Session(StdioTransport):
         self._closing = True
         await super().close()
 
+    def abandon(self) -> None:
+        """End the stream as its sandbox's death does, for a container that stopped while
+        its ``docker exec`` runs on."""
+        if self._proc is not None and self._proc.returncode is None:
+            self._proc.kill()
+
     async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
         """A guestd that never answered failed to start, which its stderr, in ``error``,
         says at once; a session that did and ended unasked lost its sandbox, or guestd in
@@ -1105,6 +1111,7 @@ class DockerSandbox(Sandbox):
         agent_home: str,
         sealed: bool = False,
         watchdog: gpu_sharing.Watchdog,
+        guest_kernel: bool = False,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -1137,10 +1144,26 @@ class DockerSandbox(Sandbox):
         #: The loopback address guestd relays the agent to the egress proxy from, while sealed.
         self._relay: str | None = None
         self.state = SandboxState.READY
+        #: Under Kata a ``docker exec`` outlives a microVM killed from outside, as by the
+        #: Host's OOM killer, so the sessions end once the container has stopped.
+        self._stopping = asyncio.ensure_future(self._end_sessions()) if guest_kernel else None
+
+    async def _end_sessions(self) -> None:
+        while True:
+            try:
+                await _docker("wait", self.container, timeout=3600)
+                break
+            except ProviderStartError:
+                continue  # still running an hour later
+        for session in self._sessions:
+            session.abandon()
 
     async def _release(self) -> None:
         """Stop watching it, then end its sessions: ALE's own end is no death."""
         self._unwatch()
+        if self._stopping is not None:
+            self._stopping.cancel()
+            await asyncio.gather(self._stopping, return_exceptions=True)
         await asyncio.gather(
             self._client.close(), self._file_client.close(), return_exceptions=True
         )
@@ -1813,6 +1836,7 @@ class DockerProvider(Provider):
             agent_user=agent_user,
             agent_home=agent_home,
             watchdog=self._watchdog,
+            guest_kernel=runtime.guest_kernel,
         )
         sandbox.watch()
         return sandbox
@@ -2229,6 +2253,7 @@ class DockerProvider(Provider):
             agent_home=agent_home,
             sealed=sealed,
             watchdog=self._watchdog,
+            guest_kernel=runtime.guest_kernel,
         )
         if sealed:
             try:

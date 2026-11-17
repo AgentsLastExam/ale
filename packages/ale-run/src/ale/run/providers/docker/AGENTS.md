@@ -315,12 +315,16 @@ episode into a fresh one. Under Kata Docker records none of the guest's OOM kill
   `oom_kill 1`. In the guest the microVM runs out before the container's cgroup does
   (`global_oom`, `CONSTRAINT_NONE`), so its `oom` stays 0 while `oom_kill` counts every
   kill.
+- A Kata hypervisor killed from outside, as the Host's OOM killer would, left the container
+  exited (255) within 5 s but its `docker exec` sessions open, so a command waited out its
+  timeout, which in an episode is the agent's final `timeout`.
 
 **Solution.** The container's state, which the Provider reads once a guestd session ended
 unasked (above), says under runc and gVisor whether an OOM kill came first: `OOMKilled`.
 Under Kata a watcher in the guest ([`memory.py`](../memory.py)) writes the container's
 `memory.events` to a `docker exec` session at every change, and any `oom_kill` or `oom`
-there counts. A loss after such a kill raises `MemoryExhaustedError`.
+there counts. A loss after such a kill raises `MemoryExhaustedError`. Under Kata the Sandbox
+also waits on its container and ends guestd's sessions once it stops.
 
 **Decisions.**
 - Docker's record, read once when the Sandbox is lost, rather than the container's cgroup
@@ -334,7 +338,8 @@ there counts. A loss after such a kill raises `MemoryExhaustedError`.
   with 139, and what killed the main process followed from the memory.
 - Under Kata every kill in the guest counts, since the microVM's memory is the Task's. Its
   watcher is in the sandbox, where root could end it; that only hides an exhaustion behind a
-  lost session, as root ending guestd does.
+  lost session, as root ending guestd does. A hypervisor the Host's OOM killer ends leaves
+  no record in the guest, and its loss stays a lost guest.
 - A stop by ALE's GPU watchdog stays an environment error, its memory notwithstanding: ALE
   stopped it.
 

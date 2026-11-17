@@ -300,8 +300,8 @@ The message says whose memory ran out where its evidence does: a cgroup's `oom_k
 every process any OOM killer ended, the Host's too, and `oom` each time its own limit was
 reached; a console line says `Memory cgroup out of memory` for a cgroup's limit in the VM
 and `Out of memory` for the VM's. Docker's `OOMKilled` does not say. A hypervisor the
-Host's OOM killer ends leaves no record in its guest, so a QEMU or Firecracker Sandbox lost
-so is a lost guest. guestd's systemd unit in a Linux VM sets `OOMPolicy=continue`, so
+Host's OOM killer ends leaves no record in its guest, so a Kata, QEMU or Firecracker Sandbox
+lost so is a lost guest. guestd's systemd unit in a Linux VM sets `OOMPolicy=continue`, so
 that one of its commands the OOM killer ends goes alone.
 
 ## Container features
@@ -518,6 +518,7 @@ configuration is used as it ships.
 | Runs no seccomp filter in the guest (`disable_guest_seccomp`) | Nothing: the VM is the boundary, and the filters are outside it |
 | Writes Docker's `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` into the container's own files, where runc mounts them | A snapshot keeps them; a Sandbox booted from it gets its own, a moment after it starts |
 | Shares the container's root filesystem with the guest over virtio-fs | Nothing; see the costs below |
+| Leaves `docker exec` running after the microVM's hypervisor was killed from outside, as by the Host's OOM killer, though Docker reports the container exited | Waits on each Kata container and ends guestd's sessions once it stops, so the loss is explained as on runc |
 
 What it costs, measured on the `example-task` and `tool-smoke` Tasks of ale-tasks-base
 (the container base with its desktop; 1 CPU, 4096 MB, `block`), five sandboxes of each per

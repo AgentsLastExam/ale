@@ -490,6 +490,7 @@ def _watched_sandbox(
     sandbox.container_id = A
     sandbox._sessions = sessions
     sandbox._watcher = None
+    sandbox._stopping = None
     sandbox._watchdog = watchdog or gpu_sharing.Watchdog()
     sandbox._context = contextvars.copy_context()
     sandbox.state = SandboxState.READY
