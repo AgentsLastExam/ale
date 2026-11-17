@@ -574,8 +574,9 @@ The `docker:gvisor` leaf starts each of its sandboxes under ALE's build of gViso
 system calls go to the Sentry, a kernel in user space, so an exploit in the sandbox must
 escape the Sentry and then its seccomp filter to reach the Host's kernel. The image, guestd
 over `docker exec`, files, uploads, the desktop, GPUs and snapshots work as on runc, and the
-allocation records the runtime Docker reports. Each row below was measured with runsc
-release-20261109.0+ale.0.1.0 under Docker 29.1.3 (containerd snapshotter) on Linux 7.0.
+allocation records the runtime Docker reports. Each row below was measured with ALE's build
+of runsc release-20261109.0, with patches 0001 to 0005, under Docker 29.1.3 (containerd
+snapshotter) on Linux 7.0.
 
 Every Host registers ALE's `runsc` in Docker twice, the same on every Host, GPUs or not: as
 `runsc`, and as `runsc-net-raw`, which adds `--net-raw`, each with exactly the arguments the
@@ -583,7 +584,7 @@ Every Host registers ALE's `runsc` in Docker twice, the same on every Host, GPUs
 shows. A Sandbox runs under `runsc` unless it asks for `raw_sockets`, and then entirely
 under `runsc-net-raw`. Besides finding each name the Run's Sandboxes run under, registered
 with exactly those arguments, the preflight checks that `runsc --version` reports the build
-this engine runs (`+ale.0.1.0`, `VERSION` in its `build.sh`; a stock `runsc` lacks the
+this engine runs (`+ale.0.1.1`, `VERSION` in its `build.sh`; a stock `runsc` lacks the
 rootless and out-of-memory fixes) and, whenever GPUs may be attached, a Sandbox needing them
 or a Node whose profile offers the Host's, that `runsc nvproxy list-supported-drivers` lists
 the Host's NVIDIA driver, and, whenever a Sandbox may share GPUs, that `runsc flags` lists

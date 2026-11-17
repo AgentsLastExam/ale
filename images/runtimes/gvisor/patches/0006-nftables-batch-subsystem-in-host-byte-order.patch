@@ -1,0 +1,99 @@
+nftables: take a batch's subsystem id in host byte order, as Linux does
+
+What: the Sentry's NETLINK_NETFILTER takes a batch whose begin message names
+the nf_tables subsystem in host byte order (res_id 10 read as 0x0a00) as a
+batch for nf_tables, as Linux's nfnetlink_rcv_skb_batch() does ("Work around
+old nft using host byte order"), instead of refusing it as an unknown
+subsystem.
+
+Why: the libnftnl of iptables 1.8.7, the iptables-nft of Ubuntu 22.04, writes
+it so. Under --TESTONLY-nftables every change it made failed with "iptables:
+Invalid argument" (the Sentry's debug log: "Unknown subsystem id 2560"), so
+the docker.io dockerd of Ubuntu 22.04 failed to start ("failed to create NAT
+chain DOCKER").
+
+Verified:
+- The new syscall test
+  NetlinkNetfilterTest.AddTableInBatchWithSubsystemInHostByteOrder, built in
+  gVisor's builder container and run as root in a container with
+  CAP_NET_ADMIN, CAP_NET_RAW and CAP_SYS_ADMIN, passed on Linux 7.0 under runc
+  and on runsc with this patch (--TESTONLY-nftables --net-raw,
+  TEST_ON_GVISOR=systrap), and failed on runsc without it. The whole
+  socket_netlink_netfilter_test passed with it, 268 tests.
+- iptables 1.8.7 in an Ubuntu 22.04 container on runsc with --TESTONLY-nftables:
+  "iptables -t nat -N TESTCHAIN" failed with "Invalid argument" before this
+  patch and succeeded with it; the docker.io dockerd 29.1.3 then started.
+
+diff --git a/pkg/sentry/socket/netlink/netfilter/protocol.go b/pkg/sentry/socket/netlink/netfilter/protocol.go
+index 2105a92..eaa29c7 100644
+--- a/pkg/sentry/socket/netlink/netfilter/protocol.go
++++ b/pkg/sentry/socket/netlink/netfilter/protocol.go
+@@ -1335,7 +1335,13 @@ func (p *Protocol) receiveBatchMessage(ctx context.Context, ms *nlmsg.MessageSet
+ 
+ 	// The resource ID is a 16-bit value that is stored in network byte order.
+ 	// We ensure that it is in host byte order before passing it for processing.
++	// Like Linux's nfnetlink_rcv_skb_batch(), take NFNL_SUBSYS_NFTABLES in host
++	// byte order too ("Work around old nft using host byte order"), as the
++	// libnftnl of iptables 1.8.7 sends it.
+ 	resID := nlmsg.NetToHostU16(nfGenMsg.ResourceID)
++	if nfGenMsg.ResourceID == linux.NFNL_SUBSYS_NFTABLES {
++		resID = linux.NFNL_SUBSYS_NFTABLES
++	}
+ 	if err := p.processBatchMessage(ctx, buf, ms, hdr, resID); err != nil {
+ 		log.Debugf("Failed to process batch message: %v", err)
+ 		netlink.DumpErrorMessage(hdr, ms, err.GetError())
+diff --git a/test/syscalls/linux/socket_netlink_netfilter.cc b/test/syscalls/linux/socket_netlink_netfilter.cc
+index 6005e7a..b9acf6e 100644
+--- a/test/syscalls/linux/socket_netlink_netfilter.cc
++++ b/test/syscalls/linux/socket_netlink_netfilter.cc
+@@ -269,6 +269,50 @@ TEST(NetlinkNetfilterTest, AddAndRetrieveNewTable) {
+   ASSERT_NO_ERRNO(NetfilterFlushRuleset(fd));
+ }
+ 
++// The libnftnl of iptables 1.8.7 sends a batch's subsystem id in host byte
++// order, which Linux takes for NFNL_SUBSYS_NFTABLES.
++TEST(NetlinkNetfilterTest, AddTableInBatchWithSubsystemInHostByteOrder) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCaps()));
++  std::string test_table_name = GetUniqueTestTableName();
++  bool correct_response = false;
++
++  FileDescriptor fd = ASSERT_NO_ERRNO_AND_VALUE(NetfilterBoundSocket());
++
++  std::vector<char> add_request_buffer =
++      NlBatchReq()
++          .SeqStart(kSeq)
++          .Req(NlReq("newtable req ack inet")
++                   .Seq(kSeq + 1)
++                   .StrAttr(NFTA_TABLE_NAME, test_table_name)
++                   .Build())
++          .SeqEnd(kSeq + 2)
++          .Build();
++  // The batch begins with its batch begin message.
++  struct nfgenmsg* nfg = reinterpret_cast<struct nfgenmsg*>(NLMSG_DATA(
++      reinterpret_cast<struct nlmsghdr*>(add_request_buffer.data())));
++  nfg->res_id = NFNL_SUBSYS_NFTABLES;
++
++  std::vector<char> get_request_buffer =
++      NlReq("gettable req inet")
++          .Seq(kSeq + 3)
++          .StrAttr(NFTA_TABLE_NAME, test_table_name)
++          .Build();
++
++  ASSERT_NO_ERRNO(NetlinkNetfilterBatchRequestAckOrError(
++      fd, kSeq, kSeq + 2, add_request_buffer.data(),
++      add_request_buffer.size()));
++  ASSERT_NO_ERRNO(NetlinkRequestResponse(
++      fd, get_request_buffer.data(), get_request_buffer.size(),
++      [&](const struct nlmsghdr* hdr) {
++        correct_response = hdr->nlmsg_type ==
++                           ((NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_NEWTABLE);
++      },
++      false));
++
++  ASSERT_TRUE(correct_response);
++  ASSERT_NO_ERRNO(NetfilterFlushRuleset(fd));
++}
++
+ TEST(NetlinkNetfilterTest, GetDumpTables) {
+   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCaps()));
+   std::string test_table_name = GetUniqueTestTableName();

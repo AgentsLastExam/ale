@@ -58,7 +58,7 @@ ARGUMENTS = {
 }
 #: The version of ALE's build of runsc this engine runs, ``VERSION`` in
 #: images/runtimes/gvisor/build.sh, and what ``runsc --version`` reports of it.
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 BUILD = f"+ale.{VERSION}"
 #: The ``runsc`` command that lists the NVIDIA driver versions nvproxy supports.
 DRIVERS = ("nvproxy", "list-supported-drivers")

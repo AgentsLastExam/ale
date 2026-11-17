@@ -1587,7 +1587,7 @@ async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     ) == ("runs arm64, not x86_64",)
 
 
-_RUNSC = "/usr/local/lib/ale-gvisor/0.1.0/runsc"
+_RUNSC = "/usr/local/lib/ale-gvisor/0.1.1/runsc"
 _REGISTERED = dict(gvisor.ARGUMENTS)
 #: Part of what ``runsc flags`` of ALE's build lists.
 _FLAGS = (
@@ -1611,7 +1611,7 @@ def _preflight_host(
     *,
     shims: tuple[str, ...] = (),
     devices: tuple[str, ...] = (),
-    version: str = "runsc version release-20261109.0+ale.0.1.0\nspec: 1.2.1\n",
+    version: str = "runsc version release-20261109.0+ale.0.1.1\nspec: 1.2.1\n",
     drivers: str = "570.124.06\n580.95.05\n",
     flags: str = _FLAGS,
     flags_code: int = 0,
@@ -1732,13 +1732,13 @@ async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
     ("version", "drivers", "needs_gpus", "refused"),
     [
         ("runsc version release-20261109.0\nspec: 1.2.1\n", "", 0, "needs ALE's build"),
-        ("runsc version release-20261109.0+ale.0.1.01\n", "", 0, "ale.0.1.0 of"),
-        ("runsc version release-20261109.0+ale.0.2.0\n", "", 0, "ale.0.1.0 of"),
-        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", 0, None),
-        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", 1, "driver 570.124.06"),
-        ("runsc version release-20261109.0+ale.0.1.0\n", "570.124.06\n", 1, None),
+        ("runsc version release-20261109.0+ale.0.1.11\n", "", 0, "ale.0.1.1 of"),
+        ("runsc version release-20261109.0+ale.0.1.0\n", "", 0, "ale.0.1.1 of"),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", 0, None),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", 1, "driver 570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "570.124.06\n", 1, None),
         # With no needs, as a Node lends it, its profile offers the Host's GPUs.
-        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", None, "570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", None, "570.124.06"),
     ],
 )
 async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_driver_here(
@@ -1760,7 +1760,7 @@ async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_dr
             await preflight
     else:
         await preflight
-    if needs_gpus != 0 and "+ale.0.1.0\n" in version:
+    if needs_gpus != 0 and "+ale.0.1.1\n" in version:
         assert ran[-1] == (_RUNSC, "nvproxy", "list-supported-drivers")
     else:
         assert all(argv[1] == "--version" for argv in ran)
