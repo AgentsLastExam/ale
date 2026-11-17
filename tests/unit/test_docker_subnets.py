@@ -179,3 +179,23 @@ async def test_a_creation_that_timed_out_is_removed_as_the_daemon_may_finish_it(
     with pytest.raises(ProviderStartError, match="timed out"):
         await _Networks().create("ale-net-e1")
     assert calls[-1] == ("network", "rm", "ale-net-e1")
+
+
+@pytest.mark.asyncio
+async def test_sandboxes_starting_at_once_read_the_default_bridges_resolv_conf_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One helper for a burst, where each sandbox's own would start a container on a daemon
+    already slow to start them."""
+    reads: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        reads.append(argv)
+        await asyncio.sleep(0.01)
+        return 0, "nameserver 192.0.2.53\n", ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    networks = _Networks()
+    found = await asyncio.gather(*(networks.resolv_conf() for _ in range(25)))
+    assert set(found) == {"nameserver 192.0.2.53\n"} and len(reads) == 1
+    assert reads[0][-1] == "/etc/resolv.conf"

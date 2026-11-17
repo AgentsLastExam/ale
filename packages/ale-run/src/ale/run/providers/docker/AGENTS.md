@@ -163,6 +163,9 @@ a container on the default bridge, which names the Host's upstream servers.
   the sandbox forges nothing toward the Host.
 - `resolv.conf` is written in place by `docker exec` rather than bind-mounted: the file
   stays the container's own and writable, as Docker's is, with nothing to keep on the Host.
+- The default bridge's `resolv.conf` is read once per Provider, by one helper however many
+  sandboxes start at once: each helper is a container start, which a loaded daemon queues
+  (80 s for one on a rootless daemon under a load of about 200, November 2026).
 - The bridge's MAC, which the filters match, is read by a runc helper on the new network,
   which resolves the Host's address there and is removed before the sandbox starts, and is
   kept in a label for a reattaching run. A helper on `--network host` sees no bridge device

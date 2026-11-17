@@ -357,18 +357,21 @@ class _Networks:
         return self._host_ip
 
     async def resolv_conf(self) -> str:
-        """As Docker wrote it for a helper on the default bridge."""
+        """As Docker wrote it for a helper on the default bridge: one helper, however many
+        sandboxes ask at once, each of which would otherwise start its own."""
         if self._resolv_conf is None:
-            code, out, stderr = await _docker(
-                "run", "--rm", *HELPER_RUNTIME, "--network", "bridge",
-                "--entrypoint", "cat", NETFILTER_IMAGE, "/etc/resolv.conf",
-                timeout=_START_SEC,
-            )  # fmt: skip
-            if code != 0 or "nameserver" not in out:
-                raise ProviderStartError(
-                    f"could not read the default bridge's resolv.conf: {stderr.strip()}"
-                )
-            self._resolv_conf = out
+            async with self._reading:
+                if self._resolv_conf is None:
+                    code, out, stderr = await _docker(
+                        "run", "--rm", *HELPER_RUNTIME, "--network", "bridge",
+                        "--entrypoint", "cat", NETFILTER_IMAGE, "/etc/resolv.conf",
+                        timeout=_START_SEC,
+                    )  # fmt: skip
+                    if code != 0 or "nameserver" not in out:
+                        raise ProviderStartError(
+                            f"could not read the default bridge's resolv.conf: {stderr.strip()}"
+                        )
+                    self._resolv_conf = out
         return self._resolv_conf
 
     async def create(self, name: str, *, internal: bool = False) -> str:
