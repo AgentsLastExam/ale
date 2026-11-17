@@ -2147,9 +2147,9 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     memory: str,
 ) -> None:
     """The union of their grants, the whole Sandbox under the runtime one of them needs, its
-    memory with what the runtime itself takes, its network mode recorded, and, under Kata or
-    gVisor, a network of its own, which goes again when the Sandbox does not start. A
-    container engine's storage is on volumes of its own."""
+    memory with what the runtime itself takes and no swap, its network mode recorded, and,
+    under Kata or gVisor, a network of its own, which goes again when the Sandbox does not
+    start. A container engine's storage is on volumes of its own."""
     calls: list[tuple[str, ...]] = []
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
@@ -2197,6 +2197,8 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     pinned = [run[index + 1] for index, flag in enumerate(run) if flag == "--runtime"]
     assert pinned == [registered]
     assert run[run.index("--memory") + 1] == memory
+    # No swap on any runtime: the Task's memory is the same whatever swap the Host has.
+    assert run[run.index("--memory-swap") + 1] == memory
     # An application, not gVisor's Sentry, is what the OOM killer takes.
     assert ("--oom-score-adj" in run) is (runtime == "gvisor")
     created = _created(calls)

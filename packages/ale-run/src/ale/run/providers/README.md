@@ -311,6 +311,16 @@ Host's OOM killer ends leaves no record in its guest, so a Kata, QEMU or Firecra
 lost so is a lost guest. guestd's systemd unit in a Linux VM sets `OOMPolicy=continue`, so
 that one of its commands the OOM killer ends goes alone.
 
+No Sandbox swaps to the Host. Every Docker leaf starts a Sandbox with `--memory-swap` equal
+to `--memory`, under every runtime. Docker's default, twice `--memory`, let one process of a
+512 MiB runc Sandbox hold 1008 MiB on a Host with 8 GiB of swap, and 504 MiB in another run
+there, against 504 MiB without swap; one of a 512 MiB gVisor Sandbox held 1112 MiB. Under
+Kata the flag only sets the guest container's `memory.swap.max` to 0: the microVM has no swap
+and its size is unchanged, and Kata's cgroup on the Host has no limit either way. The Linux
+VMs have no swap: the VM base, built from `ubuntu:24.04`, and Firecracker's microVM, built
+from the Task's image, have neither a swap file nor a swap partition. Windows keeps its page
+file and macOS its swap on the guest's own disk, part of what the VM holds.
+
 ## Container features
 
 A Task's `container_features` name the kernel features its container needs

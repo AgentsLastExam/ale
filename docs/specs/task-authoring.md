@@ -225,7 +225,10 @@ it has written and ending it once that passes `storage_mb`; one that can do neit
 not serve the Task, so such a Task never fills the Host's disk. `memory_mb` holds files in
 memory, such as a tmpfs, too, and, with shared verification, the verifier beside what the
 agent left. A Sandbox lost to either ends its Episode
-([Episode protocol](episode-protocol.md#agent-or-oracle)).
+([Episode protocol](episode-protocol.md#agent-or-oracle)). The Host's swap never adds to
+`memory_mb`, so that a Task gets the same memory on every Host; a guest system that pages to
+its own disk, as Windows and macOS do, keeps its paging
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#memory)).
 
 ### GPUs
 

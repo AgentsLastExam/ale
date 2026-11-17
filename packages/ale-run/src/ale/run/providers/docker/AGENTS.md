@@ -378,6 +378,28 @@ its own.
   refuses (`EINVAL`, which Linux allows), the CNI bridge plugin's hairpin mode and a netlink
   request of netavark 1.4 fail too.
 
+## A Sandbox's swap
+
+**Problem.** What a Task's process got of its memory depended on the Host: with Docker's
+default swap allowance, one process of a 512 MiB runc Sandbox held 1008 MiB in one run and
+504 MiB in another on a Host with 8 GiB of swap, and one of a 512 MiB gVisor Sandbox 1112 MiB
+(November 2026).
+
+**Context.** `--memory` alone sets the cgroup's `memory.max`, and Docker then lets the
+container swap as much again (`--memory-swap` twice `--memory`), as far as the Host's free
+swap, which every user of the Host shares, reaches. A VM's memory is its size, and ALE's
+Linux VMs have no swap.
+
+**Solution.** Every Sandbox, on every Docker leaf, gets `--memory-swap` equal to `--memory`.
+
+**Decisions.**
+- No swap rather than an allowance of it: an allowance holds only as far as the Host's free
+  swap at that moment, so a Task would still get different memory on different Hosts, or on
+  one Host at different times.
+- On every runtime: under Kata the flag only sets the guest container's `memory.swap.max` to
+  0, where the microVM has no swap anyway, and leaves its size and its cgroup on the Host as
+  they were (measured, Kata 4.3.1).
+
 ## A gVisor sandbox's memory and death
 
 **Problem.** Under `runsc`, an application got less memory than under runc for the same

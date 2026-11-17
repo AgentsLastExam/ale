@@ -1743,6 +1743,9 @@ class DockerProvider(Provider):
         isolated = request.network.mode is not NetworkMode.OPEN
         # Named even for runc: a Host whose default runtime is another would run it there.
         registered, grant = runtime.granted(resources.container_features)
+        # No swap: Docker's default lets a container swap as much again, as far as the Host's
+        # swap reaches, so the memory a Task gets would vary from Host to Host.
+        memory_limit = f"{runtime.memory_mb(resources.memory_mb)}m"
         argv = [
             "run", "-d", "--name", container,
             "--label", f"{LABEL}={request.episode_id}",
@@ -1751,7 +1754,8 @@ class DockerProvider(Provider):
             "--label", f"{RETENTION_LABEL}={request.retention}",
             "--label", f"{NETWORK_LABEL}={request.network.mode.value}",
             "--cpus", str(resources.cpus),
-            "--memory", f"{runtime.memory_mb(resources.memory_mb)}m",
+            "--memory", memory_limit,
+            "--memory-swap", memory_limit,
             "--runtime", registered,
             *runtime.flags,
         ]  # fmt: skip
