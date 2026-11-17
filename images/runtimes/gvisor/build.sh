@@ -13,7 +13,7 @@ set -euo pipefail
 
 # This image's own version: raise it to publish a changed build. A published version is
 # never rebuilt.
-VERSION=0.1.0
+VERSION=0.1.1
 GVISOR_TAG=release-20261109.0
 GVISOR_COMMIT=a0e6be6fb5e03d8ebea13592f36a097c7e9a41b9
 

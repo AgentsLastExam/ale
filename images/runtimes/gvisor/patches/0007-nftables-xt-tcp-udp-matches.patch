@@ -1,0 +1,481 @@
+nftables: match xt_tcp and xt_udp as Linux does
+
+What: the xtables "tcp" and "udp" matches that an nf_tables rule holds through
+nft_compat match a packet's source and destination port ranges, each possibly
+inverted, and for tcp its flags under a mask and an option, as Linux's
+net/netfilter/xt_tcpudp.c does, instead of matching every packet. A packet of
+another protocol never matches; a header too short to read, and a TCP fragment
+at offset 8, are dropped, as Linux's hotdrop drops them. The match's info is
+taken when it is at least the struct's size and the same once aligned
+(XT_ALIGN), as Linux takes it.
+
+Why: iptables-nft before 1.8.8, such as Ubuntu 22.04's 1.8.7, writes
+--sport, --dport and --tcp-flags with these matches rather than with payload
+comparisons. A placeholder that matched everything turned each such rule into
+one for the whole protocol: the dockerd of Ubuntu 22.04's docker.io writes
+"-p udp -m udp --dport 53 -j DNAT" and "-p tcp -m tcp --dport <port> -j DNAT"
+rules, and in its containers a lookup through Docker's embedded DNS server got
+no answer (busybox nslookup in 5 of 5 runs, wget of a container by name in
+some).
+
+Verified:
+- gVisor's unit tests in its builder container: the new
+  TestCompatTCPUDPMatchEvaluation (ports, inversion, flags, an option, another
+  protocol, a short header) and TestCompatTCPUDPMatchParse (aligned and
+  unaligned info, too short, too long, unknown inverse flags) pass, as does
+  the rest of //pkg/tcpip/nftables:nftables_test. The syscall tests that add
+  tcp and udp matches with an unaligned info (CompatNoopMatchTests) pass in
+  socket_netlink_netfilter_test, 268 tests, on runsc with this patch.
+- Docker in an Ubuntu 22.04 container on runsc with --TESTONLY-nftables,
+  CAP_NET_ADMIN, CAP_SYS_ADMIN and its storage on a volume: the docker.io
+  dockerd 29.1.3 (iptables 1.8.7), installed in the image or during the run,
+  ran containers that resolved each other by name (busybox nslookup and wget,
+  5 of 5), reached the Internet, published a port to the container's loopback
+  and its own address, built an image and deleted files of their image.
+
+diff --git a/pkg/tcpip/nftables/nft_xt_match.go b/pkg/tcpip/nftables/nft_xt_match.go
+index e5d98f5..4dd4ddc 100644
+--- a/pkg/tcpip/nftables/nft_xt_match.go
++++ b/pkg/tcpip/nftables/nft_xt_match.go
+@@ -27,6 +27,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/marshal/primitive"
+ 	"gvisor.dev/gvisor/pkg/sentry/socket/netlink/nlmsg"
+ 	"gvisor.dev/gvisor/pkg/syserr"
++	"gvisor.dev/gvisor/pkg/tcpip/header"
+ 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+ )
+ 
+@@ -67,10 +68,9 @@ func lookupCompatMatchRevision(name string, rev uint32, family stack.AddressFami
+ 	}
+ }
+ 
+-// compatNoopMatch implements pass-through xtables matches, including "comment".
+-// TODO: b/505405732 - Support xt_tcp/xt_udp.
++// compatNoopMatch implements pass-through xtables matches: "comment".
+ type compatNoopMatch struct {
+-	// name is the name of the match extension (e.g., "tcp" or "udp").
++	// name is the name of the match extension.
+ 	name string
+ 	// revision is the match extension revision.
+ 	revision uint32
+@@ -79,7 +79,6 @@ type compatNoopMatch struct {
+ }
+ 
+ // comment matches always succeed (net/netfilter/xt_comment.c:comment_mt).
+-// TCP/UDP remain placeholders until b/505405732 is implemented.
+ func (op *compatNoopMatch) evaluate(regs *registerSet, evalCtx opEvalCtx) {
+ 	regs.verdict = Verdict{Code: VC(linux.NFT_CONTINUE)}
+ }
+@@ -184,8 +183,202 @@ func initMatch(tab *Table, exprInfo ExprInfo) (operation, *syserr.AnnotatedError
+ 		if rev > tcpudpMaxRevision {
+ 			return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("%s revision %d not supported", name, rev))
+ 		}
+-		return &compatNoopMatch{name: name, revision: rev, infoData: infoData}, nil
++		return parseTCPUDPMatch(name, rev, infoData)
+ 	default:
+ 		return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("match extension %s not supported", name))
+ 	}
+ }
++
++// compatTCPUDPMatch implements the xt_tcp and xt_udp matches, which
++// iptables-nft before 1.8.8, such as Ubuntu 22.04's 1.8.7, uses for --sport,
++// --dport and --tcp-flags.
++// Ref: net/netfilter/xt_tcpudp.c
++type compatTCPUDPMatch struct {
++	// name is MatchTCP or MatchUDP.
++	name string
++	// revision is the match extension revision.
++	revision uint32
++	// infoData is the raw netlink attribute payload; saved for dump.
++	infoData []byte
++	// info is the match's xt_tcp; an xt_udp sets only its ports and
++	// InverseFlags, whose bits for the ports are the same.
++	info linux.XTTCP
++}
++
++// xtAlign is the size an xtables extension's info takes: XT_ALIGN() in
++// include/uapi/linux/netfilter/x_tables.h.
++func xtAlign(size int) int {
++	return (size + 7) &^ 7
++}
++
++// xtInfoFits reports whether an info of length n holds an extension's info of
++// size, as Linux takes it: at least size bytes (nft_match_select_ops()), and
++// the same once aligned (xt_check_match()).
++func xtInfoFits(n, size int) bool {
++	return n >= size && xtAlign(n) == xtAlign(size)
++}
++
++// parseTCPUDPMatch decodes a tcp or udp match's info.
++// Ref: net/netfilter/xt_tcpudp.c:tcp_mt_check(), udp_mt_check() and
++// net/netfilter/x_tables.c:xt_check_match()
++func parseTCPUDPMatch(name string, rev uint32, infoData []byte) (operation, *syserr.AnnotatedError) {
++	op := &compatTCPUDPMatch{name: name, revision: rev, infoData: infoData}
++	if name == MatchTCP {
++		if !xtInfoFits(len(infoData), linux.SizeOfXTTCP) {
++			return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("tcp info size %d, want %d", len(infoData), linux.SizeOfXTTCP))
++		}
++		op.info.UnmarshalBytes(infoData[:linux.SizeOfXTTCP])
++		if op.info.InverseFlags&^linux.XT_TCP_INV_MASK != 0 {
++			return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("tcp inverse flags %#x unknown", op.info.InverseFlags))
++		}
++		return op, nil
++	}
++	if !xtInfoFits(len(infoData), linux.SizeOfXTUDP) {
++		return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("udp info size %d, want %d", len(infoData), linux.SizeOfXTUDP))
++	}
++	var udp linux.XTUDP
++	udp.UnmarshalBytes(infoData[:linux.SizeOfXTUDP])
++	if udp.InverseFlags&^linux.XT_UDP_INV_MASK != 0 {
++		return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("udp inverse flags %#x unknown", udp.InverseFlags))
++	}
++	op.info = linux.XTTCP{
++		SourcePortStart:      udp.SourcePortStart,
++		SourcePortEnd:        udp.SourcePortEnd,
++		DestinationPortStart: udp.DestinationPortStart,
++		DestinationPortEnd:   udp.DestinationPortEnd,
++		InverseFlags:         udp.InverseFlags,
++	}
++	return op, nil
++}
++
++// portMatch reports whether port is within [start, end], inverted by invert.
++// Ref: net/netfilter/xt_tcpudp.c:port_match()
++func portMatch(start, end, port uint16, invert bool) bool {
++	return (port >= start && port <= end) != invert
++}
++
++// match reports whether pkt matches, and whether it must be dropped instead,
++// as Linux's matches set hotdrop for a header too short to read.
++// Ref: net/netfilter/xt_tcpudp.c:tcp_mt(), udp_mt()
++func (op *compatTCPUDPMatch) match(pkt *stack.PacketBuffer) (matched bool, drop bool) {
++	protocol, minimum := header.UDPProtocolNumber, header.UDPMinimumSize
++	if op.name == MatchTCP {
++		protocol, minimum = header.TCPProtocolNumber, header.TCPMinimumSize
++	}
++	// Linux relies on the rule's own protocol match before this one; a packet
++	// of another protocol never matches here.
++	switch pkt.NetworkProtocolNumber {
++	case header.IPv4ProtocolNumber:
++		net := header.IPv4(pkt.NetworkHeader().Slice())
++		if len(net) < header.IPv4MinimumSize || net.TransportProtocol() != protocol {
++			return false, false
++		}
++		// A fragment other than the first never matches; a TCP one at offset
++		// 8, which could overwrite the first one's flags, is dropped.
++		if offset := net.FragmentOffset(); offset != 0 {
++			return false, op.name == MatchTCP && offset == 8
++		}
++	case header.IPv6ProtocolNumber:
++		if pkt.TransportProtocolNumber != protocol {
++			return false, false
++		}
++	default:
++		return false, false
++	}
++	transport := pkt.TransportHeader().Slice()
++	if len(transport) < minimum {
++		return false, true
++	}
++	info := &op.info
++	var source, destination uint16
++	if op.name == MatchTCP {
++		source, destination = header.TCP(transport).SourcePort(), header.TCP(transport).DestinationPort()
++	} else {
++		source, destination = header.UDP(transport).SourcePort(), header.UDP(transport).DestinationPort()
++	}
++	if !portMatch(info.SourcePortStart, info.SourcePortEnd, source, info.InverseFlags&linux.XT_TCP_INV_SRCPT != 0) ||
++		!portMatch(info.DestinationPortStart, info.DestinationPortEnd, destination, info.InverseFlags&linux.XT_TCP_INV_DSTPT != 0) {
++		return false, false
++	}
++	if op.name == MatchUDP {
++		return true, false
++	}
++	tcp := header.TCP(transport)
++	if (uint8(tcp.Flags())&info.FlagMask == info.FlagCompare) == (info.InverseFlags&linux.XT_TCP_INV_FLAGS != 0) {
++		return false, false
++	}
++	if info.Option == 0 {
++		return true, false
++	}
++	offset := int(tcp.DataOffset())
++	if offset < header.TCPMinimumSize {
++		return false, true
++	}
++	if len(transport) < offset {
++		return false, true
++	}
++	return findTCPOption(info.Option, transport[header.TCPMinimumSize:offset], info.InverseFlags&linux.XT_TCP_INV_OPTION != 0), false
++}
++
++// findTCPOption reports whether options hold option, inverted by invert.
++// Ref: net/netfilter/xt_tcpudp.c:tcp_find_option()
++func findTCPOption(option uint8, options []byte, invert bool) bool {
++	for i := 0; i < len(options); {
++		if options[i] == option {
++			return !invert
++		}
++		if options[i] < 2 || i+1 >= len(options) || options[i+1] == 0 {
++			i++
++		} else {
++			i += int(options[i+1])
++		}
++	}
++	return invert
++}
++
++// evaluate implements operation.evaluate.
++// Ref: net/netfilter/nft_compat.c:nft_match_eval()
++func (op *compatTCPUDPMatch) evaluate(regs *registerSet, evalCtx opEvalCtx) {
++	matched, drop := op.match(evalCtx.pkt)
++	switch {
++	case drop:
++		regs.verdict = Verdict{Code: VC(linux.NF_DROP)}
++	case matched:
++		regs.verdict = Verdict{Code: VC(linux.NFT_CONTINUE)}
++	default:
++		regs.verdict = Verdict{Code: VC(linux.NFT_BREAK)}
++	}
++}
++
++// checkCompatibility implements operation.checkCompatibility.
++func (op *compatTCPUDPMatch) checkCompatibility(cCtx *opCompatCtx) *syserr.AnnotatedError {
++	return nil
++}
++
++// deepCopy implements operation.deepCopy.
++func (op *compatTCPUDPMatch) deepCopy() operation {
++	opCopy := *op
++	opCopy.infoData = append([]byte(nil), op.infoData...)
++	return &opCopy
++}
++
++// updateReferences implements operation.updateReferences.
++func (op *compatTCPUDPMatch) updateReferences(_ *Table, _ *Table, _ operation) {}
++
++// destroy implements operation.destroy.
++func (op *compatTCPUDPMatch) destroy() {}
++
++// GetExprName implements operation.GetExprName.
++func (op *compatTCPUDPMatch) GetExprName() string {
++	return OpTypeMatch.String()
++}
++
++// Dump implements operation.Dump.
++// Ref: net/netfilter/nft_compat.c:__nft_match_dump()
++func (op *compatTCPUDPMatch) Dump() ([]byte, *syserr.AnnotatedError) {
++	m := &nlmsg.Message{}
++	m.PutAttrString(linux.NFTA_MATCH_NAME, op.name)
++	m.PutAttr(linux.NFTA_MATCH_REV, nlmsg.PutU32(op.revision))
++	m.PutAttr(linux.NFTA_MATCH_INFO, primitive.AsByteSlice(op.infoData))
++	return m.Buffer(), nil
++}
+diff --git a/pkg/tcpip/nftables/nftables_test.go b/pkg/tcpip/nftables/nftables_test.go
+index 1c41207..2e57bcf 100644
+--- a/pkg/tcpip/nftables/nftables_test.go
++++ b/pkg/tcpip/nftables/nftables_test.go
+@@ -5858,7 +5858,7 @@ func TestCompatOperationDeepCopy(t *testing.T) {
+ 		{
+ 			name: "noop match",
+ 			op: &compatNoopMatch{
+-				name:     "tcp",
++				name:     "comment",
+ 				revision: 0,
+ 				infoData: []byte{1, 2, 3, 4},
+ 			},
+@@ -5881,7 +5881,7 @@ func TestCompatOpCompatibility(t *testing.T) {
+ 	masq := &compatMASQTarget{}
+ 	snat := &compatNATTarget{info: natTargetInfo{natType: stack.SNAT}}
+ 	dnat := &compatNATTarget{info: natTargetInfo{natType: stack.DNAT}}
+-	noop := &compatNoopMatch{name: "tcp"}
++	noop := &compatNoopMatch{name: "comment"}
+ 	const nonBaseChainType = BaseChainType(-1)
+ 
+ 	makeCtx := func(bcType BaseChainType, hook stack.NFHook) *opCompatCtx {
+@@ -6395,10 +6395,10 @@ func TestCompatNATTargetEvaluation(t *testing.T) {
+ 	})
+ }
+ 
+-// Tests that pass-through no-op compat matches (like tcp/udp) return NFT_CONTINUE.
++// Tests that pass-through no-op compat matches (comment) return NFT_CONTINUE.
+ func TestCompatNoopMatchEvaluation(t *testing.T) {
+ 	op := &compatNoopMatch{
+-		name:     "tcp",
++		name:     "comment",
+ 		revision: 0,
+ 		infoData: []byte{1, 2, 3, 4},
+ 	}
+@@ -6411,3 +6411,173 @@ func TestCompatNoopMatchEvaluation(t *testing.T) {
+ 		t.Errorf("evaluate verdict = %d, want %d", regs.verdict.Code, VC(linux.NFT_CONTINUE))
+ 	}
+ }
++
++// Tests evaluating the compat tcp and udp matches, which iptables-nft 1.8.7
++// writes for --sport, --dport and --tcp-flags.
++func TestCompatTCPUDPMatchEvaluation(t *testing.T) {
++	src := tcpip.AddrFrom4([4]byte{10, 0, 0, 1})
++	dst := tcpip.AddrFrom4([4]byte{10, 0, 0, 2})
++	tcpPacket := func(srcPort, dstPort uint16, flags header.TCPFlags) *stack.PacketBuffer {
++		return makeIPv4TCPPacket(header.IPv4MinimumSize+header.TCPMinimumSize, &header.IPv4Fields{
++			TotalLength: header.IPv4MinimumSize + header.TCPMinimumSize,
++			TTL:         64,
++			Protocol:    uint8(header.TCPProtocolNumber),
++			SrcAddr:     src,
++			DstAddr:     dst,
++		}, &header.TCPFields{
++			SrcPort:    srcPort,
++			DstPort:    dstPort,
++			DataOffset: header.TCPMinimumSize,
++			Flags:      flags,
++		})
++	}
++	ports := func(sStart, sEnd, dStart, dEnd uint16, invert uint8) linux.XTTCP {
++		return linux.XTTCP{
++			SourcePortStart:      sStart,
++			SourcePortEnd:        sEnd,
++			DestinationPortStart: dStart,
++			DestinationPortEnd:   dEnd,
++			InverseFlags:         invert,
++		}
++	}
++	all := ports(0, 0xffff, 0, 0xffff, 0)
++	for _, tc := range []struct {
++		name string
++		op   *compatTCPUDPMatch
++		pkt  func() *stack.PacketBuffer
++		want uint32
++	}{
++		{
++			name: "udp destination port matches",
++			op:   &compatTCPUDPMatch{name: MatchUDP, info: ports(0, 0xffff, 53, 53, 0)},
++			pkt:  func() *stack.PacketBuffer { return makeUDPv4Packet(src, dst, 40000, 53) },
++			want: VC(linux.NFT_CONTINUE),
++		},
++		{
++			name: "udp destination port mismatches",
++			op:   &compatTCPUDPMatch{name: MatchUDP, info: ports(0, 0xffff, 53, 53, 0)},
++			pkt:  func() *stack.PacketBuffer { return makeUDPv4Packet(src, dst, 40000, 54) },
++			want: VC(linux.NFT_BREAK),
++		},
++		{
++			name: "udp inverted source port range",
++			op:   &compatTCPUDPMatch{name: MatchUDP, info: ports(1000, 2000, 0, 0xffff, linux.XT_UDP_INV_SRCPT)},
++			pkt:  func() *stack.PacketBuffer { return makeUDPv4Packet(src, dst, 1500, 53) },
++			want: VC(linux.NFT_BREAK),
++		},
++		{
++			name: "udp match never takes tcp",
++			op:   &compatTCPUDPMatch{name: MatchUDP, info: all},
++			pkt:  func() *stack.PacketBuffer { return tcpPacket(40000, 53, header.TCPFlagSyn) },
++			want: VC(linux.NFT_BREAK),
++		},
++		{
++			name: "tcp destination port in range",
++			op:   &compatTCPUDPMatch{name: MatchTCP, info: ports(0, 0xffff, 8000, 8080, 0)},
++			pkt:  func() *stack.PacketBuffer { return tcpPacket(40000, 8080, header.TCPFlagSyn) },
++			want: VC(linux.NFT_CONTINUE),
++		},
++		{
++			name: "tcp inverted destination port",
++			op:   &compatTCPUDPMatch{name: MatchTCP, info: ports(0, 0xffff, 80, 80, linux.XT_TCP_INV_DSTPT)},
++			pkt:  func() *stack.PacketBuffer { return tcpPacket(40000, 80, header.TCPFlagSyn) },
++			want: VC(linux.NFT_BREAK),
++		},
++		{
++			name: "tcp syn flags match",
++			op: &compatTCPUDPMatch{name: MatchTCP, info: linux.XTTCP{
++				SourcePortEnd: 0xffff, DestinationPortEnd: 0xffff,
++				FlagMask:    uint8(header.TCPFlagSyn | header.TCPFlagAck | header.TCPFlagRst | header.TCPFlagFin),
++				FlagCompare: uint8(header.TCPFlagSyn),
++			}},
++			pkt:  func() *stack.PacketBuffer { return tcpPacket(40000, 80, header.TCPFlagSyn) },
++			want: VC(linux.NFT_CONTINUE),
++		},
++		{
++			name: "tcp syn flags mismatch an ack",
++			op: &compatTCPUDPMatch{name: MatchTCP, info: linux.XTTCP{
++				SourcePortEnd: 0xffff, DestinationPortEnd: 0xffff,
++				FlagMask:    uint8(header.TCPFlagSyn | header.TCPFlagAck | header.TCPFlagRst | header.TCPFlagFin),
++				FlagCompare: uint8(header.TCPFlagSyn),
++			}},
++			pkt:  func() *stack.PacketBuffer { return tcpPacket(40000, 80, header.TCPFlagAck) },
++			want: VC(linux.NFT_BREAK),
++		},
++		{
++			name: "tcp option absent",
++			op:   &compatTCPUDPMatch{name: MatchTCP, info: linux.XTTCP{SourcePortEnd: 0xffff, DestinationPortEnd: 0xffff, Option: 2}},
++			pkt:  func() *stack.PacketBuffer { return tcpPacket(40000, 80, header.TCPFlagSyn) },
++			want: VC(linux.NFT_BREAK),
++		},
++		{
++			name: "tcp header too short is dropped",
++			op:   &compatTCPUDPMatch{name: MatchTCP, info: all},
++			pkt: func() *stack.PacketBuffer {
++				return makeIPv4Packet(header.IPv4MinimumSize, &header.IPv4Fields{
++					TotalLength: header.IPv4MinimumSize,
++					TTL:         64,
++					Protocol:    uint8(header.TCPProtocolNumber),
++					SrcAddr:     src,
++					DstAddr:     dst,
++				})
++			},
++			want: VC(linux.NF_DROP),
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			pkt := tc.pkt()
++			defer pkt.DecRef()
++			regs := &registerSet{verdict: Verdict{Code: VC(linux.NFT_CONTINUE)}}
++			tc.op.evaluate(regs, opEvalCtx{pkt: pkt})
++			if regs.verdict.Code != tc.want {
++				t.Errorf("evaluate verdict = %d, want %d", regs.verdict.Code, tc.want)
++			}
++		})
++	}
++}
++
++// Tests parsing the compat tcp and udp matches' info.
++func TestCompatTCPUDPMatchParse(t *testing.T) {
++	tcp := linux.XTTCP{DestinationPortStart: 53, DestinationPortEnd: 53, InverseFlags: linux.XT_TCP_INV_SRCPT}
++	tcpInfo := make([]byte, linux.SizeOfXTTCP)
++	tcp.MarshalBytes(tcpInfo)
++	udp := linux.XTUDP{DestinationPortStart: 53, DestinationPortEnd: 53}
++	udpInfo := make([]byte, linux.SizeOfXTUDP)
++	udp.MarshalBytes(udpInfo)
++	for _, tc := range []struct {
++		name    string
++		match   string
++		info    []byte
++		wantErr bool
++	}{
++		{name: "tcp as iptables sends it", match: MatchTCP, info: append(append([]byte(nil), tcpInfo...), 0, 0, 0, 0)},
++		{name: "tcp unaligned", match: MatchTCP, info: tcpInfo},
++		{name: "tcp too short", match: MatchTCP, info: tcpInfo[:8], wantErr: true},
++		{name: "tcp too long", match: MatchTCP, info: make([]byte, 24), wantErr: true},
++		{name: "tcp unknown inverse flag", match: MatchTCP, info: func() []byte {
++			b := append([]byte(nil), tcpInfo...)
++			b[linux.SizeOfXTTCP-1] = 0x10
++			return b
++		}(), wantErr: true},
++		{name: "udp as iptables sends it", match: MatchUDP, info: append(append([]byte(nil), udpInfo...), 0, 0, 0, 0, 0, 0)},
++		{name: "udp unknown inverse flag", match: MatchUDP, info: func() []byte {
++			b := append([]byte(nil), udpInfo...)
++			b[8] = 0x04
++			return b
++		}(), wantErr: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			op, err := parseTCPUDPMatch(tc.match, 0, tc.info)
++			if (err != nil) != tc.wantErr {
++				t.Fatalf("parseTCPUDPMatch() error = %v, want error %t", err, tc.wantErr)
++			}
++			if err != nil {
++				return
++			}
++			got := op.(*compatTCPUDPMatch).info
++			if got.DestinationPortStart != 53 || got.DestinationPortEnd != 53 {
++				t.Errorf("parsed destination ports %d-%d, want 53-53", got.DestinationPortStart, got.DestinationPortEnd)
++			}
++		})
++	}
++}

@@ -984,7 +984,8 @@ def test_a_gvisor_sandbox_holds_the_declared_memory_and_what_the_sentry_takes() 
 
 
 def test_gvisor_is_registered_as_its_readme_shows() -> None:
-    """Both names, with exactly these arguments: raw sockets but no packet socket writes."""
+    """Every name, with exactly these arguments: raw sockets but no packet socket writes,
+    and nf_tables without raw sockets."""
     readme = (Path(ale.run.__file__).parents[5] / "images/runtimes/gvisor/README.md").read_text()
     shown = json.loads(readme.split("```json\n", 1)[1].split("```", 1)[0])["runtimes"]
     assert {name: tuple(entry["runtimeArgs"]) for name, entry in shown.items()} == {
@@ -994,6 +995,12 @@ def test_gvisor_is_registered_as_its_readme_shows() -> None:
             "--allow-suid",
             "--nvproxy-allowed-driver-capabilities=all",
             "--net-raw",
+        ),
+        "runsc-nested": (
+            "--overlay2=none",
+            "--allow-suid",
+            "--nvproxy-allowed-driver-capabilities=all",
+            "--TESTONLY-nftables",
         ),
     }
     assert {name: tuple(args) for name, args in gvisor.ARGUMENTS.items()} == {
@@ -1485,15 +1492,16 @@ async def test_kata_refuses_gpus_before_anything_starts(monkeypatch: pytest.Monk
 async def test_each_runtime_is_a_leaf_with_the_features_it_gives() -> None:
     (runc,) = await DockerProvider().profiles()
     (in_kata,) = await DockerProvider(runtime="kata").profiles()
-    (in_gvisor,) = await DockerProvider(runtime="gvisor").profiles()
+    # A Sandbox runs under one of gVisor's registrations: raw sockets or a container engine.
+    raw, nested = await DockerProvider(runtime="gvisor").profiles()
     assert (runc.provider, in_kata.provider) == ("docker:runc", "docker:kata")
-    assert in_gvisor.provider == "docker:gvisor" and in_gvisor.gui and in_gvisor.snapshot
-    assert in_gvisor.container_features == {
-        ContainerFeature.USER_NAMESPACES,
-        ContainerFeature.FUSE,
-        ContainerFeature.MOUNT,
-        ContainerFeature.RAW_SOCKETS,
-    }
+    for in_gvisor in (raw, nested):
+        assert in_gvisor.provider == "docker:gvisor" and in_gvisor.gui
+    # A commit keeps no volume, which a container engine's storage is on.
+    assert raw.snapshot and not nested.snapshot
+    common = {ContainerFeature.USER_NAMESPACES, ContainerFeature.FUSE, ContainerFeature.MOUNT}
+    assert raw.container_features == {*common, ContainerFeature.RAW_SOCKETS}
+    assert nested.container_features == {*common, ContainerFeature.NESTED_CONTAINERS}
     assert runc.container_features == {ContainerFeature.RAW_SOCKETS}
     assert in_kata.container_features == {
         ContainerFeature.PERF,
@@ -1571,9 +1579,9 @@ async def test_a_leaf_offers_the_gpus_of_this_host_that_it_may_lease(
     # limits a shared Sandbox's memory.
     (in_kata,) = await DockerProvider(runtime="kata").profiles()
     assert (in_kata.gpus, in_kata.gpu_models, in_kata.gpu_hold) == (False, (), GpuHold.WHOLE)
-    (in_gvisor,) = await DockerProvider(runtime="gvisor").profiles()
-    assert (in_gvisor.gpus, in_gvisor.gpu_models) == (True, models)
-    assert in_gvisor.gpu_hold is GpuHold.LIMIT
+    for in_gvisor in await DockerProvider(runtime="gvisor").profiles():
+        assert (in_gvisor.gpus, in_gvisor.gpu_models) == (True, models)
+        assert in_gvisor.gpu_hold is GpuHold.LIMIT
 
 
 async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
@@ -1587,7 +1595,7 @@ async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     ) == ("runs arm64, not x86_64",)
 
 
-_RUNSC = "/usr/local/lib/ale-gvisor/0.1.0/runsc"
+_RUNSC = "/usr/local/lib/ale-gvisor/0.1.1/runsc"
 _REGISTERED = dict(gvisor.ARGUMENTS)
 #: Part of what ``runsc flags`` of ALE's build lists.
 _FLAGS = (
@@ -1611,7 +1619,7 @@ def _preflight_host(
     *,
     shims: tuple[str, ...] = (),
     devices: tuple[str, ...] = (),
-    version: str = "runsc version release-20261109.0+ale.0.1.0\nspec: 1.2.1\n",
+    version: str = "runsc version release-20261109.0+ale.0.1.1\nspec: 1.2.1\n",
     drivers: str = "570.124.06\n580.95.05\n",
     flags: str = _FLAGS,
     flags_code: int = 0,
@@ -1679,6 +1687,8 @@ async def test_a_leafs_preflight_finds_its_runtime(
 
 _PLAIN = gvisor.ARGUMENTS[gvisor.RUNTIME]
 _RAW = gvisor.ARGUMENTS[gvisor.NET_RAW]
+_NESTED = gvisor.ARGUMENTS[gvisor.NESTED]
+_ENGINE = ContainerFeature.NESTED_CONTAINERS
 
 
 @pytest.mark.parametrize(
@@ -1689,8 +1699,12 @@ _RAW = gvisor.ARGUMENTS[gvisor.NET_RAW]
         ({name: tuple(reversed(args)) for name, args in _REGISTERED.items()}, None, None),
         ({gvisor.RUNTIME: _PLAIN}, (), None),
         ({gvisor.RUNTIME: _PLAIN}, (ContainerFeature.RAW_SOCKETS,), "needs the runsc-net-raw"),
+        ({gvisor.RUNTIME: _PLAIN, gvisor.NESTED: _NESTED}, (_ENGINE,), None),
+        ({gvisor.RUNTIME: _PLAIN, gvisor.NET_RAW: _RAW}, (_ENGINE,), "needs the runsc-nested"),
         # A Node lends it to any Sandbox.
-        ({gvisor.RUNTIME: _PLAIN}, None, "needs the runsc-net-raw runtime"),
+        ({gvisor.RUNTIME: _PLAIN}, None, "needs the runsc-nested runtime"),
+        ({gvisor.RUNTIME: _PLAIN, gvisor.NET_RAW: _RAW}, None, "needs the runsc-nested runtime"),
+        ({gvisor.RUNTIME: _PLAIN, gvisor.NESTED: _NESTED}, None, "needs the runsc-net-raw runtime"),
         ({gvisor.RUNTIME: _PLAIN[1:]}, (), "runsc runtime registered with --overlay2=none"),
         # No more than its arguments, an operator's GPU memory limit included.
         (
@@ -1703,6 +1717,12 @@ _RAW = gvisor.ARGUMENTS[gvisor.NET_RAW]
             (ContainerFeature.RAW_SOCKETS,),
             "runsc-net-raw runtime registered with",
         ),
+        # Raw sockets break a dockerd that may open a packet socket but not write one.
+        (
+            {**_REGISTERED, gvisor.NESTED: (*_NESTED, "--net-raw")},
+            (_ENGINE,),
+            "runsc-nested runtime registered with",
+        ),
     ],
 )
 async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
@@ -1711,8 +1731,9 @@ async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
     features: tuple[ContainerFeature, ...] | None,
     missing: str | None,
 ) -> None:
-    """Registered with exactly the arguments its README gives: the raw sockets runtime only
-    when a Sandbox needs it, or for a Node, which lends the leaf to any."""
+    """Registered with exactly the arguments its README gives: the raw sockets or the
+    container engine runtime only when a Sandbox needs it, or for a Node, which lends the
+    leaf to any."""
     ran = _preflight_host(monkeypatch, _known("runc", arguments=arguments), gpus=False)
     needs = (
         ()
@@ -1725,20 +1746,20 @@ async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
             await preflight
         return
     assert await preflight is not None  # what only a Sandbox of it shows
-    assert ran == [(_RUNSC, "--version")]  # one binary, under both names
+    assert ran == [(_RUNSC, "--version")]  # one binary, under every name
 
 
 @pytest.mark.parametrize(
     ("version", "drivers", "needs_gpus", "refused"),
     [
         ("runsc version release-20261109.0\nspec: 1.2.1\n", "", 0, "needs ALE's build"),
-        ("runsc version release-20261109.0+ale.0.1.01\n", "", 0, "ale.0.1.0 of"),
-        ("runsc version release-20261109.0+ale.0.2.0\n", "", 0, "ale.0.1.0 of"),
-        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", 0, None),
-        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", 1, "driver 570.124.06"),
-        ("runsc version release-20261109.0+ale.0.1.0\n", "570.124.06\n", 1, None),
+        ("runsc version release-20261109.0+ale.0.1.11\n", "", 0, "ale.0.1.1 of"),
+        ("runsc version release-20261109.0+ale.0.1.0\n", "", 0, "ale.0.1.1 of"),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", 0, None),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", 1, "driver 570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "570.124.06\n", 1, None),
         # With no needs, as a Node lends it, its profile offers the Host's GPUs.
-        ("runsc version release-20261109.0+ale.0.1.0\n", "580.95.05\n", None, "570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", None, "570.124.06"),
     ],
 )
 async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_driver_here(
@@ -1760,7 +1781,7 @@ async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_dr
             await preflight
     else:
         await preflight
-    if needs_gpus != 0 and "+ale.0.1.0\n" in version:
+    if needs_gpus != 0 and "+ale.0.1.1\n" in version:
         assert ran[-1] == (_RUNSC, "nvproxy", "list-supported-drivers")
     else:
         assert all(argv[1] == "--version" for argv in ran)
@@ -1862,6 +1883,18 @@ async def test_a_feature_its_runtime_does_not_give_is_refused_before_anything_st
     nested = request(resources=Resources(container_features=(ContainerFeature.MOUNT,)))
     with pytest.raises(ProviderCapabilityError, match="gives no container features mount"):
         await DockerProvider().create(nested)
+    # gVisor gives each under a registration of its own, and no profile both.
+    both = (ContainerFeature.NESTED_CONTAINERS, ContainerFeature.RAW_SOCKETS)
+    with pytest.raises(ProviderCapabilityError, match="gives no container features"):
+        await DockerProvider(runtime="gvisor").create(
+            request(resources=Resources(container_features=both))
+        )
+    # A commit would keep none of a container engine's storage.
+    engine = request(
+        resources=Resources(container_features=(ContainerFeature.NESTED_CONTAINERS,))
+    ).model_copy(update={"snapshot": "ale-snapshot:x"})
+    with pytest.raises(ProviderCapabilityError):
+        await DockerProvider(runtime="gvisor").create(engine)
     assert calls == []
 
 
@@ -1891,6 +1924,20 @@ async def test_a_feature_its_runtime_does_not_give_is_refused_before_anything_st
             "runsc-net-raw",
             "572m",
         ),
+        (
+            "gvisor",
+            (ContainerFeature.NESTED_CONTAINERS,),
+            ["NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"],
+            "runsc-nested",
+            "572m",
+        ),
+        (
+            "gvisor",
+            (ContainerFeature.NESTED_CONTAINERS, ContainerFeature.MOUNT),
+            ["NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"],
+            "runsc-nested",
+            "572m",
+        ),
     ],
 )
 async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
@@ -1903,7 +1950,8 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
 ) -> None:
     """The union of their grants, the whole Sandbox under the runtime one of them needs, its
     memory with what the runtime itself takes, its network mode recorded, and, under Kata or
-    gVisor, a network of its own, which goes again when the Sandbox does not start."""
+    gVisor, a network of its own, which goes again when the Sandbox does not start. A
+    container engine's storage is on volumes of its own."""
     calls: list[tuple[str, ...]] = []
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
@@ -1943,6 +1991,10 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
         await provider.create(asked)
     (run,) = [call for call in calls if call[:2] == ("run", "-d")]
     assert [run[index + 1] for index, flag in enumerate(run) if flag == "--cap-add"] == granted
+    engine = ContainerFeature.NESTED_CONTAINERS in features
+    assert [run[index + 1] for index, flag in enumerate(run) if flag == "--mount"] == [
+        f"type=volume,dst={path}" for path in sorted(gvisor.ENGINE_STORAGE) if engine
+    ]
     # Named even for runc, so a Host's default runtime never stands in for the leaf's.
     pinned = [run[index + 1] for index, flag in enumerate(run) if flag == "--runtime"]
     assert pinned == [registered]

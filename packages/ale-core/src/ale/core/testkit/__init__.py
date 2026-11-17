@@ -14,6 +14,6 @@ Usage in a test module::
 """
 
 from ale.core.testkit.harness import AutonomousHarnessConformance
-from ale.core.testkit.provider import ProviderConformance
+from ale.core.testkit.provider import NESTED_CHECKS, ProviderConformance
 
-__all__ = ["AutonomousHarnessConformance", "ProviderConformance"]
+__all__ = ["NESTED_CHECKS", "AutonomousHarnessConformance", "ProviderConformance"]

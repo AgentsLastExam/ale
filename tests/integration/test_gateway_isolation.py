@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 from aiohttp import web
 
-from ale.core.sandbox import Identity, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from ale.core.sandbox import Identity, Sandbox, SandboxRequest
+from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, SessionRegistry
@@ -29,14 +29,50 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 IMAGE = CONTAINER_BASE
 
 
-@pytest.fixture(params=["runc", pytest.param("kata", marks=pytest.mark.needs_kvm), "gvisor"])
-def provider(request: pytest.FixtureRequest) -> DockerProvider:
-    """Each Docker runtime, since each confines the sandbox its own way."""
-    if request.param == "kata":
+@pytest.fixture(
+    params=[
+        "runc",
+        pytest.param("kata", marks=pytest.mark.needs_kvm),
+        "gvisor",
+        "gvisor-nested",
+    ]
+)
+def sandboxes(request: pytest.FixtureRequest) -> tuple[DockerProvider, Resources]:
+    """Each Docker runtime, since each confines the sandbox its own way, and gVisor's for
+    container engines, under which the Gateway test runs one that sets its rules in
+    netstack's nf_tables: the leaf and what its Sandbox asks for."""
+    runtime, _, engine = request.param.partition("-")
+    if runtime == "kata":
         skip_without_kata()
-    if request.param == "gvisor":
+    if runtime == "gvisor":
         skip_without_gvisor()
-    return DockerProvider(runtime=request.param)
+    if not engine:
+        return DockerProvider(runtime=runtime), Resources(cpus=1, memory_mb=512)
+    # The engine installs and runs beside the sandbox's own processes.
+    features = (ContainerFeature.NESTED_CONTAINERS,)
+    return DockerProvider(runtime=runtime), Resources(
+        cpus=1, memory_mb=2048, container_features=features
+    )
+
+
+#: Installs Docker from the image's distribution, starts it and runs a container that
+#: publishes a port: its rules are in netstack's nf_tables, beside ALE's chains in its
+#: iptables tables.
+_ENGINE = """
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq && apt-get install -y -qq docker.io >/dev/null || exit 2
+(dockerd >/tmp/dockerd.log 2>&1 &)
+for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+docker run -d -p 18080:80 busybox:1.36.1 httpd -f -p 80 >/dev/null
+"""
+
+
+async def _run_an_engine(sandbox: Sandbox) -> None:
+    """Install and start a container engine, with egress open only while it installs."""
+    await sandbox.open_egress()
+    started = await sandbox.exec(["sh", "-c", _ENGINE], timeout_sec=600)
+    assert started.ok, started.stderr[-2000:]
+    await sandbox.close_egress()
 
 
 async def _stub_upstream() -> tuple[web.AppRunner, str]:
@@ -56,7 +92,10 @@ async def _stub_upstream() -> tuple[web.AppRunner, str]:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_reaches_the_gateway_and_nothing_else(provider: DockerProvider) -> None:
+async def test_sandbox_reaches_the_gateway_and_nothing_else(
+    sandboxes: tuple[DockerProvider, Resources],
+) -> None:
+    provider, resources = sandboxes
     upstream_runner, upstream_url = await _stub_upstream()
     gateway = Gateway(api_key="host-only-credential", upstream=upstream_url, host="0.0.0.0")
     await gateway.start()
@@ -66,13 +105,15 @@ async def test_sandbox_reaches_the_gateway_and_nothing_else(provider: DockerProv
     request = SandboxRequest(
         episode_id="iso",
         prepared_image=prepared,
-        resources=Resources(cpus=1, memory_mb=512),
+        resources=resources,
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
         gateway_url=gateway.base_url,
     )
 
     try:
         async with await provider.create(request) as sandbox:
+            if resources.container_features:
+                await _run_an_engine(sandbox)
             script = (
                 "import json,os,urllib.request\n"
                 "url=os.environ['ALE_GATEWAY_URL']\n"
@@ -112,7 +153,10 @@ async def test_sandbox_reaches_the_gateway_and_nothing_else(provider: DockerProv
 
 
 @pytest.mark.asyncio
-async def test_sandbox_reaches_https_through_the_episode_proxy(provider: DockerProvider) -> None:
+async def test_sandbox_reaches_https_through_the_episode_proxy(
+    sandboxes: tuple[DockerProvider, Resources],
+) -> None:
+    provider, resources = sandboxes
     registry = SessionRegistry()
     proxy = EgressProxy(registry, host="0.0.0.0")
     proxy_url = await proxy.start()
@@ -127,7 +171,7 @@ async def test_sandbox_reaches_https_through_the_episode_proxy(provider: DockerP
     request = SandboxRequest(
         episode_id="proxy",
         prepared_image=prepared,
-        resources=Resources(cpus=1, memory_mb=512),
+        resources=resources,
         network=NetworkPolicy(
             mode=NetworkMode.ALLOWLIST,
             allowed_hosts=("api.anthropic.com",),

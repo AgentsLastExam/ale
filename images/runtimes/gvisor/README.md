@@ -11,6 +11,9 @@ sent upstream; a stock `runsc` lacks them.
 | `0003-runsc-oom-score-adj-of-exiting-process` | Under rootless Docker, a container whose process exits at once starts instead of failing with `open /proc/<pid>/oom_score_adj: permission denied`. |
 | `0004-nvproxy-gpu-memory-limit` | A container can be given a limit on the memory it allocates on each of its GPUs; an allocation beyond it fails as out of memory inside the container ([GPU memory limit](#gpu-memory-limit)). |
 | `0005-runsc-tmp-on-rootfs-without-overlay` | Under `--overlay2=none`, the `/tmp` of an image whose `/tmp` is empty stays a directory of the container's filesystem on the Host, as under runc, instead of an in-memory tmpfs whose files count against the container's memory and which `docker commit` does not keep. |
+| `0006-nftables-batch-subsystem-in-host-byte-order` | The `iptables` 1.8.7 of Ubuntu 22.04, whose libnftnl writes a batch's subsystem id in host byte order, changes nf_tables instead of failing with `Invalid argument`, as Linux takes it. |
+| `0007-nftables-xt-tcp-udp-matches` | A rule that the `iptables` 1.8.7 of Ubuntu 22.04 writes with `--sport`, `--dport` or `--tcp-flags`, through the xtables `tcp` and `udp` matches, matches only the packets it names, instead of every one. |
+| `0008-netstack-nftables-connection-state-of-its-own` | Under `--TESTONLY-nftables`, a packet that iptables tracks and NATs, as once any of its tables is set, is tracked and NATed by nf_tables as well, each by its own rules, instead of the Sentry panicking (`packet already had NAT`) and ending the sandbox. |
 
 Each patch's header says what it changes, why, and how it was verified.
 
@@ -30,7 +33,7 @@ gVisor's release tarball:
 
 `runsc` and its sidecars come from one build and are installed together. The image's
 version is `VERSION` in [`build.sh`](build.sh), and `runsc --version` reports the release
-and that version, such as `release-20261109.0+ale.0.1.0`. Nothing in it depends on the
+and that version, such as `release-20261109.0+ale.0.1.1`. Nothing in it depends on the
 engine, so it has its own version, raised when the build changes.
 
 ## Install on a Host
@@ -39,7 +42,7 @@ Copy `/gvisor` into a directory of its own version, so that an upgrade never rep
 binaries of a sandbox that is running:
 
 ```bash
-version=0.1.0
+version=0.1.1
 dir=/usr/local/lib/ale-gvisor/$version
 id=$(docker create ghcr.io/agentslastexam/ale-gvisor:$version)
 sudo mkdir -p "$dir"
@@ -48,7 +51,7 @@ docker rm "$id"
 "$dir/runsc" --version
 ```
 
-Register it twice in `/etc/docker/daemon.json`, the same on every Host, with GPUs or
+Register it three times in `/etc/docker/daemon.json`, the same on every Host, with GPUs or
 without, and apply it with `sudo systemctl reload docker`, which leaves running containers
 alone:
 
@@ -56,7 +59,7 @@ alone:
 {
   "runtimes": {
     "runsc": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.0/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.1/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -64,21 +67,31 @@ alone:
       ]
     },
     "runsc-net-raw": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.0/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.1/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
         "--nvproxy-allowed-driver-capabilities=all",
         "--net-raw"
       ]
+    },
+    "runsc-nested": {
+      "path": "/usr/local/lib/ale-gvisor/0.1.1/runsc",
+      "runtimeArgs": [
+        "--overlay2=none",
+        "--allow-suid",
+        "--nvproxy-allowed-driver-capabilities=all",
+        "--TESTONLY-nftables"
+      ]
     }
   }
 }
 ```
 
-ALE's `docker:gvisor` leaf starts a sandbox under `runsc`, or under `runsc-net-raw` when its
-Task needs raw sockets, and its preflight refuses a Host where a runtime it needs is
-missing, is registered with other arguments than these, or is not this build
+ALE's `docker:gvisor` leaf starts a sandbox under `runsc`, under `runsc-net-raw` when its
+Task needs raw sockets, or under `runsc-nested` when it runs a container engine, and its
+preflight refuses a Host where a runtime it needs is missing, is registered with other
+arguments than these, or is not this build
 ([Providers](../../../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
 
 - Registered by `path`, `runsc` runs under containerd's runc shim, which passes it
@@ -102,6 +115,15 @@ missing, is registered with other arguments than these, or is not this build
   hold, which `runsc` otherwise removes: ping works and a packet socket captures, while a
   packet socket's write fails (`ENOTSUP`) without `--allow-packet-socket-write`, which ALE
   does not pass.
+- `--TESTONLY-nftables` gives the Sentry's network stack nf_tables, which the `iptables` of
+  Debian, Ubuntu and Alpine (its `nf_tables` variant), Docker and Podman set their rules
+  through; without it they fail with `Failed to initialize nft: Protocol not supported`.
+  The Sentry's netlink then takes nf_tables messages from a process that holds
+  `CAP_NET_ADMIN` in a network namespace, as any process does in one of its own, so only
+  the runtime for container engines passes it. It goes without `--net-raw`: the `docker.io`
+  dockerd 29.1.3 of Ubuntu 22.04 and 24.04 fails to start a container when it can open a
+  packet socket but not write one (`failed to advertise addresses: operation not
+  supported`), and only warns when it cannot open one.
 - For a container with OCI hooks, as `--gpus` adds, `runsc` refuses to mount into the
   root filesystem through a symlink, so Docker's data root must be given as a path
   without one. Reached through a symlinked home directory, for instance, it keeps GPU

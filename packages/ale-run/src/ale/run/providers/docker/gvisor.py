@@ -7,8 +7,8 @@ sees them, and netstack never sees a network attached later. So a gVisor sandbox
 bridge network of its own, which is not internal: tc filters on its veth's egress, in its
 network namespace outside the sandbox, seal it, and opening egress removes them. ALE's own
 chains in netstack, set by :mod:`ale.run.iptables`, route its Gateway and make what the seal
-drops fail at once. This module builds both and the sandbox's size; the Provider applies
-them.
+drops fail at once. This module builds both, the sandbox's size, and what a sandbox that
+runs a container engine is given; the Provider applies them.
 """
 
 from __future__ import annotations
@@ -25,8 +25,11 @@ __all__ = [
     "BANNER",
     "BUILD",
     "DRIVERS",
+    "ENGINE_CAPABILITIES",
+    "ENGINE_STORAGE",
     "FLAGS",
     "GPU_MEMORY_FLAG",
+    "NESTED",
     "NET_RAW",
     "RUNTIME",
     "SEAL_PROBE",
@@ -40,13 +43,18 @@ __all__ = [
     "unseal",
 ]
 
-#: The runtime a gVisor sandbox runs under, and the one for a sandbox that needs raw
-#: sockets, which ``runsc`` gives only to a whole sandbox, from its registration.
+#: The runtime a gVisor sandbox runs under, the one for a sandbox that needs raw sockets,
+#: and the one for a sandbox that runs a container engine, which ``runsc`` gives only to a
+#: whole sandbox, from its registration.
 RUNTIME = "runsc"
 NET_RAW = "runsc-net-raw"
+NESTED = "runsc-nested"
 #: The ``runtimeArgs`` each is registered with (images/runtimes/gvisor/README.md), no more:
 #: ``--overlay2=none`` keeps the sandbox's writes where Docker sees them, as snapshots need,
 #: and ``--allow-suid`` honours setuid programs, ``sudo`` among them, as runc does.
+#: ``--TESTONLY-nftables`` gives netstack the nf_tables a distribution's iptables and
+#: container engines set their rules through; without ``--net-raw``, since a dockerd that
+#: can open a packet socket but not write one fails to start a container.
 ARGUMENTS = {
     RUNTIME: ("--overlay2=none", "--allow-suid", "--nvproxy-allowed-driver-capabilities=all"),
     NET_RAW: (
@@ -55,10 +63,25 @@ ARGUMENTS = {
         "--nvproxy-allowed-driver-capabilities=all",
         "--net-raw",
     ),
+    NESTED: (
+        "--overlay2=none",
+        "--allow-suid",
+        "--nvproxy-allowed-driver-capabilities=all",
+        "--TESTONLY-nftables",
+    ),
 }
+#: What root in a sandbox that runs a container engine holds beyond Docker's default
+#: capabilities, all of them in the Sentry alone: ``NET_ADMIN`` for the engine's bridges and
+#: rules, ``SYS_ADMIN`` for its mounts and namespaces, and ``SYS_RESOURCE`` for an init
+#: script that raises its limits, as Debian's ``/etc/init.d/docker`` raises open files.
+ENGINE_CAPABILITIES = ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE")
+#: Where Docker, containerd and Podman keep their images and containers when run as root.
+#: Each gets a Docker volume of its own: the engine's overlay layers mark what they delete
+#: with whiteouts, which the Host's overlayfs, the sandbox's root, refuses to create.
+ENGINE_STORAGE = ("/var/lib/docker", "/var/lib/containerd", "/var/lib/containers")
 #: The version of ALE's build of runsc this engine runs, ``VERSION`` in
 #: images/runtimes/gvisor/build.sh, and what ``runsc --version`` reports of it.
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 BUILD = f"+ale.{VERSION}"
 #: The ``runsc`` command that lists the NVIDIA driver versions nvproxy supports.
 DRIVERS = ("nvproxy", "list-supported-drivers")
@@ -199,9 +222,9 @@ def set_netstack(container: str, state: dict[str, object]) -> list[str]:
     """The ``docker`` command that sets ``state`` in a sandbox's netstack.
 
     A privileged exec as root holds every capability there, ``CAP_NET_ADMIN`` among them,
-    which a sandbox's own processes lack, but ``CAP_NET_RAW`` only under ``runsc-net-raw``,
-    which is why the rules are written by the engine's own writer rather than an iptables
-    the image may not carry.
+    which a sandbox's own processes lack unless it runs a container engine, but
+    ``CAP_NET_RAW`` only under ``runsc-net-raw``, which is why the rules are written by the
+    engine's own writer rather than an iptables the image may not carry.
     """
     source = Path(iptables.__file__).read_text()
     python = guestd.PYTHON["linux"]
