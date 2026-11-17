@@ -18,7 +18,9 @@ holds all that differs between them: its grants, GPUs, size, ``docker run`` flag
 confinement.
 
 A Sandbox takes its GPUs whole, or shares each with others by the device memory its Task
-names, admitted by what is free and watched while it lives (``gpu_sharing.py``).
+names, admitted by what is free and watched while it lives (``gpu_sharing.py``). Under rootless
+Docker, whose bridges are in a network namespace of rootlesskit's, a listener there relays
+each of its connections to the Host's Gateway and proxy (``rootless.py``).
 """
 
 from __future__ import annotations
@@ -79,7 +81,7 @@ from ale.run.iptables import GATEWAY_CHAIN
 from ale.run.process import run
 from ale.run.providers import machine_arch, memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, subnets, tc
+from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, subnets, tc
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -1111,6 +1113,7 @@ class DockerSandbox(Sandbox):
         agent_home: str,
         sealed: bool = False,
         watchdog: gpu_sharing.Watchdog,
+        host_ports: rootless.HostPorts,
         guest_kernel: bool = False,
     ) -> None:
         super().__init__(
@@ -1137,6 +1140,8 @@ class DockerSandbox(Sandbox):
         #: The watchdog of its Provider, which watches it while it shares GPUs and this
         #: process drives it.
         self._watchdog = watchdog
+        #: The Host's ports of its Provider, of which it holds its own until it ends here.
+        self._host_ports = host_ports
         #: The context of the phase that last ran a command in it, in which what the watchdog
         #: does to it is logged, so that the episode's execution trace records it.
         self._context = contextvars.copy_context()
@@ -1159,8 +1164,10 @@ class DockerSandbox(Sandbox):
             session.abandon()
 
     async def _release(self) -> None:
-        """Stop watching it, then end its sessions: ALE's own end is no death."""
+        """Stop watching it and let go of the Host's ports, then end its sessions: ALE's own
+        end is no death."""
         self._unwatch()
+        self._host_ports.release(self.container)
         if self._stopping is not None:
             self._stopping.cancel()
             await asyncio.gather(self._stopping, return_exceptions=True)
@@ -1460,6 +1467,7 @@ class DockerProvider(Provider):
         self._daemon: str | None = None
         self._networks = _Networks()
         self._watchdog = gpu_sharing.Watchdog()
+        self._host_ports = rootless.HostPorts(self._rootless_bridges)
 
     @property
     def id(self) -> str:
@@ -1687,6 +1695,7 @@ class DockerProvider(Provider):
             # from now on removes it.
             confinement = await runtime.confinement.start(sandbox_id, request, self._networks)
             argv += confinement.run_args(isolated)
+            await self._host_ports.hold(container, _ports_on_host(request))
             if request.gateway_url or request.proxy_url:
                 host_ip = confinement.host_ip
                 argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
@@ -1787,6 +1796,7 @@ class DockerProvider(Provider):
                 await self._connect(container, agent_user, resources.memory_mb, watcher)
             )
         except BaseException:
+            self._host_ports.release(container)
             await asyncio.gather(
                 *(session.client.close() for session in sessions), return_exceptions=True
             )
@@ -1836,10 +1846,28 @@ class DockerProvider(Provider):
             agent_user=agent_user,
             agent_home=agent_home,
             watchdog=self._watchdog,
+            host_ports=self._host_ports,
             guest_kernel=runtime.guest_kernel,
         )
         sandbox.watch()
         return sandbox
+
+    async def _rootless_bridges(self) -> rootless.Namespaces | None:
+        """Where the daemon's bridges are when it is rootless and they are not in this
+        process's network namespace; None otherwise."""
+        code, options, stderr = await _docker(
+            "info", "--format", "{{json .SecurityOptions}}", timeout=30
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not read how Docker runs: {stderr.strip()}")
+        if "name=rootless" not in options:
+            return None
+        code, endpoint, stderr = await _docker(
+            "context", "inspect", "--format", "{{.Endpoints.docker.Host}}", timeout=30
+        )
+        if code != 0:
+            raise ProviderStartError(f"could not find the Docker daemon: {stderr.strip()}")
+        return rootless.namespaces(endpoint.strip())
 
     async def _lock_path(self) -> Path:
         """The lock file of this Docker daemon's GPU admission, by the daemon's ID, which
@@ -2223,17 +2251,19 @@ class DockerProvider(Provider):
         isolated = mode is not NetworkMode.OPEN
         runtime = _runtime_named(str(record.get("HostConfig", {}).get("Runtime")))
         confinement = await runtime.confinement.found(networks, self._networks, labels)
-        await confinement.wire(container, request, reattached=True)
-        sealed = isolated and await confinement.sealed(container, attached)
         agent_user = request.user
         watcher = await _watcher(container, runtime)
         memory_mb = allocation.memory_mb
         session: _Session | None = None
         try:
+            await self._host_ports.hold(container, _ports_on_host(request))
+            await confinement.wire(container, request, reattached=True)
+            sealed = isolated and await confinement.sealed(container, attached)
             session = await self._connect(container, agent_user, memory_mb, watcher)
             agent_home, _ = await self._guest_contract(session.client)
             file_session = await self._connect(container, agent_user, memory_mb, watcher)
         except BaseException:
+            self._host_ports.release(container)
             if session is not None:
                 await session.client.close()
             if watcher is not None:
@@ -2253,6 +2283,7 @@ class DockerProvider(Provider):
             agent_home=agent_home,
             sealed=sealed,
             watchdog=self._watchdog,
+            host_ports=self._host_ports,
             guest_kernel=runtime.guest_kernel,
         )
         if sealed:
@@ -2300,6 +2331,21 @@ def _url_port(url: str | None) -> str:
     return str(port) if port else ""
 
 
+#: The hosts of a URL this Host serves, which a container reaches at the Host's address on
+#: its network.
+_ON_HOST = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::"})
+
+
+def _ports_on_host(request: SandboxRequest) -> list[int]:
+    """The ports of the Gateway and egress proxy a Sandbox reaches where this Host serves
+    them."""
+    return [
+        port
+        for url in (request.gateway_url, request.proxy_url)
+        if url and urlsplit(url).hostname in _ON_HOST and (port := urlsplit(url).port)
+    ]
+
+
 def _sandbox_gateway(url: str | None) -> str | None:
     """The Gateway as every container dials it: the Host's alias at the fixed port.
 
@@ -2308,7 +2354,7 @@ def _sandbox_gateway(url: str | None) -> str | None:
     if not url:
         return url
     parts = urlsplit(url)
-    if parts.hostname not in {"0.0.0.0", "127.0.0.1", "localhost", "::"}:
+    if parts.hostname not in _ON_HOST:
         return url
     return parts._replace(netloc=f"{HOST_ALIAS}:{SANDBOX_GATEWAY_PORT}").geturl()
 

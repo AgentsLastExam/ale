@@ -224,6 +224,63 @@ reports an overlap ([`subnets.py`](subnets.py)).
   daemon left 38 of 40 networks when the containers' removal timed out first, and nothing
   said so.
 
+## A rootless daemon's Sandboxes and the Host's Gateway
+
+**Problem.** Under rootless Docker 29.9.3 with rootlesskit's default `--detach-netns` and
+`--disable-host-loopback` (on an 8-GPU Host shared by many users, November 2026), no Docker
+leaf's Sandbox reached the Gateway, under runc or gVisor: a connection to the bridge's
+address at the Gateway's port was refused. Only an oracle run, which dials no Gateway,
+completed there, and the conformance suite's Gateway tests passed only once pytest itself
+ran in the daemon's network namespace through `nsenter`.
+
+**Context.** dockerd runs in the Host's network namespace; its bridges are in one
+rootlesskit made for them, `$ROOTLESSKIT_STATE_DIR/netns`, which rootlesskit's child, the
+daemon's parent, is in. Without `--detach-netns` they are in the daemon's own namespace,
+which is not the Host's either. That namespace leaves the Host through slirp4netns, whose
+`10.0.2.2` reaches the Host's loopback unless `--disable-host-loopback`. Measured there:
+- rootlesskit's port driver forwards the other way: a port added through its API, as
+  `docker run -p` adds one, listened on the Host's `127.0.0.1` and in no namespace of the
+  daemon's, and the bridge's address still refused the connection.
+- With `--disable-host-loopback=false`, a container on the default bridge reached the Host's
+  sshd and a proxy on the Host's loopback at `10.0.2.2`; one on an internal network had no
+  route there at all.
+- To the Host's own address through slirp4netns, a runc container moved 376–408 MiB/s from
+  the Host and 89–90 MiB/s to it, a gVisor one 102–106 and 50–55; a server in the daemon's
+  namespace gave 5.0–5.5 and 5.0–6.3 GiB/s, and 820 MiB/s and 1.6–1.8 GiB/s.
+- The Fleet's tunnel carries a Run's connections between machines over a WebSocket. Its
+  Node end listens in the Node's own network namespace, where a rootless daemon's Sandbox
+  meets the same wall.
+
+**Solution.** [Docker runtimes](../README.md#docker-runtimes): the Provider listens in the
+daemon's namespace at each port of the Gateway and egress proxy its Sandboxes reach, and
+relays each connection to that port on the Host's loopback (`rootless.py`).
+
+**Decisions.**
+- A listener in the daemon's namespace rather than another route out of it: it needs no
+  daemon setting, opens nothing more of the Host, and leaves the seal as it was, which
+  still admits only those ports of the Host's address. On a Fleet Node the Provider relays
+  to the node agent's ports like any other.
+- At the Host's port number, on every address there: the seal's filters, chains and rules
+  name that port, so they stay as they are, and one listener serves every network of the
+  daemon. Only the daemon's own containers reach that namespace, as a rootful daemon's
+  reach a Gateway bound to every address.
+- Made by a fresh Python, since only a process of one thread may join a user namespace, and
+  handed back over a Unix socket: ALE's process holds the listener and relays itself, so a
+  crashed run leaves nothing in the daemon's namespace and no process of its own behind.
+- An `asyncio.Protocol` relay that hands each read to the other end, rather than streams:
+  in the same rounds under runc, streams moved 1.0–1.1 GiB/s from the Host and the Protocol
+  2.0–2.2 GiB/s; under gVisor both moved what the direct path did, which netstack bounds.
+- To the Host's loopback, on which the Gateway, the egress proxy and a node agent's
+  listeners all answer, as they bind every address.
+- One listener per port, held by each Sandbox that reaches it until it is destroyed, kept or
+  snapshotted, and closed with the last: a node agent serves Run after Run, each at ports of
+  its own.
+- A connection the Host's port refuses is reset, not ended, as a refused connection is.
+- Found as `dockerd-rootless.sh` finds it, from the daemon on the CLI's socket, and only for
+  a daemon `docker info` reports rootless; none where ALE itself runs in that namespace.
+  Found again for each new listener, since a daemon that restarted under a long-lived node
+  agent is another process; `docker info` is read once more per port, about twice a Run.
+
 ## Container features under gVisor
 
 **Problem.** On `runsc`, `--cap-add NET_RAW` gave no raw socket, `--cap-add ALL` gave no

@@ -14,8 +14,9 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 Each package keeps its Provider and Sandbox in `provider.py` and exports both. Beside it,
 `docker/kata.py` builds the tc filters and VM size a sandbox in a Kata microVM needs,
 `docker/gvisor.py` the tc filters, netstack chains, size and GPU memory limit of one on
-gVisor, `docker/tc.py` the tc commands both use, and `docker/gpu_sharing.py` decides which
-GPUs a Docker Sandbox takes and watches what a shared one uses;
+gVisor, `docker/tc.py` the tc commands both use, `docker/gpu_sharing.py` decides which
+GPUs a Docker Sandbox takes and watches what a shared one uses, and `docker/rootless.py`
+relays a Sandbox's connections to the Host's ports under rootless Docker;
 `daytona/api.py` is Daytona's REST client and `daytona/image.py` adapts and publishes
 images; `orchard/client.py` drives Orchard and Tart, `orchard/framing.py` frames images
 and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run's Gateway
@@ -85,7 +86,7 @@ serves it on.
 
 | Provider | Where the fixed port leads |
 |---|---|
-| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)) |
+| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)). Under rootless Docker, whose bridges are in a network namespace of rootlesskit's, the Provider listens at the Gateway's port there and relays each connection to the Host ([Docker runtimes](#docker-runtimes)) |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Firecracker | As QEMU, from the guest's tap device in the runner |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
@@ -467,10 +468,35 @@ what the seal needs of that network before the sandbox starts and writes its `re
 after the seal. Only a Sandbox booted from a snapshot runs code an agent wrote in that
 time, and its setup phase has the network anyway.
 
-Under rootless Docker whose network namespace rootlesskit detaches (`--detach-netns`) and
-keeps from the Host's loopback (`--disable-host-loopback`), the bridge's address is in that
-namespace, and no Docker leaf's sandbox reaches a Gateway the Host serves there (measured on
-a Host running Docker 29.9.3 so, runc included).
+A rootless daemon's bridges are in a network namespace of rootlesskit's, which it detaches
+for them (`--detach-netns`, `dockerd-rootless.sh`'s default) or which is the daemon's own,
+and which reaches no port on the Host's loopback (`--disable-host-loopback`): nothing the
+Host serves answers at a bridge's address. When `docker info` reports the daemon rootless
+and its bridges are in another network namespace than ALE's, the Provider listens there, on
+every address, at each port of the Gateway and egress proxy its Sandboxes reach, and relays
+each connection to that port on the Host's loopback; a connection the port refuses is
+reset. The seal is unchanged: it still admits only those ports of the Host's address. The
+Provider finds the namespace as `dockerd-rootless.sh` does: the daemon is the process on
+the socket the CLI uses (`SO_PEERCRED`), and the namespace is
+`$ROOTLESSKIT_STATE_DIR/netns` in the daemon's mount namespace when rootlesskit detached
+it, and the daemon's own otherwise. A Python of its own joins the daemon's user and network
+namespaces, makes the listener and hands it back, so the listener is ALE's process's: it
+closes when the last Sandbox that reaches its port ends here, or with the process. Where
+ALE runs inside that namespace itself, nothing is relayed.
+
+What a relayed connection costs, on a 384-core Host under a load of about 185 (Docker
+29.9.3 with rootlesskit 3.3.0 and slirp4netns, three runs each), against a server listening
+in the daemon's namespace itself, as a rootful daemon's Host does:
+
+| | runc, direct | runc, relayed | gVisor, direct | gVisor, relayed |
+|---|---|---|---|---|
+| Round trip of one byte | 19–23 µs | 45–53 µs | 157–174 µs | 154–260 µs |
+| Connection opened, one round trip and closed | 0.22–0.33 ms | 0.70–0.74 ms | 0.88–0.93 ms | 1.1–1.5 ms |
+| From the Host | 3.5–4.1 GiB/s | 1.3–1.6 GiB/s | 789–821 MiB/s | 731–856 MiB/s |
+| To the Host | 4.2–5.0 GiB/s | 1.7–2.3 GiB/s | 1.2–1.8 GiB/s | 1.2–1.5 GiB/s |
+
+Model traffic is a small fraction of either; under gVisor netstack bounds both paths
+alike. Each port's listener is made once, in about 19 ms.
 
 Every Kata or gVisor Sandbox, and every runc one whose network is not `open`, takes a bridge
 network of its own while it lives. Rather than one of the about 31 networks Docker's default

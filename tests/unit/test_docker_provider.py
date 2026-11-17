@@ -9,6 +9,7 @@ import contextvars
 import dataclasses
 import json
 import re
+import socket
 import time
 from ipaddress import IPv4Network
 from pathlib import Path
@@ -42,7 +43,7 @@ from ale.core.sandbox import (
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd, iptables
 from ale.run.providers import memory
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, subnets, tc
+from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, subnets, tc
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
@@ -52,6 +53,7 @@ from ale.run.providers.docker.provider import (
     _GvisorConfinement,
     _KataConfinement,
     _Networks,
+    _ports_on_host,
     _RuncConfinement,
     _sandbox_gateway,
     _Session,
@@ -88,6 +90,97 @@ def test_every_container_dials_the_gateway_at_the_fixed_port() -> None:
     assert _sandbox_gateway("http://127.0.0.1:52000/v1") == f"{fixed}/v1"
     assert _sandbox_gateway("https://gateway.example:443") == "https://gateway.example:443"
     assert _sandbox_gateway(None) is None
+
+
+def test_only_the_ports_this_host_serves_are_relayed() -> None:
+    served = request(
+        gateway_url="http://0.0.0.0:41000",
+        proxy_url="http://127.0.0.1:41001",
+        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)),
+    )
+    assert _ports_on_host(served) == [41000, 41001]
+    elsewhere = request(gateway_url="https://gateway.example:443")
+    assert _ports_on_host(elsewhere) == []
+
+
+@pytest.fixture
+def ports_here(monkeypatch: pytest.MonkeyPatch) -> tuple[rootless.HostPorts, dict[int, int]]:
+    """Host ports relayed from this process's namespace, each from a port of its own, which
+    the returned map gives."""
+    listening: dict[int, int] = {}
+
+    async def listen(_namespaces: rootless.Namespaces, port: int) -> socket.socket:
+        listener = socket.create_server(("127.0.0.1", 0))
+        listening[port] = listener.getsockname()[1]
+        return listener
+
+    async def elsewhere() -> rootless.Namespaces:
+        return rootless.Namespaces(user="/proc/1/ns/user", net="/proc/1/ns/net")
+
+    monkeypatch.setattr(rootless, "_listen", listen)
+    return rootless.HostPorts(elsewhere), listening
+
+
+async def test_a_relay_carries_both_ways_and_passes_each_end_on(
+    ports_here: tuple[rootless.HostPorts, dict[int, int]],
+) -> None:
+    ports, listening = ports_here
+    sent = bytes(range(256)) * (32 << 10)  # 8 MiB, more than any buffer holds
+
+    async def host(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        got = await reader.read()  # until the Sandbox's end arrives
+        writer.write(str(len(got)).encode() + b"\n" + got)
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(host, "0.0.0.0", 0)
+    port = server.sockets[0].getsockname()[1]
+    await ports.hold("ale-a", [port])
+    reader, writer = await asyncio.open_connection("127.0.0.1", listening[port])
+    writer.write(sent)
+    writer.write_eof()
+    assert await reader.readline() == f"{len(sent)}\n".encode()
+    assert await reader.read() == sent
+    writer.close()
+    server.close()
+
+
+async def test_a_relay_listens_while_any_holder_holds_its_port(
+    ports_here: tuple[rootless.HostPorts, dict[int, int]],
+) -> None:
+    ports, listening = ports_here
+    await ports.hold("ale-a", [41000])
+    await ports.hold("ale-b", [41000])
+    assert len(listening) == 1
+    ports.release("ale-a")
+    # Nothing serves 41000 on the Host: the relay takes the connection, then resets it.
+    reader, writer = await asyncio.open_connection("127.0.0.1", listening[41000])
+    with pytest.raises(ConnectionResetError):
+        await reader.read()
+    writer.close()
+    ports.release("ale-b")
+    await asyncio.sleep(0)
+    with pytest.raises(ConnectionRefusedError):
+        await asyncio.open_connection("127.0.0.1", listening[41000])
+
+
+async def test_nothing_is_relayed_where_the_bridges_are_in_this_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def listen(_namespaces: rootless.Namespaces, _port: int) -> socket.socket:
+        raise AssertionError("listened")
+
+    looked: list[None] = []
+
+    async def here() -> None:
+        looked.append(None)
+
+    monkeypatch.setattr(rootless, "_listen", listen)
+    ports = rootless.HostPorts(here)
+    await ports.hold("ale-a", [41000])
+    await ports.hold("ale-b", [41000, 41001])
+    ports.release("ale-a")
+    assert len(looked) == 1  # this process stays where it is
 
 
 #: A sandbox's addresses on its own network, ``ale-net-e1``, whose bridge holds the Host at
@@ -217,6 +310,10 @@ async def test_an_open_sandbox_without_a_gateway_needs_no_rules(
     assert calls == []
 
 
+async def _in_our_namespace() -> rootless.Namespaces | None:
+    return None
+
+
 def _sandbox() -> DockerSandbox:
     async def close() -> None:
         pass
@@ -240,6 +337,7 @@ def _sandbox() -> DockerSandbox:
     sandbox._watcher = None
     sandbox._stopping = None
     sandbox._watchdog = gpu_sharing.Watchdog()
+    sandbox._host_ports = rootless.HostPorts(_in_our_namespace)
     sandbox._context = contextvars.copy_context()
     sandbox.container_id = "f" * 64
     sandbox._relay = None
