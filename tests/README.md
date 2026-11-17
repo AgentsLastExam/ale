@@ -19,8 +19,8 @@ just lint             # formatting, lint and import boundaries
 (`pytest -n 4 --dist loadfile`), so an integration test neither relies on what another file
 leaves behind nor assumes it is the only run on the host. Every Kata and gVisor sandbox, an
 `open` one's included, and every runc one whose network is not `open` gets a network of its
-own, so a host that runs several suites at once may need more networks than Docker's
-default address pools hold
+own, on a subnet of ALE's own, so suites run at once on one host never exhaust Docker's
+address pools
 ([Docker runtimes](../packages/ale-run/src/ale/run/providers/README.md#docker-runtimes)).
 The Kata tests run only where Kata is installed
 ([Providers](../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)),

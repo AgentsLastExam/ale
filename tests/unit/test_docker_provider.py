@@ -6,9 +6,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextvars
+import dataclasses
 import json
 import re
 import time
+from ipaddress import IPv4Network
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, get_args
@@ -34,16 +36,16 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd, iptables
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, tc
+from ale.run.providers.docker import gpu_sharing, gvisor, kata, subnets, tc
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
     RUNTIMES,
     DockerProvider,
     DockerSandbox,
-    _DefaultBridge,
     _GvisorConfinement,
     _KataConfinement,
+    _Networks,
     _RuncConfinement,
     _sandbox_gateway,
     _Session,
@@ -87,10 +89,15 @@ def test_every_container_dials_the_gateway_at_the_fixed_port() -> None:
 SANDBOX_IP, SANDBOX_MAC, BRIDGE_MAC = "172.18.0.5", "02:42:ac:12:00:05", "02:42:aa:bb:cc:01"
 PEERS = tc.Peers(host_ip="172.18.0.1", host_mac=BRIDGE_MAC, ip=SANDBOX_IP, mac=SANDBOX_MAC)
 RESOLV_CONF = "nameserver 192.0.2.53\n"
+#: The routes in the daemon's network namespace, as a helper there prints them.
+ROUTES = json.dumps([{"dst": "default"}, {"dst": "192.0.2.0/24"}])
 
 
 def _scripted_reply(argv: tuple[str, ...]) -> tuple[int, str, str]:
-    """What the scripted docker CLI answers about networks, addresses and resolv.conf."""
+    """What the scripted docker CLI answers about networks, addresses, routes and
+    resolv.conf."""
+    if argv[-len(subnets.ROUTES) :] == subnets.ROUTES:
+        return 0, ROUTES, ""
     if argv[:2] == ("network", "inspect"):
         return 0, "172.18.0.1\n", ""
     if argv[:2] == ("inspect", "--format") and "MacAddress" in argv[2]:
@@ -111,6 +118,21 @@ def _scripted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
 
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     return calls
+
+
+def _created(calls: list[tuple[str, ...]]) -> list[tuple[str, IPv4Network, str, bool]]:
+    """Each network the scripted docker CLI created: its name, subnet and gateway, and
+    whether it is internal."""
+    return [
+        (
+            call[-1],
+            IPv4Network(call[call.index("--subnet") + 1]),
+            call[call.index("--gateway") + 1],
+            "--internal" in call,
+        )
+        for call in calls
+        if call[:2] == ("network", "create")
+    ]
 
 
 def _helpers(calls: list[tuple[str, ...]]) -> list[list[str]]:
@@ -144,16 +166,23 @@ async def test_the_fixed_port_is_routed_to_the_gateway_and_an_isolated_sandbox_c
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", [NetworkMode.BLOCK, NetworkMode.OPEN])
-async def test_a_runc_sandbox_reads_the_hosts_address_on_its_own_network(
+async def test_a_runc_sandbox_reaches_the_host_at_its_own_networks_gateway(
     monkeypatch: pytest.MonkeyPatch, mode: NetworkMode
 ) -> None:
+    """An isolated one's internal network is created with the Host as its gateway, which
+    need not be read back; an ``open`` one reads the default bridge's."""
     calls = _scripted(monkeypatch)
     started = await _RuncConfinement.start(
-        "e1-abcdef", request(network=NetworkPolicy(mode=mode)), _DefaultBridge()
+        "e1-abcdef", request(network=NetworkPolicy(mode=mode)), _Networks()
     )
-    assert started.host_ip == "172.18.0.1"
     inspected = [call[2] for call in calls if call[:2] == ("network", "inspect")]
-    assert inspected == (["ale-net-e1-abcdef"] if mode is NetworkMode.BLOCK else ["bridge"])
+    if mode is NetworkMode.OPEN:
+        assert (started.network, started.host_ip) == (None, "172.18.0.1")
+        assert inspected == ["bridge"] and _created(calls) == []
+    else:
+        ((name, subnet, gateway, internal),) = _created(calls)
+        assert (started.network, internal, inspected) == (name, True, [])
+        assert name == "ale-net-e1-abcdef" and started.host_ip == gateway == str(subnet[1])
 
 
 @pytest.mark.asyncio
@@ -380,7 +409,7 @@ def _helper_commands(call: tuple[str, ...]) -> list[str]:
 
 
 def _on_own_bridge(kind: type[_KataConfinement] | type[_GvisorConfinement]) -> Any:
-    return kind(_DefaultBridge(), "ale-net-e1", "172.18.0.1", BRIDGE_MAC)
+    return kind(_Networks(), "ale-net-e1", "172.18.0.1", BRIDGE_MAC)
 
 
 @pytest.mark.asyncio
@@ -399,24 +428,22 @@ async def test_a_kata_or_gvisor_sandbox_boots_on_a_network_of_its_own(
     sandbox removes the network."""
     calls = _scripted(monkeypatch)
     wanted = request(network=NetworkPolicy(mode=mode))
-    confinement = await kind.start("e1-abcdef", wanted, _DefaultBridge())
+    confinement = await kind.start("e1-abcdef", wanted, _Networks())
     network = "ale-net-e1-abcdef"
-    assert calls[:2] == [
-        ("network", "create", network),
-        ("network", "inspect", network, "--format", "{{(index .IPAM.Config 0).Gateway}}"),
-    ]
+    ((name, _, gateway, internal),) = _created(calls)
+    assert (name, internal) == (network, False)
     # On the network itself, removed by name before the sandbox starts there.
-    (helper,) = [call for call in calls if call[0] == "run"]
+    (helper,) = [call for call in calls if call[0] == "run" and "--name" in call]
     name = helper[helper.index("--name") + 1]
-    assert helper[helper.index("--network") + 1] == network and helper[-1] == "172.18.0.1"
+    assert helper[helper.index("--network") + 1] == network and helper[-1] == gateway
     assert calls[-1] == ("rm", "-f", name)
-    assert confinement.host_ip == "172.18.0.1" and confinement.host_mac == BRIDGE_MAC
+    assert confinement.host_ip == gateway and confinement.host_mac == BRIDGE_MAC
     assert confinement.run_args(mode is not NetworkMode.OPEN)[:4] == [
         "--network", network, "--label", f"ale.bridge-mac={BRIDGE_MAC}"
     ]  # fmt: skip
     calls.clear()
     await confinement.wire("ale-e1", wanted)
-    assert await confinement.peers("ale-e1") == PEERS
+    assert await confinement.peers("ale-e1") == dataclasses.replace(PEERS, host_ip=gateway)
     (address,) = [call for call in calls if call[0] == "inspect"]
     assert f'index .NetworkSettings.Networks "{network}"' in address[2]
     assert not [call for call in calls if call[:2] == ("run", "--rm") and "--name" in call]
@@ -443,6 +470,43 @@ async def test_a_kata_or_gvisor_sandbox_boots_on_a_network_of_its_own(
     calls.clear()
     await sandbox.destroy()
     assert calls == [("rm", "-f", "-v", "ale-e1-abcdef"), ("network", "rm", network)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removal", ["timed out", "refused"])
+async def test_a_destroyed_sandbox_removes_its_network_whatever_its_container_removal_did(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, removal: str
+) -> None:
+    """A loaded daemon can time out removing the container; the network is still asked to
+    go, and one Docker keeps, since the container still holds it, is logged by name."""
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("rm", "-f"):
+            if removal == "timed out":
+                raise ProviderStartError("docker rm -f timed out after 300s")
+            return 1, "", "Error response from daemon: cannot remove container"
+        if argv[:2] == ("network", "rm"):
+            return (
+                1,
+                "",
+                "Error response from daemon: error while removing network: has active endpoints",
+            )
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    sandbox = _sandbox()
+    sandbox.confinement = _on_own_bridge(_KataConfinement)
+    sandbox.state = SandboxState.READY
+    with caplog.at_level("WARNING"):
+        if removal == "timed out":
+            with pytest.raises(ProviderStartError, match="timed out"):
+                await sandbox.destroy()
+        else:
+            await sandbox.destroy()
+    assert calls[-1] == ("network", "rm", "ale-net-e1")
+    assert "could not remove network ale-net-e1: " in caplog.text
 
 
 @pytest.mark.asyncio
@@ -494,7 +558,7 @@ async def test_the_bridges_mac_is_read_on_the_network_by_a_helper_gone_before_it
 async def test_a_sandbox_that_records_no_bridge_mac_is_not_reattached() -> None:
     """A helper on its network would be its neighbour, so the MAC comes from its label."""
     with pytest.raises(ProviderCapabilityError, match="records no MAC"):
-        await _GvisorConfinement.found(("ale-net-e1",), _DefaultBridge(), {})
+        await _GvisorConfinement.found(("ale-net-e1",), _Networks(), {})
 
 
 REPLACE = "tc filter replace dev"
@@ -1693,18 +1757,21 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     assert run[run.index("--memory") + 1] == memory
     # An application, not gVisor's Sentry, is what the OOM killer takes.
     assert ("--oom-score-adj" in run) is (runtime == "gvisor")
-    created = [call[2:] for call in calls if call[:2] == ("network", "create")]
+    created = _created(calls)
+    host_ip = "172.18.0.1"
     if runtime == "runc":
         assert "--network" not in run and created == []
     else:
         (network,) = [run[index + 1] for index, flag in enumerate(run) if flag == "--network"]
-        assert network.startswith("ale-net-e1-") and created == [(network,)]
+        ((name, _, host_ip, internal),) = created
+        assert network.startswith("ale-net-e1-") and (name, internal) == (network, False)
         assert calls[-1] == ("network", "rm", network)
     assert "ale.network=open" in run
-    # The Host's address is read once, for the sandbox's confinement and its Gateway alias.
+    # The Host's address, the default bridge's read once or set on the sandbox's own
+    # network, serves its confinement and its Gateway alias.
     gateway = [call for call in calls if call[:2] == ("network", "inspect") and "IPAM" in call[-1]]
-    assert len(gateway) == 1
-    assert run[run.index("--add-host") + 1] == f"{HOST_ALIAS}:172.18.0.1"
+    assert len(gateway) == (runtime == "runc")
+    assert run[run.index("--add-host") + 1] == f"{HOST_ALIAS}:{host_ip}"
 
 
 @pytest.mark.asyncio
@@ -1768,8 +1835,7 @@ async def test_a_gvisor_sandbox_gets_its_gpus_as_a_runc_one_does(
 async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runtime: str
 ) -> None:
-    """Docker's default address pools hold about 31 networks, so a failed start must not
-    keep the one it made."""
+    """A failed start does not keep the network it made, whose subnet it would hold."""
     calls: list[tuple[str, ...]] = []
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
@@ -1817,34 +1883,22 @@ async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("kind", "unread"),
-    [
-        (_RuncConfinement, "Gateway"),
-        (_KataConfinement, "Gateway"),
-        (_GvisorConfinement, "Gateway"),
-        (_KataConfinement, "172.18.0.1"),
-        (_GvisorConfinement, "172.18.0.1"),
-    ],
-)
-async def test_a_network_whose_facts_cannot_be_read_is_removed_again(
-    monkeypatch: pytest.MonkeyPatch,
-    kind: type[_RuncConfinement] | type[_KataConfinement] | type[_GvisorConfinement],
-    unread: str,
+@pytest.mark.parametrize("kind", [_KataConfinement, _GvisorConfinement])
+async def test_a_network_whose_bridges_mac_cannot_be_read_is_removed_again(
+    monkeypatch: pytest.MonkeyPatch, kind: type[_KataConfinement] | type[_GvisorConfinement]
 ) -> None:
-    """The Host's address on it, or its bridge's MAC."""
     calls: list[tuple[str, ...]] = []
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         calls.append(argv)
-        if unread in argv[-1]:
+        if argv[:3] == ("run", "--rm", "--name"):
             return 1, "", "the daemon went away"
         return _scripted_reply(argv)
 
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     with pytest.raises(ProviderStartError, match="the daemon went away"):
-        await kind.start("e1-abcdef", request(), _DefaultBridge())
-    assert calls[0][:2] == ("network", "create")
+        await kind.start("e1-abcdef", request(), _Networks())
+    assert [name for name, *_ in _created(calls)] == ["ale-net-e1-abcdef"]
     assert calls[-1] == ("network", "rm", "ale-net-e1-abcdef")
 
 

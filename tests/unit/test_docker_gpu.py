@@ -38,7 +38,7 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from ale.core.trace import ExecutionLog
-from ale.run.providers.docker import gpu_sharing
+from ale.run.providers.docker import gpu_sharing, subnets
 from ale.run.providers.docker.gpu_sharing import GpuProcess, Holder, Overrun
 from ale.run.providers.docker.provider import (
     DockerProvider,
@@ -839,6 +839,8 @@ class Daemon:
         self.calls.append(argv)
         if argv[:2] == ("network", "inspect"):
             return 0, "172.17.0.1\n", ""
+        if argv[-len(subnets.ROUTES) :] == subnets.ROUTES:
+            return 0, "[]", ""
         if argv[0] == "ps":
             return 0, self.holders, ""
         if argv[:2] == ("run", "-d"):
@@ -865,7 +867,8 @@ class Daemon:
         return 0, "", ""
 
     def runs(self) -> list[tuple[str, ...]]:
-        return [call for call in self.calls if call[0] == "run"]
+        """Each Sandbox Docker was asked to start."""
+        return [call for call in self.calls if call[:2] == ("run", "-d")]
 
 
 def _starts(monkeypatch: pytest.MonkeyPatch, runtime: str) -> None:

@@ -163,12 +163,66 @@ a container on the default bridge, which names the Host's upstream servers.
   the sandbox forges nothing toward the Host.
 - `resolv.conf` is written in place by `docker exec` rather than bind-mounted: the file
   stays the container's own and writable, as Docker's is, with nothing to keep on the Host.
+- The default bridge's `resolv.conf` is read once per Provider, by one helper however many
+  sandboxes start at once: each helper is a container start, which a loaded daemon queues
+  (80 s for one on a rootless daemon under a load of about 200, November 2026).
 - The bridge's MAC, which the filters match, is read by a runc helper on the new network,
   which resolves the Host's address there and is removed before the sandbox starts, and is
   kept in a label for a reattaching run. A helper on `--network host` sees no bridge device
   under rootless Docker whose network namespace rootlesskit detaches (`--detach-netns`,
   `dockerd-rootless.sh`'s default; November 2026), and a helper on a running sandbox's
   network would be its neighbour.
+
+## Sandbox networks and Docker's address pools
+
+**Problem.** Every Kata or gVisor Sandbox, and every runc one that is not `open`, has a
+bridge network of its own, which Docker took from its default address pools: `172.17.0.0/16`
+to `172.31.0.0/16` and `192.168.0.0/16` in /20s, about 31 networks with the default
+bridge's. A daemon running about 30 such Sandboxes at once, several Runs' and test suites'
+together, started no more, and smaller pools needed `daemon.json` and a restart.
+
+**Context.** `docker network create --subnet` takes any subnet. Docker refuses one that
+overlaps another of its networks (`Pool overlaps with other one on this address space`) in
+its own allocator, so two creations never both take it, but checks it against no route, as
+it does a subnet from its pools: one overlapping the namespace's `10.0.2.0/24` was taken
+(measured, Docker 29.9.3). A network's bridge is in the daemon's network namespace: the
+Host's for a rootful daemon, rootlesskit's for a rootless one, which routes `10.0.2.0/24` to
+slirp4netns or pasta, and, without `--detach-netns`, nothing of the Host's. Only the Host's
+address, the helper that reads the bridge's MAC and then the sandbox ever hold an address on
+it.
+
+**Solution.** The Provider gives each network a /29 of `10.77.0.0/16` that no route in the
+daemon's namespace overlaps, chosen at random, and tries another, up to 32, while Docker
+reports an overlap ([`subnets.py`](subnets.py)).
+
+**Decisions.**
+- /29: the Host's address and five more, 8192 networks in the block. A /30 would hold the
+  helper and the sandbox only if Docker gave the sandbox the address the helper let go.
+- `10.77.0.0/16` lies outside Docker's default pools, so the networks Docker gives everyone
+  else are untouched, and outside the defaults of rootlesskit (`10.0.2.0/24`), Podman
+  (`10.88.0.0/16` and up), Kubernetes (`10.96.0.0/12`) and GCP's VPCs (`10.128.0.0/9`). A
+  route inside it only takes the /29s it overlaps. One that holds it all, such as a VPN's
+  `10.0.0.0/8`, leaves none, and creating a network says so; no Host so far routes it, so
+  the block is no setting.
+- Random choice and Docker's refusal rather than a lock: nothing to share between users and
+  caches, nothing a crashed process holds, and Runs creating networks at once seldom pick
+  the same /29 (with n networks, n in 8192 per try).
+- The routes are read once per Provider by a runc helper on `--network host`, not in ALE's
+  own namespace: the helper runs where the daemon puts a container on the Host's network,
+  wherever ALE runs and wherever `DOCKER_HOST` points. Under `--detach-netns` that is the
+  Host's namespace, and the bridges' then routes only rootlesskit's `10.0.2.0/24`, outside
+  the block (measured). A route added after the read, such as a VPN's, is seen by the next
+  Run.
+- Only the IPv4 subnet is given, so a network has IPv6 only when the daemon gives it to
+  every new network, as before.
+- A creation may take 300 s, as a `docker run` may: a loaded rootless daemon given 150 at
+  once answered six of them after 60 s, and finished them after their CLIs had given up;
+  with 300 s it created all 150. A creation that times out or is cancelled removes its
+  network.
+- Destroying a sandbox removes its network even when removing its container failed or
+  timed out, and logs a network Docker keeps by name: with 60 s limits, a loaded rootless
+  daemon left 38 of 40 networks when the containers' removal timed out first, and nothing
+  said so.
 
 ## Container features under gVisor
 

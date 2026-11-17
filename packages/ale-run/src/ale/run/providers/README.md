@@ -443,12 +443,22 @@ namespace, and no Docker leaf's sandbox reaches a Gateway the Host serves there 
 a Host running Docker 29.9.3 so, runc included).
 
 Every Kata or gVisor Sandbox, and every runc one whose network is not `open`, takes a bridge
-network of its own while it lives. Docker's default address pools give out 31 networks,
-`172.17.0.0/16` to `172.31.0.0/16` and `192.168.0.0/16` in /20s, and the default bridge
-holds one, so a Host that runs more than about 30 such Sandboxes at once, several Runs' or
-test suites' together, needs smaller ones:
-`"default-address-pools": [{"base": "10.200.0.0/16", "size": 24}]` in `daemon.json` gives
-256 networks of 254 addresses, from the daemon's next start.
+network of its own while it lives. Rather than one of the about 31 networks Docker's default
+address pools give out, the Provider gives it a /29 of `10.77.0.0/16` with the Host at its
+first address ([`subnets.py`](docker/subnets.py)): one of the block's 8192 that no route in
+the daemon's network namespace overlaps, chosen at random. A runc helper on `--network host`
+reads those routes once per Provider, in the namespace that holds a rootful daemon's bridges
+or a rootless one's; when rootlesskit detaches its namespace (`--detach-netns`), the helper
+sees the Host's routes, and the bridges' namespace routes only rootlesskit's `10.0.2.0/24`,
+outside the block. Docker refuses a subnet that overlaps another of its networks, and the
+Provider then tries another, up to 32, so Runs and test suites that create networks on one
+daemon at once need neither a lock nor a setting, and Docker's pools stay for everything
+else. Only the IPv4 subnet is given: a network has IPv6 only when the daemon gives it to
+every new network. On a 112-core Host, 110 sealed sandboxes (50 runc, 25 Kata, 35 gVisor)
+started at once beside 15 other networks, each on its own /29, reached their Gateway and
+neither the Internet, another Host port nor a neighbour's listener; a rootless daemon
+(Docker 29.9.3, rootlesskit with slirp4netns and `--detach-netns`) whose pools refused a
+31st network created 150 at once, each on a /29 of its own (November 2026).
 
 ## Docker on Kata Containers
 
