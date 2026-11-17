@@ -86,20 +86,23 @@ Episode's status stays what stopped the agent, and `rewards` holds the score. If
 verification then fails, that status stands without a score. An agent phase that never reached
 its run, or a guest that stopped replying, ends the Episode without verification.
 
-A Sandbox lost after an OOM kill in it, at any time since it started, ends the Episode at
-once, without verification, unless what stopped the agent before stands as above. That holds
+A Sandbox lost to memory or storage ends the Episode at once, without verification, unless
+what stopped the agent before stands as above: lost after an OOM kill in it, at any time
+since it started (`MemoryExhaustedError`), or after it wrote past its `storage_mb` where its
+Provider holds it to that by ending it (`StorageExhaustedError`). Of memory, that holds
 whether the memory its Task declares ran out or the memory around it, such as the Host's: an
 operator reads every failure, and one who finds the Host at fault fixes it and reruns, so ALE
 need not tell the two apart. In the Sandbox the agent ran in, in its phase and in shared
-verification, the status is `memory_exhausted`, the agent's own
+verification, the status is `memory_exhausted` or `storage_exhausted`, the agent's own
 [final](trace.md#result-and-run-status) result: what the agent leaves in its Sandbox,
-processes and files in memory such as a tmpfs, still holds memory after it stops, so a
-Task's shared verifier must fit beside it. In setup, and in a separate verifier, which hold
-the Task's code and the agent's files alone, the same loss is the Task's: `task_error`.
-Either way the failure is `MemoryExhaustedError` with the phase it ended, and its message
-says what showed the kill. A process the kernel ends for memory while the Sandbox goes on is
-no loss, and the Episode goes on. Which evidence counts, and where a Provider has none, is in
-the [Provider contract](sandbox-image.md#provider-contract).
+processes, files in memory such as a tmpfs and files on its disk, still holds memory and
+storage after it stops, so a Task's shared verifier must fit beside it. In setup, and in a
+separate verifier, which hold the Task's code and the agent's files alone, the same loss is
+the Task's: `task_error`. Either way the failure is that error with the phase it ended, and
+its message says what showed the loss. A process the kernel ends for memory while the
+Sandbox goes on is no loss, and neither is a write that fails as on a full disk: the Episode
+goes on. Which evidence counts, and where a Provider has none, is in the [Provider
+contract](sandbox-image.md#provider-contract).
 
 ### Evidence capture
 

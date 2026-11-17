@@ -40,6 +40,10 @@ class Status(StrEnum):
     MEMORY_EXHAUSTED = "memory_exhausted"
     """The Sandbox the agent ran in was lost after an OOM kill in it."""
 
+    STORAGE_EXHAUSTED = "storage_exhausted"
+    """The Sandbox the agent ran in was ended for writing past the storage its Task
+    declares."""
+
     CANCELLED = "cancelled"
     """An operator or a signal stopped the episode."""
 
@@ -48,15 +52,17 @@ class Status(StrEnum):
 
 
 #: The measured agent's own outcomes, which another attempt must not replace: a completed
-#: zero is a score, and a limit, a Sandbox lost to memory, or a refusal ends the agent's
-#: work, so retrying would grant a fresh limit or fresh memory. One of them without rewards,
-#: its Sandbox gone before verification, scores zero.
+#: zero is a score, and a limit, a Sandbox lost to memory or to storage it wrote past its
+#: limit, or a refusal ends the agent's work, so retrying would grant a fresh limit, fresh
+#: memory or fresh storage. One of them without rewards, its Sandbox gone before
+#: verification, scores zero.
 FINAL_STATUSES = frozenset(
     {
         Status.COMPLETED,
         Status.TIMEOUT,
         Status.BUDGET_EXCEEDED,
         Status.MEMORY_EXHAUSTED,
+        Status.STORAGE_EXHAUSTED,
         Status.REFUSED,
     }
 )

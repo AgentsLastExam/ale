@@ -53,6 +53,7 @@
             "timeout",
             "budget_exceeded",
             "memory_exhausted",
+            "storage_exhausted",
             "cancelled",
             "refused"
           ]
