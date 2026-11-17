@@ -101,6 +101,10 @@ class CapabilityProfile(BaseModel):
     always holds them whole."""
     max_cpus: int | None = Field(default=None, ge=1)
     max_memory_mb: int | None = Field(default=None, ge=1)
+    storage_limit: bool = False
+    """Whether it holds a Sandbox that names ``storage_mb`` to it, rather than let it fill the
+    Host's disk: by writable storage of that size at least, past which a write fails as on a
+    full disk, or by measuring what the Sandbox writes and ending it past the limit."""
     container_features: frozenset[ContainerFeature] = frozenset()
     """What it gives a container Sandbox that asks for it."""
 
@@ -188,6 +192,8 @@ def unmet(profile: CapabilityProfile, needs: SandboxNeeds) -> tuple[str, ...]:
         reasons.append(f"{resources.cpus} CPUs exceed its {profile.max_cpus}")
     if profile.max_memory_mb is not None and resources.memory_mb > profile.max_memory_mb:
         reasons.append(f"{resources.memory_mb} MB of memory exceed its {profile.max_memory_mb} MB")
+    if resources.storage_mb is not None and not profile.storage_limit:
+        reasons.append(f"limits no writable storage (storage_mb {resources.storage_mb})")
     if resources.gpus and not profile.gpus:
         reasons.append("attaches no GPUs")
     elif (

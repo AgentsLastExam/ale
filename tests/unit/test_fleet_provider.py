@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession
 from aiohttp.test_utils import TestServer, unused_port
-from tests.support import MemoryProvider, edit_task_config
+from tests.support import MemoryProvider, TraceSink, edit_task_config
 
 from ale.core.config import RunConfig
 from ale.core.errors import (
@@ -25,6 +25,7 @@ from ale.core.errors import (
     ProviderCapabilityError,
     ProviderCapacityError,
     ProviderStartError,
+    StorageExhaustedError,
     TaskDefinitionError,
 )
 from ale.core.fleet import ImageInputs, RunPlan, SandboxStatus
@@ -37,7 +38,6 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
-from ale.core.trace import ExecutionLog
 from ale.fleet import images as images_module
 from ale.fleet.control import ControlPlane
 from ale.fleet.node import NodeAgent, NodeSettings, probe
@@ -186,18 +186,6 @@ def request(image: PreparedTaskImage, episode: str = "episode-1", **overrides: o
     return SandboxRequest(**(base | overrides))  # type: ignore[arg-type]
 
 
-class _Trace:
-    """An episode's execution trace, as the episode's logging writes it."""
-
-    def __init__(self) -> None:
-        self.events: list[ExecutionLog] = []
-
-    def append(self, event: object, *, durable: bool = False) -> int:
-        assert isinstance(event, ExecutionLog)
-        self.events.append(event)
-        return len(self.events)
-
-
 class TestProvider:
     async def test_what_the_nodes_leaf_logs_lands_in_the_runs_trace(
         self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
@@ -219,7 +207,7 @@ class TestProvider:
             return await plain(argv, **kwargs)
 
         inner.exec = logging_exec  # type: ignore[method-assign]
-        trace = _Trace()
+        trace = TraceSink()
         with execution_logging(trace, episode_id="e1", phase="agent", component="test"):
             await sandbox.exec(["echo", "solve"])
         kept[0].run(execution.warning, "after solve")
@@ -487,6 +475,30 @@ class TestProvider:
             await sandbox.read_file("/x")
         with pytest.raises(GuestUnreachableError):
             await sandbox.exec(["true"])
+
+    async def test_a_sandbox_its_nodes_leaf_ended_raises_the_same_error_here(
+        self, fleet: Fleet, provider: FleetProvider, image: PreparedTaskImage
+    ) -> None:
+        """A Node's leaf ends a Sandbox that wrote past its storage_mb as a Run's own leaf
+        would, and its error crosses by name, so the episode records storage_exhausted."""
+        await fleet.add_node("node-a")
+        sandbox = await provider.create(request(image))
+        node = fleet.providers["node-a"]
+        assert isinstance(node, MemoryProvider)
+        (held,) = node.sandboxes
+        ended = (
+            "ALE stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
+            "Task declares"
+        )
+
+        async def stopped(*_: object, **__: object) -> None:
+            raise StorageExhaustedError(ended)
+
+        held.exec = stopped  # type: ignore[method-assign]
+        with pytest.raises(StorageExhaustedError) as lost:
+            await sandbox.exec(["true"])
+        assert str(lost.value) == ended
+        await sandbox.destroy()
 
     async def test_a_node_prepares_a_task_image_once_from_the_context_the_run_sent(
         self,

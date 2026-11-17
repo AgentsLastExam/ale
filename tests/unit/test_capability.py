@@ -98,6 +98,13 @@ class TestUnmet:
     ) -> None:
         assert unmet(PROFILE, needs(**asked)) == (reason,)
 
+    def test_a_sandbox_that_names_storage_mb_needs_a_profile_that_limits_its_writes(self) -> None:
+        """A limit nothing enforces lets a Sandbox fill the Host's disk unnoticed."""
+        sized = needs(resources=Resources(storage_mb=4096))
+        assert unmet(PROFILE, sized) == ("limits no writable storage (storage_mb 4096)",)
+        assert unmet(PROFILE.model_copy(update={"storage_limit": True}), sized) == ()
+        assert unmet(PROFILE, needs()) == ()
+
     def test_a_profile_without_snapshots_serves_no_sandbox_that_saves_or_boots_one(self) -> None:
         plain = PROFILE.model_copy(update={"snapshot": False})
         assert unmet(plain, needs(snapshot=True)) == ("saves and boots no snapshots",)
@@ -265,6 +272,7 @@ class TestProviders:
             arch=Arch.ARM64,
             gui=True,
             network_modes=frozenset({NetworkMode.OPEN}),
+            storage_limit=True,
         )
         nodes = [
             mac_node("mac").model_copy(update={"framework": framework, "profiles": (orchard,)}),

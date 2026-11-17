@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any, Literal, get_args
 
 import pytest
+from tests.support import TraceSink
 
 import ale.run
 import ale.run.providers.docker.provider as docker_provider
@@ -27,6 +28,7 @@ from ale.core.errors import (
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
+    StorageExhaustedError,
 )
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -43,7 +45,7 @@ from ale.core.sandbox import (
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd, iptables
 from ale.run.providers import memory
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, subnets, tc
+from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, storage, subnets, tc
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
@@ -58,6 +60,7 @@ from ale.run.providers.docker.provider import (
     _sandbox_gateway,
     _Session,
 )
+from ale.run.recording import execution_logging
 from ale.run.transport import GuestClient
 
 pytestmark = pytest.mark.unit
@@ -337,6 +340,7 @@ def _sandbox() -> DockerSandbox:
     sandbox._watcher = None
     sandbox._stopping = None
     sandbox._watchdog = gpu_sharing.Watchdog()
+    sandbox._storage = None
     sandbox._host_ports = rootless.HostPorts(_in_our_namespace)
     sandbox._context = contextvars.copy_context()
     sandbox.container_id = "f" * 64
@@ -1147,21 +1151,30 @@ async def test_a_kata_sandbox_lost_after_an_oom_kill_in_its_guest_says_so(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stopped",
+    [
+        GuestUnreachableError("the sandbox itself died: ALE's GPU memory watchdog stopped it"),
+        StorageExhaustedError(
+            "ALE stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
+            "Task declares"
+        ),
+    ],
+)
 async def test_a_sandbox_ale_stopped_is_no_memory_death_whatever_its_memory(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, stopped: GuestUnreachableError
 ) -> None:
-    """The GPU watchdog's stop of a gVisor Sandbox whose GPU memory limit failed is ALE's
-    doing, whatever Docker recorded."""
+    """The GPU watchdog's stop of a gVisor Sandbox whose GPU memory limit failed, or the
+    storage watch's of one that wrote past its storage_mb, is ALE's doing, whatever Docker
+    recorded: its OOMKilled, which an earlier kill may have set, is not even read."""
     calls = _scripted(monkeypatch)
     session = _Session(["sh", "-c", "echo {}"], "ale-e1", 512)
-    session.stopped_for = "ALE's GPU memory watchdog stopped it"
+    session.stopped = stopped
     await session.start()
     assert await session.recv() == "{}"
     with pytest.raises(GuestUnreachableError) as ended:
         await session.recv()
-    explained = await session.explain(ended.value)
-    assert type(explained) is GuestUnreachableError
-    assert str(explained) == "the sandbox itself died: ALE's GPU memory watchdog stopped it"
+    assert await session.explain(ended.value) is stopped
     assert calls == []
 
 
@@ -1582,6 +1595,191 @@ async def test_a_leaf_offers_the_gpus_of_this_host_that_it_may_lease(
     for in_gvisor in await DockerProvider(runtime="gvisor").profiles():
         assert (in_gvisor.gpus, in_gvisor.gpu_models) == (True, models)
         assert in_gvisor.gpu_hold is GpuHold.LIMIT
+
+
+@pytest.mark.parametrize("storage_mb", [2048, None])
+async def test_every_leaf_holds_a_sandbox_to_storage_mb_but_on_an_engines_volumes(
+    monkeypatch: pytest.MonkeyPatch, storage_mb: int | None
+) -> None:
+    """Each runtime's writes land in the writable layer the storage watch measures, but a
+    container engine's, on volumes; Docker is asked for no size, which its containerd image
+    store ignores and rootless Docker refuses."""
+    sized = request(resources=Resources(storage_mb=1024))
+    for runtime in RUNTIMES:
+        leaf = DockerProvider(runtime=runtime)
+        assert [profile.storage_limit for profile in await leaf.profiles()] == [
+            ContainerFeature.NESTED_CONTAINERS not in profile.container_features
+            for profile in await leaf.profiles()
+        ]
+        assert await leaf.unserved(sized.needs, user="user", role=SandboxRole.SHARED) == ()
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("run", "-d"):
+            return 1, "", "stopped after the flags were read"
+        return _scripted_reply(argv)
+
+    image = ResolvedImage(
+        kind="container",
+        prepared_identity=DIGEST,
+        observed_identity=DIGEST,
+        observed_ref="image@" + DIGEST,
+    )
+
+    async def resolved(_prepared: PreparedTaskImage) -> ResolvedImage:
+        return image
+
+    async def no_problems(_reference: str) -> list[str]:
+        return []
+
+    async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
+        return found
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr(
+        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+    )
+    provider = DockerProvider()
+    monkeypatch.setattr(provider, "check_image", no_problems)
+    monkeypatch.setattr(provider, "_framed", framed)
+    asked = request(
+        network=NetworkPolicy(mode=NetworkMode.OPEN), resources=Resources(storage_mb=storage_mb)
+    )
+    with pytest.raises(ProviderStartError, match="stopped after the flags were read"):
+        await provider.create(asked)
+    (run,) = [call for call in calls if call[:2] == ("run", "-d")]
+    assert "--storage-opt" not in run
+
+
+def _measured(
+    monkeypatch: pytest.MonkeyPatch, *replies: tuple[int, str, str]
+) -> list[tuple[str, ...]]:
+    """What the storage watch asks of a scripted docker CLI, which gives ``replies`` in turn
+    and then the last forever, with no wait between measurements."""
+    asked: list[tuple[str, ...]] = []
+    left = list(replies)
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        asked.append(argv)
+        return left.pop(0) if len(left) > 1 else left[0]
+
+    monkeypatch.setattr(storage, "run", run)
+    monkeypatch.setattr(storage, "WATCH_SEC", 0.0)
+    return asked
+
+
+async def _until(check: Any, timeout_sec: float = 5.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+    while not check():
+        assert asyncio.get_running_loop().time() < deadline, "it never happened"
+        await asyncio.sleep(0.01)
+
+
+def _sized_sandbox(storage_mb: int = 1024) -> DockerSandbox:
+    sandbox = _sandbox()
+    sandbox.allocation = sandbox.allocation.model_copy(update={"storage_mb": storage_mb})
+    sandbox._sessions = (
+        _Session([], sandbox.container, 1024),
+        _Session([], sandbox.container, 1024),
+    )
+    return sandbox
+
+
+async def test_a_sandbox_that_writes_past_its_storage_is_stopped_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured from outside until what it wrote over its image passes storage_mb: then the
+    stop is logged in the phase of the command that ran when it was found, before the kill
+    ends that command and with it, maybe, the episode; its next call raises
+    StorageExhaustedError naming both sizes, and nothing measures it any more. Up to the
+    limit itself, it goes on."""
+    calls: list[tuple[str, ...]] = []
+    sink = TraceSink()
+    logged_at_kill: list[int] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        logged_at_kill.append(len(sink.events))
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    asked = _measured(
+        monkeypatch,
+        (0, f"{500 << 20}\n", ""),
+        (0, f"{1024 << 20}\n", ""),
+        (0, f"{(1024 << 20) + 4096}\n", ""),
+    )
+    sandbox = _sized_sandbox()
+    with execution_logging(sink, episode_id="e1", phase="agent", component="test"):
+        sandbox._context = contextvars.copy_context()
+    sandbox.watch()
+    await _until(lambda: ("kill", sandbox.container) in calls)
+    await asyncio.sleep(0.05)
+    assert logged_at_kill == [1]
+    assert (
+        asked
+        == [("docker", "container", "inspect", "--size", "--format", "{{json .SizeRw}}", "f" * 64)]
+        * 3
+    )
+    assert calls == [("kill", sandbox.container)]
+    stopped = (
+        "ALE stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
+        "Task declares"
+    )
+    for session in sandbox._sessions:
+        ended = await session.explain(GuestUnreachableError("guest session closed"))
+        assert isinstance(ended, StorageExhaustedError)
+        assert str(ended) == stopped
+        # A call made before the kill takes effect asks nothing of the Sandbox.
+        with pytest.raises(StorageExhaustedError, match="past the 1024 MiB its Task declares"):
+            await session.client.exec(["true"])
+    (logged,) = sink.events
+    assert (logged.level, logged.phase) == ("warning", "agent")
+    assert logged.message == (
+        "ALE's storage watch stopped the Sandbox: it wrote 1025 MiB over its image, past the "
+        "1024 MiB its Task declares"
+    )
+    assert logged.data == {"written_mb": 1025, "storage_mb": 1024}
+    await sandbox._release()
+
+
+async def test_the_storage_watch_measures_only_while_a_sandbox_is_driven(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Sandbox that names no storage_mb is not measured; one that does is until ALE lets
+    go of it or it is gone, and a measurement that fails is warned of once and tried again."""
+    calls = _scripted(monkeypatch)
+    asked = _measured(monkeypatch, (0, "0\n", ""))
+    plain = _sandbox()
+    plain.watch()
+    assert plain._storage is None
+    sandbox = _sized_sandbox()
+    sandbox.watch()
+    await _until(lambda: len(asked) >= 3)
+    await sandbox._release()
+    measured = len(asked)
+    await asyncio.sleep(0.05)
+    assert len(asked) == measured
+    assert ("kill", sandbox.container) not in calls
+    asked = _measured(
+        monkeypatch,
+        (1, "", "Cannot connect to the Docker daemon"),
+        (1, "", "Cannot connect to the Docker daemon"),
+        (0, "0\n", ""),
+        (1, "", "Error response from daemon: No such container: " + "f" * 64),
+    )
+    sandbox = _sized_sandbox()
+    with caplog.at_level("WARNING", logger="ale.run.providers.docker.storage"):
+        sandbox.watch()
+        await _until(lambda: sandbox._storage is not None and sandbox._storage._task.done())
+    assert len(asked) == 4
+    assert [record.getMessage() for record in caplog.records] == [
+        f"cannot measure what {'f' * 64} wrote; goes on trying",
+        f"measures what {'f' * 64} wrote again",
+    ]
+    assert ("kill", sandbox.container) not in calls
+    await sandbox._release()
 
 
 async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(

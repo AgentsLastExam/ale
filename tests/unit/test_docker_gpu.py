@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support import TraceSink
 
 import ale.run.providers.docker.provider as docker_provider
 from ale.core.capability import GpuHold
@@ -37,7 +38,6 @@ from ale.core.sandbox import (
     SandboxState,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.core.trace import ExecutionLog
 from ale.run.providers.docker import gpu_sharing, subnets
 from ale.run.providers.docker.gpu_sharing import GpuProcess, Holder, Overrun
 from ale.run.providers.docker.provider import (
@@ -49,7 +49,6 @@ from ale.run.providers.docker.provider import (
     _parse_host_nvidia_smi,
     _parse_nvidia_smi,
     _Session,
-    _storage_run_args,
     _verify_docker_gpu,
 )
 from ale.run.recording import execution_logging
@@ -131,10 +130,6 @@ def test_container_must_observe_exact_selected_uuids() -> None:
     assert recorded.memory_free_mb == 2000  # as admission read it
     with pytest.raises(ProviderCapabilityError, match="mismatch"):
         _verify_docker_gpu((host[0],), inside)
-
-
-def test_storage_quota_uses_docker_native_writable_layer_limit() -> None:
-    assert _storage_run_args(4096) == ["--storage-opt", "size=4096M"]
 
 
 @pytest.mark.asyncio
@@ -469,18 +464,6 @@ def test_a_sandbox_past_its_share_is_an_overrun_and_one_at_it_is_not(
     assert sorted(found, key=lambda item: item[1].gpu) == expected
 
 
-class Sink:
-    """An episode's execution trace, as the episode's logging writes it."""
-
-    def __init__(self) -> None:
-        self.events: list[ExecutionLog] = []
-
-    def append(self, event: object, *, durable: bool = False) -> int:
-        assert isinstance(event, ExecutionLog)
-        self.events.append(event)
-        return len(self.events)
-
-
 def _watched_sandbox(
     hold: GpuHold, watchdog: gpu_sharing.Watchdog | None = None
 ) -> tuple[DockerSandbox, tuple[_Session, _Session]]:
@@ -492,6 +475,7 @@ def _watched_sandbox(
     sandbox._watcher = None
     sandbox._stopping = None
     sandbox._watchdog = watchdog or gpu_sharing.Watchdog()
+    sandbox._storage = None
     sandbox._context = contextvars.copy_context()
     sandbox.state = SandboxState.READY
     sandbox.allocation = ResourceAllocation(
@@ -551,7 +535,7 @@ async def test_under_runc_the_watchdog_kills_the_largest_process_and_the_episode
 
     monkeypatch.setattr(gpu_sharing, "host_process", host_process)
     sandbox, sessions = _watched_sandbox(GpuHold.WATCHED)
-    sink = Sink()
+    sink = TraceSink()
     with execution_logging(sink, episode_id="e1", phase="agent", component="test"):
         sandbox._context = contextvars.copy_context()
     calls: list[tuple[str, ...]] = []
@@ -568,7 +552,7 @@ async def test_under_runc_the_watchdog_kills_the_largest_process_and_the_episode
     await sandbox.overran(OVERRUN)
     assert rechecked == [4242]
     assert calls == [KILL]
-    assert all(session.stopped_for is None for session in sessions)
+    assert all(session.stopped is None for session in sessions)
     (logged,) = sink.events
     assert (logged.level, logged.phase) == ("warning", "agent")
     assert logged.message == (

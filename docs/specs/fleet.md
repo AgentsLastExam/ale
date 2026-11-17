@@ -55,7 +55,7 @@ Providers; a Node lends no scheduler, since it is itself where Sandboxes start.
 | Part | Holds |
 |---|---|
 | `resources` | CPUs, memory, disk, GPUs by model, and `macos_vm_slots` |
-| `profiles` | The **capability profiles** of each lent leaf, one per combination it can start (a leaf whose features exclude each other declares several), in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots, GPUs, their models and memory and how it shares them, CPU and memory limits (never more than the Node lends in all), and container features |
+| `profiles` | The **capability profiles** of each lent leaf, one per combination it can start (a leaf whose features exclude each other declares several), in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots, GPUs, their models and memory and how it shares them, CPU and memory limits (never more than the Node lends in all), whether it holds a Sandbox to its `storage_mb`, and container features |
 | `framework` | The identity of the framework its engine installs into every Sandbox |
 | `boot_id` | The machine's boot: it changes when the machine restarts, which ends every Sandbox on it, and a restarted node agent keeps it |
 
