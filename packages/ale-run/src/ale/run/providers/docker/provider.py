@@ -28,12 +28,14 @@ import contextlib
 import contextvars
 import json
 import logging
+import random
 import re
 import shutil
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from ipaddress import IPv4Network
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 from urllib.parse import urlsplit
@@ -72,7 +74,7 @@ from ale.run.iptables import GATEWAY_CHAIN
 from ale.run.process import run
 from ale.run.providers import machine_arch, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, tc
+from ale.run.providers.docker import gpu_sharing, gvisor, kata, subnets, tc
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -337,14 +339,17 @@ async def _bridge_mac(network: str, host_ip: str) -> str:
     return mac
 
 
-class _DefaultBridge:
-    """Docker's default bridge, each fact read once: the Host's address on it, at which an
-    ``open`` runc sandbox reaches its Gateway, and the ``resolv.conf`` Docker writes a
-    container there, which names the Host's upstream servers."""
+class _Networks:
+    """Docker's networks as the Provider's sandboxes use them, each fact read once: the
+    Host's address on the default bridge, at which an ``open`` runc sandbox reaches its
+    Gateway, the ``resolv.conf`` Docker writes a container there, which names the Host's
+    upstream servers, and the subnets a sandbox's own network may take."""
 
     def __init__(self) -> None:
         self._host_ip: str | None = None
         self._resolv_conf: str | None = None
+        self._free: list[IPv4Network] | None = None
+        self._reading = asyncio.Lock()
 
     async def host_ip(self) -> str:
         if self._host_ip is None:
@@ -366,6 +371,74 @@ class _DefaultBridge:
             self._resolv_conf = out
         return self._resolv_conf
 
+    async def create(self, name: str, *, internal: bool = False) -> str:
+        """Create a sandbox's own network, ``name``, on a subnet of its own; the Host's
+        address on it.
+
+        Not from Docker's address pools, which give out about 31 networks: a /29 of
+        :data:`subnets.BLOCK` that no route in the daemon's network namespace overlaps,
+        chosen at random, so that the Runs that create networks on one daemon at once seldom
+        choose alike. Docker refuses one that overlaps another network, under its own lock,
+        and the next is tried.
+
+        A loaded daemon queues the networks created at once, so each may take as long as a
+        ``docker run``; one whose CLI timed out or was cancelled is removed, since the daemon
+        may still finish it.
+        """
+        candidates = await self._free_subnets()
+        tried = random.sample(candidates, min(len(candidates), subnets.ATTEMPTS))
+        for subnet in tried:
+            host_ip = str(subnet[1])
+            try:
+                code, _, stderr = await _docker(
+                    "network", "create", *(["--internal"] if internal else []),
+                    "--subnet", str(subnet), "--gateway", host_ip, name,
+                    timeout=_START_SEC,
+                )  # fmt: skip
+            except BaseException:
+                await _discard_network(name)
+                raise
+            if code == 0:
+                return host_ip
+            if subnets.OVERLAPS not in stderr:
+                raise ProviderStartError(
+                    f"could not create the sandbox's network: {stderr.strip()}"
+                )
+        raise ProviderStartError(
+            f"could not create the sandbox's network: each of {len(tried)} subnets of "
+            f"{subnets.BLOCK} chosen at random overlapped another of Docker's networks"
+        )
+
+    async def _free_subnets(self) -> list[IPv4Network]:
+        """The /29s of :data:`subnets.BLOCK` that no route in the daemon's network namespace
+        overlaps, read once by a runc helper on ``--network host``.
+
+        That namespace holds the bridges of a rootful daemon or a rootless one; when
+        rootlesskit detaches its namespace it is the Host's, and the bridges' namespace then
+        routes only rootlesskit's ``10.0.2.0/24``, outside the block. Every sandbox's network
+        waits on this read, which may take as long as a ``docker run``.
+        """
+        if self._free is None:
+            async with self._reading:
+                if self._free is None:
+                    code, out, stderr = await _docker(
+                        "run", "--rm", *HELPER_RUNTIME, "--network", "host",
+                        "--entrypoint", "ip", NETFILTER_IMAGE, *subnets.ROUTES,
+                        timeout=_START_SEC,
+                    )  # fmt: skip
+                    if code != 0:
+                        raise ProviderStartError(
+                            f"could not read the routes of Docker's network namespace: "
+                            f"{stderr.strip()}"
+                        )
+                    self._free = subnets.free(out)
+        if not self._free:
+            raise ProviderStartError(
+                f"no sandbox network can be created: routes in Docker's network namespace "
+                f"cover all of {subnets.BLOCK}"
+            )
+        return self._free
+
 
 class _RuncConfinement:
     """A runc sandbox, sealed by an internal network of its own while it is isolated.
@@ -382,7 +455,7 @@ class _RuncConfinement:
         self.host_ip = host_ip
 
     @classmethod
-    async def start(cls, sandbox_id: str, request: SandboxRequest, bridge: _DefaultBridge) -> Self:
+    async def start(cls, sandbox_id: str, request: SandboxRequest, networks: _Networks) -> Self:
         """The per-episode network.
 
         ``block`` and ``allowlist`` both use ``--internal``: the bridge has no route off
@@ -392,25 +465,18 @@ class _RuncConfinement:
         not control. ``open`` uses the default bridge.
         """
         if request.network.mode is NetworkMode.OPEN:
-            return cls(None, await bridge.host_ip())
+            return cls(None, await networks.host_ip())
         network = f"ale-net-{sandbox_id}"
-        code, _, stderr = await _docker("network", "create", "--internal", network, timeout=60)
-        if code != 0:
-            raise ProviderStartError(f"could not create isolated network: {stderr.strip()}")
-        try:
-            return cls(network, await _bridge_host_ip(network))
-        except BaseException:
-            await _discard_network(network)
-            raise
+        return cls(network, await networks.create(network, internal=True))
 
     @classmethod
     async def found(
-        cls, networks: tuple[str, ...], bridge: _DefaultBridge, labels: Mapping[str, str]
+        cls, own: tuple[str, ...], networks: _Networks, labels: Mapping[str, str]
     ) -> Self:
         """A running sandbox's, from the ALE networks it is attached to."""
-        if not networks:
-            return cls(None, await bridge.host_ip())
-        return cls(networks[0], await _bridge_host_ip(networks[0]))
+        if not own:
+            return cls(None, await networks.host_ip())
+        return cls(own[0], await _bridge_host_ip(own[0]))
 
     def run_args(self, isolated: bool) -> list[str]:
         return ["--network", self.network] if self.network else []
@@ -505,8 +571,8 @@ class _OnOwnBridge:
     egress removes the seal and the sandbox leaves through this network's NAT.
     """
 
-    def __init__(self, bridge: _DefaultBridge, network: str, host_ip: str, host_mac: str) -> None:
-        self.bridge = bridge
+    def __init__(self, networks: _Networks, network: str, host_ip: str, host_mac: str) -> None:
+        self.networks = networks
         #: The sandbox's network, ``ale-net-<sandbox id>``.
         self.network = network
         #: The Host's address on it, the one address the seal admits, and its bridge's MAC.
@@ -515,32 +581,29 @@ class _OnOwnBridge:
         self._peers: tc.Peers | None = None
 
     @classmethod
-    async def start(cls, sandbox_id: str, request: SandboxRequest, bridge: _DefaultBridge) -> Self:
+    async def start(cls, sandbox_id: str, request: SandboxRequest, networks: _Networks) -> Self:
         """Its network, whatever its Task's network mode, with what the seal needs of it
         read before the sandbox starts: only the seal's own helper runs between the two."""
         network = f"ale-net-{sandbox_id}"
-        code, _, stderr = await _docker("network", "create", network, timeout=60)
-        if code != 0:
-            raise ProviderStartError(f"could not create the sandbox's network: {stderr.strip()}")
+        host_ip = await networks.create(network)
         try:
-            host_ip = await _bridge_host_ip(network)
-            return cls(bridge, network, host_ip, await _bridge_mac(network, host_ip))
+            return cls(networks, network, host_ip, await _bridge_mac(network, host_ip))
         except BaseException:
             await _discard_network(network)
             raise
 
     @classmethod
     async def found(
-        cls, networks: tuple[str, ...], bridge: _DefaultBridge, labels: Mapping[str, str]
+        cls, own: tuple[str, ...], networks: _Networks, labels: Mapping[str, str]
     ) -> Self:
         """A running sandbox's, from the ALE network it is attached to and the bridge's MAC
         it was started with: a helper on its network now would be its neighbour."""
-        if len(networks) != 1:
+        if len(own) != 1:
             raise ProviderCapabilityError("the container is on no network of its own")
         if not _MAC.fullmatch(host_mac := labels.get(BRIDGE_MAC_LABEL, "")):
             raise ProviderCapabilityError("the container records no MAC of its network's bridge")
-        network = networks[0]
-        return cls(bridge, network, await _bridge_host_ip(network), host_mac)
+        network = own[0]
+        return cls(networks, network, await _bridge_host_ip(network), host_mac)
 
     def run_args(self, isolated: bool) -> list[str]:
         return ["--network", self.network, "--label", f"{BRIDGE_MAC_LABEL}={self.host_mac}"]
@@ -573,7 +636,7 @@ class _OnOwnBridge:
         and of netstack. Written in place, the file stays the container's own, as Docker's
         is.
         """
-        resolv_conf = await self.bridge.resolv_conf()
+        resolv_conf = await self.networks.resolv_conf()
         code, _, stderr = await _docker(
             "exec", "-u", "0", container,
             guestd.PYTHON["linux"], "-I", "-c", _WRITE_RESOLV_CONF, resolv_conf,
@@ -641,8 +704,8 @@ class _GvisorConfinement(_OnOwnBridge):
     outside are what binds it.
     """
 
-    def __init__(self, bridge: _DefaultBridge, network: str, host_ip: str, host_mac: str) -> None:
-        super().__init__(bridge, network, host_ip, host_mac)
+    def __init__(self, networks: _Networks, network: str, host_ip: str, host_mac: str) -> None:
+        super().__init__(networks, network, host_ip, host_mac)
         self._isolated = False
         #: The Gateway's own port, when the fixed one is routed to it, and every port of
         #: the Host's address an isolated sandbox reaches, as the wiring run asked.
@@ -1297,7 +1360,7 @@ class DockerProvider(Provider):
         self._checked: dict[str, list[str]] = {}
         self._gpu_models: tuple[GpuModel, ...] | None = None
         self._daemon: str | None = None
-        self._bridge = _DefaultBridge()
+        self._networks = _Networks()
         self._watchdog = gpu_sharing.Watchdog()
 
     @property
@@ -1523,7 +1586,7 @@ class DockerProvider(Provider):
         try:
             # Its network, if it has one of its own, is created here, so that every failure
             # from now on removes it.
-            confinement = await runtime.confinement.start(sandbox_id, request, self._bridge)
+            confinement = await runtime.confinement.start(sandbox_id, request, self._networks)
             argv += confinement.run_args(isolated)
             if request.gateway_url or request.proxy_url:
                 host_ip = confinement.host_ip
@@ -2046,7 +2109,7 @@ class DockerProvider(Provider):
         )
         isolated = mode is not NetworkMode.OPEN
         runtime = _runtime_named(str(record.get("HostConfig", {}).get("Runtime")))
-        confinement = await runtime.confinement.found(networks, self._bridge, labels)
+        confinement = await runtime.confinement.found(networks, self._networks, labels)
         await confinement.wire(container, request, reattached=True)
         sealed = isolated and await confinement.sealed(container, attached)
         agent_user = request.user
