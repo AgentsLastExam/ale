@@ -24,6 +24,7 @@ This directory is the maintained description of ALE.
 | Configure subscription login | [guides/subscription-auth.md](guides/subscription-auth.md) |
 | Run Sandboxes on a Fleet of machines | [guides/fleet.md](guides/fleet.md) |
 | Run episodes on Daytona | [guides/daytona.md](guides/daytona.md) |
+| Enroll a Windows Station for licensed software | [guides/station.md](guides/station.md) |
 
 Living specifications describe what is true now and, briefly, why; superseded
 alternatives remain in Git history. Guides explain how to use the contracts without
