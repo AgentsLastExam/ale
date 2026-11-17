@@ -213,7 +213,7 @@ absolute path on one system names nothing on the other.
 
 ### Resources and network
 
-`[environment]` selects container or VM behavior; Tasks never name a Provider.
+`[environment]` selects container, VM or software behavior; Tasks never name a Provider.
 `[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches
 only the Gateway, `allowlist` also the declared hosts, `public` everything. An
 `allowed_hosts` entry `pypi.org` is that host alone, `*.pypi.org` that host and every name
@@ -332,8 +332,8 @@ Sandbox by accident. An empty value counts as unset, as in a shell. `run`, `vali
 called, and fail naming each Task's missing variables; `[solution].env` is resolved only for
 the oracle. As in Harbor, `${...}` inside other text is not a reference and stays as written.
 Values travel in each command's environment through the guest service, never in an image, a
-Sandbox's configuration or a Host command line, so container and VM, Linux, Windows and
-macOS receive them the same way.
+Sandbox's configuration or a Host command line, so every Sandbox, a container, a VM or a
+Station's Lane, on Linux, Windows or macOS, receives them the same way.
 
 A variable is a credential when its name, or the name it refers to, contains `KEY`, `SECRET`,
 `TOKEN` (not `TOKENS`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `ale lint` fails a credential
@@ -454,6 +454,12 @@ A separate verifier with an image of its own, `[verifier.environment].image` or
 ([Verification topology](#verification-topology)), because verification never runs on the
 machine its operator keeps. A Run refuses the Task when no Provider it lists serves the
 software.
+
+The `station` leaf serves such a Task's solver in a Lane of a Station whose manifest names
+every id it lists, and only when the Task declares `network_mode = "public"`, with its
+justification, and no `[agent].sudo` or `storage_mb`, since its Lanes share their machine
+([Station guide](../guides/station.md),
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#station)).
 
 ## environment/setup/
 

@@ -112,6 +112,7 @@ write between two measurements, a few GiB at a fast disk's speed
 | `firecracker` | each Linux container as a Firecracker microVM |
 | `qemu` | Linux and Windows VMs |
 | `orchard` | macOS VMs on this Mac's local Orchard |
+| `station` | Windows Sandboxes in the Lanes of a Station, for Tasks that name licensed software; see [Station](station.md) |
 | `daytona` | Linux containers on Daytona's cloud; see [Daytona](daytona.md) |
 | `fleet` | any Sandbox, on the Nodes of a Fleet; see [Fleet](fleet.md) |
 

@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
-import socket
 import stat
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +28,6 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd
-from ale.run.guestd import tunnel as guest_tunnel
 from ale.run.providers import RETAINING_PROVIDERS, ProviderRegistry, provider_named
 from ale.run.providers.daytona import image as daytona_image
 from ale.run.providers.daytona import provider as daytona_module
@@ -58,7 +55,7 @@ from ale.run.providers.daytona.provider import (
     _Session,
     _SshHost,
     _start_image_command,
-    _Tunnel,
+    _tunnel_command,
     _tunnel_plan,
 )
 
@@ -648,94 +645,14 @@ async def test_the_image_is_read_the_way_docker_would_start_it(docker: FakeDocke
     assert (config.user, config.workdir) == ("user", "/home/user")
 
 
-# --- the tunnel, against the real sandbox-side relay -----------------------------
+# --- the tunnel ------------------------------------------------------------------
 
 
-class LocalRelay:
-    """Stands in for SSH: runs the real ``tunnel.py`` as a local subprocess."""
-
-    def __init__(self) -> None:
-        self.starts = 0
-
-    async def argv(self, remote_command: str) -> list[str]:
-        self.starts += 1
-        arguments = shlex.split(remote_command.partition("tunnel.py")[2])
-        return [sys.executable, guest_tunnel.__file__, *arguments]
-
-
-def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
-async def test_the_tunnel_runs_isolated_in_the_root_directory() -> None:
-    tunnel = _Tunnel(LocalRelay(), listeners=[(7412, 0)], targets=[("127.0.0.1", 1)])  # type: ignore[arg-type]
-    assert shlex.split(tunnel._command)[:7] == [
-        "cd", "/", "&&", "exec", "/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/tunnel.py"
+def test_the_tunnel_runs_isolated_in_the_root_directory() -> None:
+    assert shlex.split(_tunnel_command([(7412, 0), (7413, 1)])) == [
+        "cd", "/", "&&", "exec", "/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/tunnel.py",
+        "--listen", "7412:0", "--listen", "7413:1",
     ]  # fmt: skip
-
-
-async def test_the_host_tunnel_serves_the_sandbox_and_reconnects_when_ssh_drops() -> None:
-    async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        writer.write(await reader.read(65536))
-        await writer.drain()
-        writer.close()
-
-    server = await asyncio.start_server(echo, "127.0.0.1", 0)
-    target_port = server.sockets[0].getsockname()[1]
-    sandbox_port = free_port()
-    relay = LocalRelay()
-    tunnel = _Tunnel(
-        relay,  # type: ignore[arg-type]
-        listeners=[(sandbox_port, 0)],
-        targets=[("127.0.0.1", target_port)],
-    )
-    await tunnel.start(timeout_sec=30)
-    try:
-
-        async def ask(message: bytes) -> bytes:
-            reader, writer = await asyncio.open_connection("127.0.0.1", sandbox_port)
-            writer.write(message)
-            await writer.drain()
-            reply = await asyncio.wait_for(reader.read(65536), 10)
-            writer.close()
-            return reply
-
-        assert await ask(b"through the relay") == b"through the relay"
-
-        assert tunnel._process is not None
-        tunnel._process.kill()  # the SSH session drops
-        for _ in range(100):
-            try:
-                assert await ask(b"after the drop") == b"after the drop"
-                break
-            except (OSError, AssertionError):
-                await asyncio.sleep(0.3)
-        else:
-            pytest.fail("the tunnel did not come back")
-        assert relay.starts >= 2
-    finally:
-        await tunnel.close()
-        server.close()
-
-
-async def test_a_relay_that_cannot_listen_fails_the_start_with_its_reason() -> None:
-    taken = socket.socket()
-    taken.bind(("127.0.0.1", 0))
-    taken.listen()
-    port = taken.getsockname()[1]
-    tunnel = _Tunnel(
-        LocalRelay(),  # type: ignore[arg-type]
-        listeners=[(port, 0)],
-        targets=[("127.0.0.1", 1)],
-    )
-    try:
-        with pytest.raises(ProviderStartError, match="cannot listen"):
-            await tunnel.start(timeout_sec=60)
-    finally:
-        await tunnel.close()
-        taken.close()
 
 
 def test_the_relay_the_provider_starts_ships_in_every_framework_layer() -> None:

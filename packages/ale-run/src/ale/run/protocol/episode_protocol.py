@@ -128,13 +128,11 @@ class _StageLayout:
         return self.root.joinpath(*parts)
 
 
-def _layout(operating_system: OperatingSystem) -> _StageLayout:
-    root: PurePath = (
-        PureWindowsPath("C:/ProgramData/ALE")
-        if operating_system is OperatingSystem.WINDOWS
-        else PurePosixPath("/opt/ale")
-    )
-    return _StageLayout(root)
+def _layout(sandbox: Sandbox) -> _StageLayout:
+    """The Sandbox's own stage root, which a Provider whose Sandboxes share a machine gives
+    each of them apart."""
+    windows = sandbox.request.os is OperatingSystem.WINDOWS
+    return _StageLayout((PureWindowsPath if windows else PurePosixPath)(sandbox.stage_root))
 
 
 def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
@@ -254,7 +252,7 @@ def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> 
 
 
 def _powershell(command: str) -> list[str]:
-    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
+    return [guestd.WINDOWS_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command]
 
 
 def _powershell_literal(value: str) -> str:
@@ -409,7 +407,7 @@ class EpisodeProtocol:
             sandbox = await ctx.sandboxes.acquire(
                 request.model_copy(update={"snapshot": resume.source.handle})
             )
-            holder = await _agent_episode(sandbox, spec.os)
+            holder = await _agent_episode(sandbox)
             if holder != resume.source.episode_id:
                 raise ProviderCapabilityError(
                     f"snapshot {resume.source.handle} holds "
@@ -422,14 +420,14 @@ class EpisodeProtocol:
             async def attach(request: SandboxRequest) -> Sandbox:
                 # Checked before the lease owns it: a refused Sandbox is not ours to destroy.
                 attached = await attach_retained(request)
-                await _require_agent_episode(attached, spec.os, resume.source.episode_id)
+                await _require_agent_episode(attached, resume.source.episode_id)
                 return attached
 
             sandbox = await ctx.sandboxes.adopt(request, attach)
         if resume is not None:
             # Claimed before anything changes it, so the earlier episode's records no
             # longer lead to this Sandbox, whatever happens to this episode.
-            await _write_agent_episode(sandbox, spec.os, ctx.episode_id)
+            await _write_agent_episode(sandbox, ctx.episode_id)
             ctx.resumed_from = resume.source
         # The image the Sandbox runs: the request's, or one a Fleet Node prepared for it.
         ctx.prepared_image = sandbox.request.prepared_image
@@ -483,7 +481,7 @@ class EpisodeProtocol:
             return
 
         if setup_dir := folder.stage_dir(Stage.SETUP):
-            target = _layout(ctx.spec.os).path(Stage.SETUP)
+            target = _layout(sandbox).path(Stage.SETUP)
             await sandbox.upload_dir(str(setup_dir), str(target))
             if folder.stage_entry(Stage.SETUP, ctx.spec.os):
                 await self._run_stage(ctx, sandbox, target, Phase.SETUP)
@@ -784,7 +782,7 @@ class EpisodeProtocol:
         # Everything below follows the system of the Sandbox verification runs in, which a
         # separate verifier may name apart from the Task's.
         operating_system = sandbox.request.os
-        layout = _layout(operating_system)
+        layout = _layout(sandbox)
         tests_root = layout.path(Stage.TESTS)
         removed = await self._clear_stages(sandbox, (Stage.TESTS,))
         if not removed.ok:
@@ -856,7 +854,7 @@ class EpisodeProtocol:
             ctx.verification_config, ctx.judge_tokens, sandbox.gateway_url
         )
         await sandbox.write_file(
-            str(_layout(sandbox.request.os).path(Stage.TESTS, "config.json")),
+            str(_layout(sandbox).path(Stage.TESTS, "config.json")),
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         )
         ctx.verification_command_env = command_env
@@ -867,9 +865,7 @@ class EpisodeProtocol:
         invocations = []
         for name in ("llm-judge.jsonl", "agent-judge.jsonl"):
             try:
-                raw = await sandbox.read_file(
-                    str(_layout(sandbox.request.os).path(Stage.TESTS, name))
-                )
+                raw = await sandbox.read_file(str(_layout(sandbox).path(Stage.TESTS, name)))
             except Exception:
                 continue
             text = redactor(raw.decode("utf-8", errors="replace"))
@@ -1001,7 +997,7 @@ class EpisodeProtocol:
         solver = sandbox.request.role is not SandboxRole.VERIFIER
         if reason is None and self.agent_enabled and solver:
             try:
-                await _write_agent_episode(sandbox, operating_system, ctx.episode_id)
+                await _write_agent_episode(sandbox, ctx.episode_id)
             except Exception as exc:
                 reason = f"could not record the agent's episode: {exc}"
         ctx.sandboxes.mark_sanitized(sandbox, succeeded=reason is None, reason=reason)
@@ -1013,7 +1009,7 @@ class EpisodeProtocol:
         A Windows base creates each one with its own ACL under the protected ALE root, so
         there only its contents go.
         """
-        paths = [str(_layout(sandbox.request.os).path(name)) for name in names]
+        paths = [str(_layout(sandbox).path(name)) for name in names]
         if sandbox.request.os is not OperatingSystem.WINDOWS:
             return await self._remove_paths(sandbox, paths)
         return await sandbox.exec(
@@ -1165,7 +1161,7 @@ class EpisodeProtocol:
         verify_python: str | None = None,
     ) -> int:
         operating_system = sandbox.request.os
-        layout = _layout(operating_system)
+        layout = _layout(sandbox)
         stage = Stage.SETUP if phase is Phase.SETUP else Stage.TESTS
         entry = directory / stage.entry(operating_system)
         variables = ctx.variables.values
@@ -1205,7 +1201,7 @@ class EpisodeProtocol:
         execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
         argv = (
             [
-                "powershell.exe",
+                guestd.WINDOWS_POWERSHELL,
                 "-NoProfile",
                 "-NonInteractive",
                 "-ExecutionPolicy",
@@ -1426,7 +1422,7 @@ class ReverificationProtocol(EpisodeProtocol):
         self.timeouts = timeouts or RunTimeouts()
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
-        await _require_agent_episode(self.solver, ctx.spec.os, self.solver.request.episode_id)
+        await _require_agent_episode(self.solver, self.solver.request.episode_id)
         ctx.resolved_image = self.solver.resolved_image
         ctx.resource_allocation = self.solver.allocation
         ctx.sandbox_identity = self.sandbox_identity
@@ -1483,33 +1479,29 @@ class ReverificationProtocol(EpisodeProtocol):
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
 
 
-def _agent_episode_path(operating_system: OperatingSystem) -> str:
+def _agent_episode_path(sandbox: Sandbox) -> str:
     """Names the episode whose agent last ran in a solver Sandbox."""
-    return str(_layout(operating_system).path("agent-episode"))
+    return str(_layout(sandbox).path("agent-episode"))
 
 
-async def _write_agent_episode(
-    sandbox: Sandbox, operating_system: OperatingSystem, episode_id: str
-) -> None:
-    await sandbox.write_file(_agent_episode_path(operating_system), episode_id.encode())
+async def _write_agent_episode(sandbox: Sandbox, episode_id: str) -> None:
+    await sandbox.write_file(_agent_episode_path(sandbox), episode_id.encode())
 
 
-async def _agent_episode(sandbox: Sandbox, operating_system: OperatingSystem) -> str | None:
+async def _agent_episode(sandbox: Sandbox) -> str | None:
     try:
-        return (await sandbox.read_file(_agent_episode_path(operating_system))).decode()
+        return (await sandbox.read_file(_agent_episode_path(sandbox))).decode()
     except Exception:
         return None
 
 
-async def _require_agent_episode(
-    sandbox: Sandbox, operating_system: OperatingSystem, episode_id: str
-) -> None:
+async def _require_agent_episode(sandbox: Sandbox, episode_id: str) -> None:
     """A retained solver serves only the episode whose agent state it still holds.
 
     Once a later episode continued it, the earlier episode's handle no longer describes it.
     A refused Sandbox is left retained as it was, only disconnected.
     """
-    holder = await _agent_episode(sandbox, operating_system)
+    holder = await _agent_episode(sandbox)
     if holder == episode_id:
         return
     await sandbox.retain(roles=("solver",), reason="refused: it holds another episode's state")

@@ -93,6 +93,8 @@ __all__ = [
     "framework_on_disk",
     "macos_framework_identity",
     "macos_framework_payload",
+    "station_framework_identity",
+    "station_framework_payload",
     "windows_framework_identity",
     "with_framework",
 ]
@@ -261,6 +263,19 @@ def macos_framework_identity(*, user: str) -> str:
     )
 
 
+def station_framework_identity() -> str:
+    """Everything the framework a Station runs is made of: guestd, the Windows Python and Cua
+    Driver, which one push lays out in its ``C:\\ProgramData\\ALE`` for every Lane, whatever
+    their accounts."""
+    return content_hash(
+        {
+            "guestd": _guestd_digests(),
+            "cua_driver": _CUA_DRIVER["windows"][1],
+            "python": _PYTHON["windows"][1],
+        }
+    )
+
+
 def fleet_framework_identity() -> str:
     """Every framework this engine installs, as one identity.
 
@@ -291,6 +306,19 @@ def macos_framework_payload() -> bytes:
             info = tarfile.TarInfo(name)
             info.size = len(data)
             bundle.addfile(info, io.BytesIO(data))
+    return stream.getvalue()
+
+
+def station_framework_payload() -> bytes:
+    """The tar ``ale-stationd`` installs as a Station's framework: ``guestd/``, ``python/``
+    and ``cua-driver/``, nothing else."""
+    driver = _cua_driver("windows")
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as bundle:
+        for name in guestd.FILES:
+            bundle.add(guestd.SOURCE / name, arcname=f"guestd/{name}")
+        bundle.add(_python("windows"), arcname="python")
+        bundle.add(driver, arcname="cua-driver")
     return stream.getvalue()
 
 

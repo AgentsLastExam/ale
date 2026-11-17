@@ -203,6 +203,33 @@ assert os.readlink(os.path.join(root, "link")) == "assets/data.txt"
 """
 
 
+#: Run as one Sandbox's agent: whether it reads the file at ``argv[1]``, and whether any
+#: process it can see has ``argv[2]`` reversed on its command line. The marker comes
+#: reversed so that this process's own command line never holds it.
+_NEIGHBOUR = """
+import os, subprocess, sys
+path, marker = sys.argv[1], sys.argv[2][::-1]
+try:
+    with open(path, "rb") as handle:
+        handle.read()
+    print("read")
+except OSError:
+    print("unread")
+if os.path.isdir("/proc"):
+    lines = []
+    for entry in os.listdir("/proc"):
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as handle:
+                lines.append(handle.read().replace(b"\\0", b" ").decode(errors="replace"))
+        except OSError:
+            pass
+else:
+    lines = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True).stdout
+    lines = lines.splitlines()
+print("seen" if any(marker in line for line in lines) else "unseen")
+"""
+
+
 @contextlib.asynccontextmanager
 async def _host_services() -> AsyncIterator[tuple[int, int]]:
     """A stand-in Gateway answering HTTP, and another Host service that must stay unseen."""
@@ -453,6 +480,71 @@ class ProviderConformance:
                 # Destroying what discard destroyed may fail; it still closes connections.
                 with contextlib.suppress(AleError):
                     await each.destroy()
+
+    @pytest.mark.asyncio
+    async def test_a_sandbox_starts_from_its_image_whatever_an_earlier_one_left(self) -> None:
+        """A Provider that reuses a machine resets it to its baseline before the next Sandbox,
+        checks the reset, and takes a machine that fails the check out of service rather
+        than hand it out; one that starts every Sandbox anew holds this as it is. A file an
+        agent left in its home is gone from the next Sandbox's."""
+        request = await self.request()
+        name = f"ale-left-{uuid.uuid4().hex[:8]}"
+        first = await self.provider.create(request)
+        try:
+            left = str(PurePosixPath(first.agent_home) / name)
+            await first.write_file(left, b"left behind", identity=Identity.AGENT)
+        finally:
+            await first.destroy()
+        reused = await self.request(prepared_image=request.prepared_image)
+        async with await self.provider.create(reused) as second:
+            assert await second.list_files(str(PurePosixPath(second.agent_home) / name)) == ()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sandboxes_reach_none_of_each_others_files_or_processes(
+        self,
+    ) -> None:
+        """Two Sandboxes at once, on one machine or not: neither's agent reads a file the
+        other's agent keeps, or sees a process it runs."""
+        requests = [await self.request() for _ in range(2)]
+        started = await asyncio.gather(
+            *(self.provider.create(request) for request in requests), return_exceptions=True
+        )
+        sandboxes = [each for each in started if isinstance(each, Sandbox)]
+        try:
+            for each in started:
+                if isinstance(each, BaseException):
+                    raise each
+            first, second = sandboxes
+            marker = f"ale-neighbour-{uuid.uuid4().hex[:8]}"
+            kept = str(PurePosixPath(first.agent_home) / f"ale-kept-{uuid.uuid4().hex[:8]}")
+            await first.write_file(kept, b"first's", identity=Identity.AGENT)
+            ready = asyncio.Event()
+
+            async def output(stream: str, data: bytes) -> None:
+                if b"ready" in data:
+                    ready.set()
+
+            running = asyncio.create_task(
+                first.exec(
+                    ["python3", "-c", "import time; print('ready', flush=True); time.sleep(10)",
+                     marker],
+                    identity=Identity.AGENT,
+                    timeout_sec=60,
+                    output_sink=output,
+                )
+            )  # fmt: skip
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=30)
+                seen = await second.exec(
+                    ["python3", "-c", _NEIGHBOUR, kept, marker[::-1]], identity=Identity.AGENT
+                )
+                assert seen.ok, seen.stderr
+                assert seen.stdout.split() == ["unread", "unseen"], seen.stdout
+            finally:
+                assert (await running).ok
+        finally:
+            for each in sandboxes:
+                await each.destroy()
 
     @pytest.mark.asyncio
     async def test_storage_and_sudo_are_enforced_or_rejected(self) -> None:

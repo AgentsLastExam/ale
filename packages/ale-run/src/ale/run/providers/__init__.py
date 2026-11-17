@@ -1,4 +1,5 @@
-"""Sandbox providers: local container, microVM, virtual machine and cloud container backends.
+"""Sandbox providers: local container, microVM and virtual machine backends, cloud containers
+and the Lanes of a Station.
 
 A provider creates and destroys sandboxes, attaches a guest transport, applies the
 network policy, and declares its capability profiles. All in-sandbox operations go through
@@ -42,7 +43,7 @@ __all__ = [
 RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "orchard", "fleet")
 
 #: The provider ids of the schedulers, which start Sandboxes on machines they manage; every
-#: other provider id names a leaf, which starts them on this one.
+#: other provider id names a leaf, which starts them on one machine: this one, or a Station.
 SCHEDULERS = ("daytona", "fleet")
 
 
@@ -58,9 +59,10 @@ def machine_arch() -> Arch:
 
 
 def leaf(provider_id: str, *, docker: DockerProviderConfig = DockerProviderConfig()) -> Provider:
-    """The leaf a provider id names: ``docker:<runtime>`` for each runtime Docker's table
-    holds, ``qemu``, ``firecracker`` or ``orchard``. ``docker`` holds a Docker leaf's
-    settings: the Host GPUs it may lease and the margin it admits a shared one with."""
+    """The leaf a provider id names among those that start Sandboxes on this machine:
+    ``docker:<runtime>`` for each runtime Docker's table holds, ``qemu``, ``firecracker`` or
+    ``orchard``. ``docker`` holds a Docker leaf's settings: the Host GPUs it may lease and the
+    margin it admits a shared one with."""
     if provider_id.startswith("docker:"):
         from ale.run.providers.docker import RUNTIMES, DockerProvider
 
@@ -83,7 +85,7 @@ def leaf(provider_id: str, *, docker: DockerProviderConfig = DockerProviderConfi
         from ale.run.providers.orchard import OrchardProvider
 
         return OrchardProvider()
-    raise ProviderCapabilityError(f"{provider_id!r} names no leaf")
+    raise ProviderCapabilityError(f"{provider_id!r} names no leaf that starts Sandboxes here")
 
 
 async def missing_features(
@@ -196,6 +198,17 @@ class ProviderRegistry:
             from ale.run.providers.daytona import DaytonaProvider
 
             return DaytonaProvider(settings.daytona)
+        if provider_id == "station":
+            from ale.run.providers.station import StationProvider
+
+            if not settings.station.destination:
+                raise ConfigError(
+                    "the station Provider needs sandbox.station.destination, the SSH "
+                    "destination of its Station's ale-host account"
+                )
+            # Every Lane has the one size its keep-alive connection gives it, which the
+            # preflight checks against the Run's.
+            return StationProvider(settings.station, self.settings.desktop_resolution)
         return leaf(provider_id, docker=settings.docker)
 
     async def select(

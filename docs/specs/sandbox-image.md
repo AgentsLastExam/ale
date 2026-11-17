@@ -1,10 +1,11 @@
-# Container and VM sandbox image specification
+# Sandbox image specification
 
-Normative for standard container and VM Tasks. Every solver and dedicated verifier runs
-in a container or a VM, except the solver of a Task that names licensed software instead of
-an image. A Linux container builds `environment/Dockerfile`; a VM builds
-`environment/build.sh` (`build.ps1` on Windows) on the VM image `[environment].image` names;
-an image named alone is used directly ([Source selection](#source-selection-and-identity)).
+Normative for every Task. Every solver and dedicated verifier runs in a container, a VM or a
+Station's Lane: the solver of a Task that names licensed software instead of an image runs
+in a Lane of a machine that has it. A Linux container builds `environment/Dockerfile`; a VM
+builds `environment/build.sh` (`build.ps1` on Windows) on the VM image `[environment].image`
+names; an image named alone is used directly
+([Source selection](#source-selection-and-identity)).
 
 ## What a Linux image needs
 
@@ -112,8 +113,9 @@ set) is the size of every Sandbox's desktop in logical pixels, which are points 
 one value fits as much of a window on every system. It is never part of a prepared image, so
 one prepared image serves every resolution: each Provider applies it as a Sandbox starts,
 refuses a desktop that reports another size, and records it with the allocation in the
-RunLock. A container's desktop is its image's own X server, so the image must start it at
-the size `VNC_RESOLUTION` names, a name VNC desktop images share that asks for no VNC; a VM's
+RunLock. A Provider that cannot set the size refuses a Run of another size before anything
+starts. A container's desktop is its image's own X server, so the image must start it at the
+size `VNC_RESOLUTION` names, a name VNC desktop images share that asks for no VNC; a VM's
 desktop starts at its display's preferred mode. How each Provider sets them is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#desktop-resolution).
 
@@ -198,8 +200,10 @@ folder decides how:
 - `[environment].image` alone is used directly, resolved by the Provider selected for it.
 - `[environment].software` names licensed software instead, which only a machine its
   operator keeps can run: a `station` image. ALE neither builds nor frames it; the Provider
-  selected for it resolves the names it lists, sorted and joined by commas, to that machine,
-  and a Run refuses the Task when no Provider it lists serves it.
+  selected for it resolves the names it lists, sorted and joined by commas, against what its
+  machine declares, and the prepared identity is the hash of those declarations, since the
+  software itself is the operator's to install. A Run refuses the Task when no Provider it
+  lists serves it.
 
 The Task folder decides every image's kind as the Task loads, so loading reads nothing
 else: software is a `station` image, other Windows and macOS images are VMs, a Linux
@@ -383,9 +387,9 @@ Any verifier image must satisfy the same guest contract and permit ALE to stage
 
 Each Sandbox owns two fixed guest connections: one for commands and one for file
 discovery and reads. A long-running command must not block periodic log collection.
-Docker uses two stdio guest sessions, Daytona two over SSH, Orchard two over its exec
-WebSocket; QEMU and Firecracker use two authenticated connections to the same guest server
-and port.
+Docker uses two stdio guest sessions, Daytona and a Station's Lane two over SSH, Orchard two
+over its exec WebSocket; QEMU and Firecracker use two authenticated connections to the same
+guest server and port.
 Providers close both on startup failure, retention, destruction, and image save.
 
 `Sandbox.list_files(path)` returns the regular files at or below an absolute path, sorted,
@@ -435,6 +439,17 @@ cloud under the same contract; how it meets it there is in
 differences reach other modules: the RunLock's observed image is the digest pushed to
 Daytona's registry, and memory and writable storage must be whole GiB, refused rather
 than rounded.
+
+The Station Provider runs the solver of a Task that names software in a Lane of a Station,
+an account of an operator's Windows machine with a desktop session of its own, under the
+same contract; how is in
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#station). Lanes are
+reused, and share their machine, so four of its differences reach other modules: the
+RunLock's observed image names the Station, the Lane and the generation it was reset to,
+with the Lane's baseline; each Lane stages a Task's files in a stage root of its own
+(`Sandbox.stage_root`), since the machine's is every Lane's; the Lane decides the agent's
+account and home; and it serves only a solver of an `open` Task, whose agent does not
+elevate, admitting the CPUs and memory it asks for without limiting them.
 
 Retained handles are always provider-qualified: `docker:<runtime-id>` for containers,
 `qemu:<runtime-id>` for QEMU VMs, `firecracker:<runtime-id>` for Firecracker microVMs,
@@ -499,26 +514,28 @@ Setup, artifact collection/restoration, and verification use the framework's ele
 identity: root on Linux and macOS, Administrator on Windows. This applies to shared and
 separate verification independently of the agent's `[agent].sudo` setting.
 
-Directory uploads ignore Host permissions: POSIX files use `0644`, directories `0755`,
-owned by the selected framework or agent identity. Windows resets ACLs to grant
-SYSTEM/Administrators full control, Users read access, and the selected agent modify
-access for agent uploads. Task entry scripts run through their interpreter, without
-requiring executable bits. Artifact collection/restoration does not use these defaults.
-Every Provider streams the tree through guestd's `put_tree`, which applies these rules as
-it writes, so they have one implementation rather than one per backend. Links arrive as
-links; a link or hard link already at a destination is replaced, never written through,
-because the writer is root. Single-file writes, `mkdirs` and `remove` treat a link at
-their path the same way and leave its target alone; their parents, like an upload's,
-are framework-chosen paths and resolve normally.
+Directory uploads ignore Host permissions: POSIX files use `0644`, directories `0755`, owned
+by the selected framework or agent identity. Windows resets ACLs to grant
+SYSTEM/Administrators full control, Users read access, and the selected agent modify access
+for agent uploads. On a machine whose other accounts are other Sandboxes' agents, a
+Station's, uploads and the agent's files grant Users nothing: every Windows account may open
+a file that grants it access by its path, even below a directory it cannot list. Task entry
+scripts run through their interpreter, without requiring executable bits. Artifact
+collection/restoration does not use these defaults. Every Provider streams the tree through
+guestd's `put_tree`, which applies these rules as it writes, so they have one implementation
+rather than one per backend. Links arrive as links; a link or hard link already at a
+destination is replaced, never written through, because the writer is root. Single-file
+writes, `mkdirs` and `remove` treat a link at their path the same way and leave its target
+alone; their parents, like an upload's, are framework-chosen paths and resolve normally.
 
-Solver and oracle use the image's agent account. Windows guestd runs elevated in that
-account's interactive session, as the account itself or as the system, and launches agent
-commands with the limited token of the session's desktop, which it refuses to borrow from
-any other account. Only a guestd that runs as the agent launches them with its own token
-instead, when the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
-desktop session are required; the Provider checks both framework and agent privileges
-before Task execution. A Windows Task image is rebuilt when the framework changes, and a
-disk named directly by `[environment].image` is framed like any other.
+Solver and oracle use the image's agent account, or the Lane's. Windows guestd runs elevated
+in that account's interactive session, as the account itself or as the system, and launches
+agent commands with the limited token of the session's desktop and that account's own
+environment, and refuses to borrow the token from any other account. Only a guestd that runs as the agent launches them with its own
+token instead, when the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a
+limited desktop session are required; the Provider checks both framework and agent
+privileges before Task execution. A Windows Task image is rebuilt when the framework
+changes, and a disk named directly by `[environment].image` is framed like any other.
 
 Elevation is never part of an image. On every system the Provider sets it as every sandbox
 the agent works in starts, before Task code runs, so one prepared image serves a Task with
@@ -528,10 +545,11 @@ agent's account elevation, or revokes every way up through sudo and the groups t
 administrators; how is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux-and-macos).
 Nothing can keep a root account from elevating, so a Task whose `[agent].user` is root
-must declare `[agent].sudo = true`. Grants, and their absence, are verified and recorded: a
-Linux or macOS sandbox the agent works in is refused when its guest service is not root,
-when a requested grant does not work, or when an agent that did not request one can still
-use sudo.
+must declare `[agent].sudo = true`. A Station's Lane is an account its operator shares
+among Tasks, so it never elevates, and a Task that asks is not run there. Grants, and their
+absence, are verified and recorded: a Linux or macOS sandbox the agent works in is refused
+when its guest service is not root, when a requested grant does not work, or when an agent
+that did not request one can still use sudo.
 
 ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
 their type and existence.
@@ -540,14 +558,15 @@ their type and existence.
 
 A Task states what its Sandboxes need and never names a Provider or runtime, so it runs
 unchanged wherever a Provider serves it. A Provider is one of two classes. A
-[leaf](lexicon.md) starts Sandboxes on the machine it runs on, and declares each real
-combination it can start as a [capability profile](lexicon.md): kind, operating system,
-architecture, desktop, network modes, snapshots, GPUs, their models and memory and how it
-shares them, CPU and memory limits, whether it holds a Sandbox to its `storage_mb`, and
-container features. A scheduler places Sandboxes on machines it manages, which start them
-with the leaves there, and offers what those leaves do: the Fleet those of the leaves its
-registered Nodes lend, Daytona the one of its own Sandboxes. Which leaves a scheduler uses,
-and in which order, is its own configuration, never a Run's.
+[leaf](lexicon.md) starts Sandboxes on one machine, the one it runs on or a Station whose
+Lanes it leases, and declares each real combination it can start as a
+[capability profile](lexicon.md): kind, operating system, architecture, desktop, network
+modes, snapshots, GPUs, their models and memory and how it shares them, CPU and memory
+limits, whether it holds a Sandbox to its `storage_mb`, and container features. A
+scheduler places Sandboxes on machines it manages, which start them with the leaves there,
+and offers what those leaves do: the Fleet those of the leaves its registered Nodes lend,
+Daytona the one of its own Sandboxes. Which leaves a scheduler uses, and in which order, is
+its own configuration, never a Run's.
 
 A Sandbox needs its image's kind and operating system, the architecture that system implies
 (arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, the
@@ -606,17 +625,19 @@ Task content (the engine).
 |---|---|---|
 | It declares its capability profiles, and refuses, before creating anything, a request that they or its own rules do not serve, by the check the Run's selection made | Provider: `profiles` and `refusals`; a leaf's `accepts` in `create`, the Fleet's placement | `test_declares_profiles`, `test_refuses_up_front_a_container_feature_none_of_its_profiles_gives`, `test_rejects_a_request_it_cannot_serve` |
 | Every sandbox runs the framework of the engine driving it, whatever image or disk it was handed | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
-| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
+| Agent work runs as `[agent].user`, or as the account of the Lane that serves it, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
 | Replies of any size arrive whatever Python variables the image sets | the Provider starting guestd isolated; guestd writing each reply whole | `test_large_replies_arrive_whatever_python_the_image_configures` |
 | Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
 | Every Sandbox reaches its Gateway at the same fixed port, whatever port the Host serves it on, and a reattached Sandbox reaches a later run's Gateway there: an agent may keep the address in its native session | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address` |
-| Resources are applied or rejected; the RunLock records the observed image and allocation, with the Provider selected for the Sandbox and the leaf whose profile served it | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
+| Resources are applied or rejected, except the CPUs and memory of Sandboxes that share a machine, which are recorded as asked and not limited ([Station](../../packages/ale-run/src/ale/run/providers/README.md#station)); the RunLock records the observed image and allocation, with the Provider selected for the Sandbox and the leaf whose profile served it | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
 | A container Sandbox that asks for the container features a profile declares has each of them, as root | Provider in `create`; the Run's preflight on the Host | `test_gives_every_container_feature_it_declares` |
 | A process past the memory the Task declares is ended alone where the kernel can, and the Sandbox goes on; a Sandbox, or its guest service, lost after an OOM kill in it since it started raises `MemoryExhaustedError`, whether the kill was for the Sandbox's memory or the Host's, with what showed it; where nothing records the kill, the loss is a lost guest ([how each Provider tells](../../packages/ale-run/src/ale/run/providers/README.md#memory)) | Provider, explaining a lost guest connection | `test_one_process_past_the_sandboxs_memory_dies_alone`, `test_a_sandbox_lost_to_its_own_memory_says_so` |
 | A Sandbox that names `storage_mb` is held to it, or refused: by writable storage of its own, at least that size, where a write past it fails as on a full disk and the Sandbox goes on; or by measuring from outside the Sandbox, never by asking it, all that has been written over its image, and ending it once that passes `storage_mb`, after which its calls raise `StorageExhaustedError` ([how each Provider does](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)) | Provider, outside the agent's reach | `test_a_sandbox_is_held_to_its_storage` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
+| A Sandbox starts from its prepared image whatever an earlier one left: a Provider that reuses a machine resets it to its baseline, as far as the reset reaches ([what it does not undo](security.md#what-is-not-defended-against)), and checks it before the next Sandbox, takes one that fails the check out of service, and never destroys it | Provider: a new container or VM each time, or a Station's reset and check | `test_a_sandbox_starts_from_its_image_whatever_an_earlier_one_left` |
+| Sandboxes that run at once, on one machine or not, reach none of each other's files, processes or desktop | Provider: a container or VM each, or a Lane's own account, session and access lists | `test_concurrent_sandboxes_reach_none_of_each_others_files_or_processes` |
 | A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/ale-run/src/ale/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
 | A snapshot holds the disk, any number of Sandboxes boot from it, and it is listed and destroyed through its Provider; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |

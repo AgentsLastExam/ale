@@ -15,7 +15,7 @@ import pytest
 from ale.core.errors import TaskError
 from ale.core.sandbox import ExecResult, Identity
 from ale.core.taskspec import Artifact, OperatingSystem, TaskSpec
-from ale.run import artifact_files
+from ale.run import artifact_files, guestd
 from ale.run.artifact_files import inspect, read
 from ale.run.episode import _Artifacts
 from ale.run.framework import MACOS_PYTHON
@@ -337,14 +337,16 @@ class WindowsGuest:
         self.written: dict[str, bytes] = {}
 
     async def exec(self, argv, *, identity=Identity.FRAMEWORK, output_sink=None, **kwargs):
-        assert argv[0] == "python.exe"
-        if argv[3] == "inspect":
-            listing = {"entries": self.found.get(argv[4], []), "skipped": [], "truncated": False}
+        # The framework's own Python, isolated: the image's may sit where another account of
+        # a shared machine writes, and the agent may have chosen what surrounds it.
+        assert argv[:3] == [guestd.PYTHON["windows"], "-I", "-c"]
+        if argv[4] == "inspect":
+            listing = {"entries": self.found.get(argv[5], []), "skipped": [], "truncated": False}
             return ExecResult(exit_code=0, stdout=json.dumps(listing))
-        if argv[3] == "read":
-            await output_sink("stdout", self.contents[argv[4]])
+        if argv[4] == "read":
+            await output_sink("stdout", self.contents[argv[5]])
             return ExecResult(exit_code=0)
-        self.prepared.append(argv[3])
+        self.prepared.append(argv[4])
         return ExecResult(exit_code=0)
 
     async def write_file(self, path, data, *, identity=Identity.FRAMEWORK):

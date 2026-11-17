@@ -108,7 +108,7 @@ def test_setup_installing_software_belongs_on_the_machine(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_no_provider_serves_software_yet(tmp_path: Path) -> None:
+async def test_only_a_station_serves_software(tmp_path: Path) -> None:
     task = load_task_folder(_software_task(tmp_path / "task"))
     registry = ProviderRegistry(
         RunConfig.model_validate({"sandbox": {"providers": ["docker:runc", "qemu"]}})
@@ -121,3 +121,13 @@ async def test_no_provider_serves_software_yet(tmp_path: Path) -> None:
         "    docker:runc: starts container Sandboxes, not station; runs linux, not windows\n"
         "    qemu: starts vm Sandboxes, not station"
     )
+    settings = {"providers": ["docker:runc", "qemu", "station"], "station": {"destination": "ws"}}
+    registry = ProviderRegistry(RunConfig.model_validate({"sandbox": settings}))
+    with pytest.raises(ProviderCapabilityError, match="station: network block is not one it"):
+        await registry.select([task])
+    # A Station's Lanes share its network, so it serves a Task whose agent may go anywhere.
+    edit_task_config(task.folder.root, {"agent": {"network_mode": "public"}})
+    task = load_task_folder(task.folder.root)
+    await registry.select([task])
+    # The solver on the Station, its verifier in a container of its own.
+    assert (task.provider, task.verifier_provider) == ("station", "docker:runc")

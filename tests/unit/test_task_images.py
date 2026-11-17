@@ -1162,11 +1162,11 @@ async def test_software_is_resolved_by_its_provider_and_neither_built_nor_framed
     tasks = load_tasks(repository / "tasks")
     registry = _Registry()
     registry.settings = RunConfig.model_validate(
-        {"sandbox": {"providers": ["qemu", "docker:runc"]}}
+        {"sandbox": {"providers": ["station", "docker:runc"], "station": {"destination": "ws"}}}
     )
-    # No leaf serves software yet: one stands in for it under a leaf's id.
+    # Stands in for the Station, which only the Provider of each Run reaches.
     station = _Provider(ImageKind.STATION)
-    registry._instances["qemu"] = station  # type: ignore[assignment]
+    registry._instances["station"] = station  # type: ignore[assignment]
 
     results = await _prepare_images(tasks, registry)  # type: ignore[arg-type]
 

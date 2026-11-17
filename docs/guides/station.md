@@ -130,6 +130,36 @@ names this software, which must exit 0. A failing probe refuses the lease, which
 reports as an infrastructure error rather than the agent's failure; use it for what can
 break between leases, such as a license server.
 
+## Run Tasks on it
+
+A Task that names software runs its solver in a Lane through the `station` Provider, and its
+verifier elsewhere, such as in a container. Point a Run at the Station's `ale-host` account,
+at the size the keep-alive box connects at, for example in `run.toml`:
+
+```toml
+desktop_resolution = "1600x900"         # the Station's resolution
+
+[sandbox]
+providers = ["station", "docker:runc"]  # the solver in a Lane, its verifier in a container
+
+[sandbox.station]
+destination = "ale-host@station.example"
+lane_wait_sec = 1800                    # how long a Sandbox waits for a free Lane
+```
+
+Before the first episode the Run checks that the Station runs the `ale-stationd` of the ALE
+checkout it runs from, so run setup again after updating ALE, and installs that checkout's
+guestd, Python and Cua Driver on the Station when they differ, which the Station allows
+only while no Lane is leased, waiting while one resets. A Station whose manifest has
+`notepad` runs ALE's own check of a Lane end to end:
+
+```bash
+uv run ale validate tests/fixtures/tasks/station-notepad --config run.toml
+```
+
+A Lane's network is the Station's, so the Station runs only Tasks whose agent may reach
+anything (`network_mode = "public"`), and it grants no agent elevation.
+
 ## Lanes after enrollment
 
 `ssh -T ale-host@station.example status` shows each Lane: `idle`, `leased`, `resetting`

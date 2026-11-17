@@ -9,6 +9,7 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona/` | Daytona cloud container | immutable OCI image identity, pushed by digest |
 | `orchard/` | macOS VM on Orchard/Tart | digest-pinned OCI image, or a local image `build.sh` built |
+| `station/` | a Lane of a Station, an operator's Windows machine ([Station](#station)) | the software ids a Task names, resolved against the Station's manifest |
 | `fleet/` | a Sandbox of any of these on a Fleet Node ([Fleet](../../../../../../docs/specs/fleet.md)) | what the Node's leaf takes; each Node prepares its own images |
 
 Each package keeps its Provider and Sandbox in `provider.py` and exports both. Beside it,
@@ -23,14 +24,17 @@ Docker;
 images; `orchard/client.py` drives Orchard and Tart, `orchard/framing.py` frames images
 and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run's Gateway
 to its Sandboxes on a Node, both ends of it, and the node agent itself is the `ale-fleet`
-package. Two files run elsewhere and import nothing from the engine:
-`firecracker/guest_init.py` is the init every microVM boots, and `qemu/ntfs_discard.py`
-runs in the VM builder. `desktop.py` and `privileges.py` serve several Providers, and
-`runner.py` holds what QEMU and Firecracker share, as each boots its guest in a runner
-container: the guest service's token and connection, the proxy's variables, the guest's
-console that shows its OOM kills, and the check for a desktop that has drawn nothing yet.
-`memory.py` counts the OOM kills in a gVisor, Kata or Daytona sandbox from inside it
-([Memory](#memory)).
+package. Three files run elsewhere and import nothing from the engine:
+`firecracker/guest_init.py` is the init every microVM boots, `qemu/ntfs_discard.py` runs in
+the VM builder, and `station/stationd.py` is the service a Station runs. `desktop.py` and
+`privileges.py` serve several Providers, the latter with the agent's elevation on Linux and
+macOS and the Windows token check and upload access lists QEMU and the Station share;
+`tunnel.py` is the Host end of `guestd/tunnel.py`'s stream tunnel, which carries Daytona's
+and a Station's Gateway over SSH; and `runner.py` holds what QEMU and Firecracker share, as
+each boots its guest in a runner container: the guest service's token and connection, the
+proxy's variables, the guest's console that shows its OOM kills, and the check for a desktop
+that has drawn nothing yet. `memory.py` counts the OOM kills in a gVisor, Kata or Daytona
+sandbox from inside it ([Memory](#memory)).
 
 They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
 profiles, preflight, image verification, lifecycle, command/file transport, egress changes,
@@ -61,21 +65,24 @@ leaves its profiles name:
 | `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
 | `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
+| `station` | Windows Lanes on x86-64 of the Station `sandbox.station.destination` names, for software in its manifest, with a desktop | none | no | none: a Lane takes none | a role other than the solver; `[agent].sudo` |
 | `daytona` (scheduler) | Linux containers on x86-64 | Daytona's, whole | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
 | `fleet` (scheduler) | what the leaves lent by its registered Nodes that run this engine's framework start, online or not, read once per Run | as those leaves | as those leaves | as those leaves | as those leaves |
 
 Every profile applies `open`, `block` and `allowlist`, apart from Orchard's, which applies
-`block` and `allowlist` only where setup's Softnet is the worker's; a macOS Sandbox refused
-for that names the setup that installs it. A Linux Task's container is x86-64, so a Docker
-leaf on an arm64 machine serves none. A Docker leaf reads its GPUs' models and memory once,
-from nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose GPUs it does
-not accept or have the memory it needs on each. A Sandbox that names `storage_mb` goes only
-to a leaf that holds it to that: under QEMU, Firecracker, Orchard and Daytona by a disk of
-its own, at least that size, as each one's section says, and under Docker by measuring what
-it writes and ending it past the limit, but in `docker:gvisor`'s profile for
-`nested_containers` ([Docker writable storage](#docker-writable-storage)). A Node's profiles
-are its leaves', each limited to the CPUs and memory the Node lends in all. A Node lends
-Docker under any of its runtimes, QEMU and Orchard, but not Firecracker.
+`block` and `allowlist` only where setup's Softnet is the worker's, and the Station's, which
+applies `open` alone; a macOS Sandbox refused for that names the setup that installs it. A
+Linux Task's container is x86-64, so a Docker leaf on an arm64 machine serves none. A Docker
+leaf reads its GPUs' models and memory once, from nvidia-smi, so a GPU Task goes to the next
+listed Provider on a Host whose GPUs it does not accept or have the memory it needs on each.
+A Sandbox that names `storage_mb` goes only to a leaf that holds it to that: under QEMU,
+Firecracker, Orchard and Daytona by a disk of its own, at least that size, as each one's
+section says, and under Docker by measuring what it writes and ending it past the limit, but
+in `docker:gvisor`'s profile for `nested_containers`
+([Docker writable storage](#docker-writable-storage)); a Lane writes on its Station's disks,
+so a Station serves none. A Node's profiles are its leaves', each limited to the CPUs and
+memory the Node lends in all. A Node lends Docker under any of its runtimes, QEMU and
+Orchard, but not Firecracker or a Station.
 
 `docker:runc` shares the Host's kernel with its Sandboxes, so a kernel exploit in one
 reaches the Host. `docker:kata` and `firecracker` give each Sandbox a VM's kernel and attach
@@ -96,6 +103,7 @@ serves it on.
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Firecracker | As QEMU, from the guest's tap device in the runner |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
+| Station | `guestd/tunnel.py` accepts at 7412 on a loopback address drawn at random for each lease, since Lanes share the machine's loopback, on a socket `ale-stationd` binds exclusively and holds until the lease ends: no other account takes the port, between two tunnels either |
 | Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted, or until a later episode that continues in a retained VM stops it (through `lsof` on the port) and starts its own |
 | Fleet | The Node's Provider's own route, to the port where the node agent listens for the Run; the agent carries each connection over the Run's tunnel to its Gateway |
 
@@ -145,6 +153,7 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the ALE cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
 | Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the ALE cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so its profile saves none |
+| Station | None: a Lane is reset to its baseline after every lease |
 | Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `ale-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
 | Fleet | The Node's Provider saves it on that Node, as in its row, and Sandboxes that boot from it are placed there. The Fleet's handle for it is `fleet:snapshot:<sandbox>`; destroying it has the Node's Provider destroy it at the Node's next heartbeat |
 
@@ -158,7 +167,7 @@ same machine, such as a restarted Fleet node agent, drives it again or destroys 
 | Docker | `docker:<container>`: `docker inspect` finds the container, whose labels must name it ALE's, and it must be running the recorded image. Reattaching confines it by the network mode its `ale.network` label records, which it was started with, whatever the reattaching run asks, re-applies the [Gateway route](#gateway-address) as a reattaching run does and reads the seal back from the container: a runc one is sealed when it is off the default bridge, a Kata one when the seal's drop filter is on `tap0_kata`, a gVisor one when it is on `eth0`'s egress, whose netstack chains are then written again to match. `discard` removes the container and its network; one that is already gone needs nothing |
 | QEMU | `qemu:<runner>`: the same for the runner container, whose labels must name it ALE's and whose overlay must sit on the recorded disk. Reattaching refills the runner's `ALE_GATEWAY` chain and reads the seal back from its `FORWARD` drop rule. `discard` removes the runner and its overlay |
 | Orchard | `orchard:<name>:<uid>`: the VM by its name, which must still have that UID and run the image that framing, a snapshot, or a kept VM's record names on this Mac. Reattaching opens new guest sessions; the Gateway relay started at boot outlives the old ones. `discard` deletes the VM unless Orchard replaced it |
-| Daytona, Firecracker, Fleet | None: their Sandboxes have no handle, and `reattach` refuses |
+| Daytona, Firecracker, Fleet, Station | None: their Sandboxes have no handle, and `reattach` refuses |
 
 ## GPU models
 
@@ -173,6 +182,7 @@ models it got with `ale.core.capability.accepts_model`, which applies that rule.
 | Daytona | Maps the names to Daytona's GPU types as Harbor does: `h100` and `nvidia-h100-80gb` to `H100`, `h200` and `nvidia-h200-141gb` to `H200`, `rtx-pro-6000` and `nvidia-rtx-pro-6000` to `RTX-PRO-6000`, `rtx-4090` and `rtx-5090` to themselves, ignoring case. It asks for them in the Task's order, which Daytona tries in turn, and leaves out names with no type; a Task left with none is refused before anything is created. The models attached are then checked against the Task's own names, as on every Provider. `MI355X` is never asked for, as `nvidia-smi` cannot see it to record it. A Task naming no model sends no type, so Daytona chooses |
 | Firecracker | Attaches none: Firecracker passes no GPU through |
 | Orchard | Attaches none |
+| Station | Attaches none: the Station's own GPU renders every Lane's session, and no Sandbox holds it |
 
 ## GPU memory
 
@@ -328,7 +338,7 @@ A Task's `container_features` name the kernel features its container needs
 ([Container features](../../../../../../docs/specs/task-authoring.md#container-features)).
 Each container profile lists those its Provider gives. A Provider adds a grant, such as a
 flag, only to a Sandbox that names the feature; what it gives without one, every Sandbox it
-starts has anyway. QEMU and Orchard start VMs, which take none.
+starts has anyway. QEMU and Orchard start VMs, and a Station leases Lanes, which take none.
 
 [`capprobe.py`](../capprobe.py) shows them: run as root on the framework's Python, it makes,
 for each feature named, the syscalls that need it (`perf_event_open`; a BPF array map;
@@ -368,6 +378,7 @@ Each Provider starts a desktop at the request's `desktop_resolution` and then ch
 | Firecracker | The same variable, in the environment the guest's init starts the image's command with. A microVM has no display device, so its desktop is the image's own X server, as in a container |
 | QEMU | Every guest gets QEMU's standard VGA (`VGA=std`), whose EDID names the size as the display's preferred mode (`-global VGA.xres=… -global VGA.yres=…`). OVMF sets that mode at boot, Linux's `bochs` driver and GNOME start at it, and Windows' Microsoft Basic Display Adapter keeps the mode the firmware set; it ignores the size virtio-vga, the runner's own default, announces. The display has 64 MB of video memory, since Linux's driver keeps two frames of the screen. OVMF sets no mode above 3200x1800 and falls back to 1280x800, which is why `DesktopResolution` stops there |
 | Orchard | Tart keeps a VM's display size in the VM's configuration, which a clone copies and Orchard cannot set, so each resolution boots its own clone of the framed image, `ale-framed-<key>-<WIDTHxHEIGHT>`, made on first use with `tart set --display WIDTHxHEIGHTpt` and deleted when the image is framed again. The size is in points, Tart's default for macOS: a 1024x768 desktop is 2048x1536 pixels, and Cua Driver returns its captures scaled down (1366x1025 for 1024x768). macOS keeps a display narrower than 1024 points at 1024x768, which is why `DesktopResolution` starts there |
+| Station | Each Lane's session has the size its keep-alive connection gives it, the one `resolution` of the Station's setup, which no Run changes. The preflight refuses a Run whose `desktop_resolution` differs, `ale-stationd` leases only a Lane whose session has the size asked for, and `create` checks it |
 
 ## Agent elevation on Linux and macOS
 
@@ -1080,3 +1091,57 @@ On a shared Mac, Softnet sets `bootpd`'s lease time to 600 seconds and has it ig
 client identifiers (`com.apple.InternetSharing.default.plist`), for every VM and Internet
 Sharing on the Mac; cleanup leaves that setting. Any local account can run its
 set-user-ID program.
+
+## Station
+
+`StationProvider` runs the solver of a Task that names software in a Lane of the Station
+`sandbox.station.destination` names: an account of an operator's Windows Server machine with
+a Remote Desktop session of its own. What the Station runs, `ale-stationd`, how it leases,
+resets and checks Lanes, and why, is in [`station/AGENTS.md`](station/AGENTS.md); enrolling
+a Station is in the [Station guide](../../../../../../docs/guides/station.md).
+
+- **Requests.** Every request is one `ssh -T` session to the destination, `ale-host`'s,
+  whose keys run only `ale-stationd`'s client: in batch mode, without a shared connection or
+  any forwarding. The session's command is the request, and the reply's first line is JSON;
+  a `guestd` or `tunnel` session is then that process's standard streams.
+- **Image.** `prepare_image` reads the Station's manifest once per Run (`hello`) and
+  resolves the Task's software ids against it. The prepared identity is the hash of their
+  manifest entries, and the resolved reference is `station:<station>`, `<station>` being the
+  destination without its user, which may be an SSH alias.
+- **Preflight.** The Station must speak this engine's protocol, run the very
+  `ale-stationd` this checkout ships (its SHA-256), have the Run's `desktop_resolution` and
+  a Lane in service. When its framework, `guestd/`, the Windows Python and Cua Driver under
+  `C:\ProgramData\ALE`, is not this engine's (`framework.station_framework_identity`), the
+  preflight pushes this one (`station_framework_payload`), which `ale-stationd` takes only
+  while no Lane is leased, and waits while another push runs or a Lane resets.
+- **Lease.** `create` asks for a Lane whose session is active at the Run's resolution, for
+  this framework and the Task's software, whose probes the Station runs first, within two
+  minutes in all. `ale-stationd` waits up to a minute for one, and the Provider waits for
+  its answer as long as both may take; while it answers `busy` the Provider asks
+  again, for up to `sandbox.station.lane_wait_sec` (1800 s by default), and then fails the
+  Sandbox with `ProviderCapacityError`. Software the manifest lacks and a resolution the
+  Lanes lack refuse the Sandbox; a failed probe is an infrastructure error, never the
+  agent's.
+- **Channels.** A `tunnel` session runs `guestd/tunnel.py` as the system at the lease's
+  loopback address, port 7412, carrying the Gateway as on Daytona. Two `guestd` sessions,
+  one for commands and one for file reads, run guestd as the system in the Lane's session,
+  which runs the agent's commands with the Lane's limited token. The Provider then checks
+  that guestd serves the Lane's account and home with a desktop, that the framework's token
+  is an Administrator's and the agent's is not
+  (`privileges.verify_windows_identities`), that the desktop gives a screenshot, and its
+  size. Each command gets the request's variables and `ALE_GATEWAY_URL`, as a container's
+  process environment would hold them.
+- **Files.** The Lane's stage root is the one `ale-stationd` keeps for it,
+  `C:\ProgramData\ALE\lanes\<lane>`, which admits SYSTEM and Administrators alone. Every
+  upload, and every file written for the agent, gets an access list that grants SYSTEM,
+  Administrators and the identity's own account, never Users
+  (`privileges.reset_windows_acl(private=True)`): every account holds *Bypass traverse
+  checking*, so another Lane could open by its path a file Users may read.
+- **Record.** The RunLock's observed image is `station:<station>/<lane>@<generation>`, with
+  an identity that hashes the prepared identity and the Lane's baseline digest. The
+  allocation records the CPUs and memory the Task asked for, which nothing limits, no
+  storage, no elevation and the `open` network.
+- **Release.** `destroy` closes the sessions and sends `release`; a release that fails is
+  logged, not raised, since the Station ends a lease 120 s after its last session anyway.
+  The Station then resets the Lane and checks it before it leases it again. Nothing is kept:
+  `retain` and `snapshot` refuse, so a Run's `keep` ends as `retention-failed`.

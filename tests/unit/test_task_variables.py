@@ -318,6 +318,7 @@ class _Sandbox:
     def __init__(self, stdout: str = "", *, agent_home: str = "/home/user") -> None:
         self.stdout = stdout
         self.agent_home = agent_home
+        self.stage_root = "/opt/ale"
         self.request = SimpleNamespace(os=OperatingSystem.LINUX)
         self.envs: list[dict[str, str] | None] = []
 

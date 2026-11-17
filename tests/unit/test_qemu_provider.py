@@ -66,6 +66,7 @@ from ale.run.providers.qemu.provider import (
     _index_vfio_gpus,
     _inspect_vfio_gpu,
     _verify_qemu_gpus,
+    _verify_windows_privileges,
     _VfioGpu,
 )
 from ale.run.providers.runner import url_port
@@ -1134,7 +1135,7 @@ async def test_windows_privileges_must_match_framework_and_agent_roles(
             elevated = framework_admin if run_as is None else agent_admin
             return 0, f"{int(elevated)}\r\n", "", False
 
-    check = QemuProvider()._verify_windows_privileges(Client(), "user", sudo)
+    check = _verify_windows_privileges(Client(), "user", sudo=sudo)
     if framework_admin and agent_admin == sudo:
         await check
     else:

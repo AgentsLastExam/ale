@@ -1,8 +1,8 @@
 """ale-guestd — the in-sandbox execution service.
 
 Every exec, file transfer and screenshot goes through here, so the host side is
-identical for containers and virtual machines and providers only have to attach a
-transport.
+identical for containers, virtual machines and a Station's Lanes, and providers only have
+to attach a transport.
 
 Constraints that shape this file:
 

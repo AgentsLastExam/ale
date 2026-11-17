@@ -33,3 +33,6 @@ PYTHON = {
     "windows": r"C:\ProgramData\ALE\python\python.exe",
     "macos": "/opt/ale/python/bin/python3",
 }
+#: Windows PowerShell, by its full path, for what the framework runs: a Windows machine's
+#: PATH may name directories other accounts write to before the system's own.
+WINDOWS_POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"

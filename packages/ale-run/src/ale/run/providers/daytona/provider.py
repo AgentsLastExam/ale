@@ -43,7 +43,7 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import urlsplit
 
 from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
 from ale.core.config import DaytonaProviderConfig
@@ -76,7 +76,6 @@ from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem
 from ale.run import guestd
 from ale.run.framework import MARKER, framework_identity, with_framework
 from ale.run.gpu import parse_nvidia_smi
-from ale.run.guestd.tunnel import Mux
 from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.providers import relay
 from ale.run.providers.daytona.api import DaytonaApi, DaytonaError
@@ -90,6 +89,7 @@ from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.memory import WATCHER, GuestEvents
 from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.tunnel import Tunnel, target
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -385,103 +385,6 @@ class _Session(StdioTransport):
         return explained
 
 
-class _Tunnel:
-    """The Host end of the stream tunnel; reconnects if its SSH session drops."""
-
-    def __init__(
-        self,
-        ssh: _SshHost,
-        *,
-        listeners: list[tuple[int, int]],
-        targets: list[tuple[str, int]],
-    ) -> None:
-        self._ssh = ssh
-        self._targets = targets
-        self._command = "cd / && exec {} -I {} {}".format(
-            PYTHON,
-            GUESTD_DIR / "tunnel.py",
-            " ".join(f"--listen {port}:{target}" for port, target in listeners),
-        )
-        self._closing = False
-        self._first: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._process: asyncio.subprocess.Process | None = None
-        self._task: asyncio.Task[None] | None = None
-
-    async def start(self, timeout_sec: float = 120) -> None:
-        self._task = asyncio.ensure_future(self._supervise())
-        try:
-            await asyncio.wait_for(asyncio.shield(self._first), timeout_sec)
-        except BaseException:
-            await self.close()
-            raise
-
-    async def close(self) -> None:
-        self._closing = True
-        if self._first.done() and not self._first.cancelled():
-            self._first.exception()  # mark retrieved
-        if self._process is not None and self._process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                self._process.kill()
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-
-    async def _dial(self, index: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        host, port = self._targets[index]
-        return await asyncio.open_connection(host, port)
-
-    async def _supervise(self) -> None:
-        failures = 0
-        detail = ""
-        while not self._closing:
-            ready = False
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *await self._ssh.argv(self._command),
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                self._process = process
-                assert process.stdin is not None and process.stdout is not None
-                mux = Mux(process.stdout, process.stdin, dial=self._dial)
-                running = asyncio.ensure_future(mux.run())
-                try:
-                    waiting = asyncio.ensure_future(mux.ready.wait())
-                    await asyncio.wait(
-                        {waiting, running}, timeout=60, return_when=asyncio.FIRST_COMPLETED
-                    )
-                    waiting.cancel()
-                    ready = mux.ready.is_set()
-                    if ready:
-                        failures = 0
-                        if not self._first.done():
-                            self._first.set_result(None)
-                        await running
-                finally:
-                    running.cancel()
-                    if process.returncode is None:
-                        with contextlib.suppress(ProcessLookupError):
-                            process.kill()
-                    assert process.stderr is not None
-                    detail = (await process.stderr.read()).decode("utf-8", "replace").strip()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                detail = f"{type(exc).__name__}: {exc}"
-            if self._closing:
-                return
-            if not ready:
-                failures += 1
-                if failures >= 3:
-                    if not self._first.done():
-                        self._first.set_exception(
-                            ProviderStartError(f"the sandbox tunnel did not start: {detail[-500:]}")
-                        )
-                    return
-            await asyncio.sleep(min(2**failures, 15))
-
-
 class DaytonaSandbox(Sandbox):
     """One Daytona sandbox, driven through guestd over SSH."""
 
@@ -495,7 +398,7 @@ class DaytonaSandbox(Sandbox):
         ssh: _SshHost,
         client: GuestClient,
         file_client: GuestClient,
-        tunnel: _Tunnel | None,
+        tunnel: Tunnel | None,
         local_gateway: str | None,
         resolved_image: ResolvedImage,
         allocation: ResourceAllocation,
@@ -792,7 +695,7 @@ class DaytonaProvider(Provider):
         ssh: _SshHost | None = None
         client: GuestClient | None = None
         file_client: GuestClient | None = None
-        tunnel: _Tunnel | None = None
+        tunnel: Tunnel | None = None
         memory = _Memory(request.resources.memory_mb)
         try:
             published, daytona_id, data = await self._start(
@@ -821,7 +724,7 @@ class DaytonaProvider(Provider):
                 gpus = await _observed_gpus(client, request, data)
                 allocation = allocation.model_copy(update={"gpu": gpus})
             if listeners:
-                tunnel = _Tunnel(ssh, listeners=listeners, targets=targets)
+                tunnel = _tunnel(ssh, listeners, targets)
                 await tunnel.start()
             await _start_image_command(client, config, request)
             if has_desktop:
@@ -1008,7 +911,7 @@ class DaytonaProvider(Provider):
         ssh = _SshHost(self._api, daytona_id)
         client: GuestClient | None = None
         file_client: GuestClient | None = None
-        tunnel: _Tunnel | None = None
+        tunnel: Tunnel | None = None
         memory = _Memory(allocation.memory_mb)
         try:
             environment = _guest_environment(config, attached, local_gateway)
@@ -1018,7 +921,7 @@ class DaytonaProvider(Provider):
             await memory.watch(ssh)
             await _seal_daemon(client, request.user)  # idempotent: the rules persist
             if listeners:
-                tunnel = _Tunnel(ssh, listeners=listeners, targets=targets)
+                tunnel = _tunnel(ssh, listeners, targets)
                 await tunnel.start()
             file_client = await _connect(ssh, request.user, environment, memory)
         except BaseException:
@@ -1314,7 +1217,7 @@ async def _discard(
     *,
     ssh: _SshHost | None = None,
     clients: Sequence[GuestClient | None] = (),
-    tunnel: _Tunnel | None = None,
+    tunnel: Tunnel | None = None,
     memory: _Memory | None = None,
 ) -> None:
     """Undo a failed start, leaving nothing behind and never raising."""
@@ -1335,7 +1238,24 @@ async def _discard(
         ssh.close()
 
 
+def _tunnel(
+    ssh: _SshHost, listeners: list[tuple[int, int]], targets: list[tuple[str, int]]
+) -> Tunnel:
+    """The stream tunnel over an SSH session of its own, which reconnects if it drops."""
+    command = _tunnel_command(listeners)
+    return Tunnel(lambda: ssh.argv(command), targets=targets)
+
+
 # --- pure helpers -------------------------------------------------------------------
+
+
+def _tunnel_command(listeners: list[tuple[int, int]]) -> str:
+    """The shell command that runs ``guestd/tunnel.py`` with ``listeners`` in the sandbox."""
+    return "cd / && exec {} -I {} {}".format(
+        PYTHON,
+        GUESTD_DIR / "tunnel.py",
+        " ".join(f"--listen {port}:{index}" for port, index in listeners),
+    )
 
 
 def _tunnel_plan(
@@ -1351,28 +1271,18 @@ def _tunnel_plan(
     targets: list[tuple[str, int]] = []
     local_gateway = None
     if request.gateway_url:
-        parts = _tunneled(request.gateway_url)
-        local_gateway = parts._replace(netloc=f"127.0.0.1:{SANDBOX_GATEWAY_PORT}").geturl()
+        dialed = target(request.gateway_url)
+        local_gateway = (
+            urlsplit(request.gateway_url)
+            ._replace(netloc=f"127.0.0.1:{SANDBOX_GATEWAY_PORT}")
+            .geturl()
+        )
         listeners.append((SANDBOX_GATEWAY_PORT, len(targets)))
-        targets.append((_host_end(parts), parts.port or 0))
+        targets.append(dialed)
     if request.network.mode is NetworkMode.ALLOWLIST and request.proxy_url:
-        parts = _tunneled(request.proxy_url)
         listeners.append((PROXY_PORT, len(targets)))
-        targets.append((_host_end(parts), parts.port or 0))
+        targets.append(target(request.proxy_url))
     return local_gateway, listeners, targets
-
-
-def _tunneled(url: str) -> SplitResult:
-    parts = urlsplit(url)
-    if parts.port is None:
-        raise ProviderCapabilityError(f"{url!r} has no explicit port to tunnel")
-    return parts
-
-
-def _host_end(parts: SplitResult) -> str:
-    """Where the Host dials a service that listens on every interface."""
-    host = parts.hostname or "127.0.0.1"
-    return "127.0.0.1" if host in {"0.0.0.0", "::"} else host
 
 
 def _observed_allocation(request: SandboxRequest, data: dict[str, Any]) -> ResourceAllocation:

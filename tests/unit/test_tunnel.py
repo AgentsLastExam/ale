@@ -8,13 +8,16 @@ import contextlib
 import hashlib
 import os
 import socket
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 import pytest
 
+from ale.core.errors import ProviderCapabilityError, ProviderStartError
 from ale.run.guestd import tunnel
 from ale.run.guestd.tunnel import CHUNK_BYTES, WINDOW_BYTES, Mux
+from ale.run.providers.tunnel import Tunnel, target
 
 pytestmark = pytest.mark.unit
 
@@ -266,6 +269,47 @@ async def test_sandboxes_sharing_a_loopback_listen_on_one_port_at_their_own_addr
     server.close()
 
 
+async def test_a_socket_its_parent_holds_stays_bound_between_two_tunnels() -> None:
+    """A Station binds the port itself and hands each tunnel the socket, so that no other
+    account binds it while one tunnel has ended and the next has not started."""
+    server, port = await serve(echo)
+    held = socket.socket()
+    held.bind(("127.0.0.1", 0))
+    held.listen(8)
+    address = held.getsockname()
+
+    async def dial(index: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        return await asyncio.open_connection("127.0.0.1", port)
+
+    try:
+        for message in (b"first tunnel", b"second tunnel"):
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, tunnel.__file__, "--accept", f"{held.fileno()}:0",
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                pass_fds=[held.fileno()],
+            )  # fmt: skip
+            assert process.stdout is not None and process.stdin is not None
+            host = Mux(process.stdout, process.stdin, dial=dial)
+            running = asyncio.ensure_future(host.run())
+            try:
+                await asyncio.wait_for(host.ready.wait(), 10)
+                reader, writer = await asyncio.open_connection(*address)
+                writer.write(message)
+                await writer.drain()
+                assert await asyncio.wait_for(reader.readexactly(len(message)), 5) == message
+                writer.close()
+            finally:
+                process.kill()  # the SSH session drops
+                await process.wait()
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+            with socket.socket() as other, pytest.raises(OSError):
+                other.bind(address)  # the port is still taken once the tunnel has ended
+    finally:
+        held.close()
+        server.close()
+
+
 @pytest.mark.parametrize("spec", ["7", "7:x", "-1:0", "7:256", "7:0:1"])
 def test_an_inherited_socket_that_is_not_socket_target_is_refused(spec: str) -> None:
     with pytest.raises(argparse.ArgumentTypeError):
@@ -331,3 +375,87 @@ def test_a_listener_names_its_address_or_takes_loopback(
 def test_a_listener_that_is_not_host_port_target_is_refused(spec: str) -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         tunnel._listener(spec)
+
+
+# --- the Host end, against the real sandbox end -----------------------------------
+
+
+class LocalRelay:
+    """Stands in for the SSH session: runs the real ``tunnel.py`` as a local subprocess."""
+
+    def __init__(self, *listeners: str) -> None:
+        self.listeners = listeners
+        self.starts = 0
+
+    async def __call__(self) -> list[str]:
+        self.starts += 1
+        listen = [argument for spec in self.listeners for argument in ("--listen", spec)]
+        return [sys.executable, tunnel.__file__, *listen]
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+async def test_the_host_tunnel_serves_the_sandbox_and_reconnects_when_its_command_ends() -> None:
+    async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(await reader.read(65536))
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(echo, "127.0.0.1", 0)
+    target_port = server.sockets[0].getsockname()[1]
+    sandbox_port = free_port()
+    relay = LocalRelay(f"{sandbox_port}:0")
+    host_end = Tunnel(relay, targets=[("127.0.0.1", target_port)])
+    await host_end.start(timeout_sec=30)
+    try:
+
+        async def ask(message: bytes) -> bytes:
+            reader, writer = await asyncio.open_connection("127.0.0.1", sandbox_port)
+            writer.write(message)
+            await writer.drain()
+            reply = await asyncio.wait_for(reader.read(65536), 10)
+            writer.close()
+            return reply
+
+        assert await ask(b"through the relay") == b"through the relay"
+
+        assert host_end._process is not None
+        host_end._process.kill()  # the SSH session drops
+        for _ in range(100):
+            try:
+                assert await ask(b"after the drop") == b"after the drop"
+                break
+            except (OSError, AssertionError):
+                await asyncio.sleep(0.3)
+        else:
+            pytest.fail("the tunnel did not come back")
+        assert relay.starts >= 2
+    finally:
+        await host_end.close()
+        server.close()
+
+
+async def test_a_relay_that_cannot_listen_fails_the_start_with_its_reason() -> None:
+    taken = socket.socket()
+    taken.bind(("127.0.0.1", 0))
+    taken.listen()
+    port = taken.getsockname()[1]
+    host_end = Tunnel(LocalRelay(f"{port}:0"), targets=[("127.0.0.1", 1)])
+    try:
+        with pytest.raises(ProviderStartError, match="cannot listen"):
+            await host_end.start(timeout_sec=60)
+    finally:
+        await host_end.close()
+        taken.close()
+
+
+def test_the_host_dials_a_service_at_its_address_or_loopback_for_every_interface() -> None:
+    assert target("http://0.0.0.0:41000/v1") == ("127.0.0.1", 41000)
+    assert target("http://[::]:41000") == ("127.0.0.1", 41000)
+    assert target("http://192.0.2.9:42000") == ("192.0.2.9", 42000)
+    with pytest.raises(ProviderCapabilityError, match="explicit port"):
+        target("http://host/")

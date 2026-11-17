@@ -3,7 +3,9 @@
 A Station is a Windows Server machine its operator owns, with licensed software installed
 once for every account. Each Lane is an ordinary account with a Remote Desktop session of
 its own and serves one Sandbox at a time. `stationd.py` is the service that runs there
-(`ALEStation`); `scripts/setup_station.py` enrolls the machine; the operator's guide is
+(`ALEStation`); `provider.py` is the leaf that leases its Lanes, which the Providers
+[README](../README.md#station) describes; `scripts/setup_station.py` enrolls the machine;
+the operator's guide is
 [`docs/guides/station.md`](../../../../../../../docs/guides/station.md). This file records
 the problems peculiar to Stations: what we saw, what we measured, and what we decided.
 
@@ -202,3 +204,39 @@ service deletes each stored credential written after the baseline was taken.
 - Not covered: registry keys outside the Lane's hive that standard accounts may write,
   places outside the scanned ones that grant Lanes write access, and the network: Lanes
   share the machine's network stack and loopback, so a Station serves `open` Tasks only.
+
+## The Provider waits for a Lane, then gives up
+
+**Problem.** A Run with more Sandboxes at once than the Station has free Lanes, or one
+whose Lanes are resetting, would fail its episodes as soon as none is free.
+
+**Solution.** `ale-stationd` runs the probes of a `lease` request, within 120 s in all,
+and holds the request up to 60 s for a Lane to come free; the Provider waits for its reply
+as long as both may take and a minute more. While it answers `busy`, the Provider asks
+again for up to `sandbox.station.lane_wait_sec`, 1800 s by default, and then fails the
+Sandbox with `ProviderCapacityError`, an environment error that `episode_retries` retries.
+
+**Decisions.**
+- The wait is a Run setting, not the Station's: what is worth waiting for depends on the
+  Run, and a Station serves several.
+- CPUs and memory are recorded as the Task asked and not admitted against the Station's:
+  several Runs share a Station, and only `ale-stationd` could count them all.
+
+## A Lane's files are its own
+
+**Problem.** QEMU's Windows upload access lists grant Users read and execute. On a Station
+every other Lane is in Users and holds *Bypass traverse checking*, so it could open such a
+file by its path below a directory it cannot list.
+
+**Solution.** The Provider resets every upload, and every file it writes for the agent, to
+an access list that grants SYSTEM, Administrators and the identity's own account only
+(`privileges.reset_windows_acl(private=True)`). The Lane's stage root admits SYSTEM and
+Administrators alone, as `/opt/ale` admits root: a Task's stages are the framework's, and
+none of them is for the agent to read.
+
+## Tokens travel in SSH command lines
+
+A request is the SSH session's command, so a lease's token is in the command line of the
+Host's `ssh` processes, which every account on the Host can list. It is worth nothing
+without the key that signs in as `ale-host`, which only the operator of the Run holds; a
+Host shared with accounts that hold that key shares the Station with them anyway.

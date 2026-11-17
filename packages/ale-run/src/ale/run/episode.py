@@ -57,7 +57,7 @@ from ale.core.task import ResolvedVariables, Task
 from ale.core.taskspec import Artifact, NetworkMode, OperatingSystem, Resources, VerificationMode
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import FINAL_STATUSES, Status, Verdict
-from ale.run import artifact_files
+from ale.run import artifact_files, guestd
 from ale.run.assets import observe_task_assets
 from ale.run.framework import MACOS_PYTHON
 from ale.run.gateway.server import Gateway
@@ -384,15 +384,18 @@ def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxO
     )
 
 
-def _artifact_python(operating_system: OperatingSystem) -> str:
-    """The Python the framework copies artifacts with.
+def _artifact_python(operating_system: OperatingSystem) -> list[str]:
+    """The Python the framework copies artifacts with, isolated (``-I``) from the variables,
+    the user site and the working directory around it, which the agent may have chosen.
 
-    The image's own, except on macOS, which may have none, where it is the framework's.
+    The image's own on Linux; the framework's on macOS, which may have none, and on Windows,
+    where the image's may sit in a directory another account of a shared machine can write.
     """
-    return {
-        OperatingSystem.WINDOWS: "python.exe",
+    python = {
+        OperatingSystem.WINDOWS: guestd.PYTHON["windows"],
         OperatingSystem.MACOS: MACOS_PYTHON,
     }.get(operating_system, "python3")
+    return [python, "-I"]
 
 
 def _sandbox_path_type(
@@ -445,7 +448,7 @@ class _Artifacts(ArtifactSink):
         captured = {entry["source"] for entry in self.entries}
         try:
             probe = await sandbox.exec(
-                [python, "-c", script, "inspect", source, *artifact.exclude],
+                [*python, "-c", script, "inspect", source, *artifact.exclude],
                 identity=Identity.FRAMEWORK,
             )
             if not probe.ok:
@@ -486,7 +489,7 @@ class _Artifacts(ArtifactSink):
                                     size += len(data)
 
                             copied = await sandbox.exec(
-                                [python, "-c", script, "read", remote],
+                                [*python, "-c", script, "read", remote],
                                 identity=Identity.FRAMEWORK,
                                 output_sink=receive,
                             )
@@ -543,7 +546,7 @@ class _Artifacts(ArtifactSink):
                     roots.append(path)
                 prepared = await sandbox.exec(
                     [
-                        python,
+                        *python,
                         "-c",
                         (
                             "import os,pathlib,shutil,sys; p=pathlib.Path(sys.argv[1]); "
