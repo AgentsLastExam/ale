@@ -862,8 +862,15 @@ class Runtime:
     """What the kernel log of each of its Sandboxes starts with, which shows a Sandbox runs
     on it, together with Docker seeing what the Sandbox writes."""
     guest_kernel: bool = False
-    """Whether each of its Sandboxes runs a kernel of its own, whose OOM kills Docker does not
-    record ([memory](../memory.py))."""
+    """Whether each of its Sandboxes runs a kernel of its own in a VM, whose ``docker exec``
+    sessions outlive that VM killed from outside."""
+    oom_kills: str = ""
+    """For a runtime whose own kernel ends a Sandbox's processes for its memory without Docker
+    recording it, as Kata's guest and gVisor's Sentry do, the file in the Sandbox in which
+    that kernel counts them, ``oom_kill``, which a watcher there reads
+    ([memory](../memory.py))."""
+    oom_counter: str = ""
+    """What keeps those counts, as the message of a Sandbox lost after one names it."""
     gpu_memory_flag: str = ""
     """For a runtime that can hold a Sandbox to so many bytes of device memory on each of its
     GPUs, its flag that does, which ``<runtime> flags`` lists and a Sandbox's annotation
@@ -940,6 +947,8 @@ RUNTIMES: dict[str, Runtime] = {
         devices=("/dev/kvm",),
         memory_mb=kata.memory_mb,
         guest_kernel=True,
+        oom_kills=kata.OOM_KILLS,
+        oom_counter="its cgroup",
     ),
     "gvisor": Runtime(
         gvisor.RUNTIME,
@@ -963,6 +972,8 @@ RUNTIMES: dict[str, Runtime] = {
         drivers=gvisor.DRIVERS,
         banner=gvisor.BANNER,
         gpu_memory_flag=gvisor.GPU_MEMORY_FLAG,
+        oom_kills=gvisor.OOM_KILLS,
+        oom_counter="the Sentry",
     ),
 }
 
@@ -979,7 +990,7 @@ def _runtime_named(registered: str) -> Runtime:
 #: sandbox died has stopped, or stops within seconds: under rootless Docker ``docker wait``
 #: returned up to 10.5 s after the session ended. One still running lost only the session.
 _DEATH_SEC = 30.0
-#: How long a lost session then waits for a guest's memory watcher to end too, as its
+#: How long a lost session then waits for the Sandbox's memory watcher to end too, as its
 #: session does once its container is gone, so that what it saw last has arrived.
 _SETTLE_SEC = 5.0
 
@@ -1000,8 +1011,8 @@ class _Session(StdioTransport):
         self.container = container
         #: The memory its Task declares.
         self.memory_mb = memory_mb
-        #: Under a runtime that boots a kernel of its own, what counts the OOM kills there,
-        #: which Docker does not record.
+        #: Under a runtime whose own kernel kills in the Sandbox, Kata's guest or gVisor's
+        #: Sentry, what counts those OOM kills, which Docker does not record.
         self.watcher = watcher
         self.client = GuestClient(self)
         self._answered = False
@@ -1052,15 +1063,16 @@ class _Session(StdioTransport):
         running, code = bool(state.get("Running")), state.get("ExitCode")
         lost = "guestd in the sandbox ended" if running else "the sandbox itself died"
         exited = "" if running else f", and its main process exited with code {code}"
+        # Docker records the Host's OOM kills, and a watcher those of the runtime's own kernel.
+        evidence = ["Docker recorded OOMKilled"] if state.get("OOMKilled") else []
         if self.watcher is not None:
             await self.watcher.settled(_SETTLE_SEC)
-            evidence = self.watcher.oom_killed()
-        else:
-            evidence = "Docker recorded OOMKilled" if state.get("OOMKilled") else None
-        if evidence is not None:
+            if (counted := self.watcher.oom_killed()) is not None:
+                evidence.append(counted)
+        if evidence:
             explained: GuestUnreachableError = MemoryExhaustedError(
                 f"{lost} after an OOM kill in it (its Task declares {self.memory_mb} MiB): "
-                f"{evidence}{exited} ({error})"
+                f"{'; '.join(evidence)}{exited} ({error})"
             )
         elif running:
             return error
@@ -1092,15 +1104,16 @@ async def _state(container: str) -> dict[str, Any] | None:
 
 
 async def _watcher(container: str, runtime: Runtime) -> memory.GuestEvents | None:
-    """What counts the OOM kills in ``container`` where Docker records none: under a runtime
-    that boots a kernel of its own, a watcher in it."""
-    if not runtime.guest_kernel:
+    """What counts the OOM kills in ``container`` that Docker does not record: under a runtime
+    whose own kernel kills in it, a watcher there."""
+    if not runtime.oom_kills:
         return None
     return await memory.GuestEvents.start(
         [
             "docker", "exec", "-i", "--user", "0", "--workdir", "/", container,
-            guestd.PYTHON["linux"], "-I", "-c", memory.WATCHER,
-        ]
+            guestd.PYTHON["linux"], "-I", "-c", memory.WATCHER, runtime.oom_kills,
+        ],
+        counter=runtime.oom_counter,
     )  # fmt: skip
 
 

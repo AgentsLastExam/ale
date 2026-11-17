@@ -889,7 +889,7 @@ async def test_a_lost_guestd_session_says_whether_an_oom_kill_came_first(
     it started."""
     memory = _Memory(1024)
     memory.watcher = await daytona_module.GuestEvents.start(
-        ["sh", "-c", f"echo oom 0 oom_kill 0; sleep 0.3; echo {counts}"]
+        ["sh", "-c", f"echo oom 0 oom_kill 0; sleep 0.3; echo {counts}"], counter="its cgroup"
     )
     session = _Session(["sh", "-c", "echo {}; sleep 0.1; echo closed >&2"], memory)
     await session.start()

@@ -93,7 +93,8 @@ while True:
 """
 
 
-#: Ends every process of a sandbox of the container base but guestd's and its command's,
+#: Ends every process of a sandbox of the container base but ALE's own, which run on the
+#: framework's Python (guestd and, under gVisor, its memory watcher), its command's and
 #: supervisord, which reloads with no programs: the desktop's memory, which varies by about
 #: 50 MiB from run to run on a loaded Host, then leaves what one process holds alone.
 _QUIET = """
@@ -111,7 +112,7 @@ for _ in range(10):
                 state = open(f"/proc/{name}/stat").read().rsplit(")", 1)[1].split()[0]
                 command = open(f"/proc/{name}/cmdline", "rb").read()
                 # A zombie, such as a child guestd has yet to reap, holds no memory.
-                if state != "Z" and b"guestd" not in command:
+                if state != "Z" and not command.startswith(b"/opt/ale/python/"):
                     left.append(name)
                     os.kill(int(name), signal.SIGKILL)
             except OSError:
@@ -235,7 +236,8 @@ async def _plain_request(
 async def test_processes_in_a_gvisor_sandbox_get_the_declared_memory(memory_mb: int) -> None:
     """The Sentry's own memory is added to the container's limit, not taken from the Task's:
     with the desktop ended, one process holds what it holds under runc, give or take the
-    allocator's 8 MiB steps and their spread from run to run."""
+    allocator's 8 MiB steps and the Sentry's own memory, which varies by up to 48 MiB from run
+    to run."""
     skip_without_gvisor()
     runc, recorded, host_kernel = await _most_memory_mb(
         DockerProvider(), quiet=True, memory_mb=memory_mb
@@ -245,7 +247,7 @@ async def test_processes_in_a_gvisor_sandbox_get_the_declared_memory(memory_mb: 
     )
     assert (recorded, gvisor_recorded) == ("runc", gvisor.RUNTIME)
     assert kernel != host_kernel, "the gVisor sandbox reports the Host's kernel"
-    assert abs(on_gvisor - runc) <= 16, f"runc held {runc} MiB, gVisor {on_gvisor} MiB"
+    assert abs(on_gvisor - runc) <= 32, f"runc held {runc} MiB, gVisor {on_gvisor} MiB"
 
 
 @pytest.mark.asyncio
@@ -697,14 +699,11 @@ time.sleep(600)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("runtime", ["runc", "gvisor"])
-async def test_a_sandbox_whose_processes_take_its_memory_dies_of_it(runtime: str) -> None:
-    """The OOM killer ends its processes until the sandbox goes: under runc, largest first,
-    up to the container's main process; under gVisor, the Sentry. Docker records the kills."""
-    if runtime == "gvisor":
-        skip_without_gvisor()
-    provider = DockerProvider(runtime=runtime)
-    async with await provider.create(await _plain_request(provider, f"many-{runtime}")) as sandbox:
+async def test_a_runc_sandbox_whose_processes_take_its_memory_dies_of_it() -> None:
+    """The OOM killer ends its processes, largest first, up to the container's main process,
+    and the sandbox goes. Docker records the kills."""
+    provider = DockerProvider()
+    async with await provider.create(await _plain_request(provider, "many-runc")) as sandbox:
         with pytest.raises(MemoryExhaustedError) as lost:
             await sandbox.exec(["python3", "-c", _MANY], identity=Identity.AGENT, timeout_sec=300)
     assert str(lost.value).startswith(
@@ -714,11 +713,27 @@ async def test_a_sandbox_whose_processes_take_its_memory_dies_of_it(runtime: str
 
 
 @pytest.mark.asyncio
+async def test_a_gvisor_sandbox_whose_processes_take_its_memory_loses_them_one_by_one() -> None:
+    """The Sentry ends them one at a time below the container's limit on the Host, as a guest
+    kernel would, and counts each; the sandbox, guestd in it and the forking process live on,
+    as under Kata."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    async with await provider.create(await _plain_request(provider, "many-gvisor")) as sandbox:
+        forked = await sandbox.exec(
+            ["python3", "-c", _MANY], identity=Identity.AGENT, timeout_sec=90
+        )
+        assert forked.timed_out, forked.stdout + forked.stderr
+        counted = await sandbox.exec(["cat", gvisor.OOM_KILLS])
+        assert counted.ok and int(counted.stdout.split()[-1]) >= 300, counted.stdout
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["gvisor", "kata"])
 async def test_a_sandbox_that_fills_its_memory_with_a_tmpfs_dies_of_it(runtime: str) -> None:
-    """Under gVisor a tmpfs is the Sentry's memory, and under Kata the microVM's, so filling
-    the limit with one ends the whole sandbox, whatever the OOM killer ranks; under Kata only
-    the guest kernel saw it, and its watcher in the guest says so."""
+    """Under gVisor a tmpfs is the Sentry's memory, and under Kata the microVM's, which no
+    process's end frees: the kernel ends what it may until it reaches guestd or the sandbox,
+    and its count in the sandbox, which a watcher there reports, says so."""
     if runtime == "gvisor":
         skip_without_gvisor()
     else:
@@ -733,7 +748,7 @@ async def test_a_sandbox_that_fills_its_memory_with_a_tmpfs_dies_of_it(runtime: 
         with pytest.raises(MemoryExhaustedError) as lost:
             await sandbox.exec(["sh", "-c", fill], timeout_sec=120)
     # The whole sandbox or only guestd first, as the kernel picks.
-    evidence = "its cgroup counted" if runtime == "kata" else "Docker recorded OOMKilled"
+    evidence = "its cgroup counted" if runtime == "kata" else "the Sentry counted"
     assert "after an OOM kill in it (its Task declares 512 MiB): " in str(lost.value)
     assert evidence in str(lost.value)
 

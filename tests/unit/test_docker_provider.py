@@ -983,8 +983,8 @@ def test_every_netstack_state_is_one_the_writer_takes(
 
 
 def test_a_gvisor_sandbox_holds_the_declared_memory_and_what_the_sentry_takes() -> None:
-    assert gvisor.memory_mb(512) == 572
-    assert gvisor.memory_mb(8192) == 8260
+    assert gvisor.memory_mb(512) == 620
+    assert gvisor.memory_mb(8192) == 8308
 
 
 def test_gvisor_is_registered_as_its_readme_shows() -> None:
@@ -1010,6 +1010,33 @@ def test_gvisor_is_registered_as_its_readme_shows() -> None:
     assert {name: tuple(args) for name, args in gvisor.ARGUMENTS.items()} == {
         name: tuple(entry["runtimeArgs"]) for name, entry in shown.items()
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime", "watched"),
+    [
+        ("runc", None),
+        ("kata", (kata.OOM_KILLS, "its cgroup")),
+        ("gvisor", (gvisor.OOM_KILLS, "the Sentry")),
+    ],
+)
+async def test_a_watcher_counts_the_oom_kills_docker_does_not_record(
+    monkeypatch: pytest.MonkeyPatch, runtime: str, watched: tuple[str, str] | None
+) -> None:
+    """Docker records the OOM kills of the Host's kernel; a watcher in the Sandbox counts
+    those of Kata's guest kernel and of gVisor's Sentry, which kills below the container's
+    limit on the Host."""
+    started: list[tuple[str, str]] = []
+
+    async def start(argv: list[str], *, counter: str) -> object:
+        started.append((argv[-1], counter))
+        return object()
+
+    monkeypatch.setattr(docker_provider.memory.GuestEvents, "start", start)
+    watcher = await docker_provider._watcher("ale-e1", docker_provider.RUNTIMES[runtime])
+    assert started == ([watched] if watched else [])
+    assert (watcher is None) is (watched is None)
 
 
 def test_the_gvisor_build_ale_runs_is_the_one_its_build_script_makes() -> None:
@@ -1133,7 +1160,8 @@ async def test_a_kata_sandbox_lost_after_an_oom_kill_in_its_guest_says_so(
 
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     watcher = await memory.GuestEvents.start(
-        ["sh", "-c", "echo oom 0 oom_kill 0; sleep 0.3; echo oom 0 oom_kill 13"]
+        ["sh", "-c", "echo oom 0 oom_kill 0; sleep 0.3; echo oom 0 oom_kill 13"],
+        counter="its cgroup",
     )
     session = _Session(["sh", "-c", "echo {}; sleep 0.1"], "ale-e1", 512, watcher)
     await session.start()
@@ -1147,6 +1175,46 @@ async def test_a_kata_sandbox_lost_after_an_oom_kill_in_its_guest_says_so(
         "the sandbox itself died after an OOM kill in it (its Task declares 512 MiB): its "
         "cgroup counted 13 OOM kills and 0 times its memory reached its limit, and its main "
         "process exited with code 255 (guest session closed)"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("oom_killed", "sentry", "evidence"),
+    [
+        (False, 3, "the Sentry counted 3 OOM kills"),
+        # The Host's OOM killer acts on memory the Sentry does not see, which Docker records.
+        (True, 0, "Docker recorded OOMKilled"),
+        (True, 3, "Docker recorded OOMKilled; the Sentry counted 3 OOM kills"),
+    ],
+)
+async def test_a_gvisor_sandbox_lost_after_an_oom_kill_says_which_kernel_made_it(
+    monkeypatch: pytest.MonkeyPatch, oom_killed: bool, sentry: int, evidence: str
+) -> None:
+    """The Sentry's kills reach neither the container's cgroup on the Host nor Docker: its
+    watcher counts them, and Docker records those of the Host's OOM killer."""
+
+    async def docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
+        if argv[0] == "wait":
+            return 0, "137\n", ""
+        return 0, json.dumps({"Running": False, "ExitCode": 137, "OOMKilled": oom_killed}), ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    counts = "oom_kill_disable 0 under_oom 0 oom_kill"
+    watcher = await memory.GuestEvents.start(
+        ["sh", "-c", f"echo {counts} 0; sleep 0.3; echo {counts} {sentry}"], counter="the Sentry"
+    )
+    session = _Session(["sh", "-c", "echo {}; sleep 0.1"], "ale-e1", 512, watcher)
+    await session.start()
+    assert await session.recv() == "{}"
+    with pytest.raises(GuestUnreachableError) as ended:
+        await session.recv()
+    explained = await session.explain(ended.value)
+    await watcher.close()
+    assert isinstance(explained, MemoryExhaustedError)
+    assert str(explained) == (
+        f"the sandbox itself died after an OOM kill in it (its Task declares 512 MiB): "
+        f"{evidence}, and its main process exited with code 137 (guest session closed)"
     )
 
 
@@ -1793,7 +1861,7 @@ async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     ) == ("runs arm64, not x86_64",)
 
 
-_RUNSC = "/usr/local/lib/ale-gvisor/0.1.1/runsc"
+_RUNSC = "/usr/local/lib/ale-gvisor/0.1.2/runsc"
 _REGISTERED = dict(gvisor.ARGUMENTS)
 #: Part of what ``runsc flags`` of ALE's build lists.
 _FLAGS = (
@@ -1817,7 +1885,7 @@ def _preflight_host(
     *,
     shims: tuple[str, ...] = (),
     devices: tuple[str, ...] = (),
-    version: str = "runsc version release-20261109.0+ale.0.1.1\nspec: 1.2.1\n",
+    version: str = "runsc version release-20261109.0+ale.0.1.2\nspec: 1.2.1\n",
     drivers: str = "570.124.06\n580.95.05\n",
     flags: str = _FLAGS,
     flags_code: int = 0,
@@ -1951,13 +2019,13 @@ async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
     ("version", "drivers", "needs_gpus", "refused"),
     [
         ("runsc version release-20261109.0\nspec: 1.2.1\n", "", 0, "needs ALE's build"),
-        ("runsc version release-20261109.0+ale.0.1.11\n", "", 0, "ale.0.1.1 of"),
-        ("runsc version release-20261109.0+ale.0.1.0\n", "", 0, "ale.0.1.1 of"),
-        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", 0, None),
-        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", 1, "driver 570.124.06"),
-        ("runsc version release-20261109.0+ale.0.1.1\n", "570.124.06\n", 1, None),
+        ("runsc version release-20261109.0+ale.0.1.21\n", "", 0, "ale.0.1.2 of"),
+        ("runsc version release-20261109.0+ale.0.1.1\n", "", 0, "ale.0.1.2 of"),
+        ("runsc version release-20261109.0+ale.0.1.2\n", "580.95.05\n", 0, None),
+        ("runsc version release-20261109.0+ale.0.1.2\n", "580.95.05\n", 1, "driver 570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.2\n", "570.124.06\n", 1, None),
         # With no needs, as a Node lends it, its profile offers the Host's GPUs.
-        ("runsc version release-20261109.0+ale.0.1.1\n", "580.95.05\n", None, "570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.2\n", "580.95.05\n", None, "570.124.06"),
     ],
 )
 async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_driver_here(
@@ -1979,7 +2047,7 @@ async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_dr
             await preflight
     else:
         await preflight
-    if needs_gpus != 0 and "+ale.0.1.1\n" in version:
+    if needs_gpus != 0 and "+ale.0.1.2\n" in version:
         assert ran[-1] == (_RUNSC, "nvproxy", "list-supported-drivers")
     else:
         assert all(argv[1] == "--version" for argv in ran)
@@ -2111,30 +2179,30 @@ async def test_a_feature_its_runtime_does_not_give_is_refused_before_anything_st
             "620m",
         ),
         ("kata", (ContainerFeature.MOUNT,), ["SYS_ADMIN"], kata.RUNTIME, "620m"),
-        ("gvisor", (), [], "runsc", "572m"),
-        ("gvisor", (ContainerFeature.USER_NAMESPACES, ContainerFeature.FUSE), [], "runsc", "572m"),
-        ("gvisor", (ContainerFeature.MOUNT,), ["SYS_ADMIN"], "runsc", "572m"),
-        ("gvisor", (ContainerFeature.RAW_SOCKETS,), [], "runsc-net-raw", "572m"),
+        ("gvisor", (), [], "runsc", "620m"),
+        ("gvisor", (ContainerFeature.USER_NAMESPACES, ContainerFeature.FUSE), [], "runsc", "620m"),
+        ("gvisor", (ContainerFeature.MOUNT,), ["SYS_ADMIN"], "runsc", "620m"),
+        ("gvisor", (ContainerFeature.RAW_SOCKETS,), [], "runsc-net-raw", "620m"),
         (
             "gvisor",
             (ContainerFeature.RAW_SOCKETS, ContainerFeature.MOUNT),
             ["SYS_ADMIN"],
             "runsc-net-raw",
-            "572m",
+            "620m",
         ),
         (
             "gvisor",
             (ContainerFeature.NESTED_CONTAINERS,),
             ["NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"],
             "runsc-nested",
-            "572m",
+            "620m",
         ),
         (
             "gvisor",
             (ContainerFeature.NESTED_CONTAINERS, ContainerFeature.MOUNT),
             ["NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"],
             "runsc-nested",
-            "572m",
+            "620m",
         ),
     ],
 )

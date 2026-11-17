@@ -17,6 +17,7 @@ from ale.run.providers.docker import tc
 from ale.run.transport import GuestClient
 
 __all__ = [
+    "OOM_KILLS",
     "RUNTIME",
     "SEAL_PROBE",
     "TAP",
@@ -31,6 +32,10 @@ __all__ = [
 #: The containerd shim that starts each container in a Kata Containers microVM. Docker
 #: runs it by this name from its PATH, so the daemon needs no setting and no restart.
 RUNTIME = "io.containerd.kata.v2"
+#: Where the guest kernel counts the container's processes it ended, ``oom_kill``, and its
+#: limit reached, ``oom``: the microVM's memory is the Task's, so every kill is the
+#: Sandbox's own.
+OOM_KILLS = "/sys/fs/cgroup/memory.events"
 #: The VM's tap and the container's veth in the sandbox's network namespace. Kata passes
 #: every frame between them with tc filters, past the namespace's netfilter, so the
 #: Provider's rules for a Kata sandbox are tc filters placed ahead of Kata's own.

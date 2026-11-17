@@ -323,6 +323,8 @@ class _SshHost:
 #: How long a lost guestd session waits for the memory watcher's session to end too, as it
 #: does with its Sandbox: it arrived 0.2 to 0.8 s before guestd's end when the Sandbox died.
 _SETTLE_SEC = 10.0
+#: The Sandbox's own cgroup's counts, which the watcher reads.
+_MEMORY_EVENTS = "/sys/fs/cgroup/memory.events"
 
 
 class _Memory:
@@ -336,8 +338,8 @@ class _Memory:
 
     async def watch(self, ssh: _SshHost) -> None:
         """Start the watcher on the Sandbox's own cgroup, whose limit is the Task's."""
-        command = f"cd / && exec {PYTHON} -I -c {shlex.quote(WATCHER)}"
-        self.watcher = await GuestEvents.start(await ssh.argv(command))
+        command = f"cd / && exec {PYTHON} -I -c {shlex.quote(WATCHER)} {_MEMORY_EVENTS}"
+        self.watcher = await GuestEvents.start(await ssh.argv(command), counter="its cgroup")
 
     async def close(self) -> None:
         if self.watcher is not None:

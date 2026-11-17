@@ -29,7 +29,7 @@ runs in the VM builder. `desktop.py` and `privileges.py` serve several Providers
 `runner.py` holds what QEMU and Firecracker share, as each boots its guest in a runner
 container: the guest service's token and connection, the proxy's variables, the guest's
 console that shows its OOM kills, and the check for a desktop that has drawn nothing yet.
-`memory.py` counts the OOM kills in a Kata or Daytona sandbox from inside it
+`memory.py` counts the OOM kills in a gVisor, Kata or Daytona sandbox from inside it
 ([Memory](#memory)).
 
 They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
@@ -294,7 +294,7 @@ whose message gives what showed the kill.
 | Provider | Where the limit is | One process past it | What loses the Sandbox | How ALE tells |
 |---|---|---|---|---|
 | `docker:runc` | its cgroup on the Host | killed alone | many processes: the OOM killer reaches supervisord; `/dev/shm` is too small to | Docker's `OOMKilled`, which it sets at any OOM kill in the container and keeps after it stops ([Docker](docker/AGENTS.md#a-sandbox-that-runs-out-of-its-memory)) |
-| `docker:gvisor` | its cgroup on the Host, the Sentry's memory included | killed alone | many processes, or a mounted tmpfs written full, the Sentry's memory | the same |
+| `docker:gvisor` | its cgroup on the Host, the Sentry's memory included, which the Sentry keeps 16 MiB below | killed alone, by the Sentry | a mounted tmpfs written full: the Sentry ends every process it may choose, guestd among them; many processes are killed one by one | `oom_kill` in the Sentry's `memory.oom_control`, which a watcher in the sandbox writes to a `docker exec` session, since Docker records none of the Sentry's kills; and Docker's `OOMKilled` as under runc, for the Host's OOM killer, which still acts on memory the Sentry does not see ([gVisor](../../../../../../images/runtimes/gvisor/README.md#out-of-memory)) |
 | `docker:kata` | the microVM's memory | killed alone | a mounted tmpfs written full; many processes are killed one by one | `oom_kill` or `oom` in the container's `memory.events` in the guest, which a watcher there writes to a `docker exec` session: Docker records no OOM kill in the guest |
 | `firecracker` | the microVM's memory | killed alone | a tmpfs written full; many processes are killed one by one, guestd at times among them | the kernel's OOM-killer lines on the guest's serial console since it booted, the runner's log ([QEMU](qemu/AGENTS.md#a-vm-that-runs-out-of-its-memory)) |
 | `qemu`, Linux | the VM's memory | killed alone | a tmpfs written full; many processes are killed one by one | the same |
@@ -305,11 +305,12 @@ whose message gives what showed the kill.
 
 The message says whose memory ran out where its evidence does: a cgroup's `oom_kill` counts
 every process any OOM killer ended, the Host's too, and `oom` each time its own limit was
-reached; a console line says `Memory cgroup out of memory` for a cgroup's limit in the VM
-and `Out of memory` for the VM's. Docker's `OOMKilled` does not say. A hypervisor the
-Host's OOM killer ends leaves no record in its guest, so a Kata, QEMU or Firecracker Sandbox
-lost so is a lost guest. guestd's systemd unit in a Linux VM sets `OOMPolicy=continue`, so
-that one of its commands the OOM killer ends goes alone.
+reached; the Sentry kills only for the sandbox's own limit; a console line says `Memory
+cgroup out of memory` for a cgroup's limit in the VM and `Out of memory` for the VM's.
+Docker's `OOMKilled` does not say. A hypervisor the Host's OOM killer ends leaves no record
+in its guest, so a Kata, QEMU or Firecracker Sandbox lost so is a lost guest. guestd's
+systemd unit in a Linux VM sets `OOMPolicy=continue`, so that one of its commands the OOM
+killer ends goes alone.
 
 No Sandbox swaps to the Host. Every Docker leaf starts a Sandbox with `--memory-swap` equal
 to `--memory`, under every runtime. Docker's default, twice `--memory`, let one process of a
@@ -470,16 +471,16 @@ When the stream of a guestd session that has answered ends unasked, the Provider
 `docker wait` on the container for up to 30 s, outside the timeout of the call that was
 waiting, which returns once it has stopped (under rootless Docker up to 10.5 s after the
 session ended), and then reads its state. A Sandbox in which Docker recorded an OOM kill
-(`OOMKilled`), or under Kata its watcher counted one, stopped or with only guestd gone, was
-lost to memory ([Memory](#memory)). Otherwise a stopped container is reported as the sandbox
-itself dying: it was killed from outside on exit code 137, and otherwise its main process
-exited with its code; one still running lost only the session, which is reported as a lost
-guest session, with guestd's stderr. A session that never answered failed to start, and its
-stderr is reported at once. ALE ends a session itself before it destroys, keeps or
-snapshots the Sandbox, and that end asks nothing of Docker. Nor does the end of a Sandbox
-that ALE stopped, by the GPU watchdog ([GPU memory](#gpu-memory)) or the storage watch
-([Docker writable storage](#docker-writable-storage)): it is reported as what ALE stopped it
-for, whatever `OOMKilled` says.
+(`OOMKilled`), or under gVisor or Kata its watcher counted one, stopped or with only guestd
+gone, was lost to memory ([Memory](#memory)). Otherwise a stopped container is reported as
+the sandbox itself dying: it was killed from outside on exit code 137, and otherwise its
+main process exited with its code; one still running lost only the session, which is
+reported as a lost guest session, with guestd's stderr. A session that never answered failed
+to start, and its stderr is reported at once. ALE ends a session itself before it destroys,
+keeps or snapshots the Sandbox, and that end asks nothing of Docker. Nor does the end of a
+Sandbox that ALE stopped, by the GPU watchdog ([GPU memory](#gpu-memory)) or the storage
+watch ([Docker writable storage](#docker-writable-storage)): it is reported as what ALE
+stopped it for, whatever `OOMKilled` or a watcher says.
 
 On every Docker leaf a sandbox runs its image's command before the Provider confines it,
 until the network helper's first run returns: 0.35 to 0.45 s after `docker run` did, most of
@@ -663,7 +664,7 @@ Sandbox runs under `runsc` unless it asks for `raw_sockets` or `nested_container
 entirely under `runsc-net-raw` or `runsc-nested`; no profile gives both, so a Sandbox that
 asks for both is refused before anything starts. Besides finding each name the Run's
 Sandboxes run under, registered with exactly those arguments, the preflight checks that
-`runsc --version` reports the build this engine runs (`+ale.0.1.1`, `VERSION` in its
+`runsc --version` reports the build this engine runs (`+ale.0.1.2`, `VERSION` in its
 `build.sh`; a stock `runsc` lacks the rootless and out-of-memory fixes) and, whenever GPUs
 may be attached, a Sandbox needing them or a Node whose profiles offer the Host's, that
 `runsc nvproxy list-supported-drivers` lists the Host's NVIDIA driver, and, whenever a
@@ -681,9 +682,9 @@ kernel log must say `Starting gVisor`, and `docker cp` must see what the Sandbox
 | A privileged `docker exec` holds every capability in the Sentry, `CAP_NET_RAW` only under `runsc-net-raw`, so under `runsc` the image's iptables, if it has one, cannot open its raw socket; the sandbox's own processes hold `CAP_NET_ADMIN` only under `runsc-nested` | [`iptables.py`](../iptables.py), run as root on the framework's Python through `docker exec --privileged`, replaces each table in one `IPT_SO_SET_REPLACE` on a UDP socket, which needs only `CAP_NET_ADMIN`, holding `/run/xtables.lock` as iptables does, and keeps every rule the Task made. That Python is the sandbox's own file: root in the sandbox, an agent granted `sudo`, can replace it and so run with every capability at ALE's next change of egress, mount file systems whether its Task named `mount` or not, and rewrite ALE's chains. Only the filters outside bind the sandbox, and they hold: with its chains flushed, a sealed sandbox reaches neither the Internet nor anything with a raw ICMP echo (measured) |
 | tc cannot drop frames on their way into the sandbox | No other container is on its network, so only the Host's frames arrive: a container with raw sockets on the default bridge that wrote as the Host got none to its veth (measured). `ALE_INPUT` drops what the sandbox did not ask for while it is sealed |
 | `runsc` gives raw sockets only to a whole sandbox, from its registration's `--net-raw`; `--allow-packet-socket-write` would let a packet socket write any frame | A Sandbox that asks for `raw_sockets` runs under `runsc-net-raw`: ping works and a packet socket captures, but its write fails (`ENOTSUP`), and the seal drops what a raw socket forges |
-| The Sentry, the gofer and the stubs are charged to the container: beside the framework's processes alone, the desktop ended, one process got 16 to 32 MiB less than under runc for the same `--memory` with 24 MiB and 1 MiB per GiB added, at 512 MiB, 2, 4 and 8 GiB alike (three runs each); beside the desktop, whose memory the two runtimes account differently, it got 16 to 48 MiB more | Starts it with `memory_mb + 60 + memory_mb / 1024` MiB, which covers the largest gap with 4 MiB to spare; the allocation records `memory_mb` |
-| Under the container's memory limit, the OOM killer chooses among the Sentry, the gofer and the stubs that run the application, all charged to the container, and taking the Sentry ends the whole sandbox; under rootless Docker, Docker's default `oom_score_adj` ties them ([Out of memory](../../../../../../images/runtimes/gvisor/README.md#out-of-memory) has the measurements) | `--oom-score-adj 500` ranks every stub above the Sentry and the gofer, under rootful and rootless Docker alike |
-| What a sandbox writes into a tmpfs with `write(2)`, such as `/dev/shm`, is the Sentry's memory, so filling its limit that way ends the whole sandbox | Docker records the OOM kill, and the lost session reports a loss to memory ([Memory](#memory)) |
+| The Sentry, the gofer and the stubs are charged to the container, the Sentry keeps 16 MiB of it free, and the memory watcher (below) runs beside guestd: beside the framework's processes alone, the desktop ended, one process got 24 to 72 MiB less than under runc for the same Task with 60 MiB and 1 MiB per GiB added, at 512 MiB, 2, 4 and 8 GiB alike (28 runs, rootless Docker 29.9.3 on Linux 6.12); the Sentry's own memory when it kills varies that much from run to run | Starts it with `memory_mb + 108 + memory_mb / 1024` MiB, which puts runc's share in the middle of that spread; the allocation records `memory_mb` |
+| The application's memory is the Sentry's memory file, charged to the container: a stub the Host's OOM killer takes at the container's limit frees nothing until the Sentry has torn it down, so the next charge takes another process, at times the Sentry, which ends the whole sandbox; under rootless Docker, Docker's default `oom_score_adj` ties the stubs with the Sentry ([Out of memory](../../../../../../images/runtimes/gvisor/README.md#out-of-memory) has the measurements) | ALE's runtime keeps a sandbox whose cgroup cannot swap, as no Sandbox's can, 16 MiB below its limit and kills there in the Sentry, one process at a time, sparing init and any process at `oom_score_adj` -1000 (patch 0009). `--oom-score-adj 500` ranks every stub above the Sentry and the gofer for the Host's OOM killer, which still acts on memory the Sentry does not see, under rootful and rootless Docker alike |
+| The Sentry counts the processes it kills in `oom_kill` of cgroup v1's `memory.oom_control`, which the Host's cgroup and Docker never learn of; what a sandbox writes into a tmpfs, such as `/dev/shm`, is the Sentry's memory, which no kill frees, so filling its limit that way ends every process the Sentry may choose, guestd among them | A watcher on the framework's Python, at `oom_score_adj` -1000, writes the Sentry's `memory.oom_control` to a `docker exec` session, and a lost session after it counted a kill, or after Docker recorded one, reports a loss to memory ([Memory](#memory)) |
 | `docker stop` ends a command without a `SIGTERM` handler at once (exit 143), where runc waits out the timeout; `docker cp` into a running sandbox is not reliably seen inside | Snapshots stop and commit as on runc; files go through guestd, never `docker cp` |
 | `docker run --gpus` turns nvproxy, gVisor's proxy of the NVIDIA driver, on for that container alone; `--nvproxy` would turn it on, and probe the driver, for every container; `nvidia-smi` in the sandbox reports no PCI address (`[Unknown Error]`) | GPUs are attached as on runc (`--gpus "device=<uuid>,..."`, `NVIDIA_DRIVER_CAPABILITIES=all`, which `--nvproxy-allowed-driver-capabilities=all` allows), and recorded as the Host sees them; a sandbox sees the whole GPU and what its other tenants use, as under runc. A Sandbox that shares its GPUs is limited to its `gpu_memory_mb` on each ([GPU memory](#gpu-memory)) |
 | `runsc` ignores the setuid bit of a program, `sudo` among them, unless it runs with `--allow-suid` | Every registration passes `--allow-suid`, so the agent elevates through `sudo` as under runc |
