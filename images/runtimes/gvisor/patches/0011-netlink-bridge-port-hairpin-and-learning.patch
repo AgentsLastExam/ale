@@ -1,0 +1,1221 @@
+netlink: configure hairpin and learning on bridge ports (upstream PR 16233)
+
+What: RTM_SETLINK with ifi_family AF_BRIDGE and a nested IFLA_PROTINFO sets
+the hairpin (IFLA_BRPORT_MODE) and learning (IFLA_BRPORT_LEARNING) options of
+a bridge port, as net/core/rtnetlink.c:rtnl_bridge_setlink() and
+net/bridge/br_netlink.c:br_setlink() do, and the bridge honors both: in
+hairpin mode a frame may go back out of the port it came in on
+(net/bridge/br_forward.c:should_deliver()), and without learning the port's
+source addresses are not recorded (br_handle_frame_finish()). A new port
+starts with learning on and hairpin off, as in Linux's br_add_if(), which is
+what gVisor's bridge did. Other port options still fail with EOPNOTSUPP.
+
+Why: the CNI bridge plugin sets hairpin mode on every container veth it adds
+to a bridge and fails the attachment when that fails. Podman 4.9.3's CNI
+backend, Ubuntu 24.04's default when netavark is not installed, failed every
+container on a network of its own: "plugin type=bridge failed (add): failed
+to setup hairpin mode for vethX: operation not supported".
+
+Upstream: google/gvisor PR 16233 (top commit 5513a14b9b1a, open on
+2026-11-17), applied to release-20261109.0's bridge. Upstream stacks it on PR
+16230 (commit e1d29de2d, in master since 2026-11-12), which ALE leaves out:
+besides keeping frames for the bridge's own addresses out of its ports, it
+makes IPv4, IPv6 and ARP drop frames addressed to another host on every
+interface, as Linux does, and with it a container that Docker restarts in a
+sandbox, which comes back with another MAC address, was unreachable through
+its published port for about 30 s, until the sandbox's neighbor entry for it
+expired: 8 of the 9 Docker installs of the nested checks failed their stop and
+start. Docker announces the new address with a gratuitous ARP, which needs a
+packet socket that runsc-nested does not give ("Failed to prepare unsolicited
+ARP ... create socket: operation not permitted"). So the bridge forwards as
+in release-20261109.0, flags aside, and the PR's check that a frame for the
+bridge's or a port's own address never goes back out, which needs PR 16230,
+is left out of its test; such a frame is still flooded, as before. Drop this
+patch once the gVisor release ALE builds from has PR 16233, and check then
+that Docker's stop and start still pass with PR 16230.
+
+Verified:
+- The PR's syscall tests BridgePortTest.SetHairpinAndLearning,
+  .SetUnknownInterface and .SetEmptyAttribute pass on runsc with this patch,
+  under the runtime arguments of runsc and of runsc-nested, and fail on ALE's
+  0.1.2; the whole socket_netlink_route_test passes (126 tests with patches
+  0012 to 0014). The PR's unit tests in //pkg/tcpip/stack:bridge_test
+  (TestBridgePortHairpin, TestBridgePortLearning, TestBridgePortFlagsAPI),
+  //pkg/sentry/socket/netlink/route:route_test and
+  //pkg/sentry/socket/netstack:netstack_test pass, as do stack_test and
+  stack_x_test.
+- Podman 4.9.3's CNI backend in an Ubuntu 24.04 sandbox under runsc-nested
+  attached its containers to its bridge; with the patches up to 0018 it passed
+  the nested checks, and Docker's stop and start passed as with 0.1.2
+  (README.md).
+
+diff --git a/pkg/abi/linux/netlink_route.go b/pkg/abi/linux/netlink_route.go
+index 631044c..b82a536 100644
+--- a/pkg/abi/linux/netlink_route.go
++++ b/pkg/abi/linux/netlink_route.go
+@@ -183,6 +183,59 @@ const (
+ 	IFLA_INFO_SLAVE_DATA = 5
+ )
+ 
++// Bridge port attributes, nested in IFLA_PROTINFO, from
++// uapi/linux/if_link.h.
++const (
++	IFLA_BRPORT_UNSPEC                = 0
++	IFLA_BRPORT_STATE                 = 1
++	IFLA_BRPORT_PRIORITY              = 2
++	IFLA_BRPORT_COST                  = 3
++	IFLA_BRPORT_MODE                  = 4
++	IFLA_BRPORT_GUARD                 = 5
++	IFLA_BRPORT_PROTECT               = 6
++	IFLA_BRPORT_FAST_LEAVE            = 7
++	IFLA_BRPORT_LEARNING              = 8
++	IFLA_BRPORT_UNICAST_FLOOD         = 9
++	IFLA_BRPORT_PROXYARP              = 10
++	IFLA_BRPORT_LEARNING_SYNC         = 11
++	IFLA_BRPORT_PROXYARP_WIFI         = 12
++	IFLA_BRPORT_ROOT_ID               = 13
++	IFLA_BRPORT_BRIDGE_ID             = 14
++	IFLA_BRPORT_DESIGNATED_PORT       = 15
++	IFLA_BRPORT_DESIGNATED_COST       = 16
++	IFLA_BRPORT_ID                    = 17
++	IFLA_BRPORT_NO                    = 18
++	IFLA_BRPORT_TOPOLOGY_CHANGE_ACK   = 19
++	IFLA_BRPORT_CONFIG_PENDING        = 20
++	IFLA_BRPORT_MESSAGE_AGE_TIMER     = 21
++	IFLA_BRPORT_FORWARD_DELAY_TIMER   = 22
++	IFLA_BRPORT_HOLD_TIMER            = 23
++	IFLA_BRPORT_FLUSH                 = 24
++	IFLA_BRPORT_MULTICAST_ROUTER      = 25
++	IFLA_BRPORT_PAD                   = 26
++	IFLA_BRPORT_MCAST_FLOOD           = 27
++	IFLA_BRPORT_MCAST_TO_UCAST        = 28
++	IFLA_BRPORT_VLAN_TUNNEL           = 29
++	IFLA_BRPORT_BCAST_FLOOD           = 30
++	IFLA_BRPORT_GROUP_FWD_MASK        = 31
++	IFLA_BRPORT_NEIGH_SUPPRESS        = 32
++	IFLA_BRPORT_ISOLATED              = 33
++	IFLA_BRPORT_BACKUP_PORT           = 34
++	IFLA_BRPORT_MRP_RING_OPEN         = 35
++	IFLA_BRPORT_MRP_IN_OPEN           = 36
++	IFLA_BRPORT_MCAST_EHT_HOSTS_LIMIT = 37
++	IFLA_BRPORT_MCAST_EHT_HOSTS_CNT   = 38
++	IFLA_BRPORT_LOCKED                = 39
++	IFLA_BRPORT_MAB                   = 40
++	IFLA_BRPORT_MCAST_N_GROUPS        = 41
++	IFLA_BRPORT_MCAST_MAX_GROUPS      = 42
++	IFLA_BRPORT_NEIGH_VLAN_SUPPRESS   = 43
++	IFLA_BRPORT_BACKUP_NHID           = 44
++	IFLA_BRPORT_NEIGH_FORWARD_GRAT    = 45
++
++	IFLA_BRPORT_MAX = IFLA_BRPORT_NEIGH_FORWARD_GRAT
++)
++
+ // Interface operational states (RFC 2863), from uapi/linux/if_link.h.
+ const (
+ 	IF_OPER_UNKNOWN        = 0
+diff --git a/pkg/sentry/inet/inet.go b/pkg/sentry/inet/inet.go
+index 619af81..cb43f6c 100644
+--- a/pkg/sentry/inet/inet.go
++++ b/pkg/sentry/inet/inet.go
+@@ -51,6 +51,11 @@ type Stack interface {
+ 	// SetInterface modifies or adds a new interface.
+ 	SetInterface(ctx context.Context, msg *nlmsg.Message) *syserr.Error
+ 
++	// SetBridgePort applies cfg to the bridge port with index idx. It fails
++	// with ENODEV if there is no such interface and with EOPNOTSUPP if the
++	// interface is not a bridge port.
++	SetBridgePort(ctx context.Context, idx int32, cfg BridgePortConfig) *syserr.Error
++
+ 	// RemoveInterfaceAddr removes an address from the network interface
+ 	// identified by idx.
+ 	RemoveInterfaceAddr(ctx context.Context, idx int32, addr InterfaceAddr) error
+@@ -188,6 +193,18 @@ type Interface struct {
+ 	Kind string
+ }
+ 
++// BridgePortConfig is a change to the options of a bridge port. A nil field
++// leaves the option unchanged.
++type BridgePortConfig struct {
++	// Hairpin is IFLA_BRPORT_MODE: whether the bridge may send a frame back
++	// out of the port it was received on.
++	Hairpin *bool
++
++	// Learning is IFLA_BRPORT_LEARNING: whether the bridge learns source
++	// addresses seen on the port.
++	Learning *bool
++}
++
+ // InterfaceAddr contains information about a network interface address.
+ type InterfaceAddr struct {
+ 	// Family is the address family, a Linux AF_* constant.
+diff --git a/pkg/sentry/inet/test_stack.go b/pkg/sentry/inet/test_stack.go
+index 1e7f2ec..cf922b7 100644
+--- a/pkg/sentry/inet/test_stack.go
++++ b/pkg/sentry/inet/test_stack.go
+@@ -75,6 +75,11 @@ func (s *TestStack) SetInterface(ctx context.Context, msg *nlmsg.Message) *syser
+ 	panic("unimplemented")
+ }
+ 
++// SetBridgePort implements Stack.
++func (s *TestStack) SetBridgePort(ctx context.Context, idx int32, cfg BridgePortConfig) *syserr.Error {
++	panic("unimplemented")
++}
++
+ // InterfaceAddrs implements Stack.
+ func (s *TestStack) InterfaceAddrs() map[int32][]InterfaceAddr {
+ 	return s.InterfaceAddrsMap
+diff --git a/pkg/sentry/socket/hostinet/stack.go b/pkg/sentry/socket/hostinet/stack.go
+index 6e44c67..1e31fa2 100644
+--- a/pkg/sentry/socket/hostinet/stack.go
++++ b/pkg/sentry/socket/hostinet/stack.go
+@@ -244,6 +244,11 @@ func (s *Stack) InterfaceAddrs() map[int32][]inet.InterfaceAddr {
+ 	return addrs
+ }
+ 
++// SetBridgePort implements inet.Stack.SetBridgePort.
++func (s *Stack) SetBridgePort(ctx context.Context, idx int32, cfg inet.BridgePortConfig) *syserr.Error {
++	return syserr.ErrNotSupported
++}
++
+ // SetInterface implements inet.Stack.SetInterface.
+ func (s *Stack) SetInterface(ctx context.Context, msg *nlmsg.Message) *syserr.Error {
+ 	var ifinfomsg linux.InterfaceInfoMessage
+diff --git a/pkg/sentry/socket/netlink/route/BUILD b/pkg/sentry/socket/netlink/route/BUILD
+index d372d76..6be3b2f 100644
+--- a/pkg/sentry/socket/netlink/route/BUILD
++++ b/pkg/sentry/socket/netlink/route/BUILD
+@@ -34,6 +34,7 @@ go_test(
+     embed = [":route"],
+     deps = [
+         "//pkg/abi/linux",
++        "//pkg/context",
+         "//pkg/marshal/primitive",
+         "//pkg/sentry/inet",
+         "//pkg/sentry/socket/netlink/nlmsg",
+diff --git a/pkg/sentry/socket/netlink/route/protocol.go b/pkg/sentry/socket/netlink/route/protocol.go
+index 9238295..f89c5f8 100644
+--- a/pkg/sentry/socket/netlink/route/protocol.go
++++ b/pkg/sentry/socket/netlink/route/protocol.go
+@@ -188,6 +188,11 @@ func (p *Protocol) setLink(ctx context.Context, s *netlink.Socket, msg *nlmsg.Me
+ 		return syserr.ErrProtocolNotSupported
+ 	}
+ 
++	var ifi linux.InterfaceInfoMessage
++	if attrs, ok := msg.GetData(&ifi); ok && ifi.Family == linux.AF_BRIDGE {
++		return p.setBridgePort(ctx, stack, ifi.Index, attrs)
++	}
++
+ 	if msg.Header().Flags&linux.NLM_F_CREATE == linux.NLM_F_CREATE {
+ 		return syserr.ErrInvalidArgument
+ 	}
+@@ -195,6 +200,103 @@ func (p *Protocol) setLink(ctx context.Context, s *netlink.Socket, msg *nlmsg.Me
+ 	return stack.SetInterface(ctx, msg)
+ }
+ 
++// setBridgePort handles RTM_SETLINK requests with ifi_family AF_BRIDGE, which
++// configure a bridge port. It follows rtnl_bridge_setlink and br_setlink in
++// net/core/rtnetlink.c and net/bridge/br_netlink.c, but only supports the
++// hairpin and learning flags of IFLA_PROTINFO.
++func (p *Protocol) setBridgePort(ctx context.Context, stack inet.Stack, idx int32, attrs nlmsg.AttrsView) *syserr.Error {
++	// As in rtnl_bridge_setlink(), report interface errors before attribute
++	// errors. An empty config validates the port without changing it.
++	if err := stack.SetBridgePort(ctx, idx, inet.BridgePortConfig{}); err != nil {
++		return err
++	}
++	cfg, err := parseBridgePortRequest(attrs)
++	if err != nil {
++		return err
++	}
++	return stack.SetBridgePort(ctx, idx, cfg)
++}
++
++// parseBridgePortRequest parses the attributes of an AF_BRIDGE RTM_SETLINK
++// request, as br_setlink does.
++func parseBridgePortRequest(attrs nlmsg.AttrsView) (inet.BridgePortConfig, *syserr.Error) {
++	// As with nlmsg_find_attr, the first IFLA_PROTINFO and IFLA_AF_SPEC win.
++	var (
++		protinfo    []byte
++		hasProtinfo bool
++		protinfoHdr linux.NetlinkAttrHeader
++		hasAFSpec   bool
++	)
++	for !attrs.Empty() {
++		hdr, value, rest, ok := attrs.ParseFirst()
++		if !ok {
++			return inet.BridgePortConfig{}, syserr.ErrInvalidArgument
++		}
++		attrs = rest
++		switch hdr.Type & linux.NLA_TYPE_MASK {
++		case linux.IFLA_PROTINFO:
++			if !hasProtinfo {
++				hasProtinfo = true
++				protinfoHdr = hdr
++				protinfo = value
++			}
++		case linux.IFLA_AF_SPEC:
++			hasAFSpec = true
++		}
++	}
++
++	var cfg inet.BridgePortConfig
++	if hasProtinfo {
++		// Without NLA_F_NESTED the attribute is the spanning tree port state.
++		if protinfoHdr.Type&linux.NLA_F_NESTED == 0 {
++			return inet.BridgePortConfig{}, syserr.ErrNotSupported
++		}
++		var err *syserr.Error
++		if cfg, err = parseBridgePortAttrs(nlmsg.AttrsView(protinfo)); err != nil {
++			return inet.BridgePortConfig{}, err
++		}
++	}
++	// IFLA_AF_SPEC carries VLAN and bridge mode configuration.
++	if hasAFSpec {
++		return inet.BridgePortConfig{}, syserr.ErrNotSupported
++	}
++	return cfg, nil
++}
++
++// parseBridgePortAttrs parses the attributes nested in IFLA_PROTINFO, as
++// nla_parse_nested_deprecated and br_setport do. Attributes other than the
++// hairpin and learning flags are not supported.
++func parseBridgePortAttrs(attrs nlmsg.AttrsView) (inet.BridgePortConfig, *syserr.Error) {
++	// A later attribute of the same type replaces an earlier one.
++	var cfg inet.BridgePortConfig
++	for !attrs.Empty() {
++		hdr, value, rest, ok := attrs.ParseFirst()
++		if !ok {
++			return inet.BridgePortConfig{}, syserr.ErrInvalidArgument
++		}
++		attrs = rest
++		typ := hdr.Type & linux.NLA_TYPE_MASK
++		switch {
++		case typ == linux.IFLA_BRPORT_MODE || typ == linux.IFLA_BRPORT_LEARNING:
++			// The attributes are u8 and may be longer, but not shorter.
++			if len(value) < 1 {
++				return inet.BridgePortConfig{}, syserr.ErrRange
++			}
++			on := value[0] != 0
++			if typ == linux.IFLA_BRPORT_MODE {
++				cfg.Hairpin = &on
++			} else {
++				cfg.Learning = &on
++			}
++		case typ == linux.IFLA_BRPORT_UNSPEC || typ > linux.IFLA_BRPORT_MAX:
++			// Linux ignores attributes outside of 1..IFLA_BRPORT_MAX.
++		default:
++			return inet.BridgePortConfig{}, syserr.ErrNotSupported
++		}
++	}
++	return cfg, nil
++}
++
+ // delLink handles RTM_DELLINK requests.
+ func (p *Protocol) delLink(ctx context.Context, s *netlink.Socket, msg *nlmsg.Message, ms *nlmsg.MessageSet) *syserr.Error {
+ 	stack := s.Stack()
+diff --git a/pkg/sentry/socket/netlink/route/protocol_test.go b/pkg/sentry/socket/netlink/route/protocol_test.go
+index 04f042c..87d91a5 100644
+--- a/pkg/sentry/socket/netlink/route/protocol_test.go
++++ b/pkg/sentry/socket/netlink/route/protocol_test.go
+@@ -16,10 +16,13 @@ package route
+ 
+ import (
+ 	"bytes"
++	"encoding/binary"
++	"fmt"
+ 	"net"
+ 	"testing"
+ 
+ 	"gvisor.dev/gvisor/pkg/abi/linux"
++	"gvisor.dev/gvisor/pkg/context"
+ 	"gvisor.dev/gvisor/pkg/marshal/primitive"
+ 	"gvisor.dev/gvisor/pkg/sentry/inet"
+ 	"gvisor.dev/gvisor/pkg/sentry/socket/netlink/nlmsg"
+@@ -681,3 +684,211 @@ func TestDumpFamily(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// fakeBridgeStack implements the bridge port part of inet.Stack and records the
++// configurations it applies.
++type fakeBridgeStack struct {
++	inet.Stack
++	known   bool
++	isPort  bool
++	applied []string
++}
++
++func (f *fakeBridgeStack) SetBridgePort(ctx context.Context, idx int32, cfg inet.BridgePortConfig) *syserr.Error {
++	if !f.known {
++		return syserr.ErrNoDevice
++	}
++	if !f.isPort {
++		return syserr.ErrNotSupported
++	}
++	if cfg.Hairpin == nil && cfg.Learning == nil {
++		// An empty config changes nothing, so it isn't recorded.
++		return nil
++	}
++	str := func(b *bool) string {
++		if b == nil {
++			return "-"
++		}
++		return fmt.Sprint(*b)
++	}
++	f.applied = append(f.applied, fmt.Sprintf("hairpin=%s learning=%s", str(cfg.Hairpin), str(cfg.Learning)))
++	return nil
++}
++
++// nlAttr encodes a netlink attribute.
++func nlAttr(typ uint16, payload ...[]byte) []byte {
++	var value []byte
++	for _, p := range payload {
++		value = append(value, p...)
++	}
++	b := make([]byte, linux.NetlinkAttrHeaderSize, linux.NetlinkAttrHeaderSize+len(value)+3)
++	binary.NativeEndian.PutUint16(b, uint16(linux.NetlinkAttrHeaderSize+len(value)))
++	binary.NativeEndian.PutUint16(b[2:], typ)
++	b = append(b, value...)
++	for len(b)%linux.NLA_ALIGNTO != 0 {
++		b = append(b, 0)
++	}
++	return b
++}
++
++func TestSetBridgePort(t *testing.T) {
++	protinfo := func(attrs ...[]byte) []byte {
++		return nlAttr(linux.IFLA_PROTINFO|linux.NLA_F_NESTED, attrs...)
++	}
++	u8 := func(typ uint16, v byte) []byte { return nlAttr(typ, []byte{v}) }
++
++	for _, test := range []struct {
++		name    string
++		known   bool
++		isPort  bool
++		attrs   []byte
++		want    *syserr.Error
++		applied []string
++	}{
++		{
++			name:    "hairpin on",
++			known:   true,
++			isPort:  true,
++			attrs:   protinfo(u8(linux.IFLA_BRPORT_MODE, 1)),
++			applied: []string{"hairpin=true learning=-"},
++		},
++		{
++			name:    "hairpin off and learning on",
++			known:   true,
++			isPort:  true,
++			attrs:   protinfo(u8(linux.IFLA_BRPORT_MODE, 0), u8(linux.IFLA_BRPORT_LEARNING, 1)),
++			applied: []string{"hairpin=false learning=true"},
++		},
++		{
++			name:    "any nonzero value is on",
++			known:   true,
++			isPort:  true,
++			attrs:   protinfo(u8(linux.IFLA_BRPORT_MODE, 2)),
++			applied: []string{"hairpin=true learning=-"},
++		},
++		{
++			name:    "longer value uses the first byte",
++			known:   true,
++			isPort:  true,
++			attrs:   protinfo(nlAttr(linux.IFLA_BRPORT_LEARNING, []byte{0, 1, 0, 0})),
++			applied: []string{"hairpin=- learning=false"},
++		},
++		{
++			name:    "last attribute of a type wins",
++			known:   true,
++			isPort:  true,
++			attrs:   protinfo(u8(linux.IFLA_BRPORT_MODE, 1), u8(linux.IFLA_BRPORT_MODE, 0)),
++			applied: []string{"hairpin=false learning=-"},
++		},
++		{
++			name:   "attributes Linux ignores",
++			known:  true,
++			isPort: true,
++			attrs:  protinfo(u8(linux.IFLA_BRPORT_UNSPEC, 1), u8(linux.IFLA_BRPORT_MAX+1, 1)),
++		},
++		{
++			name:   "empty value",
++			known:  true,
++			isPort: true,
++			attrs:  protinfo(nlAttr(linux.IFLA_BRPORT_MODE)),
++			want:   syserr.ErrRange,
++		},
++		{
++			name:   "unsupported flag",
++			known:  true,
++			isPort: true,
++			attrs:  protinfo(u8(linux.IFLA_BRPORT_GUARD, 1)),
++			want:   syserr.ErrNotSupported,
++		},
++		{
++			name:   "unsupported flag after a supported one changes nothing",
++			known:  true,
++			isPort: true,
++			attrs:  protinfo(u8(linux.IFLA_BRPORT_MODE, 1), u8(linux.IFLA_BRPORT_UNICAST_FLOOD, 0)),
++			want:   syserr.ErrNotSupported,
++		},
++		{
++			name:   "unsupported attribute with a value that is too short",
++			known:  true,
++			isPort: true,
++			attrs:  protinfo(u8(linux.IFLA_BRPORT_MODE, 1), nlAttr(linux.IFLA_BRPORT_COST)),
++			want:   syserr.ErrNotSupported,
++		},
++		{
++			name:   "spanning tree port state",
++			known:  true,
++			isPort: true,
++			attrs:  nlAttr(linux.IFLA_PROTINFO, []byte{0}),
++			want:   syserr.ErrNotSupported,
++		},
++		{
++			name:   "af_spec changes nothing",
++			known:  true,
++			isPort: true,
++			attrs:  append(protinfo(u8(linux.IFLA_BRPORT_MODE, 1)), nlAttr(linux.IFLA_AF_SPEC|linux.NLA_F_NESTED)...),
++			want:   syserr.ErrNotSupported,
++		},
++		{
++			name:   "truncated nested attribute",
++			known:  true,
++			isPort: true,
++			attrs:  nlAttr(linux.IFLA_PROTINFO|linux.NLA_F_NESTED, []byte{9, 0, 4}),
++			want:   syserr.ErrInvalidArgument,
++		},
++		{
++			name:   "no attributes",
++			known:  true,
++			isPort: true,
++		},
++		{
++			name:   "unrelated attributes",
++			known:  true,
++			isPort: true,
++			attrs:  nlAttr(linux.IFLA_MTU, []byte{0, 0, 0, 0}),
++		},
++		{
++			name:  "not a bridge port",
++			known: true,
++			attrs: protinfo(u8(linux.IFLA_BRPORT_MODE, 1)),
++			want:  syserr.ErrNotSupported,
++		},
++		{
++			name:  "malformed request on something that is not a bridge port",
++			known: true,
++			attrs: protinfo(nlAttr(linux.IFLA_BRPORT_MODE)),
++			want:  syserr.ErrNotSupported,
++		},
++		{
++			name:  "no attributes on something that is not a bridge port",
++			known: true,
++			want:  syserr.ErrNotSupported,
++		},
++		{
++			name:  "unknown interface",
++			attrs: protinfo(u8(linux.IFLA_BRPORT_MODE, 1)),
++			want:  syserr.ErrNoDevice,
++		},
++		{
++			name:  "unsupported flag on an unknown interface",
++			attrs: protinfo(u8(linux.IFLA_BRPORT_GUARD, 1)),
++			want:  syserr.ErrNoDevice,
++		},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			f := &fakeBridgeStack{known: test.known, isPort: test.isPort}
++			p := &Protocol{}
++			got := p.setBridgePort(context.Background(), f, 7, nlmsg.AttrsView(test.attrs))
++			if got != test.want {
++				t.Errorf("setBridgePort() = %v, want %v", got, test.want)
++			}
++			if len(f.applied) != len(test.applied) {
++				t.Fatalf("applied flags = %v, want %v", f.applied, test.applied)
++			}
++			for i := range f.applied {
++				if f.applied[i] != test.applied[i] {
++					t.Errorf("applied flags = %v, want %v", f.applied, test.applied)
++				}
++			}
++		})
++	}
++}
+diff --git a/pkg/sentry/socket/netstack/BUILD b/pkg/sentry/socket/netstack/BUILD
+index 346c38f..42daed9 100644
+--- a/pkg/sentry/socket/netstack/BUILD
++++ b/pkg/sentry/socket/netstack/BUILD
+@@ -88,9 +88,13 @@ go_test(
+         "//pkg/abi/linux",
+         "//pkg/context",
+         "//pkg/marshal/primitive",
++        "//pkg/sentry/inet",
+         "//pkg/sentry/socket/netlink/nlmsg",
+         "//pkg/syserr",
+         "//pkg/tcpip",
++        "//pkg/tcpip/header",
++        "//pkg/tcpip/link/channel",
++        "//pkg/tcpip/link/ethernet",
+         "//pkg/tcpip/stack",
+     ],
+ )
+diff --git a/pkg/sentry/socket/netstack/stack.go b/pkg/sentry/socket/netstack/stack.go
+index 29332bd..b429974 100644
+--- a/pkg/sentry/socket/netstack/stack.go
++++ b/pkg/sentry/socket/netstack/stack.go
+@@ -255,6 +255,27 @@ func (s *Stack) SetInterface(ctx context.Context, msg *nlmsg.Message) *syserr.Er
+ 	return s.setLinkLocked(ctx, tcpip.NICID(ifinfomsg.Index), attrs, ifinfomsg.Flags, ifinfomsg.Change, dstNs)
+ }
+ 
++// SetBridgePort implements inet.Stack.SetBridgePort.
++func (s *Stack) SetBridgePort(ctx context.Context, idx int32, cfg inet.BridgePortConfig) *syserr.Error {
++	s.linkMu.Lock()
++	defer s.linkMu.Unlock()
++
++	var set, clear stack.BridgePortFlags
++	for _, f := range []struct {
++		on   *bool
++		flag stack.BridgePortFlags
++	}{{cfg.Hairpin, stack.BridgePortHairpin}, {cfg.Learning, stack.BridgePortLearning}} {
++		switch {
++		case f.on == nil:
++		case *f.on:
++			set |= f.flag
++		default:
++			clear |= f.flag
++		}
++	}
++	return syserr.TranslateNetstackError(s.Stack.SetBridgePortFlags(tcpip.NICID(idx), set, clear))
++}
++
+ // If the linkAttrs map contains IFLA_NET_NS_FD, locks the source and
+ // destination stacks and returns the destination netns, which must
+ // be passed into unlockSrcAndDst by the caller.
+diff --git a/pkg/sentry/socket/netstack/stack_test.go b/pkg/sentry/socket/netstack/stack_test.go
+index 87f1863..4350334 100644
+--- a/pkg/sentry/socket/netstack/stack_test.go
++++ b/pkg/sentry/socket/netstack/stack_test.go
+@@ -23,10 +23,14 @@ import (
+ 	"gvisor.dev/gvisor/pkg/abi/linux"
+ 	"gvisor.dev/gvisor/pkg/context"
+ 	"gvisor.dev/gvisor/pkg/marshal/primitive"
++	"gvisor.dev/gvisor/pkg/sentry/inet"
+ 	"gvisor.dev/gvisor/pkg/sentry/socket/netlink/nlmsg"
+ 	"gvisor.dev/gvisor/pkg/sentry/socket/netstack"
+ 	"gvisor.dev/gvisor/pkg/syserr"
+ 	"gvisor.dev/gvisor/pkg/tcpip"
++	"gvisor.dev/gvisor/pkg/tcpip/header"
++	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
++	"gvisor.dev/gvisor/pkg/tcpip/link/ethernet"
+ 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+ )
+ 
+@@ -161,3 +165,58 @@ func TestRouteTableDumpOrder(t *testing.T) {
+ 		t.Errorf("GetRouteTable()[0] prefix = %d, want 128", got)
+ 	}
+ }
++
++func TestSetBridgePort(t *testing.T) {
++	const (
++		bridgeID = 1
++		portID   = 2
++		loneID   = 3
++	)
++	s := &netstack.Stack{Stack: stack.New(stack.Options{})}
++	defer s.Stack.Destroy()
++	if err := s.Stack.CreateNIC(bridgeID, stack.NewBridgeEndpoint(1500)); err != nil {
++		t.Fatalf("CreateNIC(%d): %s", bridgeID, err)
++	}
++	for _, id := range []tcpip.NICID{portID, loneID} {
++		ch := channel.New(1, header.EthernetMinimumSize, "\x02\x02\x03\x04\x05\x06")
++		defer ch.Close()
++		if err := s.Stack.CreateNIC(id, ethernet.New(ch)); err != nil {
++			t.Fatalf("CreateNIC(%d): %s", id, err)
++		}
++	}
++	if err := s.Stack.SetNICCoordinator(portID, bridgeID); err != nil {
++		t.Fatalf("SetNICCoordinator(%d, %d): %s", portID, bridgeID, err)
++	}
++
++	wantFlags := func(want stack.BridgePortFlags) {
++		t.Helper()
++		if got, err := s.Stack.BridgePortFlags(portID); err != nil || got != want {
++			t.Errorf("BridgePortFlags(%d) = %#x, %v, want %#x", portID, got, err, want)
++		}
++	}
++	ctx := context.Background()
++	on, off := true, false
++
++	if err := s.SetBridgePort(ctx, portID, inet.BridgePortConfig{Hairpin: &on, Learning: &off}); err != nil {
++		t.Fatalf("SetBridgePort(hairpin on, learning off) = %v", err)
++	}
++	wantFlags(stack.BridgePortHairpin)
++	if err := s.SetBridgePort(ctx, portID, inet.BridgePortConfig{Learning: &on}); err != nil {
++		t.Fatalf("SetBridgePort(learning on) = %v", err)
++	}
++	wantFlags(stack.BridgePortHairpin | stack.BridgePortLearning)
++
++	for _, test := range []struct {
++		name string
++		id   int32
++		want *syserr.Error
++	}{
++		{"unknown interface", 99, syserr.ErrUnknownNICID},
++		{"interface without a bridge", loneID, syserr.ErrNotSupported},
++		{"the bridge itself", bridgeID, syserr.ErrNotSupported},
++	} {
++		if err := s.SetBridgePort(ctx, test.id, inet.BridgePortConfig{Hairpin: &on}); err != test.want {
++			t.Errorf("%s: SetBridgePort() = %v, want %v", test.name, err, test.want)
++		}
++	}
++}
+diff --git a/pkg/tcpip/stack/bridge.go b/pkg/tcpip/stack/bridge.go
+index 82a9180..dd2d238 100644
+--- a/pkg/tcpip/stack/bridge.go
++++ b/pkg/tcpip/stack/bridge.go
+@@ -22,10 +22,31 @@ import (
+ 
+ var _ NetworkLinkEndpoint = (*BridgeEndpoint)(nil)
+ 
++// BridgePortFlags is a set of per-port bridge options.
++type BridgePortFlags uint32
++
++const (
++	// BridgePortHairpin allows the bridge to send a frame back out of the port
++	// it was received on. It is Linux's BR_HAIRPIN_MODE.
++	BridgePortHairpin BridgePortFlags = 1 << iota
++
++	// BridgePortLearning makes the bridge learn source addresses seen on the
++	// port. It is Linux's BR_LEARNING.
++	BridgePortLearning
++)
++
++// defaultBridgePortFlags are the modeled flags of a newly added port. Linux
++// starts a port with BR_LEARNING, BR_FLOOD, BR_MCAST_FLOOD and BR_BCAST_FLOOD
++// (net/bridge/br_if.c:new_nbp()); only BR_LEARNING is modeled.
++const defaultBridgePortFlags = BridgePortLearning
++
+ // +stateify savable
+ type bridgePort struct {
+ 	bridge *BridgeEndpoint
+ 	nic    *nic
++
++	// +checklocks:bridge.mu
++	flags BridgePortFlags
+ }
+ 
+ // BridgeFDBKey is the MAC address of a device which a bridge port is associated with.
+@@ -56,22 +77,25 @@ func (p *bridgePort) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber,
+ 	eth := header.Ethernet(pkt.LinkHeader().Slice())
+ 	updateFDB := false
+ 	bridge.mu.RLock()
++	hairpin := p.flags&BridgePortHairpin != 0
+ 	// Add an entry at the bridge FDB, it maps a MAC address
+ 	// to a bridge port where the traffic is received when
+-	// the MAC address is not multicast.
++	// the MAC address is not multicast and the port has learning enabled.
+ 	// Network packets that are sent to the learned MAC address
+ 	// will be forwarded to the bridge port that is stored in
+ 	// the FDB table.
+ 	sourceAddress := eth.SourceAddress()
+-	if _, hasSourceFDB := bridge.fdbTable[BridgeFDBKey(sourceAddress)]; !header.IsMulticastEthernetAddress(sourceAddress) && !hasSourceFDB {
++	if _, hasSourceFDB := bridge.fdbTable[BridgeFDBKey(sourceAddress)]; p.flags&BridgePortLearning != 0 && !header.IsMulticastEthernetAddress(sourceAddress) && !hasSourceFDB {
+ 		updateFDB = true
+ 	}
+ 	destAddress := eth.DestinationAddress()
+ 	isMulticast := header.IsMulticastEthernetAddress(destAddress)
++	// As in net/bridge/br_forward.c:should_deliver(), the ingress port gets a
++	// flooded or forwarded frame only in hairpin mode.
+ 	if entry, exist := bridge.fdbTable[BridgeFDBKey(destAddress)]; !exist {
+ 		// When no FDB entry is found, send the packet to all ports.
+ 		for _, port := range bridge.ports {
+-			if p == port {
++			if p == port && !hairpin {
+ 				continue
+ 			}
+ 			newPkt := NewPacketBuffer(PacketBufferOptions{
+@@ -81,7 +105,7 @@ func (p *bridgePort) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber,
+ 			port.nic.writeRawPacket(newPkt)
+ 			newPkt.DecRef()
+ 		}
+-	} else if entry.port != p {
++	} else if entry.port != p || hairpin {
+ 		destPort := entry.port
+ 		newPkt := NewPacketBuffer(PacketBufferOptions{
+ 			ReserveHeaderBytes: int(destPort.nic.MaxHeaderLength()),
+@@ -178,6 +202,7 @@ func (b *BridgeEndpoint) AddNIC(n *nic) tcpip.Error {
+ 	port := &bridgePort{
+ 		nic:    n,
+ 		bridge: b,
++		flags:  defaultBridgePortFlags,
+ 	}
+ 	n.NetworkLinkEndpoint.Attach(port)
+ 	b.ports[n.id] = port
+@@ -310,3 +335,65 @@ func (b *BridgeEndpoint) FindFDBEntry(addr tcpip.LinkAddress) BridgeFDBEntry {
+ 	defer b.mu.RUnlock()
+ 	return b.fdbTable[BridgeFDBKey(addr)]
+ }
++
++// bridgeOfPortLocked returns the bridge that the NIC with the given ID is a
++// port of.
++//
++// +checklocksread:s.mu
++func (s *Stack) bridgeOfPortLocked(id tcpip.NICID) (*BridgeEndpoint, tcpip.Error) {
++	n, ok := s.nics[id]
++	if !ok {
++		return nil, &tcpip.ErrUnknownNICID{}
++	}
++	if n.Primary == nil {
++		return nil, &tcpip.ErrNotSupported{}
++	}
++	b, ok := n.Primary.NetworkLinkEndpoint.(*BridgeEndpoint)
++	if !ok {
++		return nil, &tcpip.ErrNotSupported{}
++	}
++	return b, nil
++}
++
++// BridgePortFlags returns the bridge port flags of the NIC with the given ID.
++// It returns ErrUnknownNICID if there is no such NIC and ErrNotSupported if
++// the NIC is not a bridge port.
++func (s *Stack) BridgePortFlags(id tcpip.NICID) (BridgePortFlags, tcpip.Error) {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	b, err := s.bridgeOfPortLocked(id)
++	if err != nil {
++		return 0, err
++	}
++	b.mu.RLock()
++	defer b.mu.RUnlock()
++	port, ok := b.ports[id]
++	if !ok {
++		return 0, &tcpip.ErrNotSupported{}
++	}
++	return port.flags, nil // +checklocksforce: port.bridge is b.
++}
++
++// SetBridgePortFlags sets the flags in set and then clears the flags in clear
++// on the bridge port of the NIC with the given ID. It returns
++// ErrUnknownNICID if there is no such NIC and ErrNotSupported if the NIC is
++// not a bridge port.
++//
++// Addresses that were already learned stay in the forwarding table when
++// learning is turned off.
++func (s *Stack) SetBridgePortFlags(id tcpip.NICID, set, clear BridgePortFlags) tcpip.Error {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	b, err := s.bridgeOfPortLocked(id)
++	if err != nil {
++		return err
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	port, ok := b.ports[id]
++	if !ok {
++		return &tcpip.ErrNotSupported{}
++	}
++	port.flags = (port.flags | set) &^ clear // +checklocksforce: port.bridge is b.
++	return nil
++}
+diff --git a/pkg/tcpip/stack/bridge_test.go b/pkg/tcpip/stack/bridge_test.go
+index a7f90b0..a91d735 100644
+--- a/pkg/tcpip/stack/bridge_test.go
++++ b/pkg/tcpip/stack/bridge_test.go
+@@ -464,6 +464,218 @@ func TestBridgeDispatchOnlyForLocalOrMulticast(t *testing.T) {
+ 	}
+ }
+ 
++// bridgePortTestEnv is a bridge with one channel-based port per link address.
++type bridgePortTestEnv struct {
++	s      *stack.Stack
++	bridge *stack.BridgeEndpoint
++	nicIDs []tcpip.NICID
++	chs    []*channel.Endpoint
++}
++
++const (
++	bridgePortTestBridgeID   = 20
++	bridgePortTestBridgeAddr = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x20")
++)
++
++func newBridgePortTestEnv(t *testing.T, linkAddrs ...tcpip.LinkAddress) *bridgePortTestEnv {
++	t.Helper()
++	env := &bridgePortTestEnv{
++		s:      stack.New(stack.Options{}),
++		bridge: stack.NewBridgeEndpoint(1500),
++	}
++	env.bridge.SetLinkAddress(bridgePortTestBridgeAddr)
++	if err := env.s.CreateNIC(bridgePortTestBridgeID, env.bridge); err != nil {
++		t.Fatalf("s.CreateNIC(%d, _): %s", bridgePortTestBridgeID, err)
++	}
++	for i, addr := range linkAddrs {
++		id := tcpip.NICID(21 + i)
++		ch := channel.New(4, header.EthernetMinimumSize, addr)
++		if err := env.s.CreateNIC(id, ethernet.New(ch)); err != nil {
++			t.Fatalf("s.CreateNIC(%d, _): %s", id, err)
++		}
++		if err := env.s.SetNICCoordinator(id, bridgePortTestBridgeID); err != nil {
++			t.Fatalf("s.SetNICCoordinator(%d, %d): %s", id, bridgePortTestBridgeID, err)
++		}
++		env.nicIDs = append(env.nicIDs, id)
++		env.chs = append(env.chs, ch)
++	}
++	t.Cleanup(func() {
++		drainChannels(env.chs...)
++		for _, ch := range env.chs {
++			ch.Close()
++		}
++		env.s.Destroy()
++	})
++	return env
++}
++
++// inject delivers a frame from src to dst on the port at index port.
++func (env *bridgePortTestEnv) inject(port int, src, dst tcpip.LinkAddress) {
++	pkt := makeEthernetFrame(src, dst)
++	env.chs[port].InjectInbound(header.IPv4ProtocolNumber, pkt)
++	pkt.DecRef()
++}
++
++// forwardedTo returns whether the port at index port sent out a frame, and
++// drains everything the port sent.
++func (env *bridgePortTestEnv) forwardedTo(port int) bool {
++	got := false
++	for pkt := env.chs[port].Read(); pkt != nil; pkt = env.chs[port].Read() {
++		got = true
++		pkt.DecRef()
++	}
++	return got
++}
++
++// TestBridgePortHairpin checks that a frame goes back out of the port it came
++// in on only when the port is in hairpin mode, both when it is flooded and
++// when its destination was learned on that port.
++func TestBridgePortHairpin(t *testing.T) {
++	const (
++		portAddr1 = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x30")
++		portAddr2 = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x31")
++		hostA     = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x32")
++		hostB     = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x33")
++		unknown   = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x34")
++	)
++	for _, hairpin := range []bool{false, true} {
++		name := "off"
++		if hairpin {
++			name = "on"
++		}
++		t.Run(name, func(t *testing.T) {
++			env := newBridgePortTestEnv(t, portAddr1, portAddr2)
++			if hairpin {
++				if err := env.s.SetBridgePortFlags(env.nicIDs[0], stack.BridgePortHairpin, 0); err != nil {
++					t.Fatalf("SetBridgePortFlags: %s", err)
++				}
++			}
++
++			// hostA is not known yet, so the frame is flooded. It is learned on
++			// port 1 afterwards.
++			env.inject(0, hostA, unknown)
++			if got := env.forwardedTo(1); !got {
++				t.Errorf("flooded frame was not sent out of port 2")
++			}
++			if got := env.forwardedTo(0); got != hairpin {
++				t.Errorf("flooded frame sent back out of the ingress port = %t, want %t", got, hairpin)
++			}
++
++			// hostA is on the ingress port, so the frame is not flooded.
++			env.inject(0, hostB, hostA)
++			if got := env.forwardedTo(0); got != hairpin {
++				t.Errorf("frame for an address on the ingress port sent back out of it = %t, want %t", got, hairpin)
++			}
++			if got := env.forwardedTo(1); got {
++				t.Errorf("frame for an address on port 1 was sent out of port 2")
++			}
++
++			env.inject(0, hostA, header.EthernetBroadcastAddress)
++			if got := env.forwardedTo(1); !got {
++				t.Errorf("broadcast frame was not sent out of port 2")
++			}
++			if got := env.forwardedTo(0); got != hairpin {
++				t.Errorf("broadcast frame sent back out of the ingress port = %t, want %t", got, hairpin)
++			}
++
++		})
++	}
++}
++
++// TestBridgePortLearning checks that the source address of a frame is added to
++// the forwarding table only when the ingress port has learning enabled.
++func TestBridgePortLearning(t *testing.T) {
++	const (
++		portAddr1 = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x40")
++		portAddr2 = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x41")
++		portAddr3 = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x42")
++		hostX     = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x43")
++		hostY     = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x44")
++	)
++	for _, learning := range []bool{true, false} {
++		name := "on"
++		if !learning {
++			name = "off"
++		}
++		t.Run(name, func(t *testing.T) {
++			env := newBridgePortTestEnv(t, portAddr1, portAddr2, portAddr3)
++			if !learning {
++				if err := env.s.SetBridgePortFlags(env.nicIDs[1], 0, stack.BridgePortLearning); err != nil {
++					t.Fatalf("SetBridgePortFlags: %s", err)
++				}
++			}
++
++			// Port 2 sees a frame from hostX.
++			env.inject(1, hostX, hostY)
++			drainChannels(env.chs...)
++			entry := env.bridge.FindFDBEntry(hostX)
++			if got := entry.PortLinkAddress() == portAddr2; got != learning {
++				t.Errorf("hostX learned on port 2 = %t, want %t", got, learning)
++			}
++
++			// A frame for hostX is sent only to port 2 if it was learned, and
++			// flooded otherwise.
++			env.inject(0, hostY, hostX)
++			if got := env.forwardedTo(1); !got {
++				t.Errorf("frame for hostX was not sent out of port 2")
++			}
++			if got := env.forwardedTo(2); got == learning {
++				t.Errorf("frame for hostX sent out of port 3 = %t, want %t", got, !learning)
++			}
++
++			// Other ports keep learning.
++			if e := env.bridge.FindFDBEntry(hostY); e.PortLinkAddress() != portAddr1 {
++				t.Errorf("hostY learned on %q, want port 1 (%q)", e.PortLinkAddress(), portAddr1)
++			}
++		})
++	}
++}
++
++func TestBridgePortFlagsAPI(t *testing.T) {
++	const portAddr = tcpip.LinkAddress("\x02\x02\x03\x04\x05\x50")
++	env := newBridgePortTestEnv(t, portAddr)
++	port := env.nicIDs[0]
++
++	flags, err := env.s.BridgePortFlags(port)
++	if err != nil {
++		t.Fatalf("BridgePortFlags(%d): %s", port, err)
++	}
++	if want := stack.BridgePortLearning; flags != want {
++		t.Errorf("new port flags = %#x, want %#x", flags, want)
++	}
++
++	// One call can set some flags and clear others.
++	if err := env.s.SetBridgePortFlags(port, stack.BridgePortHairpin, stack.BridgePortLearning); err != nil {
++		t.Fatalf("SetBridgePortFlags(%d): %s", port, err)
++	}
++	if flags, _ := env.s.BridgePortFlags(port); flags != stack.BridgePortHairpin {
++		t.Errorf("flags = %#x, want %#x", flags, stack.BridgePortHairpin)
++	}
++	// Empty masks change nothing.
++	if err := env.s.SetBridgePortFlags(port, 0, 0); err != nil {
++		t.Fatalf("SetBridgePortFlags(%d, 0, 0): %s", port, err)
++	}
++	if flags, _ := env.s.BridgePortFlags(port); flags != stack.BridgePortHairpin {
++		t.Errorf("flags = %#x, want %#x", flags, stack.BridgePortHairpin)
++	}
++
++	for _, test := range []struct {
++		name string
++		id   tcpip.NICID
++		want tcpip.Error
++	}{
++		{"unknown NIC", 99, &tcpip.ErrUnknownNICID{}},
++		{"the bridge itself", bridgePortTestBridgeID, &tcpip.ErrNotSupported{}},
++	} {
++		if _, err := env.s.BridgePortFlags(test.id); err == nil || err.String() != test.want.String() {
++			t.Errorf("%s: BridgePortFlags() = %v, want %v", test.name, err, test.want)
++		}
++		if err := env.s.SetBridgePortFlags(test.id, stack.BridgePortHairpin, 0); err == nil || err.String() != test.want.String() {
++			t.Errorf("%s: SetBridgePortFlags() = %v, want %v", test.name, err, test.want)
++		}
++	}
++}
++
+ func TestMain(m *testing.M) {
+ 	refs.SetLeakMode(refs.LeaksPanic)
+ 	code := m.Run()
+diff --git a/test/syscalls/linux/socket_netlink_route.cc b/test/syscalls/linux/socket_netlink_route.cc
+index e3f7e8e..a920ce0 100644
+--- a/test/syscalls/linux/socket_netlink_route.cc
++++ b/test/syscalls/linux/socket_netlink_route.cc
+@@ -4213,6 +4213,173 @@ TEST(NetlinkRouteTest, LinkInfoKind) {
+   }
+ }
+ 
++struct LinkRequest {
++  struct nlmsghdr hdr;
++  struct ifinfomsg ifm;
++  char buf[256];
++};
++
++// Builds an RTM_SETLINK request for the interface with the given index.
++LinkRequest GetSetLinkRequest(uint32_t seq, int family, int ifindex) {
++  LinkRequest req = {};
++  req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++  req.hdr.nlmsg_type = RTM_SETLINK;
++  req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
++  req.hdr.nlmsg_seq = seq;
++  req.ifm.ifi_family = family;
++  req.ifm.ifi_index = ifindex;
++  return req;
++}
++
++// Appends a nested IFLA_PROTINFO that holds the given bridge port attributes.
++void AddBridgePortInfo(LinkRequest* req,
++                       const std::vector<std::pair<uint16_t, uint8_t>>& attrs) {
++  struct rtattr* protinfo = NLMSG_TAIL(&req->hdr);
++  addattr(&req->hdr, sizeof(*req), IFLA_PROTINFO | NLA_F_NESTED, nullptr, 0);
++  for (const auto& [type, value] : attrs) {
++    addattr(&req->hdr, sizeof(*req), type, &value, sizeof(value));
++  }
++  protinfo->rta_len = (uint64_t)NLMSG_TAIL(&req->hdr) - (uint64_t)protinfo;
++}
++
++// Creates a bridge "br0" with the veth "veth1" as a port, and the veth
++// "veth2", which is not on a bridge. Skips the test if the kernel has no
++// bridge.
++class BridgePortTest : public ::testing::Test {
++ protected:
++  void SetUp() override {
++    SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++    SKIP_IF(IsRunningWithHostinet());
++
++    curr_nsfd_ =
++        ASSERT_NO_ERRNO_AND_VALUE(Open("/proc/thread-self/ns/net", O_RDONLY));
++    ASSERT_THAT(unshare(CLONE_NEWNET), SyscallSucceedsWithValue(0));
++    restore_netns_ = true;
++
++    fd_ = ASSERT_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++    VethRequest veth_req = GetVethRequest(kSeq, "veth1", "veth2");
++    ASSERT_NO_ERRNO(
++        NetlinkRequestAckOrError(fd_, kSeq, &veth_req, veth_req.hdr.nlmsg_len));
++    BridgeRequest br_req = GetBridgeRequest(kSeq + 1, "br0");
++    PosixError err =
++        NetlinkRequestAckOrError(fd_, kSeq + 1, &br_req, br_req.hdr.nlmsg_len);
++    // Native Linux kernels may not be built with CONFIG_BRIDGE.
++    SKIP_IF(!IsRunningOnGvisor() && err.errno_value() == EOPNOTSUPP);
++    ASSERT_NO_ERRNO(err);
++
++    veth1_ = if_nametoindex("veth1");
++    veth2_ = if_nametoindex("veth2");
++    br_ = if_nametoindex("br0");
++    ASSERT_NE(veth1_, 0);
++    ASSERT_NE(veth2_, 0);
++    ASSERT_NE(br_, 0);
++
++    LinkRequest master_req = GetSetLinkRequest(kSeq + 2, AF_UNSPEC, veth1_);
++    uint32_t master = br_;
++    addattr(&master_req.hdr, sizeof(master_req), IFLA_MASTER, &master,
++            sizeof(master));
++    ASSERT_NO_ERRNO(NetlinkRequestAckOrError(fd_, kSeq + 2, &master_req,
++                                             master_req.hdr.nlmsg_len));
++  }
++
++  void TearDown() override {
++    if (restore_netns_) {
++      EXPECT_THAT(setns(curr_nsfd_.get(), CLONE_NEWNET),
++                  SyscallSucceedsWithValue(0));
++    }
++  }
++
++  PosixError SetBridgePort(
++      int ifindex, const std::vector<std::pair<uint16_t, uint8_t>>& attrs) {
++    static uint32_t seq = kSeq + 100;
++    LinkRequest req = GetSetLinkRequest(++seq, AF_BRIDGE, ifindex);
++    AddBridgePortInfo(&req, attrs);
++    return NetlinkRequestAckOrError(fd_, seq, &req, req.hdr.nlmsg_len);
++  }
++
++  FileDescriptor fd_;
++  FileDescriptor curr_nsfd_;
++  bool restore_netns_ = false;
++  int veth1_ = 0;
++  int veth2_ = 0;
++  int br_ = 0;
++};
++
++TEST_F(BridgePortTest, SetHairpinAndLearning) {
++  EXPECT_NO_ERRNO(SetBridgePort(veth1_, {{IFLA_BRPORT_MODE, 1}}));
++  EXPECT_NO_ERRNO(SetBridgePort(veth1_, {{IFLA_BRPORT_MODE, 0}}));
++  EXPECT_NO_ERRNO(SetBridgePort(veth1_, {{IFLA_BRPORT_LEARNING, 0}}));
++  EXPECT_NO_ERRNO(SetBridgePort(
++      veth1_, {{IFLA_BRPORT_MODE, 1}, {IFLA_BRPORT_LEARNING, 1}}));
++}
++
++TEST_F(BridgePortTest, SetNoAttributes) {
++  uint32_t seq = kSeq + 50;
++  LinkRequest req = GetSetLinkRequest(seq, AF_BRIDGE, veth1_);
++  EXPECT_NO_ERRNO(NetlinkRequestAckOrError(fd_, seq, &req, req.hdr.nlmsg_len));
++}
++
++TEST_F(BridgePortTest, SetUnknownInterface) {
++  EXPECT_THAT(SetBridgePort(veth1_ + 100, {{IFLA_BRPORT_MODE, 1}}),
++              PosixErrorIs(ENODEV, _));
++}
++
++TEST_F(BridgePortTest, SetNotBridgePort) {
++  EXPECT_THAT(SetBridgePort(veth2_, {{IFLA_BRPORT_MODE, 1}}),
++              PosixErrorIs(EOPNOTSUPP, _));
++
++  // The bridge is not a port of a bridge either.
++  EXPECT_THAT(SetBridgePort(br_, {{IFLA_BRPORT_MODE, 1}}),
++              PosixErrorIs(EOPNOTSUPP, _));
++}
++
++TEST_F(BridgePortTest, SetEmptyAttribute) {
++  uint32_t seq = kSeq + 51;
++  auto request = [&seq](int ifindex) {
++    LinkRequest req = GetSetLinkRequest(++seq, AF_BRIDGE, ifindex);
++    struct rtattr* protinfo = NLMSG_TAIL(&req.hdr);
++    addattr(&req.hdr, sizeof(req), IFLA_PROTINFO | NLA_F_NESTED, nullptr, 0);
++    addattr(&req.hdr, sizeof(req), IFLA_BRPORT_MODE, nullptr, 0);
++    protinfo->rta_len = (uint64_t)NLMSG_TAIL(&req.hdr) - (uint64_t)protinfo;
++    return req;
++  };
++  LinkRequest req = request(veth1_);
++  EXPECT_THAT(NetlinkRequestAckOrError(fd_, seq, &req, req.hdr.nlmsg_len),
++              PosixErrorIs(ERANGE, _));
++
++  // veth2 is not a bridge port, which is reported before the bad attribute.
++  req = request(veth2_);
++  EXPECT_THAT(NetlinkRequestAckOrError(fd_, seq, &req, req.hdr.nlmsg_len),
++              PosixErrorIs(EOPNOTSUPP, _));
++}
++
++// Linux applies the flags that gVisor does not model, so only gVisor rejects
++// them. They are not sent to Linux so that the test never changes a port there.
++TEST_F(BridgePortTest, SetUnmodeledFlagRejected) {
++  SKIP_IF(!IsRunningOnGvisor());
++  EXPECT_THAT(SetBridgePort(veth1_, {{IFLA_BRPORT_GUARD, 1}}),
++              PosixErrorIs(EOPNOTSUPP, _));
++  // The request is rejected as a whole.
++  EXPECT_THAT(
++      SetBridgePort(veth1_, {{IFLA_BRPORT_MODE, 1}, {IFLA_BRPORT_GUARD, 1}}),
++      PosixErrorIs(EOPNOTSUPP, _));
++
++  // So are the spanning tree port state, which is a non-nested IFLA_PROTINFO,
++  // and IFLA_AF_SPEC.
++  uint32_t seq = kSeq + 52;
++  LinkRequest req = GetSetLinkRequest(seq, AF_BRIDGE, veth1_);
++  uint8_t state = 0;
++  addattr(&req.hdr, sizeof(req), IFLA_PROTINFO, &state, sizeof(state));
++  EXPECT_THAT(NetlinkRequestAckOrError(fd_, seq, &req, req.hdr.nlmsg_len),
++              PosixErrorIs(EOPNOTSUPP, _));
++
++  seq = kSeq + 53;
++  req = GetSetLinkRequest(seq, AF_BRIDGE, veth1_);
++  addattr(&req.hdr, sizeof(req), IFLA_AF_SPEC | NLA_F_NESTED, nullptr, 0);
++  EXPECT_THAT(NetlinkRequestAckOrError(fd_, seq, &req, req.hdr.nlmsg_len),
++              PosixErrorIs(EOPNOTSUPP, _));
++}
++
+ struct RouteRequest {
+   struct nlmsghdr hdr;
+   struct rtmsg rtm;

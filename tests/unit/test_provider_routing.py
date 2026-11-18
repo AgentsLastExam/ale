@@ -222,10 +222,9 @@ async def test_a_run_any_sandbox_of_which_no_provider_serves_is_refused_whole(
 async def test_a_sandbox_that_names_storage_mb_goes_to_a_leaf_that_holds_it_to_that(
     tmp_path: Path,
 ) -> None:
-    """Every Docker leaf measures what a Sandbox writes, but not into the volumes of a
-    container engine's storage: a Sandbox that runs one and names storage_mb passes
-    docker:gvisor for the next listed leaf that holds it, and a Run with none is refused
-    before anything starts."""
+    """Every Docker leaf measures what a Sandbox writes, a container engine's volumes
+    included: a Sandbox that runs one and names storage_mb goes to docker:gvisor, the first
+    listed, as any other does to the first Docker leaf listed."""
     sized = _task(tmp_path / "sized", {"environment": {"storage_mb": 4096}})
     leaves = ("docker:runc", "docker:kata", "docker:gvisor")
     for leaf in leaves:
@@ -234,9 +233,7 @@ async def test_a_sandbox_that_names_storage_mb_goes_to_a_leaf_that_holds_it_to_t
     engine = {"storage_mb": 4096, "memory_mb": 4096, "container_features": ["nested_containers"]}
     nested = _task(tmp_path / "nested", {"environment": engine})
     await ProviderRegistry(_settings("docker:gvisor", "daytona")).select([nested])
-    assert nested.provider == "daytona"
-    with pytest.raises(ProviderCapabilityError, match="agentslastexam/nested solver"):
-        await ProviderRegistry(_settings("docker:gvisor")).select([nested])
+    assert nested.provider == "docker:gvisor"
 
 
 @pytest.mark.asyncio

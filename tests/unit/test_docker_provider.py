@@ -8,8 +8,10 @@ import asyncio
 import contextvars
 import dataclasses
 import json
+import os
 import re
 import socket
+import subprocess
 import time
 from ipaddress import IPv4Network
 from pathlib import Path
@@ -45,7 +47,16 @@ from ale.core.sandbox import (
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd, iptables
 from ale.run.providers import memory
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, storage, subnets, tc
+from ale.run.providers.docker import (
+    gpu_sharing,
+    gvisor,
+    kata,
+    rootless,
+    storage,
+    subnets,
+    tc,
+    volumes,
+)
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
@@ -341,6 +352,8 @@ def _sandbox() -> DockerSandbox:
     sandbox._stopping = None
     sandbox._watchdog = gpu_sharing.Watchdog()
     sandbox._storage = None
+    sandbox._meter = None
+    sandbox.volumes = {}
     sandbox._host_ports = rootless.HostPorts(_in_our_namespace)
     sandbox._context = contextvars.copy_context()
     sandbox.container_id = "f" * 64
@@ -439,7 +452,19 @@ async def test_a_snapshot_boots_only_for_the_tasks_prepared_image(
 async def test_a_snapshot_is_listed_and_destroyed_by_its_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Its volumes go with its image, only once the image has: a snapshot a Sandbox still
+    uses keeps both."""
     removed: list[str] = []
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        if argv[1:3] == ("volume", "ls"):
+            assert "label=ale.snapshot=e1-abcdef" in argv
+            return 0, f"{SAVED} /var/lib/docker\n", ""
+        assert argv[1:3] == ("volume", "rm"), argv
+        removed.append(argv[3])
+        return 0, "", ""
+
+    monkeypatch.setattr(volumes, "run", run)
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         if argv[0] == "ps":
@@ -463,8 +488,196 @@ async def test_a_snapshot_is_listed_and_destroyed_by_its_handle(
     ]
     with pytest.raises(ProviderStartError, match="being used"):
         await provider.destroy_retained("docker:snapshot:e1-abcdef")
+    assert removed == ["ale-snapshot:e1-abcdef"]
     await provider.destroy_retained("docker:snapshot:e1-abcdef")
-    assert removed == ["ale-snapshot:e1-abcdef"] * 2
+    assert removed == ["ale-snapshot:e1-abcdef"] * 2 + [SAVED]
+
+
+#: A container engine's storage on a Sandbox's volumes, and one volume of a snapshot.
+ENGINE_VOLUMES = {"/var/lib/containerd": "c" * 64, "/var/lib/docker": "d" * 64}
+SAVED = "ale-snapshot-e0-abcdef-var-lib-docker"
+
+
+def _volume_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, ...]],
+    replies: dict[tuple[str, ...], tuple[int, str, str]] | None = None,
+) -> None:
+    """Record into ``calls`` what volumes.py asks of the docker CLI, without ``docker``,
+    answering the first matching prefix of ``replies``, and otherwise success."""
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv[1:])
+        for prefix, reply in (replies or {}).items():
+            if argv[1 : 1 + len(prefix)] == prefix:
+                return reply
+        return 0, "", ""
+
+    monkeypatch.setattr(volumes, "run", run)
+
+
+def _mounts(argv: tuple[str, ...]) -> list[str]:
+    return [argv[index + 1] for index, flag in enumerate(argv) if flag == "--mount"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [None, "volume", "copy"])
+async def test_a_snapshot_keeps_each_volume_of_its_sandbox_in_one_of_its_own(
+    monkeypatch: pytest.MonkeyPatch, fails: str | None
+) -> None:
+    """After the commit, which keeps no volume, each is copied by a runc helper with no
+    network and Docker's default capabilities, the Sandbox's read-only, into a volume labelled
+    with the snapshot's Sandbox and the directory it belongs at. A snapshot that fails leaves
+    neither its image nor its volumes."""
+    calls = _scripted(monkeypatch)
+    asked: list[tuple[str, ...]] = []
+    failure = (1, "", "cp: cannot create special file")
+    _volume_calls(
+        monkeypatch,
+        asked,
+        {("volume", "create", "--label"): failure} if fails == "volume" else
+        {("run",): failure} if fails == "copy" else {},
+    )  # fmt: skip
+    sandbox = _sandbox()
+    sandbox.volumes = dict(ENGINE_VOLUMES)
+    if fails:
+        with pytest.raises(ProviderStartError, match="cannot create special file"):
+            await sandbox.snapshot(roles=("solver",), reason="kept")
+    else:
+        retained = await sandbox.snapshot(roles=("solver",), reason="kept")
+        assert retained.handle == "docker:snapshot:e1-abcdef"
+    names = ["ale-snapshot-e1-abcdef-var-lib-containerd", "ale-snapshot-e1-abcdef-var-lib-docker"]
+    assert asked[0] == (
+        "volume", "create",
+        "--label", "ale.managed=true", "--label", "ale.retention=snapshot",
+        "--label", "ale.snapshot=e1-abcdef", "--label", "ale.path=/var/lib/containerd",
+        names[0],
+    )  # fmt: skip
+    assert [call[0] for call in calls[:2]] == ["stop", "commit"]
+    if fails is None:
+        ((copy, helper),) = [
+            (call, call[call.index("--name") + 1]) for call in asked if call[0] == "run"
+        ]
+        assert (copy[copy.index("--runtime") + 1], copy[copy.index("--network") + 1]) == (
+            "runc",
+            "none",
+        )
+        assert "--cap-add" not in copy and volumes.IMAGE in copy
+        assert _mounts(copy) == [
+            f"type=volume,src={'c' * 64},dst=/from/0,readonly",
+            f"type=volume,src={names[0]},dst=/to/0",
+            f"type=volume,src={'d' * 64},dst=/from/1,readonly",
+            f"type=volume,src={names[1]},dst=/to/1",
+        ]
+        assert "cp -a --reflink=auto --preserve=xattr" in copy[copy.index("-c") + 1]
+        assert asked[-1] == ("rm", "-f", helper)
+        assert len(calls) == 2
+    else:
+        assert ("volume", "rm", *names) in asked
+        assert calls[-1] == ("rmi", "ale-snapshot:e1-abcdef")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kept", ["/var/lib/docker", "/var/lib/mysql"])
+async def test_a_sandbox_booted_from_a_snapshot_gets_its_volumes_back_before_it_starts(
+    monkeypatch: pytest.MonkeyPatch, kept: str
+) -> None:
+    """It is created with a fresh volume at each directory the snapshot keeps, which Docker
+    must not fill from the image, as it does as it creates a container, filled from the
+    snapshot's own by a runc helper, and only then started. A snapshot that keeps a directory
+    this Sandbox does not mount is refused before anything starts."""
+    labels = {
+        "ale.managed": "true",
+        "ale.retention": "snapshot",
+        "ale.role": "solver",
+        "ale.prepared": DIGEST,
+    }
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("image", "inspect"):
+            return 0, _snapshot_inspect(labels), ""
+        if argv[0] == "create":
+            return 0, "f" * 64 + "\n", ""
+        if argv[0] == "start":
+            return 1, "", "stopped once it was started"
+        return _scripted_reply(argv)
+
+    fresh = [
+        {"Type": "volume", "Destination": path, "Name": f"fresh{path.replace('/', '-')}"}
+        for path in gvisor.ENGINE_STORAGE
+    ]
+    _volume_calls(
+        monkeypatch,
+        calls,
+        {
+            ("volume", "ls"): (0, f"{SAVED} {kept}\n", ""),
+            ("inspect",): (0, json.dumps([*fresh, {"Type": "bind", "Destination": "/x"}]), ""),
+        },
+    )
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    provider = DockerProvider(runtime="gvisor")
+    asked = request(
+        network=NetworkPolicy(mode=NetworkMode.OPEN),
+        resources=Resources(container_features=(ContainerFeature.NESTED_CONTAINERS,)),
+        snapshot="docker:snapshot:e0-abcdef",
+    )
+    if kept != "/var/lib/docker":
+        with pytest.raises(ProviderCapabilityError, match=f"keeps {kept} on volumes"):
+            await provider.create(asked)
+        assert not [call for call in calls if call[0] in {"create", "run"}]
+        return
+    with pytest.raises(ProviderStartError, match="stopped once it was started"):
+        await provider.create(asked)
+    listed = next(call for call in calls if call[:2] == ("volume", "ls"))
+    filters = [listed[index + 1] for index, flag in enumerate(listed) if flag == "--filter"]
+    assert filters == [
+        "label=ale.managed=true",
+        "label=ale.retention=snapshot",
+        "label=ale.snapshot=e0-abcdef",
+    ]
+    order = [
+        index
+        for index, call in enumerate(calls)
+        if call[0] in {"create", "start"} or (call[0] == "run" and "/from/0" in str(call))
+    ]
+    created, copy, started = (calls[index] for index in order)
+    assert (created[0], copy[0], started) == ("create", "run", ("start", created[2]))
+    assert _mounts(created) == [
+        "type=volume,dst=/var/lib/containerd",
+        "type=volume,dst=/var/lib/containers",
+        "type=volume,dst=/var/lib/docker,volume-nocopy",
+    ]
+    assert _mounts(copy) == [
+        f"type=volume,src={SAVED},dst=/from/0,readonly",
+        "type=volume,src=fresh-var-lib-docker,dst=/to/0",
+    ]
+    assert ("rm", "-f", "-v", created[2]) in calls[order[-1] :]
+
+
+@pytest.mark.asyncio
+async def test_discarding_a_sandbox_with_volumes_first_removes_a_storage_helper_left_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker keeps an anonymous volume another container still mounts when its Sandbox is
+    removed with its volumes, as a storage watch's helper whose process another one replaced
+    would."""
+    record = {
+        "Config": {"Labels": {"ale.managed": "true"}},
+        "Mounts": [{"Type": "volume", "Destination": "/var/lib/docker", "Name": "d" * 64}],
+        "NetworkSettings": {"Networks": {}},
+    }
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        return (0, json.dumps([record]), "") if argv[0] == "inspect" else (0, "", "")
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    _volume_calls(monkeypatch, calls, {("rm",): (1, "", "Error: No such container: x")})
+    await DockerProvider().discard("docker:ale-e1")
+    assert calls[1:] == [("rm", "-f", "ale-e1-storage"), ("rm", "-f", "-v", "ale-e1")]
 
 
 async def test_a_provider_without_snapshots_refuses_them_before_anything_starts() -> None:
@@ -1578,8 +1791,8 @@ async def test_each_runtime_is_a_leaf_with_the_features_it_gives() -> None:
     assert (runc.provider, in_kata.provider) == ("docker:runc", "docker:kata")
     for in_gvisor in (raw, nested):
         assert in_gvisor.provider == "docker:gvisor" and in_gvisor.gui
-    # A commit keeps no volume, which a container engine's storage is on.
-    assert raw.snapshot and not nested.snapshot
+    # A snapshot keeps the volumes a container engine's storage is on beside its image.
+    assert raw.snapshot and nested.snapshot
     common = {ContainerFeature.USER_NAMESPACES, ContainerFeature.FUSE, ContainerFeature.MOUNT}
     assert raw.container_features == {*common, ContainerFeature.RAW_SOCKETS}
     assert nested.container_features == {*common, ContainerFeature.NESTED_CONTAINERS}
@@ -1666,20 +1879,24 @@ async def test_a_leaf_offers_the_gpus_of_this_host_that_it_may_lease(
 
 
 @pytest.mark.parametrize("storage_mb", [2048, None])
-async def test_every_leaf_holds_a_sandbox_to_storage_mb_but_on_an_engines_volumes(
+async def test_every_leaf_holds_a_sandbox_to_storage_mb(
     monkeypatch: pytest.MonkeyPatch, storage_mb: int | None
 ) -> None:
-    """Each runtime's writes land in the writable layer the storage watch measures, but a
-    container engine's, on volumes; Docker is asked for no size, which its containerd image
-    store ignores and rootless Docker refuses."""
+    """Each runtime's writes land in the writable layer the storage watch measures, and a
+    container engine's on volumes it measures too; Docker is asked for no size, which its
+    containerd image store ignores and rootless Docker refuses."""
     sized = request(resources=Resources(storage_mb=1024))
+    engine = request(
+        resources=Resources(
+            storage_mb=1024, container_features=(ContainerFeature.NESTED_CONTAINERS,)
+        )
+    )
     for runtime in RUNTIMES:
         leaf = DockerProvider(runtime=runtime)
-        assert [profile.storage_limit for profile in await leaf.profiles()] == [
-            ContainerFeature.NESTED_CONTAINERS not in profile.container_features
-            for profile in await leaf.profiles()
-        ]
+        assert all(profile.storage_limit for profile in await leaf.profiles())
         assert await leaf.unserved(sized.needs, user="user", role=SandboxRole.SHARED) == ()
+    gvisor_leaf = DockerProvider(runtime="gvisor")
+    assert await gvisor_leaf.unserved(engine.needs, user="user", role=SandboxRole.SHARED) == ()
     calls: list[tuple[str, ...]] = []
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
@@ -1850,6 +2067,123 @@ async def test_the_storage_watch_measures_only_while_a_sandbox_is_driven(
     await sandbox._release()
 
 
+class _Meter:
+    """Stands in for a Sandbox's meter: answers ``sizes`` in turn, then the last forever, and
+    records into ``calls`` when it is closed."""
+
+    def __init__(self, calls: list[tuple[str, ...]], *sizes: int) -> None:
+        self.name = "ale-e1-abcdef-storage"
+        self.calls = calls
+        self.sizes = list(sizes)
+
+    async def measure(self) -> int:
+        return self.sizes.pop(0) if len(self.sizes) > 1 else self.sizes[0]
+
+    async def close(self) -> None:
+        self.calls.append(("close", self.name))
+
+
+async def test_what_a_sandbox_writes_to_its_volumes_counts_beside_its_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither its writable layer nor its volumes alone pass its storage_mb; together they
+    do, and it is stopped. Its meter's helper is gone before the Sandbox is removed, which
+    Docker would otherwise remove without the volumes the helper holds."""
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        return 0, "", ""
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    _measured(monkeypatch, (0, f"{600 << 20}\n", ""))
+    sandbox = _sized_sandbox()
+    sandbox._meter = _Meter(calls, 400 << 20, 400 << 20, 500 << 20)  # type: ignore[assignment]
+    sandbox.confinement = _RuncConfinement(None, "172.17.0.1")
+    sandbox.state = SandboxState.READY
+    sandbox.watch()
+    await _until(lambda: ("kill", sandbox.container) in calls)
+    with pytest.raises(StorageExhaustedError, match="it wrote 1100 MiB over its image"):
+        await sandbox._sessions[0].client.exec(["true"])
+    await sandbox.destroy()
+    assert calls == [
+        ("kill", sandbox.container),
+        ("close", "ale-e1-abcdef-storage"),
+        ("rm", "-f", "-v", sandbox.container),
+    ]
+
+
+def _gnu() -> bool:
+    try:
+        return "GNU" in subprocess.run(["find", "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(
+    not _gnu(), reason="the helper's script needs GNU du and find, as its image has"
+)
+async def test_a_meter_measures_every_volume_in_one_walk_as_the_daemon_counts_a_layer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A runc helper with no network mounts each volume read-only by its name and answers each
+    line on its stdin, a hard link counted once: blocks, directories included, as the
+    containerd image store counts SizeRw, or the bytes of every file but a directory, as a
+    classic graph driver does. One that answers nothing says why; one that ended is started
+    again; closing it removes it."""
+    removed: list[tuple[str, ...]] = []
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        removed.append(argv)
+        return 1, "", "Error response from daemon: No such container: ale-e1-abcdef-storage"
+
+    monkeypatch.setattr(volumes, "run", run)
+    meter = volumes.Meter("ale-e1-abcdef", ["vol-a", "vol-b"], blocks=True)
+    argv = meter.argv
+    assert argv[:6] == ["docker", "run", "-i", "--rm", "--name", "ale-e1-abcdef-storage"]
+    assert (argv[argv.index("--runtime") + 1], argv[argv.index("--network") + 1]) == (
+        "runc",
+        "none",
+    )
+    assert _mounts(tuple(argv)) == [
+        "type=volume,src=vol-a,dst=/v/0,readonly",
+        "type=volume,src=vol-b,dst=/v/1,readonly",
+    ]
+    assert argv[argv.index(volumes.IMAGE) :][-2:] == ["/v/0", "/v/1"]
+    # The helper's own script, run here over two directories standing in for the volumes.
+    roots = [tmp_path / "a", tmp_path / "b"]
+    for root in roots:
+        (root / "dir").mkdir(parents=True)
+    (roots[0] / "dir" / "data").write_bytes(b"x" * 10_000)
+    os.link(roots[0] / "dir" / "data", roots[0] / "link")
+    with (roots[1] / "sparse").open("wb") as sparse:
+        sparse.truncate(64 << 20)
+    seen: set[tuple[int, int]] = set()
+    blocks = files = 0
+    for root in roots:
+        for path in [root, *root.rglob("*")]:
+            info = path.lstat()
+            if (info.st_dev, info.st_ino) not in seen:
+                seen.add((info.st_dev, info.st_ino))
+                blocks += info.st_blocks * 512
+                files += 0 if path.is_dir() else info.st_size
+    assert files == 10_000 + (64 << 20)
+    for counts_blocks, expected in ((True, blocks), (False, files)):
+        meter = volumes.Meter("ale-e1-abcdef", ["vol-a", "vol-b"], blocks=counts_blocks)
+        meter.argv = ["sh", "-c", volumes._MEASURE[counts_blocks], "sh", *map(str, roots)]
+        assert [await meter.measure(), await meter.measure()] == [expected] * 2
+        await meter.close()
+    assert removed == [("docker", "rm", "-f", "ale-e1-abcdef-storage")] * 2
+    meter.argv = ["sh", "-c", "echo 'docker: no such image' >&2; exit 125"]
+    with pytest.raises(ProviderStartError, match="no such image"):
+        await meter.measure()
+    meter.argv = ["sh", "-c", "read -r _; echo 7"]
+    assert await meter.measure() == 7
+    await asyncio.sleep(0.1)  # the helper ends, as one Docker stopped would
+    assert await meter.measure() == 7
+    await meter.close()
+
+
 async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1861,7 +2195,7 @@ async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     ) == ("runs arm64, not x86_64",)
 
 
-_RUNSC = "/usr/local/lib/ale-gvisor/0.1.2/runsc"
+_RUNSC = "/usr/local/lib/ale-gvisor/0.1.3/runsc"
 _REGISTERED = dict(gvisor.ARGUMENTS)
 #: Part of what ``runsc flags`` of ALE's build lists.
 _FLAGS = (
@@ -1885,7 +2219,7 @@ def _preflight_host(
     *,
     shims: tuple[str, ...] = (),
     devices: tuple[str, ...] = (),
-    version: str = "runsc version release-20261109.0+ale.0.1.2\nspec: 1.2.1\n",
+    version: str = "runsc version release-20261109.0+ale.0.1.3\nspec: 1.2.1\n",
     drivers: str = "570.124.06\n580.95.05\n",
     flags: str = _FLAGS,
     flags_code: int = 0,
@@ -2019,13 +2353,13 @@ async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
     ("version", "drivers", "needs_gpus", "refused"),
     [
         ("runsc version release-20261109.0\nspec: 1.2.1\n", "", 0, "needs ALE's build"),
-        ("runsc version release-20261109.0+ale.0.1.21\n", "", 0, "ale.0.1.2 of"),
-        ("runsc version release-20261109.0+ale.0.1.1\n", "", 0, "ale.0.1.2 of"),
-        ("runsc version release-20261109.0+ale.0.1.2\n", "580.95.05\n", 0, None),
-        ("runsc version release-20261109.0+ale.0.1.2\n", "580.95.05\n", 1, "driver 570.124.06"),
-        ("runsc version release-20261109.0+ale.0.1.2\n", "570.124.06\n", 1, None),
+        ("runsc version release-20261109.0+ale.0.1.31\n", "", 0, "ale.0.1.3 of"),
+        ("runsc version release-20261109.0+ale.0.1.2\n", "", 0, "ale.0.1.3 of"),
+        ("runsc version release-20261109.0+ale.0.1.3\n", "580.95.05\n", 0, None),
+        ("runsc version release-20261109.0+ale.0.1.3\n", "580.95.05\n", 1, "driver 570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.3\n", "570.124.06\n", 1, None),
         # With no needs, as a Node lends it, its profile offers the Host's GPUs.
-        ("runsc version release-20261109.0+ale.0.1.2\n", "580.95.05\n", None, "570.124.06"),
+        ("runsc version release-20261109.0+ale.0.1.3\n", "580.95.05\n", None, "570.124.06"),
     ],
 )
 async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_driver_here(
@@ -2047,7 +2381,7 @@ async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_dr
             await preflight
     else:
         await preflight
-    if needs_gpus != 0 and "+ale.0.1.2\n" in version:
+    if needs_gpus != 0 and "+ale.0.1.3\n" in version:
         assert ran[-1] == (_RUNSC, "nvproxy", "list-supported-drivers")
     else:
         assert all(argv[1] == "--version" for argv in ran)
@@ -2155,12 +2489,6 @@ async def test_a_feature_its_runtime_does_not_give_is_refused_before_anything_st
         await DockerProvider(runtime="gvisor").create(
             request(resources=Resources(container_features=both))
         )
-    # A commit would keep none of a container engine's storage.
-    engine = request(
-        resources=Resources(container_features=(ContainerFeature.NESTED_CONTAINERS,))
-    ).model_copy(update={"snapshot": "ale-snapshot:x"})
-    with pytest.raises(ProviderCapabilityError):
-        await DockerProvider(runtime="gvisor").create(engine)
     assert calls == []
 
 

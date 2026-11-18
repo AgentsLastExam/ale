@@ -1,0 +1,415 @@
+kernel: enforce pids.max (upstream 173505fa3)
+
+What: upstream commit 173505fa3 "Fix cgroup pids.max enforcement and
+parsing" (master, 2026-11-11; in release-20261116.0), as it is but for the
+includes of test/syscalls/linux/cgroup.cc:
+- Task.chargeLocked charges the task's cgroup on the hierarchy that has the
+  controller charged, instead of the first of its cgroups in Go's map order,
+  which the charge then silently missed unless that one held the pids
+  controller.
+- The parent is charged for a new task under TaskSet.mu, so that it cannot
+  move to another cgroup between the charge and the child's entry, and a
+  pending charge taken back to 0 is deleted.
+- cgroup v1's pids.max compares "max" with the bytes written only, and
+  cgroup v2's refuses a value above PID_MAX_LIMIT, as Linux does.
+
+Why: docker run --pids-limit and podman run --pids-limit in a sandbox write
+pids.max of the container's cgroup, which did not hold: with --pids-limit 10,
+a container of Docker 29.1.3 in a sandbox ran 21 tasks (pids.current 21,
+pids.max 10). With patch 0019's freezer there are eight hierarchies, so a
+fork was charged to the pids cgroup one time in eight.
+
+Only a cgroup's own pids.max is enforced, not an ancestor's: the Sentry's pids
+controller, as upstream, charges and checks the task's own cgroup, not every
+ancestor up the hierarchy, so a fork in parent/child can go past parent's
+pids.max. Docker and Podman set --pids-limit on the container's own cgroup,
+which holds. Linux's kernel/cgroup/pids.c:pids_try_charge() charges the
+ancestors too; matching that is not a small change and upstream does not, so
+it is left as is.
+
+Upstream: 173505fa3; drop this patch with a release that has it.
+
+Verified: the syscall tests PIDsCgroup.LimitEnforced and SetInvalidLimit,
+which the commit adds or extends, pass under gVisor's test runner with the
+rest of cgroup_test (64) and cgroup2_test (86, 2 skipped); LimitEnforced
+failed on ALE's 0.1.3 without this patch. In sandboxes under runsc-nested,
+rootful (Docker 29.1.3, Linux 7.0) and rootless (Docker 29.9.3, Linux 6.12),
+a container of Docker 29.1.3 and of Podman 4.9.3 given --pids-limit 10
+started 8 of 20 sleeps, each from a shell of its own, as Linux would let
+it: the container's shell, a sleep and the shell starting the next fill the
+ten.
+
+diff --git a/pkg/sentry/fsimpl/cgroup2fs/pids.go b/pkg/sentry/fsimpl/cgroup2fs/pids.go
+index 1e1f9b4..798c82b 100644
+--- a/pkg/sentry/fsimpl/cgroup2fs/pids.go
++++ b/pkg/sentry/fsimpl/cgroup2fs/pids.go
+@@ -272,7 +272,7 @@ func (pm *pidsMax) Write(ctx context.Context, fd *vfs.FileDescription, src userm
+ 	}
+ 
+ 	val, err := strconv.ParseInt(str, 10, 64)
+-	if err != nil || val < 0 {
++	if err != nil || val < 0 || val > pidMaxLimit {
+ 		return 0, linuxerr.EINVAL
+ 	}
+ 
+diff --git a/pkg/sentry/fsimpl/cgroupfs/base.go b/pkg/sentry/fsimpl/cgroupfs/base.go
+index 7731d6a..6deb611 100644
+--- a/pkg/sentry/fsimpl/cgroupfs/base.go
++++ b/pkg/sentry/fsimpl/cgroupfs/base.go
+@@ -144,7 +144,7 @@ type controller interface {
+ 
+ 	// Charge charges a controller for a particular resource. The implementation
+ 	// should panic if passed a resource type they do not control.
+-	Charge(t *kernel.Task, d *kernfs.Dentry, res kernel.CgroupResourceType, value int64) error
++	Charge(t *kernel.Task, res kernel.CgroupResourceType, value int64) error
+ }
+ 
+ // cgroupInode implements kernel.CgroupImpl and kernfs.Inode.
+@@ -330,11 +330,11 @@ func (c *cgroupInode) CgroupFromControlFileFD(fd *vfs.FileDescription) kernel.Cg
+ // matching controller is present in this directory, the call silently
+ // succeeds. The caller should call Charge on all hierarchies to ensure any
+ // matching controller across the entire system is charged.
+-func (c *cgroupInode) Charge(t *kernel.Task, d *kernfs.Dentry, ctlType kernel.CgroupControllerType, res kernel.CgroupResourceType, value int64) error {
++func (c *cgroupInode) Charge(t *kernel.Task, ctlType kernel.CgroupControllerType, res kernel.CgroupResourceType, value int64) error {
+ 	c.fs.tasksMu.RLock()
+ 	defer c.fs.tasksMu.RUnlock()
+ 	if ctl, ok := c.controllers[ctlType]; ok {
+-		return ctl.Charge(t, d, res, value)
++		return ctl.Charge(t, res, value)
+ 	}
+ 	return nil
+ }
+@@ -597,6 +597,6 @@ func (*controllerStateless) AbortMigrate(t *kernel.Task, src controller) {}
+ type controllerNoResource struct{}
+ 
+ // Charge implements controller.Charge.
+-func (*controllerNoResource) Charge(t *kernel.Task, d *kernfs.Dentry, res kernel.CgroupResourceType, value int64) error {
++func (*controllerNoResource) Charge(_ *kernel.Task, res kernel.CgroupResourceType, value int64) error {
+ 	panic(fmt.Sprintf("cgroupfs: Attempted to charge a controller with unknown resource %v for value %v", res, value))
+ }
+diff --git a/pkg/sentry/fsimpl/cgroupfs/pids.go b/pkg/sentry/fsimpl/cgroupfs/pids.go
+index 3ed438e..3b0d261 100644
+--- a/pkg/sentry/fsimpl/cgroupfs/pids.go
++++ b/pkg/sentry/fsimpl/cgroupfs/pids.go
+@@ -223,7 +223,7 @@ func (c *pidsController) AbortMigrate(t *kernel.Task, src controller) {}
+ // charges. Negative charges that cause an underflow result in a panic.
+ //
+ // +checklocksexclude:c.mu
+-func (c *pidsController) Charge(t *kernel.Task, d *kernfs.Dentry, res kernel.CgroupResourceType, value int64) error {
++func (c *pidsController) Charge(t *kernel.Task, res kernel.CgroupResourceType, value int64) error {
+ 	if res != kernel.CgroupResourcePID {
+ 		panic(fmt.Sprintf("cgroupfs: pids controller invalid resource type %v", res))
+ 	}
+@@ -234,19 +234,21 @@ func (c *pidsController) Charge(t *kernel.Task, d *kernfs.Dentry, res kernel.Cgr
+ 	// Negative charge.
+ 	if value < 0 {
+ 		if c.pendingTotal+value < 0 {
+-			panic(fmt.Sprintf("cgroupfs: pids controller pending pool would be negative if charge was allowed: current pool: %d, proposed charge: %d, path: %q, task: %p", c.pendingTotal, value, d.FSLocalPath(), t))
++			panic(fmt.Sprintf("cgroupfs: pids controller pending pool would be negative if charge was allowed: current pool: %d, proposed charge: %d, task: %p", c.pendingTotal, value, t))
+ 		}
+ 
+ 		pending, ok := c.pendingPool[t]
+ 		if !ok {
+-			panic(fmt.Sprintf("cgroupfs: pids controller attempted to remove pending charge for Task %p, but task didn't have pending charges, path: %q", t, d.FSLocalPath()))
++			panic(fmt.Sprintf("cgroupfs: pids controller attempted to remove pending charge for Task %p, but task didn't have pending charges", t))
+ 		}
+ 		if pending+value < 0 {
+-			panic(fmt.Sprintf("cgroupfs: pids controller attempted to remove pending charge for Task %p, but task didn't have enough pending charges; current charges: %d, proposed charge: %d, path: %q", t, pending, value, d.FSLocalPath()))
+-
++			panic(fmt.Sprintf("cgroupfs: pids controller attempted to remove pending charge for Task %p, but task didn't have enough pending charges; current charges: %d, proposed charge: %d", t, pending, value))
+ 		}
+ 
+ 		c.pendingPool[t] += value
++		if c.pendingPool[t] == 0 {
++			delete(c.pendingPool, t)
++		}
+ 		c.pendingTotal += value
+ 		return nil
+ 	}
+@@ -254,8 +256,8 @@ func (c *pidsController) Charge(t *kernel.Task, d *kernfs.Dentry, res kernel.Cgr
+ 	// Positive charge.
+ 	new := c.committed + c.pendingTotal + value
+ 	if new > c.max {
+-		log.Debugf("cgroupfs: pids controller charge denied due to limit: path: %q, requested: %d, current: %d (pending: %v, committed: %v), max: %v",
+-			d.FSLocalPath(), value, c.committed+c.pendingTotal, c.pendingTotal, c.committed, c.max)
++		log.Debugf("cgroupfs: pids controller charge denied due to limit: requested: %d, current: %d (pending: %v, committed: %v), max: %v",
++			value, c.committed+c.pendingTotal, c.pendingTotal, c.committed, c.max)
+ 		return linuxerr.EAGAIN
+ 	}
+ 
+@@ -316,7 +318,7 @@ func (d *pidsMaxData) WriteBackground(ctx context.Context, src usermem.IOSequenc
+ 	if err != nil {
+ 		return 0, err
+ 	}
+-	if strings.TrimSpace(string(buf)) == "max" {
++	if strings.TrimSpace(string(buf[:ncpy])) == "max" {
+ 		d.c.mu.Lock()
+ 		defer d.c.mu.Unlock()
+ 		d.c.max = pidLimitUnlimited
+diff --git a/pkg/sentry/kernel/cgroup.go b/pkg/sentry/kernel/cgroup.go
+index bad019f..c7780f0 100644
+--- a/pkg/sentry/kernel/cgroup.go
++++ b/pkg/sentry/kernel/cgroup.go
+@@ -216,7 +216,7 @@ type CgroupImpl interface {
+ 	// resource type for a given controller.
+ 	//
+ 	// See cgroupfs.controller.Charge.
+-	Charge(t *Task, d *kernfs.Dentry, ctl CgroupControllerType, res CgroupResourceType, value int64) error
++	Charge(t *Task, ctl CgroupControllerType, res CgroupResourceType, value int64) error
+ 
+ 	// ReadControlFromBackground allows a background context to read a cgroup's
+ 	// control values.
+diff --git a/pkg/sentry/kernel/task_cgroup.go b/pkg/sentry/kernel/task_cgroup.go
+index 1c7b31d..03bb57e 100644
+--- a/pkg/sentry/kernel/task_cgroup.go
++++ b/pkg/sentry/kernel/task_cgroup.go
+@@ -521,11 +521,15 @@ func (t *Task) chargeLocked(target *Task, ctl CgroupControllerType, res CgroupRe
+ 	// Due to the uniqueness of controllers on hierarchies, at most one cgroup
+ 	// in t.cgroups will match.
+ 	for c := range t.cgroups {
+-		err := c.Charge(target, c.Dentry, ctl, res, value)
+-		if err == nil {
+-			c.IncRef()
++		for _, cctl := range c.Controllers() {
++			if cctl.Type() == ctl {
++				err := c.Charge(target, ctl, res, value)
++				if err == nil {
++					c.IncRef()
++				}
++				return err == nil, c, err
++			}
+ 		}
+-		return err == nil, c, err
+ 	}
+ 	return false, Cgroup{}, nil
+ }
+diff --git a/pkg/sentry/kernel/task_start.go b/pkg/sentry/kernel/task_start.go
+index 538616a..0224f62 100644
+--- a/pkg/sentry/kernel/task_start.go
++++ b/pkg/sentry/kernel/task_start.go
+@@ -196,6 +196,29 @@ func (ts *TaskSet) newTask(ctx context.Context, cfg *TaskConfig) (*Task, error)
+ 		}
+ 	}()
+ 
++	// Reserve cgroup PIDs controller charge. This is either committed when the
++	// new task enters the cgroup below, or rolled back on failure.
++	// Register the defer before cu.Clean() so rollback and DecRef run after
++	// locks in cu are released.
++	var (
++		t                  *Task
++		cg                 Cgroup
++		charged, committed bool
++	)
++	defer func() {
++		if !charged {
++			return
++		}
++		if !committed {
++			if err := cg.Charge(t, CgroupControllerPIDs, CgroupResourcePID, -1); err != nil {
++				panic(fmt.Sprintf("Failed to clean up PIDs charge on task creation failure: %v", err))
++			}
++		}
++		// Ref from ChargeFor. Note that we need to drop this outside of
++		// TaskSet.mu critical sections.
++		cg.DecRef(ctx)
++	}()
++
+ 	var cu cleanup.Cleanup
+ 	defer cu.Clean()
+ 
+@@ -228,7 +251,7 @@ func (ts *TaskSet) newTask(ctx context.Context, cfg *TaskConfig) (*Task, error)
+ 		cachedKillSeq = cgroup2.KillSeq()
+ 	}
+ 
+-	t := &Task{
++	t = &Task{
+ 		taskNode: taskNode{
+ 			tg:       tg,
+ 			parent:   cfg.Parent,
+@@ -275,35 +298,6 @@ func (ts *TaskSet) newTask(ctx context.Context, cfg *TaskConfig) (*Task, error)
+ 		t.pid.t.Store(t)
+ 	}
+ 
+-	// Reserve cgroup PIDs controller charge. This is either committed when the
+-	// new task enters the cgroup below, or rolled back on failure.
+-	// We may also get here from a non-task context (for example, when
+-	// creating the init task, or from the exec control command). In these cases
+-	// we skip charging the pids controller, as non-userspace task creation
+-	// bypasses pid limits.
+-	var (
+-		cg                 Cgroup
+-		charged, committed bool
+-	)
+-	if srcT != nil {
+-		var err error
+-		if charged, cg, err = srcT.ChargeFor(t, CgroupControllerPIDs, CgroupResourcePID, 1); err != nil {
+-			return nil, err
+-		}
+-		if charged {
+-			defer func() {
+-				if !committed {
+-					if err := cg.Charge(t, cg.Dentry, CgroupControllerPIDs, CgroupResourcePID, -1); err != nil {
+-						panic(fmt.Sprintf("Failed to clean up PIDs charge on task creation failure: %v", err))
+-					}
+-				}
+-				// Ref from ChargeFor. Note that we need to drop this outside of
+-				// TaskSet.mu critical sections.
+-				cg.DecRef(ctx)
+-			}()
+-		}
+-	}
+-
+ 	// If the task was the first to be added to the thread group, check if
+ 	// it needs to be notified of CPU limits being exceeded.
+ 	// We use a defer here because we need to do this without holding the
+@@ -320,6 +314,20 @@ func (ts *TaskSet) newTask(ctx context.Context, cfg *TaskConfig) (*Task, error)
+ 	ts.mu.Lock()
+ 	defer ts.mu.Unlock()
+ 
++	// We may also get here from a non-task context (for example, when
++	// creating the init task, or from the exec control command). In these cases
++	// we skip charging the pids controller, as non-userspace task creation
++	// bypasses pid limits.
++	//
++	// Charge under TaskSet.mu so srcT cannot migrate between cgroups or have
++	// its cgroup hierarchy modified before t enters srcT's cgroups below.
++	if srcT != nil {
++		var err error
++		if charged, cg, err = srcT.ChargeFor(t, CgroupControllerPIDs, CgroupResourcePID, 1); err != nil {
++			return nil, err
++		}
++	}
++
+ 	// GetTTY takes the bond reference under srcT's signal mutex, so
+ 	// the IncRef cannot race with a final DecRef.
+ 	//
+diff --git a/test/syscalls/linux/cgroup.cc b/test/syscalls/linux/cgroup.cc
+index 7d5dfe8..fdd9590 100644
+--- a/test/syscalls/linux/cgroup.cc
++++ b/test/syscalls/linux/cgroup.cc
+@@ -21,6 +21,7 @@
+ #include <linux/capability.h>
+ #include <linux/magic.h>
+ #include <poll.h>
++#include <pthread.h>
+ #include <signal.h>
+ #include <sys/inotify.h>
+ #include <sys/mman.h>
+@@ -125,6 +126,8 @@ class NoopThreads {
+   bool joined_ = false;
+ };
+ 
++void* DummyThreadBody(void* unused) { return nullptr; }
++
+ TEST(Cgroup, MountsForAllControllers) {
+   SKIP_IF(!CgroupsAvailable());
+ 
+@@ -1058,13 +1061,21 @@ TEST(PIDsCgroup, SetInvalidLimit) {
+               PosixErrorIs(EINVAL, _));
+   EXPECT_THAT(child.WriteControlFile("pids.max", "-3894732"),
+               PosixErrorIs(EINVAL, _));
+-  // This value is much larger than the maximum allowed value of ~ 1<<22.
++  // PID_MAX_LIMIT + 1 (PIDS_MAX = 4 * 1024 * 1024 + 1) and larger values are
++  // rejected with EINVAL.
++  EXPECT_THAT(child.WriteIntegerControlFile("pids.max", (4 * 1024 * 1024) + 1),
++              PosixErrorIs(EINVAL, _));
+   EXPECT_THAT(child.WriteIntegerControlFile("pids.max", LLONG_MAX - 1),
+               PosixErrorIs(EINVAL, _));
+ 
+   // The initial valid limit should remain unchanged.
+   EXPECT_THAT(child.ReadIntegerControlFile("pids.max"),
+               IsPosixErrorOkAndHolds(1234));
++
++  // PID_MAX_LIMIT (4 * 1024 * 1024) is the maximum valid numeric limit.
++  EXPECT_NO_ERRNO(child.WriteIntegerControlFile("pids.max", 4 * 1024 * 1024));
++  EXPECT_THAT(child.ReadIntegerControlFile("pids.max"),
++              IsPosixErrorOkAndHolds(4 * 1024 * 1024));
+ }
+ 
+ TEST(PIDsCgroup, CanLowerLimitBelowCurrentCharge) {
+@@ -1080,6 +1091,59 @@ TEST(PIDsCgroup, CanLowerLimitBelowCurrentCharge) {
+   EXPECT_NO_ERRNO(child.WriteIntegerControlFile("pids.max", 0));
+ }
+ 
++TEST(PIDsCgroup, LimitEnforced) {
++  SKIP_IF(!CgroupsAvailable());
++
++  Cgroup c = Cgroup::RootCgroup("/sys/fs/cgroup/pids");
++  Cgroup child = ASSERT_NO_ERRNO_AND_VALUE(c.CreateChild("child"));
++  ASSERT_NO_ERRNO(child.Enter(getpid()));
++
++  // Set limit so we have room for one more task.
++  const int64_t baseline =
++      ASSERT_NO_ERRNO_AND_VALUE(child.ReadIntegerControlFile("pids.current"));
++  ASSERT_NO_ERRNO(child.WriteIntegerControlFile("pids.max", baseline + 1));
++
++  // Spawning a thread should succeed.
++  NoopThreads t1(1);
++  ASSERT_THAT(child.ReadIntegerControlFile("pids.current"),
++              IsPosixErrorOkAndHolds(baseline + 1));
++
++  // Attempting to spawn another thread should fail.
++  for (int i = 0; i < 3; ++i) {
++    pthread_t pt;
++    int res = pthread_create(&pt, nullptr, &DummyThreadBody, nullptr);
++    if (res == 0) {
++      pthread_join(pt, nullptr);
++    }
++    ASSERT_EQ(res, EAGAIN);
++  }
++  ASSERT_THAT(child.ReadIntegerControlFile("pids.current"),
++              IsPosixErrorOkAndHolds(baseline + 1));
++
++  // Exit the first thread and try create a thread again, which should succeed.
++  ASSERT_NO_ERRNO(child.PollControlFileForChangeAfter(
++      "pids.current", absl::Seconds(30), [&t1]() { t1.Join(); }));
++  ASSERT_THAT(child.ReadIntegerControlFile("pids.current"),
++              IsPosixErrorOkAndHolds(baseline));
++  NoopThreads t2(1);
++  EXPECT_THAT(child.ReadIntegerControlFile("pids.current"),
++              IsPosixErrorOkAndHolds(baseline + 1));
++
++  // Increase the limit and try again.
++  ASSERT_NO_ERRNO(child.WriteIntegerControlFile("pids.max", baseline + 2));
++  NoopThreads t3(1);
++  EXPECT_THAT(child.ReadIntegerControlFile("pids.current"),
++              IsPosixErrorOkAndHolds(baseline + 2));
++
++  // Reset the limit to "max" and verify we can spawn another thread.
++  ASSERT_NO_ERRNO(child.WriteControlFile("pids.max", "max"));
++  EXPECT_THAT(child.ReadControlFile("pids.max"),
++              IsPosixErrorOkAndHolds("max\n"));
++  NoopThreads t4(1);
++  EXPECT_THAT(child.ReadIntegerControlFile("pids.current"),
++              IsPosixErrorOkAndHolds(baseline + 3));
++}
++
+ TEST(DevicesCgroup, ControlFilesExist) {
+   SKIP_IF(!CgroupsAvailable());
+ 
+diff --git a/test/syscalls/linux/cgroup2.cc b/test/syscalls/linux/cgroup2.cc
+index 52669e3..0209958 100644
+--- a/test/syscalls/linux/cgroup2.cc
++++ b/test/syscalls/linux/cgroup2.cc
+@@ -835,8 +835,21 @@ TEST_F(Cgroup2Test, PidsEnforcement) {
+   ASSERT_NO_ERRNO(c().WriteControlFile("cgroup.subtree_control", "+pids"));
+   Cgroup child = ASSERT_NO_ERRNO_AND_VALUE(c().CreateChild("child"));
+   ExpectDefaultControlFiles(child);
++  ASSERT_NO_ERRNO(child.WriteIntegerControlFile("pids.max", 4 * 1024 * 1024));
++  EXPECT_THAT(child.ReadIntegerControlFile("pids.max"),
++              IsPosixErrorOkAndHolds(4 * 1024 * 1024));
+   ASSERT_NO_ERRNO(child.WriteControlFile("pids.max", "1"));
+ 
++  // Invalid writes to pids.max fail with EINVAL and leave the limit unchanged.
++  EXPECT_THAT(child.WriteControlFile("pids.max", "m a x"),
++              PosixErrorIs(EINVAL));
++  EXPECT_THAT(child.WriteControlFile("pids.max", "-1"), PosixErrorIs(EINVAL));
++  EXPECT_THAT(child.WriteIntegerControlFile("pids.max", (4 * 1024 * 1024) + 1),
++              PosixErrorIs(EINVAL));
++  EXPECT_THAT(child.WriteIntegerControlFile("pids.max", LLONG_MAX - 1),
++              PosixErrorIs(EINVAL));
++  EXPECT_THAT(child.ReadControlFile("pids.max"), IsPosixErrorOkAndHolds("1\n"));
++
+   FileDescriptor event_fd =
+       ASSERT_NO_ERRNO_AND_VALUE(Open(child.Relpath("pids.events"), O_RDONLY));
+   FileDescriptor event_local_fd = ASSERT_NO_ERRNO_AND_VALUE(

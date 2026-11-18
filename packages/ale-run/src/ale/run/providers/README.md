@@ -57,7 +57,7 @@ leaves its profiles name:
 |---|---|---|---|---|---|
 | `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models and memory nvidia-smi reports, shared by `gpu_memory_mb` and watched ([GPU memory](#gpu-memory)); none without a working nvidia-smi | yes | `raw_sockets` | — |
 | `docker:kata` | Linux containers, on the machine's architecture | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
-| `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes, but not with `nested_containers` | `user_namespaces`, `fuse` and `mount`, with `raw_sockets` in one profile and `nested_containers` in another | — |
+| `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes | `user_namespaces`, `fuse` and `mount`, with `raw_sockets` in one profile and `nested_containers` in another | — |
 | `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
 | `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
@@ -72,8 +72,8 @@ from nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose 
 not accept or have the memory it needs on each. A Sandbox that names `storage_mb` goes only
 to a leaf that holds it to that: under QEMU, Firecracker, Orchard and Daytona by a disk of
 its own, at least that size, as each one's section says, and under Docker by measuring what
-it writes and ending it past the limit, but in `docker:gvisor`'s profile for
-`nested_containers` ([Docker writable storage](#docker-writable-storage)). A Node's profiles
+it writes, its Docker volumes included, and ending it past the limit
+([Docker writable storage](#docker-writable-storage)). A Node's profiles
 are its leaves', each limited to the CPUs and memory the Node lends in all. A Node lends
 Docker under any of its runtimes, QEMU and Orchard, but not Firecracker.
 
@@ -141,7 +141,7 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 
 | Provider | How a snapshot is saved, booted and destroyed |
 |---|---|
-| Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
+| Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A commit keeps no Docker volume, so each of the Sandbox's, a container engine's storage ([gVisor](#docker-on-gvisor)), is copied into a volume of the snapshot's, `ale-snapshot-<sandbox id>-<directory>`, labelled `ale.managed`, `ale.retention=snapshot`, `ale.snapshot=<sandbox id>` and `ale.path=<directory>`, by a helper (ALE's QEMU runner under runc, with no network and Docker's default capabilities, the Sandbox's volumes read-only) with GNU `cp -a --reflink=auto --preserve=xattr`, which keeps owners, modes, timestamps, hard and symbolic links, the 0:0 whiteouts, sparse files' holes and every xattr, and fails on one it cannot copy (an engine's storage of about 20,800 entries came back with every entry alike, rootful and rootless); a snapshot that fails leaves neither image nor volume. A container boots from its image ID; one booted from a snapshot with volumes is created with a fresh volume at each such directory, marked `volume-nocopy`, since Docker otherwise fills a fresh volume from the image as it creates the container, filled from the snapshot's by the helper and only then started, and its volumes' contents count toward its `storage_mb` in full, as a VM's disk does. The Sandbox was stopped, not shut down, and its `/run` is in the image, so what a daemon left there comes back, as after `docker restart`: a dockerd started again refused to run while `/var/run/docker.pid` named a process of the new Sandbox, so an image that starts one removes that file first, as `docker:dind`'s entrypoint does. `docker rmi` destroys it, and then its volumes, and fails while a container still uses it |
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the ALE cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
 | Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the ALE cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so its profile saves none |
@@ -550,7 +550,9 @@ names `storage_mb` to it as Kubernetes holds a Pod to its `ephemeral-storage`
 ([`docker/storage.py`](docker/storage.py)): every 5 s while a Run or a Node drives it, the
 leaf reads what the Sandbox has written over its image, `SizeRw` of
 `docker container inspect --size`, which the daemon counts on the Host, outside the
-Sandbox's reach. Once that passes `storage_mb` MiB the leaf kills the container and logs, in
+Sandbox's reach, together with what the Sandbox's Docker volumes take, such as a container
+engine's storage ([gVisor](#docker-on-gvisor)), which a helper of its own measures (below).
+Once that passes `storage_mb` MiB the leaf kills the container and logs, in
 the phase of the command that ran last, `ALE's storage watch stopped the Sandbox: it wrote
 4102 MiB over its image, past the 4096 MiB its Task declares`; the Sandbox's next call,
 and one that waits on it then, raises `StorageExhaustedError` with the same sizes, which
@@ -558,7 +560,12 @@ ends the Episode as `storage_exhausted`
 ([Episode protocol](../../../../../../docs/specs/episode-protocol.md#agent-or-oracle)). A
 Node's leaf measures as a Run's does, and the error crosses to the Run by name. Nothing is
 asked of the daemon's setup: Docker 29.1.3 rootful and 29.9.3 rootless, both with the
-containerd image store on ext4, counted alike, and so did every runtime:
+containerd image store on ext4, counted alike, and so did every runtime. That store counts
+the blocks of the layer's entries, its directories included; a classic graph driver
+(`overlay2`, the containerd store turned off) counts the bytes of its files instead,
+directories not and a sparse file's holes too (a file of 1 byte counted 8192 against 1,
+64 MiB made with `truncate` 4096 against 64 MiB, 1000 empty files 24576 against 0;
+rootless 29.9.3):
 
 | Written in the Sandbox | Counted |
 |---|---|
@@ -568,7 +575,7 @@ containerd image store on ext4, counted alike, and so did every runtime:
 | Empty files | their directories' blocks: 100,000 count 2.5 MiB |
 | A file deleted while a process holds it open | nothing, though it holds the Host's disk until it is closed |
 | `/dev/shm` or another tmpfs | nothing: it is memory, which `memory_mb` holds |
-| A volume, as the container engine's storage of a Sandbox that asks for `nested_containers` | nothing, so `docker:gvisor`'s profile for `nested_containers` holds no Sandbox to `storage_mb`, which goes to the next Provider listed that does: Docker sizes a volume only in `docker system df -v`, which sizes every volume and layer of the daemon, in 4 to 6 s with 80 volumes, and fails when a container goes meanwhile |
+| A Docker volume, as the container engine's storage of a Sandbox that asks for `nested_containers` | what it takes on the Host's disk, counted as the daemon counts `SizeRw`, at the next measurement: an engine's containers that wrote 2 GiB to their layers, on the volume, ended a Sandbox of 1024 MiB |
 
 What ALE writes counts as the Sandbox's own, as on a disk of that size: a ready Sandbox of
 the container base has written 3.4 MiB, and 16 MiB 30 s later, the framework's Python
@@ -589,6 +596,30 @@ Docker 29.9.3, rootless, on a busy disk array (Linux 5.15, 384 cores under a loa
 
 So a Sandbox may write about 5 GiB past its limit on a fast disk before it ends, and all of
 a Host's Sandboxes together no more than its disk takes in 5 s, which the Host keeps free.
+
+ALE runs unprivileged and cannot read a rootful daemon's volume directories, nor, under
+rootless Docker, the files of an engine's containers, which belong to sub-UIDs. So for each
+watched Sandbox with volumes a helper runs (`<container>-storage`: ALE's QEMU runner under
+runc, with no network and the Sandbox's volumes mounted read-only by name), started with
+`docker run -i --rm` at the first measurement, which answers each line on its stdin with one
+walk over all of them, a hard link counted once: GNU `du`'s blocks under the containerd
+image store, the bytes of every file but a directory under a classic graph driver, as
+`docker info` says once per Provider. It ends with its stdin, so with ALE's process (the
+container was gone 0.2 s after its CLI was killed), and it is removed before the Sandbox,
+since Docker keeps an anonymous volume another container mounts when the Sandbox is removed
+with its volumes, even once that one goes. Measured on an engine's storage of ubuntu,
+python, node and busybox images, one built and one stopped container, about 20,800 entries
+and 725 MB, 20 times each, the containerd store, rootful Docker 29.1.3 on NVMe (112 cores, a
+load of about 25) and rootless Docker 29.9.3 on a GCP persistent disk (128 cores, nearly
+idle):
+
+| | Rootful | Rootless |
+|---|---|---|
+| One measurement by the helper kept running | 0.09 to 0.13 s, about as much of `du`'s CPU, none of the daemons' | 0.05 s, about as much of `du`'s CPU, none of the daemons' |
+| One `docker run --rm` of the same helper per measurement, for comparison | 0.31 to 0.40 s, and 0.22 s of dockerd's and containerd's CPU besides the shim's | 0.25 to 0.31 s, and 0.08 s of their CPU |
+| `SizeRw` beside it, for comparison | 0.04 s, and 0.05 s of their CPU | 0.03 s, and 0.02 s of their CPU |
+| Copying it into a snapshot's volumes; filling a booted Sandbox's from those | 1.8 s; 1.6 s | 2.1 s; 2.0 s |
+
 What measuring leaves to the agent, such as `df` in the Sandbox showing the Host's disk and
 a write past the limit succeeding rather than failing as on a full disk, is
 [issue #152](https://github.com/AgentsLastExam/ale/issues/152).
@@ -664,7 +695,7 @@ Sandbox runs under `runsc` unless it asks for `raw_sockets` or `nested_container
 entirely under `runsc-net-raw` or `runsc-nested`; no profile gives both, so a Sandbox that
 asks for both is refused before anything starts. Besides finding each name the Run's
 Sandboxes run under, registered with exactly those arguments, the preflight checks that
-`runsc --version` reports the build this engine runs (`+ale.0.1.2`, `VERSION` in its
+`runsc --version` reports the build this engine runs (`+ale.0.1.3`, `VERSION` in its
 `build.sh`; a stock `runsc` lacks the rootless and out-of-memory fixes) and, whenever GPUs
 may be attached, a Sandbox needing them or a Node whose profiles offer the Host's, that
 `runsc nvproxy list-supported-drivers` lists the Host's NVIDIA driver, and, whenever a
@@ -690,7 +721,7 @@ kernel log must say `Starting gVisor`, and `docker cp` must see what the Sandbox
 | `runsc` ignores the setuid bit of a program, `sudo` among them, unless it runs with `--allow-suid` | Every registration passes `--allow-suid`, so the agent elevates through `sudo` as under runc |
 | `perf_event_open`, `bpf` and `io_uring_setup` fail whatever is granted (`ENODEV`, `EPERM` or `EINVAL`, `ENOSYS`) | Its profiles give none of them |
 | netstack implements nf_tables only under `--TESTONLY-nftables`, without which the `iptables` of Debian, Ubuntu and Alpine, Docker and Podman fail (`Failed to initialize nft: Protocol not supported`); with it, the Sentry's netlink takes nf_tables messages from any process holding `CAP_NET_ADMIN` in a network namespace, as every process does in one it creates | A Sandbox that asks for `nested_containers` runs under `runsc-nested`, with `--cap-add NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE`, which stay in the Sentry: the engine's bridges and rules, its mounts and namespaces, and an init script's limits, such as Debian's raising open files. No other sandbox reaches nf_tables. netstack runs ALE's chains, which stay in its iptables tables, before the engine's nf_tables rules, as Linux runs both; unlike Linux, which tracks and NATs a connection once for both, each tracks and NATs it on its own (patch 0008) |
-| The sandbox's root is the Host's overlayfs, which refuses to create the whiteouts (a 0:0 character device) by which an engine's overlay layers mark what they delete: an engine that keeps its images there fails to start a container (`symlink /proc/mounts …/etc/mtab: file exists`) or to delete a file of its image | `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` each get a Docker volume of their own, which starts with what the image holds there and goes with the sandbox. A commit keeps no volume and the storage watch does not measure one, so the profile for container engines takes no snapshots and holds no Sandbox to `storage_mb` ([Docker writable storage](#docker-writable-storage)) |
+| The sandbox's root is the Host's overlayfs, which refuses to create the whiteouts (a 0:0 character device) by which an engine's overlay layers mark what they delete: an engine that keeps its images there fails to start a container (`symlink /proc/mounts …/etc/mtab: file exists`) or to delete a file of its image | `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` each get a Docker volume of their own, which starts with what the image holds there and goes with the sandbox. On a volume the gofer keeps the whiteouts and only `user.*` xattrs, such as the `user.overlay.opaque` of a directory a layer replaced; it refuses `trusted.*` and `security.*` ones (`ENOTSUP`), file capabilities among them. A snapshot keeps each volume beside its image ([Snapshots](#snapshots)), and the storage watch measures them ([Docker writable storage](#docker-writable-storage)) |
 | A dockerd that can open a packet socket but not write one, as under `--net-raw`, fails to start a container (`failed to advertise addresses: operation not supported`, the `docker.io` 29.1.3 of Ubuntu 22.04 and 24.04); one that cannot open one only warns | `runsc-nested` passes no `--net-raw`, so a nested container has no raw socket, and a Sandbox has `raw_sockets` or `nested_containers`, in a profile each |
 
 Under `runsc-nested`, Ubuntu 22.04's and 24.04's `docker.io` 29.1.3 installed during the run
@@ -698,12 +729,17 @@ and started with `dockerd`, Docker CE 29.10.0 preinstalled and started with `ser
 start` or `dockerd`, Debian 12's `docker.io` 20.10.24 started with `service docker start`,
 and `docker:29-dind`'s entrypoint each ran containers that reached the Internet, published a
 port to the sandbox, resolved each other on a network of their own, built an image and
-deleted files of their image, and `docker exec`, `stop` and `start` worked. Ubuntu's
-`docker.io` ships no init script, so `service docker start` fails for it under runc too.
-Podman 4.9.3 runs containers on the host network only: on a network of its own it fails as
-it binds the container's network namespace recursively (`mount --rbind /proc/<pid>/ns/net`,
-`EINVAL`, which Linux allows), and past that its bridge plugin sets hairpin mode (`operation
-not supported`) and netavark 1.4 makes a netlink request that fails with `EINVAL`.
+deleted files of their image; `docker exec`, `pause`, `stop` and `start` worked, and a
+paused container was removed by force. Ubuntu's `docker.io` ships no init script, so
+`service docker start` fails for it under runc too. Rootful Podman runs on networks of its
+own too: Ubuntu 24.04's Podman 4.9.3 on its CNI backend and on netavark 1.4, Debian 13's
+5.4.2 and Fedora 43's 5.8.9 on netavark's nftables driver each did all of that, `podman
+exec` and `pause` included, which crun, Podman's default OCI runtime, does through cgroup
+v1's freezer. A nested container's `--pids-limit` holds; its `--memory` and `--cpus` reach
+its cgroup, but nothing in the sandbox enforces them, and the sandbox's own limits bound all
+of its containers together. A Podman container sees the sandbox's cgroups at
+`/sys/fs/cgroup` rather than its own
+([gVisor runtime](../../../../../../images/runtimes/gvisor/README.md#container-engines-in-a-sandbox)).
 
 The filters and chains confine IPv4. The Provider creates a sandbox's network without IPv6;
 on a daemon that enables IPv6 on every new network, the Host's IPv6 address is outside the

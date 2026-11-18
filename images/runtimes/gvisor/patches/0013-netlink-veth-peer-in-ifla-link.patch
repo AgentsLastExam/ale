@@ -1,0 +1,412 @@
+netlink: report the peer of a veth in IFLA_LINK
+
+What: an RTM_NEWLINK message for one end of a veth pair, in a dump, a reply or
+a notification, holds the index of the other end in IFLA_LINK, its index in
+its own network namespace, as Linux's rtnl_fill_ifinfo() puts
+dev_get_iflink(), which drivers/net/veth.c:veth_get_iflink() gives as the
+peer's ifindex. As in Linux, it is left out when it equals the interface's own
+index and the peer is in the same namespace; a peer in another namespace is
+put whatever its index, as rtnl_fill_link_netnsid() has nla_put_iflink() do.
+To find the peer's NIC, the veth endpoint and the nested link endpoints that
+wrap it tell the dispatcher they are attached to, and a NIC, and a bridge
+port, which is a NIC's dispatcher while the NIC is part of a bridge, tell
+their NIC's ID and stack.
+
+Why: netavark creates the veth pair with the container end in the container's
+namespace, reads the container end back, and brings the host end up by the
+index in its IFLA_LINK (src/network/bridge.rs, create_veth_pair(), in 1.4.0,
+1.14.0 and 1.17.2). Without it, it asked for interface 0: "netavark: failed
+to set host veth up: Netlink error: Invalid argument (os error 22)".
+
+Not done: Linux also puts IFLA_LINK_NETNSID when the peer is in another
+namespace; gVisor has no namespace IDs, so `ip link` there names the peer
+after the interface of its index in its own namespace (veth@eth0 rather than
+veth@if2). A veth whose peer is gone is not reported with IFLA_LINK 0.
+
+Upstream: none found; drop this patch when upstream reports IFLA_LINK.
+
+Verified:
+- The new syscall test NetlinkRouteTest.VethLink (a pair in one namespace,
+  after one end joins a bridge, a pair across namespaces, and one across two
+  new namespaces whose ends both have index 2) passes on
+  Linux 7.0 under runc and on runsc with this patch, under the runtime
+  arguments of runsc and of runsc-nested, and fails on ALE's 0.1.2. The unit
+  tests of //pkg/tcpip/link/veth, //pkg/tcpip/link/nested, //pkg/tcpip/stack
+  (stack_test, stack_x_test, bridge_test) and
+  //pkg/sentry/socket/netstack pass.
+- netavark 1.4.0, 1.14.0 and 1.17.2 brought the host end of the pair up and
+  attached the container to its bridge; the containers reached the Internet
+  once patch 0016 gave netavark its sysctls.
+
+diff --git a/pkg/sentry/inet/inet.go b/pkg/sentry/inet/inet.go
+index cb43f6c..f9b0038 100644
+--- a/pkg/sentry/inet/inet.go
++++ b/pkg/sentry/inet/inet.go
+@@ -191,6 +191,15 @@ type Interface struct {
+ 
+ 	// Kind is the link kind (e.g. "veth", "bridge").
+ 	Kind string
++
++	// Link is the index of the interface that this one is linked to, such as
++	// the other end of a veth pair, which may be in another network
++	// namespace (IFLA_LINK); 0 if none.
++	Link int32
++
++	// LinkOtherNetns is true if the interface of Link is in another network
++	// namespace.
++	LinkOtherNetns bool
+ }
+ 
+ // BridgePortConfig is a change to the options of a bridge port. A nil field
+diff --git a/pkg/sentry/socket/netlink/route/protocol.go b/pkg/sentry/socket/netlink/route/protocol.go
+index 6119e4b..72c39db 100644
+--- a/pkg/sentry/socket/netlink/route/protocol.go
++++ b/pkg/sentry/socket/netlink/route/protocol.go
+@@ -364,6 +364,12 @@ func writeLinkInfo(m *nlmsg.Message, idx int32, i inet.Interface) {
+ 	if i.Master != 0 {
+ 		m.PutAttr(linux.IFLA_MASTER, primitive.AllocateUint32(i.Master))
+ 	}
++	// As Linux's rtnl_fill_ifinfo() puts it with nla_put_iflink(): for a link
++	// to another interface, or to one in another network namespace, which
++	// rtnl_fill_link_netnsid() forces, whatever its index.
++	if i.Link != 0 && (i.Link != idx || i.LinkOtherNetns) {
++		m.PutAttr(linux.IFLA_LINK, primitive.AllocateUint32(uint32(i.Link)))
++	}
+ 
+ 	if i.Kind != "" {
+ 		var nestedAttrs nlmsg.NestedAttr
+diff --git a/pkg/sentry/socket/netstack/stack.go b/pkg/sentry/socket/netstack/stack.go
+index cb56ada..0c46102 100644
+--- a/pkg/sentry/socket/netstack/stack.go
++++ b/pkg/sentry/socket/netstack/stack.go
+@@ -78,8 +78,8 @@ func (s *Stack) AddInterfaceEventSubscriber(sub inet.InterfaceEventSubscriber) {
+ 	s.eventSubscriber = sub
+ }
+ 
+-func makeInterfaceInfo(ni *stack.NICInfo) inet.Interface {
+-	return inet.Interface{
++func (s *Stack) makeInterfaceInfo(ni *stack.NICInfo) inet.Interface {
++	i := inet.Interface{
+ 		Name:       ni.Name,
+ 		Addr:       []byte(ni.LinkAddress),
+ 		Flags:      uint32(nicStateFlagsToLinux(ni.Flags)),
+@@ -88,6 +88,46 @@ func makeInterfaceInfo(ni *stack.NICInfo) inet.Interface {
+ 		Master:     uint32(ni.Primary),
+ 		Kind:       ni.Kind,
+ 	}
++	if ni.Kind == "veth" {
++		if ep := s.Stack.GetLinkEndpointByName(ni.Name); ep != nil {
++			if peer, peerStack, ok := vethPeer(ep); ok {
++				i.Link = int32(peer)
++				i.LinkOtherNetns = peerStack != s.Stack
++			}
++		}
++	}
++	return i
++}
++
++// vethPeer returns the index of the interface that the other end of the veth
++// pair under ep belongs to, in its own network namespace, as Linux's
++// veth_get_iflink returns it, and that namespace's stack.
++func vethPeer(ep stack.LinkEndpoint) (tcpip.NICID, *stack.Stack, bool) {
++	for {
++		switch e := ep.(type) {
++		case *veth.Endpoint:
++			// The peer's NIC, or its bridge port, is the dispatcher of the
++			// outermost endpoint wrapping the peer.
++			d := e.Peer().Dispatcher()
++			for d != nil {
++				if nic, ok := d.(stack.NICDispatcher); ok {
++					return nic.NICID(), nic.Stack(), true
++				}
++				wrapper, ok := d.(interface {
++					Dispatcher() stack.NetworkDispatcher
++				})
++				if !ok {
++					return 0, nil, false
++				}
++				d = wrapper.Dispatcher()
++			}
++			return 0, nil, false
++		case interface{ Child() stack.LinkEndpoint }:
++			ep = e.Child()
++		default:
++			return 0, nil, false
++		}
++	}
+ }
+ 
+ func (s *Stack) sendChangeEvent(ctx context.Context, id tcpip.NICID) {
+@@ -95,7 +135,7 @@ func (s *Stack) sendChangeEvent(ctx context.Context, id tcpip.NICID) {
+ 		return
+ 	}
+ 	if nicInfo, ok := s.Stack.SingleNICInfo(id); ok {
+-		s.eventSubscriber.OnInterfaceChangeEvent(ctx, int32(id), makeInterfaceInfo(nicInfo))
++		s.eventSubscriber.OnInterfaceChangeEvent(ctx, int32(id), s.makeInterfaceInfo(nicInfo))
+ 	}
+ }
+ 
+@@ -103,7 +143,7 @@ func (s *Stack) sendDeleteEvent(ctx context.Context, id tcpip.NICID, nicInfo *st
+ 	if s.eventSubscriber == nil {
+ 		return
+ 	}
+-	s.eventSubscriber.OnInterfaceDeleteEvent(ctx, int32(id), makeInterfaceInfo(nicInfo))
++	s.eventSubscriber.OnInterfaceDeleteEvent(ctx, int32(id), s.makeInterfaceInfo(nicInfo))
+ }
+ 
+ func (s *Stack) sendAddressEvent(ctx context.Context, id tcpip.NICID, addr inet.InterfaceAddr, added bool) {
+@@ -111,7 +151,7 @@ func (s *Stack) sendAddressEvent(ctx context.Context, id tcpip.NICID, addr inet.
+ 		return
+ 	}
+ 	if nicInfo, ok := s.Stack.SingleNICInfo(id); ok {
+-		s.eventSubscriber.OnAddressEvent(ctx, int32(id), makeInterfaceInfo(nicInfo), addr, added)
++		s.eventSubscriber.OnAddressEvent(ctx, int32(id), s.makeInterfaceInfo(nicInfo), addr, added)
+ 	}
+ }
+ 
+@@ -159,7 +199,7 @@ func toLinuxARPHardwareType(t header.ARPHardwareType) uint16 {
+ func (s *Stack) Interfaces() map[int32]inet.Interface {
+ 	is := make(map[int32]inet.Interface)
+ 	for id, ni := range s.Stack.NICInfo() {
+-		is[int32(id)] = makeInterfaceInfo(&ni)
++		is[int32(id)] = s.makeInterfaceInfo(&ni)
+ 	}
+ 	return is
+ }
+diff --git a/pkg/tcpip/link/nested/nested.go b/pkg/tcpip/link/nested/nested.go
+index fdb5022..7763333 100644
+--- a/pkg/tcpip/link/nested/nested.go
++++ b/pkg/tcpip/link/nested/nested.go
+@@ -93,6 +93,15 @@ func (e *Endpoint) Attach(dispatcher stack.NetworkDispatcher) {
+ 	e.child.Attach(pass)
+ }
+ 
++// Dispatcher returns the dispatcher that e is attached to, or nil.
++//
++// +checklocksexclude:e.mu
++func (e *Endpoint) Dispatcher() stack.NetworkDispatcher {
++	e.mu.RLock()
++	defer e.mu.RUnlock()
++	return e.dispatcher
++}
++
+ // IsAttached implements stack.LinkEndpoint.
+ //
+ // +checklocksexclude:e.mu
+diff --git a/pkg/tcpip/link/veth/veth.go b/pkg/tcpip/link/veth/veth.go
+index 296370a..1ece86e 100644
+--- a/pkg/tcpip/link/veth/veth.go
++++ b/pkg/tcpip/link/veth/veth.go
+@@ -159,6 +159,20 @@ func (e *Endpoint) Attach(dispatcher stack.NetworkDispatcher) {
+ 	e.dispatcher = dispatcher
+ }
+ 
++// Peer returns the other endpoint of e's pair.
++func (e *Endpoint) Peer() *Endpoint {
++	return e.peer
++}
++
++// Dispatcher returns the dispatcher that e is attached to, or nil.
++//
++// +checklocksexclude:e.mu
++func (e *Endpoint) Dispatcher() stack.NetworkDispatcher {
++	e.mu.RLock()
++	defer e.mu.RUnlock()
++	return e.dispatcher
++}
++
+ // IsAttached implements stack.LinkEndpoint.IsAttached.
+ //
+ // +checklocksexclude:e.mu
+diff --git a/pkg/tcpip/stack/bridge.go b/pkg/tcpip/stack/bridge.go
+index dd2d238..0ef0cd1 100644
+--- a/pkg/tcpip/stack/bridge.go
++++ b/pkg/tcpip/stack/bridge.go
+@@ -65,6 +65,16 @@ func (e BridgeFDBEntry) PortLinkAddress() tcpip.LinkAddress {
+ 	return e.port.nic.LinkAddress()
+ }
+ 
++// NICID implements NICDispatcher.NICID.
++func (p *bridgePort) NICID() tcpip.NICID {
++	return p.nic.id
++}
++
++// Stack implements NICDispatcher.Stack.
++func (p *bridgePort) Stack() *Stack {
++	return p.nic.stack
++}
++
+ // ParseHeader implements stack.LinkEndpoint.
+ func (p *bridgePort) ParseHeader(pkt *PacketBuffer) bool {
+ 	_, ok := pkt.LinkHeader().Consume(header.EthernetMinimumSize)
+diff --git a/pkg/tcpip/stack/nic.go b/pkg/tcpip/stack/nic.go
+index 605d66a..112eb7f 100644
+--- a/pkg/tcpip/stack/nic.go
++++ b/pkg/tcpip/stack/nic.go
+@@ -1068,6 +1068,28 @@ func (n *nic) DeliverRawPacket(protocol tcpip.TransportProtocolNumber, pkt *Pack
+ 	n.stack.demux.deliverRawPacket(protocol, pkt)
+ }
+ 
++// NICDispatcher is a NetworkDispatcher that the stack attaches to the link
++// endpoint of a NIC: the NIC itself, or its port if it belongs to a bridge.
++type NICDispatcher interface {
++	NetworkDispatcher
++
++	// NICID returns the ID of the NIC.
++	NICID() tcpip.NICID
++
++	// Stack returns the stack of the NIC.
++	Stack() *Stack
++}
++
++// NICID implements NICDispatcher.NICID.
++func (n *nic) NICID() tcpip.NICID {
++	return n.id
++}
++
++// Stack implements NICDispatcher.Stack.
++func (n *nic) Stack() *Stack {
++	return n.stack
++}
++
+ // ID implements NetworkInterface.
+ func (n *nic) ID() tcpip.NICID {
+ 	return n.id
+diff --git a/test/syscalls/linux/BUILD b/test/syscalls/linux/BUILD
+index b175435..c37fa1f 100644
+--- a/test/syscalls/linux/BUILD
++++ b/test/syscalls/linux/BUILD
+@@ -4182,6 +4182,7 @@ cc_binary(
+         "//test/util:socket_util",
+         "//test/util:test_main",
+         "//test/util:test_util",
++        "//test/util:thread_util",
+         "//test/util:timer_util",
+         "@com_google_absl//absl/strings:str_format",
+         "@com_google_absl//absl/time",
+diff --git a/test/syscalls/linux/socket_netlink_route.cc b/test/syscalls/linux/socket_netlink_route.cc
+index b267dc6..f4f8b0f 100644
+--- a/test/syscalls/linux/socket_netlink_route.cc
++++ b/test/syscalls/linux/socket_netlink_route.cc
+@@ -71,6 +71,7 @@
+ #include "test/util/save_util.h"
+ #include "test/util/socket_util.h"
+ #include "test/util/test_util.h"
++#include "test/util/thread_util.h"
+ #include "test/util/timer_util.h"
+ 
+ // Tests for NETLINK_ROUTE sockets.
+@@ -6232,6 +6233,25 @@ PosixErrorOr<std::map<std::string, LinkAttrs>> DumpLinkAttrs(
+   return DumpLinkAttrs(fd, &req, sizeof(req));
+ }
+ 
++// SetLinkMaster makes the link of index index a port of the bridge of index
++// master.
++PosixError SetLinkMaster(const FileDescriptor& fd, int index, int master) {
++  struct {
++    struct nlmsghdr hdr;
++    struct ifinfomsg ifm;
++    char buf[64];
++  } req = {};
++  req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++  req.hdr.nlmsg_type = RTM_SETLINK;
++  req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
++  req.hdr.nlmsg_seq = kSeq;
++  req.ifm.ifi_family = AF_UNSPEC;
++  req.ifm.ifi_index = index;
++  uint32_t m = master;
++  addattr(&req.hdr, sizeof(req), IFLA_MASTER, &m, sizeof(m));
++  return NetlinkRequestAckOrError(fd, kSeq, &req, req.hdr.nlmsg_len);
++}
++
+ // RTM_SETLINK changes an existing link only. Like Linux's rtnl_setlink(), it
+ // ignores NLM_F_CREATE, NLM_F_EXCL and NLM_F_REPLACE, which netavark sets when
+ // it brings a link up.
+@@ -6278,6 +6298,87 @@ TEST(NetlinkRouteTest, SetLinkIgnoresNewLinkFlags) {
+               PosixErrorIs(EINVAL, ::testing::_));
+ }
+ 
++// Each end of a veth pair reports the other's index in IFLA_LINK, as Linux's
++// veth_get_iflink() returns it, also when one end is a bridge port or in
++// another network namespace. netavark finds the host end of the pair it
++// created that way.
++TEST(NetlinkRouteTest, VethLink) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++
++  FileDescriptor fd =
++      ASSERT_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  VethRequest veth = GetVethRequest(kSeq, "vlink1", "vlink2");
++  ASSERT_NO_ERRNO(
++      NetlinkRequestAckOrError(fd, kSeq, &veth, veth.hdr.nlmsg_len));
++  BridgeRequest bridge = GetBridgeRequest(kSeq, "vlinkbr");
++  ASSERT_NO_ERRNO(
++      NetlinkRequestAckOrError(fd, kSeq, &bridge, bridge.hdr.nlmsg_len));
++
++  auto links = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd));
++  ASSERT_EQ(links.count("vlink1"), 1);
++  ASSERT_EQ(links.count("vlink2"), 1);
++  EXPECT_EQ(links["vlink1"].link, links["vlink2"].index);
++  EXPECT_EQ(links["vlink2"].link, links["vlink1"].index);
++  EXPECT_EQ(links["lo"].link, 0);
++  EXPECT_EQ(links["vlinkbr"].link, 0);
++
++  ASSERT_NO_ERRNO(
++      SetLinkMaster(fd, links["vlink1"].index, links["vlinkbr"].index));
++  links = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd));
++  EXPECT_EQ(links["vlink1"].master, links["vlinkbr"].index);
++  EXPECT_EQ(links["vlink1"].link, links["vlink2"].index);
++  EXPECT_EQ(links["vlink2"].link, links["vlink1"].index);
++
++  // A pair whose peer is created in another network namespace.
++  FileDescriptor peer_netns;
++  FileDescriptor peer_fd;
++  ScopedThread([&] {
++    TEST_CHECK_SUCCESS(unshare(CLONE_NEWNET));
++    peer_netns = TEST_CHECK_NO_ERRNO_AND_VALUE(
++        Open("/proc/thread-self/ns/net", O_RDONLY));
++    peer_fd = TEST_CHECK_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  });
++  veth = GetVethRequest(kSeq, "vlink3", "vlink4", peer_netns.get());
++  ASSERT_NO_ERRNO(
++      NetlinkRequestAckOrError(fd, kSeq, &veth, veth.hdr.nlmsg_len));
++  links = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd));
++  auto peer_links = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(peer_fd));
++  ASSERT_EQ(links.count("vlink3"), 1);
++  ASSERT_EQ(peer_links.count("vlink4"), 1);
++  EXPECT_EQ(links["vlink3"].link, peer_links["vlink4"].index);
++  EXPECT_EQ(peer_links["vlink4"].link, links["vlink3"].index);
++
++  // A pair across two new namespaces, whose ends both get index 2: across
++  // namespaces Linux puts IFLA_LINK whatever the index
++  // (rtnl_fill_link_netnsid()).
++  FileDescriptor netns_b;
++  FileDescriptor fd_a;
++  FileDescriptor fd_b;
++  ScopedThread([&] {
++    TEST_CHECK_SUCCESS(unshare(CLONE_NEWNET));
++    netns_b = TEST_CHECK_NO_ERRNO_AND_VALUE(
++        Open("/proc/thread-self/ns/net", O_RDONLY));
++    fd_b = TEST_CHECK_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  });
++  ScopedThread([&] {
++    TEST_CHECK_SUCCESS(unshare(CLONE_NEWNET));
++    fd_a = TEST_CHECK_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  });
++  veth = GetVethRequest(kSeq, "vlink5", "vlink6", netns_b.get());
++  ASSERT_NO_ERRNO(
++      NetlinkRequestAckOrError(fd_a, kSeq, &veth, veth.hdr.nlmsg_len));
++  auto links_a = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd_a));
++  auto links_b = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd_b));
++  ASSERT_EQ(links_a.count("vlink5"), 1);
++  ASSERT_EQ(links_b.count("vlink6"), 1);
++  ASSERT_EQ(links_a["vlink5"].index, links_b["vlink6"].index);
++  EXPECT_EQ(links_a["vlink5"].link, links_b["vlink6"].index);
++  EXPECT_EQ(links_b["vlink6"].link, links_a["vlink5"].index);
++}
++
+ }  // namespace
+ 
+ }  // namespace testing

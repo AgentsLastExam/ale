@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import time
@@ -12,14 +11,14 @@ from typing import Literal
 import pytest
 from tests.support import CONTAINER_BASE, skip_without_gvisor, skip_without_kata
 
-from ale.core.errors import GuestUnreachableError, MemoryExhaustedError
+from ale.core.errors import GuestUnreachableError, MemoryExhaustedError, StorageExhaustedError
 from ale.core.sandbox import SANDBOX_GATEWAY_PORT, Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import NESTED_CHECKS, ProviderConformance
 from ale.run import guestd
 from ale.run.framework import framework_identity
 from ale.run.providers import missing_features
-from ale.run.providers.docker import gvisor, kata, storage
+from ale.run.providers.docker import gvisor, kata, storage, volumes
 from ale.run.providers.docker.provider import (
     DockerProvider,
     DockerSandbox,
@@ -594,34 +593,152 @@ docker pull -q busybox:1.36.1 >/dev/null
 """
 
 
-async def _volumes(container: str) -> dict[str, str]:
-    """The Docker volumes a container mounts, by the directory each is mounted at."""
-    code, raw, stderr = await _docker(
-        "inspect", "--format", "{{json .Mounts}}", container, timeout=30
-    )
-    assert code == 0, stderr
-    return {m["Destination"]: m["Name"] for m in json.loads(raw) if m["Type"] == "volume"}
+async def _engine_request(
+    provider: DockerProvider, episode: str, **resources: int
+) -> SandboxRequest:
+    """A Sandbox that runs a container engine, with ``resources`` beside the plain ones."""
+    request = await _plain_request(provider, episode, ContainerFeature.NESTED_CONTAINERS)
+    return request.model_copy(update={"resources": request.resources.model_copy(update=resources)})
+
+
+async def _exists(kind: str, name: str) -> bool:
+    code, _, _ = await _docker(kind, "inspect", name, timeout=30)
+    return code == 0
 
 
 @pytest.mark.asyncio
 async def test_a_gvisor_sandbox_with_a_container_engine_keeps_its_storage_on_volumes() -> None:
     """Under the runtime registered for container engines, which may mount, with each of
-    the engines' storage directories on a volume of its own that goes with the Sandbox. A
-    Sandbox that did not ask has none of it."""
+    the engines' storage directories on a volume of its own that goes with the Sandbox, the
+    storage watch's helper, which mounts them while it measures them, gone first. A Sandbox
+    that did not ask has none of it."""
     skip_without_gvisor()
     provider = DockerProvider(runtime="gvisor")
     async with await provider.create(await _plain_request(provider, "gvisor-no-engine")) as sandbox:
         assert sandbox.allocation.runtime == gvisor.RUNTIME
-        assert await _volumes(sandbox.container) == {}
-    asked = await _plain_request(provider, "gvisor-engine", ContainerFeature.NESTED_CONTAINERS)
+        assert await volumes.mounted(sandbox.container) == {}
+    asked = await _engine_request(provider, "gvisor-engine", storage_mb=4096)
     async with await provider.create(asked) as sandbox:
         assert sandbox.allocation.runtime == gvisor.NESTED
         assert await missing_features(sandbox, {ContainerFeature.MOUNT}) == {}
-        volumes = await _volumes(sandbox.container)
-        assert set(volumes) == set(gvisor.ENGINE_STORAGE)
-    for name in volumes.values():
-        code, _, _ = await _docker("volume", "inspect", name, timeout=30)
-        assert code != 0, f"volume {name} outlived its Sandbox"
+        mounted = await volumes.mounted(sandbox.container)
+        assert set(mounted) == set(gvisor.ENGINE_STORAGE)
+        meter = volumes.meter_name(sandbox.container)
+        for _ in range(60):
+            if await _exists("container", meter):
+                break
+            await asyncio.sleep(1)
+        else:
+            pytest.fail(f"no helper {meter} measured the Sandbox's volumes")
+    assert not await _exists("container", meter), f"{meter} outlived its Sandbox"
+    for name in mounted.values():
+        assert not await _exists("volume", name), f"volume {name} outlived its Sandbox"
+
+
+@pytest.mark.asyncio
+async def test_a_gvisor_sandbox_whose_container_engine_writes_past_its_storage_is_stopped() -> None:
+    """What the engine's containers write lands on its volumes, which count beside the
+    Sandbox's own writable layer: past its storage_mb the Sandbox is stopped as one that wrote
+    to its layer is, within a measurement and the kill."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = await _engine_request(
+        provider, "gvisor-engine-storage", memory_mb=2048, storage_mb=1024
+    )
+    async with await provider.create(request) as sandbox:
+        await sandbox.open_egress()
+        installed = await sandbox.exec(["sh", "-c", _INSTALL_ENGINE], timeout_sec=600)
+        assert installed.ok, installed.stderr[-2000:]
+        layer = await storage.written(sandbox.container)
+        assert layer is not None and layer < 1024 << 20, f"the engine alone wrote {layer} bytes"
+        # Kept once it exits: the layer of a container removed at once goes before a
+        # measurement can see it.
+        fill = (
+            "docker run --name ale-fill --network none busybox:1.36.1 "
+            "dd if=/dev/zero of=/fill bs=1M count=2048"
+        )
+        loop = asyncio.get_running_loop()
+        try:
+            filled = await sandbox.exec(["sh", "-c", fill], timeout_sec=600)
+            assert filled.ok, filled.stderr[-2000:]
+            deadline = loop.time() + storage.WATCH_SEC + 15
+            while loop.time() < deadline:
+                await sandbox.exec(["true"], timeout_sec=30)
+                await asyncio.sleep(1)
+        except StorageExhaustedError as ended:
+            assert "past the 1024 MiB its Task declares" in str(ended), ended
+            return
+        pytest.fail(
+            "its engine's container wrote 2048 MiB past its storage_mb of 1024, and it went on"
+        )
+
+
+#: Run in a Sandbox whose engine runs: an image pulled, one built whose layer deletes a file,
+#: a named volume and a stopped container with a file in its layer and one deleted.
+_ENGINE_STATE = """
+set -ex
+mkdir -p /tmp/ale-build && cd /tmp/ale-build
+printf 'FROM busybox:1.36.1\\nRUN rm /bin/ls && echo built >/built\\n' >Dockerfile
+docker build -q -t ale-built . >/dev/null
+docker volume create ale-kept >/dev/null
+docker run --name ale-keeper --network none -v ale-kept:/kept busybox:1.36.1 \\
+    sh -c 'echo in-volume >/kept/f; echo in-layer >/layer; rm -f /bin/ls'
+"""
+#: Run in a Sandbox booted from its snapshot, once its engine runs again: all of it is back.
+_ENGINE_STATE_BACK = """
+set -ex
+docker image inspect busybox:1.36.1 >/dev/null
+docker run --rm --network none ale-built sh -c 'test ! -e /bin/ls && cat /built' | grep -qx built
+test "$(docker inspect -f '{{.State.Status}}' ale-keeper)" = exited
+docker start -a ale-keeper
+docker run --rm --network none -v ale-kept:/kept busybox:1.36.1 cat /kept/f | grep -qx in-volume
+docker cp ale-keeper:/layer - | tar -xO | grep -qx in-layer
+! docker cp ale-keeper:/bin/ls - >/dev/null 2>&1
+echo engine-state-back
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_of_a_gvisor_sandbox_brings_its_container_engines_storage_back() -> None:
+    """A snapshot keeps the engine's volumes beside its image: a Sandbox booted from it, once
+    its engine runs again, has the engine's pulled and built images, its stopped container,
+    which starts again, and its named volume, and what their layers deleted stays deleted.
+    Destroying the snapshot removes its volumes with its image."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = await _engine_request(provider, "gvisor-engine-snapshot", memory_mb=2048)
+    sandbox = await provider.create(request.model_copy(update={"retention": "snapshot"}))
+    try:
+        await sandbox.open_egress()
+        installed = await sandbox.exec(["sh", "-c", _INSTALL_ENGINE], timeout_sec=600)
+        assert installed.ok, installed.stderr[-2000:]
+        made = await sandbox.exec(["sh", "-c", _ENGINE_STATE], timeout_sec=300)
+        assert made.ok, made.stderr[-2000:]
+        retained = await sandbox.snapshot(roles=("solver",), reason="conformance")
+    finally:
+        await sandbox.destroy()
+    snapshot_of = retained.handle.rpartition(":")[2]
+    labels = {"ale.managed": "true", "ale.retention": "snapshot"}
+    try:
+        saved = await volumes.saved(snapshot_of, labels)
+        assert set(saved) == set(gvisor.ENGINE_STORAGE)
+        async with await provider.create(
+            request.model_copy(update={"snapshot": retained.handle})
+        ) as fork:
+            # The engine was stopped with its Sandbox, uncleanly, so its pid file is still
+            # there, as after a `docker restart`, and may name a process of this Sandbox.
+            started = await fork.exec(
+                ["sh", "-c", _START_ENGINE],
+                env={"START": "rm -f /var/run/docker.pid; (dockerd >/tmp/dockerd.log 2>&1 &)"},
+                timeout_sec=120,
+            )
+            assert started.ok and started.stdout.strip(), started.stderr[-2000:]
+            back = await fork.exec(["sh", "-c", _ENGINE_STATE_BACK], timeout_sec=300)
+            assert "engine-state-back" in back.stdout, back.stderr[-2000:]
+    finally:
+        await provider.destroy_retained(retained.handle)
+    for name in saved.values():
+        assert not await _exists("volume", name), f"volume {name} outlived its snapshot"
 
 
 @pytest.mark.asyncio

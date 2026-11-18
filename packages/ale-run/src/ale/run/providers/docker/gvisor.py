@@ -82,7 +82,7 @@ ENGINE_CAPABILITIES = ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE")
 ENGINE_STORAGE = ("/var/lib/docker", "/var/lib/containerd", "/var/lib/containers")
 #: The version of ALE's build of runsc this engine runs, ``VERSION`` in
 #: images/runtimes/gvisor/build.sh, and what ``runsc --version`` reports of it.
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 BUILD = f"+ale.{VERSION}"
 #: The ``runsc`` command that lists the NVIDIA driver versions nvproxy supports.
 DRIVERS = ("nvproxy", "list-supported-drivers")

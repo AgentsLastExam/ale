@@ -4,8 +4,12 @@ What: the xtables "tcp" and "udp" matches that an nf_tables rule holds through
 nft_compat match a packet's source and destination port ranges, each possibly
 inverted, and for tcp its flags under a mask and an option, as Linux's
 net/netfilter/xt_tcpudp.c does, instead of matching every packet. A packet of
-another protocol never matches; a header too short to read, and a TCP fragment
-at offset 8, are dropped, as Linux's hotdrop drops them. The match's info is
+another protocol never matches, nor a fragment other than the first; the
+first fragment of an IPv4 datagram, whose transport header netstack does not
+parse, is matched by the bytes where its transport header begins, as Linux
+reads them with skb_header_pointer(). A header too short to read, and a TCP
+fragment at offset 8, are dropped, as Linux's hotdrop drops them. The match's
+info is
 taken when it is at least the struct's size and the same once aligned
 (XT_ALIGN), as Linux takes it.
 
@@ -21,7 +25,8 @@ some).
 Verified:
 - gVisor's unit tests in its builder container: the new
   TestCompatTCPUDPMatchEvaluation (ports, inversion, flags, an option, another
-  protocol, a short header) and TestCompatTCPUDPMatchParse (aligned and
+  protocol, a short header, the first and a later fragment of a datagram)
+  and TestCompatTCPUDPMatchParse (aligned and
   unaligned info, too short, too long, unknown inverse flags) pass, as does
   the rest of //pkg/tcpip/nftables:nftables_test. The syscall tests that add
   tcp and udp matches with an unaligned info (CompatNoopMatchTests) pass in
@@ -34,7 +39,7 @@ Verified:
   and its own address, built an image and deleted files of their image.
 
 diff --git a/pkg/tcpip/nftables/nft_xt_match.go b/pkg/tcpip/nftables/nft_xt_match.go
-index e5d98f5..4dd4ddc 100644
+index e5d98f5..b8c5f01 100644
 --- a/pkg/tcpip/nftables/nft_xt_match.go
 +++ b/pkg/tcpip/nftables/nft_xt_match.go
 @@ -27,6 +27,7 @@ import (
@@ -66,7 +71,7 @@ index e5d98f5..4dd4ddc 100644
  func (op *compatNoopMatch) evaluate(regs *registerSet, evalCtx opEvalCtx) {
  	regs.verdict = Verdict{Code: VC(linux.NFT_CONTINUE)}
  }
-@@ -184,8 +183,202 @@ func initMatch(tab *Table, exprInfo ExprInfo) (operation, *syserr.AnnotatedError
+@@ -184,8 +183,214 @@ func initMatch(tab *Table, exprInfo ExprInfo) (operation, *syserr.AnnotatedError
  		if rev > tcpudpMaxRevision {
  			return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("%s revision %d not supported", name, rev))
  		}
@@ -173,8 +178,8 @@ index e5d98f5..4dd4ddc 100644
 +	default:
 +		return false, false
 +	}
-+	transport := pkt.TransportHeader().Slice()
-+	if len(transport) < minimum {
++	transport, ok := transportHeader(pkt, minimum)
++	if !ok {
 +		return false, true
 +	}
 +	info := &op.info
@@ -202,10 +207,22 @@ index e5d98f5..4dd4ddc 100644
 +	if offset < header.TCPMinimumSize {
 +		return false, true
 +	}
-+	if len(transport) < offset {
++	if transport, ok = transportHeader(pkt, offset); !ok {
 +		return false, true
 +	}
 +	return findTCPOption(info.Option, transport[header.TCPMinimumSize:offset], info.InverseFlags&linux.XT_TCP_INV_OPTION != 0), false
++}
++
++// transportHeader returns at least the first size bytes of pkt's transport
++// header, as Linux's matches read them with skb_header_pointer() at the
++// transport offset, or false if pkt holds fewer. Netstack does not parse the
++// transport header of an IPv4 fragment, so for the first fragment of a
++// datagram the bytes are those that follow the network header.
++func transportHeader(pkt *stack.PacketBuffer, size int) ([]byte, bool) {
++	if h := pkt.TransportHeader().Slice(); len(h) != 0 {
++		return h, len(h) >= size
++	}
++	return pkt.Data().PullUp(size)
 +}
 +
 +// findTCPOption reports whether options hold option, inverted by invert.
@@ -271,7 +288,7 @@ index e5d98f5..4dd4ddc 100644
 +	return m.Buffer(), nil
 +}
 diff --git a/pkg/tcpip/nftables/nftables_test.go b/pkg/tcpip/nftables/nftables_test.go
-index 1c41207..2e57bcf 100644
+index 1c41207..54f533c 100644
 --- a/pkg/tcpip/nftables/nftables_test.go
 +++ b/pkg/tcpip/nftables/nftables_test.go
 @@ -5858,7 +5858,7 @@ func TestCompatOperationDeepCopy(t *testing.T) {
@@ -305,13 +322,47 @@ index 1c41207..2e57bcf 100644
  		revision: 0,
  		infoData: []byte{1, 2, 3, 4},
  	}
-@@ -6411,3 +6411,173 @@ func TestCompatNoopMatchEvaluation(t *testing.T) {
+@@ -6411,3 +6411,227 @@ func TestCompatNoopMatchEvaluation(t *testing.T) {
  		t.Errorf("evaluate verdict = %d, want %d", regs.verdict.Code, VC(linux.NFT_CONTINUE))
  	}
  }
 +
 +// Tests evaluating the compat tcp and udp matches, which iptables-nft 1.8.7
 +// writes for --sport, --dport and --tcp-flags.
++// makeUDPv4Fragment makes an IPv4 fragment of a UDP datagram at offset, as
++// netstack's IPv4 endpoint passes it to the PREROUTING hook before reassembly:
++// the network header parsed and the rest left as data. The first fragment
++// (offset 0) begins with the UDP header and has more fragments after it.
++func makeUDPv4Fragment(srcAddr, dstAddr tcpip.Address, srcPort, dstPort, offset uint16) *stack.PacketBuffer {
++	payload := make([]byte, header.UDPMinimumSize+8)
++	var flags uint8
++	if offset == 0 {
++		header.UDP(payload).Encode(&header.UDPFields{
++			SrcPort: srcPort,
++			DstPort: dstPort,
++			Length:  header.UDPMinimumSize + 16,
++		})
++		flags = header.IPv4FlagMoreFragments
++	}
++	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
++		ReserveHeaderBytes: header.IPv4MinimumSize,
++		Payload:            buffer.MakeWithData(payload),
++	})
++	pkt.NetworkProtocolNumber = header.IPv4ProtocolNumber
++	ipHdr := header.IPv4(pkt.NetworkHeader().Push(header.IPv4MinimumSize))
++	ipHdr.Encode(&header.IPv4Fields{
++		TotalLength:    uint16(header.IPv4MinimumSize + len(payload)),
++		Flags:          flags,
++		FragmentOffset: offset,
++		Protocol:       uint8(header.UDPProtocolNumber),
++		SrcAddr:        srcAddr,
++		DstAddr:        dstAddr,
++		TTL:            64,
++	})
++	ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
++	return pkt
++}
++
 +func TestCompatTCPUDPMatchEvaluation(t *testing.T) {
 +	src := tcpip.AddrFrom4([4]byte{10, 0, 0, 1})
 +	dst := tcpip.AddrFrom4([4]byte{10, 0, 0, 2})
@@ -361,6 +412,26 @@ index 1c41207..2e57bcf 100644
 +			name: "udp inverted source port range",
 +			op:   &compatTCPUDPMatch{name: MatchUDP, info: ports(1000, 2000, 0, 0xffff, linux.XT_UDP_INV_SRCPT)},
 +			pkt:  func() *stack.PacketBuffer { return makeUDPv4Packet(src, dst, 1500, 53) },
++			want: VC(linux.NFT_BREAK),
++		},
++		{
++			// Linux reads the ports of a first fragment where its transport
++			// header begins.
++			name: "udp first fragment matches",
++			op:   &compatTCPUDPMatch{name: MatchUDP, info: ports(0, 0xffff, 53, 53, 0)},
++			pkt:  func() *stack.PacketBuffer { return makeUDPv4Fragment(src, dst, 40000, 53, 0) },
++			want: VC(linux.NFT_CONTINUE),
++		},
++		{
++			name: "udp first fragment mismatches",
++			op:   &compatTCPUDPMatch{name: MatchUDP, info: ports(0, 0xffff, 54, 54, 0)},
++			pkt:  func() *stack.PacketBuffer { return makeUDPv4Fragment(src, dst, 40000, 53, 0) },
++			want: VC(linux.NFT_BREAK),
++		},
++		{
++			name: "udp later fragment never matches",
++			op:   &compatTCPUDPMatch{name: MatchUDP, info: all},
++			pkt:  func() *stack.PacketBuffer { return makeUDPv4Fragment(src, dst, 40000, 53, 8) },
 +			want: VC(linux.NFT_BREAK),
 +		},
 +		{

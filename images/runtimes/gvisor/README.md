@@ -15,6 +15,17 @@ sent upstream; a stock `runsc` lacks them.
 | `0007-nftables-xt-tcp-udp-matches` | A rule that the `iptables` 1.8.7 of Ubuntu 22.04 writes with `--sport`, `--dport` or `--tcp-flags`, through the xtables `tcp` and `udp` matches, matches only the packets it names, instead of every one. |
 | `0008-netstack-nftables-connection-state-of-its-own` | Under `--TESTONLY-nftables`, a packet that iptables tracks and NATs, as once any of its tables is set, is tracked and NATed by nf_tables as well, each by its own rules, instead of the Sentry panicking (`packet already had NAT`) and ending the sandbox. |
 | `0009-runsc-sentry-oom-killer-below-cgroup-limit` | A container whose cgroup has a memory limit and no swap loses only the process the Sentry's own OOM killer chooses when its memory runs out, as under runc, instead of, at times, the whole sandbox; the Sentry counts its kills in `memory.oom_control` ([Out of memory](#out-of-memory)). |
+| `0010-vfs-recursive-bind-of-nsfs-files` | A recursive bind mount of a namespace file, with which Podman pins each container's network namespace, binds it, as Linux does, instead of failing with `EINVAL` (upstream PR 16872). |
+| `0011-netlink-bridge-port-hairpin-and-learning` | Hairpin mode and learning can be set on a bridge port, as the CNI bridge plugin sets hairpin mode on every container's veth, instead of failing with `operation not supported` (upstream PR 16233, without the change upstream stacks it on). |
+| `0012-netlink-setlink-ignores-newlink-flags` | `RTM_SETLINK` ignores `NLM_F_CREATE` and `NLM_F_EXCL`, which netavark sets when it brings a link up, as Linux does, instead of failing with `Invalid argument`. |
+| `0013-netlink-veth-peer-in-ifla-link` | Each end of a veth pair reports the other's index in `IFLA_LINK`, by which netavark finds the host end of the pair, as Linux does. |
+| `0014-netlink-strict-check-and-dump-filters` | `NETLINK_GET_STRICT_CHK`, which netavark 1.17 sets, is a socket flag instead of `Protocol not available`, and dumps of links, addresses and routes take the filters Linux takes, by which netavark finds a bridge without ports. |
+| `0015-netstack-siocsifflags` | `SIOCSIFFLAGS` brings an interface up or down, as crun brings up the loopback interface of a build's `RUN` step, instead of failing with `Inappropriate ioctl for device`; it and the interface ioctls that read act in the socket's network namespace, as in Linux. |
+| `0016-proc-sysctls-per-network-namespace` | `/proc/sys/net/ipv4/conf/<interface>` and `/proc/sys/net/ipv6/conf/<interface>`, and `net.ipv4.ping_group_range`, exist, belong to the network namespace they are looked up in and check access at every read and write, as in Linux: netavark writes the first two, crun writes the last for every Podman container. |
+| `0017-nftables-xt-mark-and-multiport` | Rules that `iptables-nft` writes with the `MARK` target and the `mark` and `multiport` matches, as the CNI portmap plugin and netavark write to publish ports, work as in Linux instead of failing. |
+| `0018-nftables-meta-mark-set-and-anonymous-sets` | `meta mark set`, sets without data, and anonymous sets named, found and freed as Linux does them, which netavark's nftables driver (Debian 13, Fedora) uses, work instead of failing with `Operation not supported`. |
+| `0019-cgroupfs-v1-freezer-controller` | Every sandbox has cgroup v1's freezer: writing `FROZEN` to a cgroup's `freezer.state` stops its tasks and its descendants' until it is thawed, as in Linux, so that `podman exec` with crun, `podman pause` and `docker pause` work instead of failing for want of `freezer.state` ([Container engines in a sandbox](#container-engines-in-a-sandbox)). |
+| `0020-cgroupfs-pids-max-enforced` | A fork past a cgroup's own `pids.max`, as an engine's `--pids-limit` in a sandbox sets it on the container's cgroup, fails with `EAGAIN`, as in Linux, instead of only when the task's pids cgroup happened to be the first of its cgroups (upstream commit 173505fa3); an ancestor's `pids.max` is still not enforced, as upstream. |
 
 Each patch's header says what it changes, why, and how it was verified.
 
@@ -34,7 +45,7 @@ gVisor's release tarball:
 
 `runsc` and its sidecars come from one build and are installed together. The image's
 version is `VERSION` in [`build.sh`](build.sh), and `runsc --version` reports the release
-and that version, such as `release-20261109.0+ale.0.1.2`. Nothing in it depends on the
+and that version, such as `release-20261109.0+ale.0.1.3`. Nothing in it depends on the
 engine, so it has its own version, raised when the build changes.
 
 ## Install on a Host
@@ -43,7 +54,7 @@ Copy `/gvisor` into a directory of its own version, so that an upgrade never rep
 binaries of a sandbox that is running:
 
 ```bash
-version=0.1.2
+version=0.1.3
 dir=/usr/local/lib/ale-gvisor/$version
 id=$(docker create ghcr.io/agentslastexam/ale-gvisor:$version)
 sudo mkdir -p "$dir"
@@ -60,7 +71,7 @@ alone:
 {
   "runtimes": {
     "runsc": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.3/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -68,7 +79,7 @@ alone:
       ]
     },
     "runsc-net-raw": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.3/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -77,7 +88,7 @@ alone:
       ]
     },
     "runsc-nested": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.3/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -137,6 +148,44 @@ Under rootless Docker, copy `/gvisor` without `sudo` into a directory of the use
 that delegates the `memory`, `cpu` and `pids` controllers; `runsc` reaches the manager over
 the session bus at `$DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`, else
 `/run/user/<uid>/bus`.
+
+## Container engines in a sandbox
+
+Under `runsc-nested`, with `--cap-add NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE` and the
+engine's storage on volumes, Docker and Podman run as root in a sandbox on networks of
+their own. Each of these ran a container, which reached the Internet, published a port to
+the sandbox's loopback and its own address, ran a command through `exec`, answered nothing
+on that port while it was paused, and was stopped and started; ran containers that resolved
+each other by name on a network it created; built an image whose `RUN` steps reached the
+Internet and deleted a file of the base image; removed the image; and removed a paused
+container by force:
+
+| Engine | Network | Rootful Docker 29.1.3, Linux 7.0 | Rootless Docker 29.9.3, Linux 6.12 |
+|---|---|---|---|
+| Docker: Ubuntu 22.04's and 24.04's `docker.io` 29.1.3, Debian 12's 20.10.24, Docker CE 29.10.0, `docker:29-dind` (9 ways of installing and starting it) | its bridge, `iptables-nft` | all | all |
+| Podman 4.9.3, Ubuntu 24.04 | CNI plugins 1.1.1, `iptables-nft` | all | all |
+| Podman 4.9.3, Ubuntu 24.04 | netavark 1.4.0, `iptables-nft` | all | all |
+| Podman 5.4.2, Debian 13 | netavark 1.14.0, nftables | all | all |
+| Podman 5.8.9, Fedora 43 | netavark 1.17.2, nftables | all | all |
+
+Patches 0010 to 0018 are what Podman's networks needed; with ALE's 0.1.2, only Podman's
+`--network host` worked. Patch 0019 is what `podman exec` needed with crun, Podman's
+default OCI runtime, which reads the container's `freezer.state` in cgroup v1's freezer
+hierarchy, and what `docker pause` and `podman pause` needed. Rootless Podman in a sandbox
+(slirp4netns, pasta) was not tried.
+
+An engine in a sandbox finds gVisor's cgroup v1 controllers (`cpu`, `cpuacct`, `cpuset`,
+`devices`, `freezer`, `job`, `memory` and `pids`) under `/sys/fs/cgroup` and creates its
+containers' cgroups in them. The `tmpfs` that holds them is read-only, so Podman warns on
+standard error that it cannot create the hierarchies gVisor lacks (`Failed to add conmon to
+cgroupfs sandbox cgroup: creating cgroup for blkio: mkdir /sys/fs/cgroup/blkio: read-only
+file system`); only its `conmon` stays out of a cgroup of its own. A Podman container sees
+the sandbox's cgroups at `/sys/fs/cgroup`, not its own, which Docker's containers see. Of a
+nested container's limits, its own cgroup's `--pids-limit` holds (patch 0020), though an
+ancestor cgroup's `pids.max` is not enforced, as upstream; `--memory` and `--cpus` reach
+the container's cgroup, but nothing in the sandbox enforces them: a container given
+`--memory 64m` allocated 200 MiB, and one given `--cpus 0.5` ran a busy loop on a whole
+CPU. The sandbox's own `--memory` and `--cpus` bound all of its containers together.
 
 ## Out of memory
 

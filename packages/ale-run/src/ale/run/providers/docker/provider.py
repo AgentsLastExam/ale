@@ -19,8 +19,9 @@ confinement.
 
 A Sandbox takes its GPUs whole, or shares each with others by the device memory its Task
 names, admitted by what is free and watched while it lives (``gpu_sharing.py``). One that
-names ``storage_mb`` is measured while it lives, and stopped once it has written more
-(``storage.py``). Under rootless
+names ``storage_mb`` is measured while it lives, its Docker volumes included, and stopped once
+it has written more (``storage.py``, ``volumes.py``); a snapshot keeps those volumes beside its
+image. Under rootless
 Docker, whose bridges are in a network namespace of rootlesskit's, a listener there relays
 each of its connections to the Host's Gateway and proxy (``rootless.py``).
 """
@@ -84,7 +85,16 @@ from ale.run.iptables import GATEWAY_CHAIN
 from ale.run.process import run
 from ale.run.providers import machine_arch, memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, storage, subnets, tc
+from ale.run.providers.docker import (
+    gpu_sharing,
+    gvisor,
+    kata,
+    rootless,
+    storage,
+    subnets,
+    tc,
+    volumes,
+)
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -114,9 +124,11 @@ GPU_LABEL = "ale.gpus"
 GPU_MEMORY_LABEL = "ale.gpu_memory_mb"
 PREPARED_LABEL = "ale.prepared"
 HANDLE_PREFIX = "docker:"
-#: A snapshot is a local image in this repository, tagged with its Sandbox's ID.
+#: A snapshot is a local image in this repository, tagged with its Sandbox's ID, and a Docker
+#: volume with these labels for each of that Sandbox's volumes.
 SNAPSHOT_REPOSITORY = "ale-snapshot"
 SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
+_SNAPSHOT_LABELS = {MANAGED_LABEL: "true", RETENTION_LABEL: "snapshot"}
 
 #: The name a sandbox uses for its gateway. It is mapped to the host's address *on the
 #: container's own bridge* rather than to docker's usual host-gateway: an ``--internal``
@@ -1153,6 +1165,8 @@ class DockerSandbox(Sandbox):
         watchdog: gpu_sharing.Watchdog,
         host_ports: rootless.HostPorts,
         guest_kernel: bool = False,
+        volumes: Mapping[str, str] | None = None,
+        meter: volumes.Meter | None = None,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -1178,9 +1192,12 @@ class DockerSandbox(Sandbox):
         #: The watchdog of its Provider, which watches it while it shares GPUs and this
         #: process drives it.
         self._watchdog = watchdog
+        #: Its Docker volumes, by the directory each is at, which its snapshot keeps.
+        self.volumes = dict(volumes or {})
         #: What measures what it writes while it names ``storage_mb`` and this process drives
-        #: it.
+        #: it, and what measures its volumes meanwhile.
         self._storage: storage.Watch | None = None
+        self._meter = meter
         #: The Host's ports of its Provider, of which it holds its own until it ends here.
         self._host_ports = host_ports
         #: The context of the phase that last ran a command in it, in which what the watchdog
@@ -1208,7 +1225,7 @@ class DockerSandbox(Sandbox):
     async def _release(self) -> None:
         """Stop watching it and let go of the Host's ports, then end its sessions: ALE's own
         end is no death."""
-        self._unwatch()
+        await self._unwatch()
         self._host_ports.release(self.container)
         if self._stopping is not None:
             self._stopping.cancel()
@@ -1346,13 +1363,15 @@ class DockerSandbox(Sandbox):
             )
         if self.allocation.storage_mb is not None:
             self._storage = storage.Watch(
-                self.container_id, self.allocation.storage_mb, self.wrote_past
+                self.container_id, self.allocation.storage_mb, self.wrote_past, self._meter
             )
 
-    def _unwatch(self) -> None:
+    async def _unwatch(self) -> None:
+        """Watch it no more; the storage watch's helper is gone when this returns, so that it
+        holds none of the Sandbox's volumes."""
         self._watchdog.unwatch(self.container_id)
         if self._storage is not None:
-            self._storage.stop()
+            await self._storage.stop()
 
     def _stop_for(self, reason: GuestUnreachableError) -> None:
         """Have every call from now on, and each that waits on it now, raise ``reason``:
@@ -1403,7 +1422,7 @@ class DockerSandbox(Sandbox):
             f"gpu_memory_mb of {gpu.memory_mb} MiB"
         )
         if gpu.hold is GpuHold.LIMIT:
-            self._unwatch()
+            await self._unwatch()
             self._stop_for(
                 GuestUnreachableError(
                     f"the sandbox itself died: ALE's GPU memory watchdog stopped it: {found}, "
@@ -1483,12 +1502,11 @@ class DockerSandbox(Sandbox):
     async def snapshot(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
-        """Stop the container and commit its filesystem as a labelled local image.
+        """Stop the container, commit its filesystem as a labelled local image, and copy each
+        of its Docker volumes, which a commit does not keep, into one of the snapshot's own.
 
-        Only a sandbox that runs a container engine mounts volumes, which a commit does not
-        keep, and its profile takes no snapshots, so the commit holds all of the files. The
-        image keeps the container's labels and command; a snapshot holds no GPU and reserves
-        no memory.
+        The image keeps the container's labels and command; a snapshot holds no GPU and
+        reserves no memory. A snapshot that fails leaves neither image nor volumes behind.
         """
         # The relay ends with this container; the image keeps the account's own settings.
         await relay.stop(self._client, self.request)
@@ -1510,6 +1528,15 @@ class DockerSandbox(Sandbox):
         if code != 0:
             raise ProviderStartError(f"could not commit {self.container}: {stderr.strip()}")
         handle = f"{SNAPSHOT_PREFIX}{self.sandbox_id}"
+        if self.volumes:
+            try:
+                await volumes.save(self.sandbox_id, self.volumes, _SNAPSHOT_LABELS)
+            except BaseException:
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(
+                        _docker("rmi", _snapshot_reference(handle), timeout=_REMOVE_SEC)
+                    )
+                raise
         return RetainedSandbox(
             provider="docker",
             handle=handle,
@@ -1547,6 +1574,8 @@ class DockerProvider(Provider):
         self._checked: dict[str, list[str]] = {}
         self._gpu_models: tuple[GpuModel, ...] | None = None
         self._daemon: str | None = None
+        #: Whether the daemon counts ``SizeRw`` in blocks, as its containerd image store does.
+        self._blocks: bool | None = None
         self._networks = _Networks()
         self._watchdog = gpu_sharing.Watchdog()
         self._host_ports = rootless.HostPorts(self._rootless_bridges)
@@ -1558,29 +1587,24 @@ class DockerProvider(Provider):
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
         runtime = RUNTIMES[self.runtime]
         models = await self._models() if runtime.gpus else ()
-        profiles = []
-        for features in runtime.feature_sets:
-            # A commit keeps no volume and what a Sandbox writes to one is not measured
-            # (storage.py), so a Sandbox with storage on one saves no snapshot and is held to
-            # no storage_mb.
-            on_volumes = any(runtime.grants[feature].volumes for feature in features)
-            profiles.append(
-                CapabilityProfile(
-                    provider=self.id,
-                    kind=ImageKind.CONTAINER,
-                    os=OperatingSystem.LINUX,
-                    arch=machine_arch(),
-                    gui=True,  # depends on the image; the GUI base image provides a desktop
-                    network_modes=frozenset(NetworkMode),
-                    snapshot=not on_volumes,
-                    gpus=bool(models),
-                    gpu_models=models,
-                    gpu_hold=runtime.gpu_hold if models else GpuHold.WHOLE,
-                    storage_limit=not on_volumes,
-                    container_features=features,
-                )
+        return tuple(
+            CapabilityProfile(
+                provider=self.id,
+                kind=ImageKind.CONTAINER,
+                os=OperatingSystem.LINUX,
+                arch=machine_arch(),
+                gui=True,  # depends on the image; the GUI base image provides a desktop
+                network_modes=frozenset(NetworkMode),
+                snapshot=True,
+                gpus=bool(models),
+                gpu_models=models,
+                gpu_hold=runtime.gpu_hold if models else GpuHold.WHOLE,
+                # What it writes, its volumes included, is measured (storage.py).
+                storage_limit=True,
+                container_features=features,
             )
-        return tuple(profiles)
+            for features in runtime.feature_sets
+        )
 
     async def _models(self) -> tuple[GpuModel, ...]:
         """The models of the Host GPUs it may lease, read once: a Host's GPUs are a fact of
@@ -1739,8 +1763,20 @@ class DockerProvider(Provider):
             candidates = _eligible_gpus(await self._host_gpus(), self.gpus, resources)
         #: What it reserves on each GPU, which it shares; None when it takes them whole.
         shared = resources.gpu_memory_mb if resources.gpus else None
+        # Named even for runc: a Host whose default runtime is another would run it there.
+        registered, grant = runtime.granted(resources.container_features)
+        #: The snapshot's volumes it boots with, by the directory each belongs at.
+        saved: dict[str, str] = {}
         if request.snapshot is not None:
             resolved_image = await self._snapshot_image(request.snapshot, request)
+            saved = await volumes.saved(
+                request.snapshot.removeprefix(SNAPSHOT_PREFIX), _SNAPSHOT_LABELS
+            )
+            if unmounted := sorted(set(saved) - set(grant.volumes)):
+                raise ProviderCapabilityError(
+                    f"{request.snapshot!r} keeps {', '.join(unmounted)} on volumes, which a "
+                    "Sandbox of this Task does not mount"
+                )
         else:
             resolved_image = await resolve_prepared_container_image(request.prepared_image)
             if problems := await self.check_image(resolved_image.observed_ref):
@@ -1754,13 +1790,12 @@ class DockerProvider(Provider):
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-{sandbox_id}"
         isolated = request.network.mode is not NetworkMode.OPEN
-        # Named even for runc: a Host whose default runtime is another would run it there.
-        registered, grant = runtime.granted(resources.container_features)
         # No swap: Docker's default lets a container swap as much again, as far as the Host's
         # swap reaches, so the memory a Task gets would vary from Host to Host.
         memory_limit = f"{runtime.memory_mb(resources.memory_mb)}m"
+        # One booted with a snapshot's volumes is created, filled and then started.
         argv = [
-            "run", "-d", "--name", container,
+            *(["create"] if saved else ["run", "-d"]), "--name", container,
             "--label", f"{LABEL}={request.episode_id}",
             "--label", f"{MANAGED_LABEL}=true",
             "--label", f"{ROLE_LABEL}={request.role.value}",
@@ -1775,7 +1810,12 @@ class DockerProvider(Provider):
         for capability in grant.capabilities:
             argv += ["--cap-add", capability]
         for path in grant.volumes:
-            argv += ["--mount", f"type=volume,dst={path}"]
+            # Docker copies the image's files there into a fresh volume as it creates the
+            # container, unless told not to: one the snapshot fills holds the snapshot's alone.
+            argv += [
+                "--mount",
+                f"type=volume,dst={path}" + (",volume-nocopy" if path in saved else ""),
+            ]
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
         argv += ["-e", f"{CONTAINER_VARIABLE}={request.desktop_resolution}"]
@@ -1784,6 +1824,8 @@ class DockerProvider(Provider):
         admitted: tuple[GpuDevice, ...] = ()
         sessions: list[_Session] = []
         watcher: memory.GuestEvents | None = None
+        #: Its Docker volumes, by the directory each is at.
+        mounted: dict[str, str] = {}
         try:
             # Its network, if it has one of its own, is created here, so that every failure
             # from now on removes it.
@@ -1826,6 +1868,11 @@ class DockerProvider(Provider):
                 code, started_id, stderr = await _docker(
                     *argv, resolved_image.observed_ref, timeout=_START_SEC
                 )
+                if code == 0 and grant.volumes:
+                    mounted = await volumes.mounted(container)
+                if code == 0 and saved:
+                    await volumes.copy([(saved[path], mounted[path]) for path in saved])
+                    code, _, stderr = await _docker("start", container, timeout=_START_SEC)
             if code != 0:
                 if resources.gpus:
                     raise ProviderCapabilityError(
@@ -1884,6 +1931,7 @@ class DockerProvider(Provider):
             sessions.append(
                 await self._connect(container, agent_user, resources.memory_mb, watcher)
             )
+            meter = await self._meter(container, mounted, resources.storage_mb)
         except BaseException:
             self._host_ports.release(container)
             await asyncio.gather(
@@ -1937,9 +1985,22 @@ class DockerProvider(Provider):
             watchdog=self._watchdog,
             host_ports=self._host_ports,
             guest_kernel=runtime.guest_kernel,
+            volumes=mounted,
+            meter=meter,
         )
         sandbox.watch()
         return sandbox
+
+    async def _meter(
+        self, container: str, mounted: Mapping[str, str], storage_mb: int | None
+    ) -> volumes.Meter | None:
+        """What measures the volumes of a Sandbox held to its ``storage_mb``, as the daemon
+        counts ``SizeRw``, which this Provider reads once."""
+        if not mounted or storage_mb is None:
+            return None
+        if self._blocks is None:
+            self._blocks = await volumes.counts_blocks()
+        return volumes.Meter(container, mounted.values(), blocks=self._blocks)
 
     async def _rootless_bridges(self) -> rootless.Namespaces | None:
         """Where the daemon's bridges are when it is rootless and they are not in this
@@ -2234,10 +2295,13 @@ class DockerProvider(Provider):
         if handle.startswith(SNAPSHOT_PREFIX):
             await _snapshot_record(handle)
             reference = _snapshot_reference(handle)
-            # Not forced: a sandbox booted from the snapshot still uses its layers.
+            # Not forced: a sandbox booted from the snapshot still uses its layers. Its
+            # volumes go once the image has, so a snapshot never boots without them.
             code, _, stderr = await _docker("rmi", reference, timeout=120)
             if code != 0:
                 raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
+            saved = await volumes.saved(handle.removeprefix(SNAPSHOT_PREFIX), _SNAPSHOT_LABELS)
+            await volumes.remove(saved.values())
             return
         await self._destroy(handle, retained=True)
 
@@ -2268,6 +2332,9 @@ class DockerProvider(Provider):
             for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
             if name.startswith("ale-net-")
         )
+        if volumes.of(record.get("Mounts") or []):
+            # A storage watch's helper that outlived its process still holds them.
+            await volumes.gone(volumes.meter_name(container))
         code, _, stderr = await _docker("rm", "-f", "-v", container, timeout=_REMOVE_SEC)
         if code != 0:
             raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
@@ -2343,6 +2410,7 @@ class DockerProvider(Provider):
         agent_user = request.user
         watcher = await _watcher(container, runtime)
         memory_mb = allocation.memory_mb
+        mounted = volumes.of(record.get("Mounts") or [])
         session: _Session | None = None
         try:
             await self._host_ports.hold(container, _ports_on_host(request))
@@ -2351,6 +2419,7 @@ class DockerProvider(Provider):
             session = await self._connect(container, agent_user, memory_mb, watcher)
             agent_home, _ = await self._guest_contract(session.client)
             file_session = await self._connect(container, agent_user, memory_mb, watcher)
+            meter = await self._meter(container, mounted, allocation.storage_mb)
         except BaseException:
             self._host_ports.release(container)
             if session is not None:
@@ -2374,6 +2443,8 @@ class DockerProvider(Provider):
             watchdog=self._watchdog,
             host_ports=self._host_ports,
             guest_kernel=runtime.guest_kernel,
+            volumes=mounted,
+            meter=meter,
         )
         if sealed:
             try:

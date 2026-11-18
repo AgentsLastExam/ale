@@ -1,0 +1,1279 @@
+cgroupfs: cgroup v1's freezer controller
+
+What: cgroupfs gets the freezer controller of Linux's
+kernel/cgroup/legacy_freezer.c, mounted in every sandbox beside the other
+controllers (/sys/fs/cgroup/freezer; "freezer" in /proc/cgroups and
+/proc/<pid>/cgroup). Every cgroup but the root has
+- freezer.state, which reads THAWED, FREEZING or FROZEN and takes THAWED or
+  FROZEN, stripped of white space, and nothing else (EINVAL);
+- freezer.self_freezing, 1 while FROZEN was written to the cgroup's own
+  freezer.state and THAWED not since;
+- freezer.parent_freezing, 1 while the parent is freezing.
+A cgroup is freezing while it or an ancestor is self-freezing; it reads FROZEN
+once every task in it and its descendants has stopped, FREEZING until then, as
+update_if_frozen() finds. A task in a freezing cgroup, whether it was there,
+was created there or moved there, stops as the Sentry stops a task for a
+checkpoint: it is interrupted, a system call it blocks in is restarted, and
+its goroutine waits at the top of its run loop, with one more count in its
+stopCount, which also counts group, ptrace and external stops, so that none
+ends another. It runs again once none of its cgroups is freezing. As in Linux,
+a frozen task is not stopped as SIGSTOP stops it: wait and ptrace do not
+report it, /proc/<pid>/stat shows it in D, and SIGKILL ends it only once it is
+thawed. A signal sent to its process goes to a thread that is not frozen, else
+waits for the thaw. A task that has started to exit is not frozen, and one
+running its exit path drops any freezer stop as it begins to exit
+(Task.exitThreadGroup, under the signal mutex that a freeze also takes): a
+freeze raised after its last stop check but before it leaves its cgroups would
+otherwise never be thawed, as it is no longer in the cgroup and SIGKILL does
+not end a freeze, and it would never become waitable. Linux's freezer likewise
+does not stop a task between its exit cleanup and its exit notification.
+
+Two kinds of task are let go and no longer frozen: the thread group that
+patch 0009's OOM killer kills, as Linux's mark_oom_victim() thaws its victim,
+which could not free its memory while frozen; and every task, when the root
+PID namespace's init exits or the Sentry kills all tasks (TaskSet.Kill),
+since the sandbox then ends and nothing is left in it to thaw them. The
+exemption is the thread group's, set before the group is signalled, so a
+thread created in the gap before the kill does not start frozen and pin the
+victim's memory, as Linux's signal->oom_mm is shared by the threads
+freezing_slow_path() spares.
+
+Writing a process to a cgroup v1 cgroup.procs or tasks, which can now freeze
+it, is refused (EACCES) unless the writer's effective UID is the global root
+or the target's real or saved UID, as Linux's
+kernel/cgroup/cgroup-v1.c:__cgroup1_procs_write() checks; gVisor did not check
+it, so with a freezer subtree delegated writable to another user, that user
+could otherwise move, and freeze, a process it does not own. An engine, which
+runs as root, and a process moving itself or its own children are unaffected.
+
+Why: crun, Podman's default OCI runtime, reads the container's freezer.state
+on cgroup v1 before it runs podman exec, and failed: "crun: error opening
+file `/sys/fs/cgroup/freezer/libpod_parent/libpod-<id>/freezer.state`: No
+such file or directory". podman pause (crun) and docker pause (runc) write
+it. The controller is mounted for every sandbox, as Linux offers it on every
+cgroup v1 system: what an engine finds in /sys/fs/cgroup then does not depend
+on the runtime's arguments, and the controller costs nothing until FROZEN is
+written (an atomic read per cgroup when a task is created or moves).
+
+A SIGKILL waits for the thaw because Linux's does: on Linux 7.0 (runc,
+privileged, the freezer mounted in the initial cgroup namespace) a frozen
+process sent SIGKILL stayed in D until its cgroup was thawed, then died.
+Docker and Podman allow for it: they resume a paused container they remove
+by force.
+
+Upstream: gVisor issue 13722 (docker pause in gVisor); PR 13728 "Emulate
+cgroup v1 freezer controller" was closed unmerged on 2026-10-01, and master
+(2026-11-17) has no v1 freezer. It is not taken: it predates this release's
+cgroup v2 freeze (PR 13683) and does not apply, it moves a new task's entry
+into its cgroups out of the signal mutex, gives the root cgroup the control
+files, reads FROZEN as soon as FROZEN is written and ends a frozen task's
+stop on SIGKILL. Its approach, a stop of its own counted in stopCount, is the
+one taken here. Drop this patch when upstream has a v1 freezer.
+
+Verified:
+- The new syscall tests CgroupFreezer.ControlFiles, FreezesDescendants (a
+  busy and a sleeping process in a cgroup and its child; wait does not
+  report them, /proc shows D), KilledTaskExitsWhenThawed,
+  MigrationFreezesAndThaws, FreezesOneThread, ExitWhileFreezeToggles (400
+  children churned through a cgroup whose freezer toggles while they exit,
+  each reaped) and MigrationChecksCredentials (a process at uid 65534 is
+  refused, EACCES, when it writes a root process to cgroup.procs or tasks,
+  and allowed to write itself) pass on Linux 7.0 under runc
+  and on runsc with this patch, with every other case of cgroup_test: under
+  gVisor's test runner (cgroup_test_runsc_systrap_directfs and its save
+  variant) and under the runtime arguments of runsc and runsc-nested, a case
+  per sandbox. On ALE's 0.1.3 without it they fail, with those that count the
+  controllers. cgroup2_test passes (86, 2 skipped), as do
+  //pkg/sentry/kernel:kernel_test,
+  //pkg/sentry/fsimpl/cgroup2fs:cgroup2fs_test,
+  //pkg/sentry/fsimpl/proc:proc_test and runsc/container's TestProcfsDump.
+- In sandboxes under runsc-nested, rootful (Docker 29.1.3, Linux 7.0) and
+  rootless (Docker 29.9.3, Linux 6.12): Podman 4.9.3 (CNI and netavark 1.4),
+  5.4.2 and 5.8.9 ran podman exec with crun; podman pause, and docker pause
+  in the nine Docker installs, stopped a container's server until it was
+  unpaused; and each removed a paused container by force within a second.
+  Patch 0009's out-of-memory cells kept 5 of 5 sandboxes each (rootful).
+
+Not done: the save variant checkpoints the control files' state, not a
+frozen task (the timing-sensitive tests disable saving). The exit-race and
+new-thread-during-OOM races were not reproduced on ALE's 0.1.3 before the fix
+(each needs a freeze to land inside a sub-millisecond window in the Sentry);
+they are prevented by construction and the stress test ran clean.
+
+diff --git a/pkg/sentry/fsimpl/cgroupfs/BUILD b/pkg/sentry/fsimpl/cgroupfs/BUILD
+index 687a032..e5713c4 100644
+--- a/pkg/sentry/fsimpl/cgroupfs/BUILD
++++ b/pkg/sentry/fsimpl/cgroupfs/BUILD
+@@ -41,6 +41,7 @@ go_library(
+         "cpuset.go",
+         "devices.go",
+         "dir_refs.go",
++        "freezer.go",
+         "job.go",
+         "memory.go",
+         "pids.go",
+diff --git a/pkg/sentry/fsimpl/cgroupfs/base.go b/pkg/sentry/fsimpl/cgroupfs/base.go
+index 0759467..7731d6a 100644
+--- a/pkg/sentry/fsimpl/cgroupfs/base.go
++++ b/pkg/sentry/fsimpl/cgroupfs/base.go
+@@ -459,6 +459,9 @@ func (d *cgroupProcsData) Write(ctx context.Context, fd *vfs.FileDescription, sr
+ 	if targetTG == nil {
+ 		return 0, linuxerr.EINVAL
+ 	}
++	if leader := targetTG.Leader(); leader == nil || !canMigrateCgroup(ctx, leader.Credentials()) {
++		return 0, linuxerr.EACCES
++	}
+ 	return n, targetTG.MigrateCgroup(d.CgroupFromControlFileFD(fd))
+ }
+ 
+@@ -509,9 +512,29 @@ func (d *tasksData) Write(ctx context.Context, fd *vfs.FileDescription, src user
+ 	if targetTask == nil {
+ 		return 0, linuxerr.EINVAL
+ 	}
++	if !canMigrateCgroup(ctx, targetTask.Credentials()) {
++		return 0, linuxerr.EACCES
++	}
+ 	return n, targetTask.MigrateCgroup(d.CgroupFromControlFileFD(fd))
+ }
+ 
++// canMigrateCgroup reports whether the writer in ctx may move a task owned by
++// targetCreds into a cgroup, as Linux's
++// kernel/cgroup/cgroup-v1.c:__cgroup1_procs_write() checks on a write to a
++// cgroup v1 cgroup.procs or tasks: the writer's effective UID must be the
++// global root, or equal the target's real or saved UID. gVisor does not check
++// this elsewhere; where a freezer subtree is delegated writable to another
++// user, the check keeps that user from moving, and so freezing, a process it
++// does not own (patch 0019).
++func canMigrateCgroup(ctx context.Context, targetCreds *auth.Credentials) bool {
++	creds := auth.CredentialsFromContext(ctx)
++	if creds == nil {
++		return true
++	}
++	euid := creds.EffectiveKUID
++	return euid == auth.RootKUID || euid == targetCreds.RealKUID || euid == targetCreds.SavedKUID
++}
++
+ // parseInt64FromString interprets src as string encoding a int64 value, and
+ // returns the parsed value.
+ func parseInt64FromString(ctx context.Context, src usermem.IOSequence) (val, len int64, err error) {
+diff --git a/pkg/sentry/fsimpl/cgroupfs/cgroupfs.go b/pkg/sentry/fsimpl/cgroupfs/cgroupfs.go
+index 1dba544..2e94775 100644
+--- a/pkg/sentry/fsimpl/cgroupfs/cgroupfs.go
++++ b/pkg/sentry/fsimpl/cgroupfs/cgroupfs.go
+@@ -90,13 +90,14 @@ var allControllers = []kernel.CgroupControllerType{
+ 	kernel.CgroupControllerCPUAcct,
+ 	kernel.CgroupControllerCPUSet,
+ 	kernel.CgroupControllerDevices,
++	kernel.CgroupControllerFreezer,
+ 	kernel.CgroupControllerJob,
+ 	kernel.CgroupControllerMemory,
+ 	kernel.CgroupControllerPIDs,
+ }
+ 
+ // SupportedMountOptions is the set of supported mount options for cgroupfs.
+-var SupportedMountOptions = []string{"all", "cpu", "cpuacct", "cpuset", "devices", "job", "memory", "pids"}
++var SupportedMountOptions = []string{"all", "cpu", "cpuacct", "cpuset", "devices", "freezer", "job", "memory", "pids"}
+ 
+ // FilesystemType implements vfs.FilesystemType.
+ //
+@@ -232,6 +233,10 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
+ 		delete(mopts, "devices")
+ 		wantControllers = append(wantControllers, kernel.CgroupControllerDevices)
+ 	}
++	if _, ok := mopts["freezer"]; ok {
++		delete(mopts, "freezer")
++		wantControllers = append(wantControllers, kernel.CgroupControllerFreezer)
++	}
+ 	if _, ok := mopts["job"]; ok {
+ 		delete(mopts, "job")
+ 		wantControllers = append(wantControllers, kernel.CgroupControllerJob)
+@@ -348,6 +353,8 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
+ 			c = newCPUSetController(k, fs)
+ 		case kernel.CgroupControllerDevices:
+ 			c = newDevicesController(fs)
++		case kernel.CgroupControllerFreezer:
++			c = newFreezerController(fs)
+ 		case kernel.CgroupControllerJob:
+ 			c = newJobController(fs)
+ 		case kernel.CgroupControllerMemory:
+diff --git a/pkg/sentry/fsimpl/cgroupfs/freezer.go b/pkg/sentry/fsimpl/cgroupfs/freezer.go
+new file mode 100644
+index 0000000..f18c2c5
+--- /dev/null
++++ b/pkg/sentry/fsimpl/cgroupfs/freezer.go
+@@ -0,0 +1,223 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package cgroupfs
++
++import (
++	"bytes"
++	"strings"
++
++	"gvisor.dev/gvisor/pkg/atomicbitops"
++	"gvisor.dev/gvisor/pkg/context"
++	"gvisor.dev/gvisor/pkg/errors/linuxerr"
++	"gvisor.dev/gvisor/pkg/hostarch"
++	"gvisor.dev/gvisor/pkg/sentry/fsimpl/kernfs"
++	"gvisor.dev/gvisor/pkg/sentry/kernel"
++	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
++	"gvisor.dev/gvisor/pkg/sentry/vfs"
++	"gvisor.dev/gvisor/pkg/usermem"
++)
++
++// freezerController is cgroup v1's freezer controller, as in Linux's
++// kernel/cgroup/legacy_freezer.c. Writing FROZEN to a cgroup's freezer.state
++// stops every task of the cgroup and its descendants until THAWED is written
++// to it; freezer.state reads FREEZING until all of them have stopped, then
++// FROZEN. The root cgroup has no control files and cannot be frozen.
++//
++// +stateify savable
++type freezerController struct {
++	controllerCommon
++	controllerStateless
++	controllerNoResource
++
++	// cg is the cgroup of this controller. Immutable once set by
++	// AddControlFiles.
++	cg *cgroupInode
++
++	// self is Linux's CGROUP_FREEZING_SELF: FROZEN was written to this
++	// cgroup's freezer.state, and THAWED not since. It is written with
++	// fs.tasksMu locked and may be read without it.
++	self atomicbitops.Bool
++}
++
++var _ controller = (*freezerController)(nil)
++
++func newFreezerController(fs *filesystem) *freezerController {
++	c := &freezerController{}
++	c.controllerCommon.init(kernel.CgroupControllerFreezer, fs)
++	return c
++}
++
++// Clone implements controller.Clone.
++func (c *freezerController) Clone() controller {
++	new := &freezerController{}
++	new.controllerCommon.cloneFromParent(c)
++	return new
++}
++
++// AddControlFiles implements controller.AddControlFiles.
++func (c *freezerController) AddControlFiles(ctx context.Context, creds *auth.Credentials, cg *cgroupInode, contents map[string]kernfs.Inode) {
++	c.cg = cg
++	if c.parent == nil {
++		// Linux's CFTYPE_NOT_ON_ROOT.
++		return
++	}
++	contents["freezer.state"] = c.fs.newControllerWritableFile(ctx, creds, &freezerStateData{c}, true)
++	contents["freezer.self_freezing"] = c.fs.newControllerFile(ctx, creds, &freezerFlagData{c: c, self: true}, true)
++	contents["freezer.parent_freezing"] = c.fs.newControllerFile(ctx, creds, &freezerFlagData{c: c}, true)
++}
++
++func (c *freezerController) parentFreezer() *freezerController {
++	if c.parent == nil {
++		return nil
++	}
++	return c.parent.(*freezerController)
++}
++
++// freezing returns true if FROZEN was written to the freezer.state of c or
++// one of its ancestors, and THAWED not since: Linux's CGROUP_FREEZING, which
++// its CGROUP_FREEZING_PARENT carries down the hierarchy.
++func (c *freezerController) freezing() bool {
++	for f := c; f != nil; f = f.parentFreezer() {
++		if f.self.Load() {
++			return true
++		}
++	}
++	return false
++}
++
++// forEachCgroupLocked calls fn on c's cgroup and each of its descendants.
++//
++// Preconditions: c.fs.tasksMu is locked.
++func (c *freezerController) forEachCgroupLocked(fn func(*cgroupInode)) {
++	fn(c.cg)
++	c.cg.dir.OrderedChildren.ForEachChild(func(_ string, i kernfs.Inode) {
++		if child, ok := i.(*cgroupInode); ok {
++			child.controllers[kernel.CgroupControllerFreezer].(*freezerController).forEachCgroupLocked(fn)
++		}
++	})
++}
++
++// setSelf sets the freezer.state of c to FROZEN or THAWED, and stops or
++// resumes the tasks of c and its descendants accordingly.
++func (c *freezerController) setSelf(freeze bool) {
++	var ts []*kernel.Task
++	c.fs.tasksMu.Lock()
++	if c.self.Swap(freeze) != freeze {
++		c.forEachCgroupLocked(func(cg *cgroupInode) {
++			for t := range cg.ts {
++				ts = append(ts, t)
++			}
++		})
++	}
++	c.fs.tasksMu.Unlock()
++	// A task that moves between cgroups meanwhile syncs itself, after it
++	// moves.
++	for _, t := range ts {
++		t.SyncCgroupFreezer()
++	}
++}
++
++// state returns the freezer.state of c: FROZEN once c is freezing and all
++// tasks of c and its descendants have stopped, as Linux's
++// legacy_freezer.c:update_if_frozen() finds.
++func (c *freezerController) state() string {
++	if !c.freezing() {
++		return "THAWED"
++	}
++	frozen := true
++	c.fs.tasksMu.RLock()
++	c.forEachCgroupLocked(func(cg *cgroupInode) {
++		for t := range cg.ts {
++			if frozen && !t.CgroupFreezerFrozen() {
++				frozen = false
++			}
++		}
++	})
++	c.fs.tasksMu.RUnlock()
++	if frozen {
++		return "FROZEN"
++	}
++	return "FREEZING"
++}
++
++// Freezing implements kernel.CgroupImpl.Freezing.
++func (c *cgroupInode) Freezing() bool {
++	f, ok := c.controllers[kernel.CgroupControllerFreezer].(*freezerController)
++	return ok && f.freezing()
++}
++
++// freezerStateData implements freezer.state.
++//
++// +stateify savable
++type freezerStateData struct {
++	c *freezerController
++}
++
++// Generate implements vfs.DynamicBytesSource.Generate.
++func (d *freezerStateData) Generate(ctx context.Context, buf *bytes.Buffer) error {
++	buf.WriteString(d.c.state())
++	buf.WriteString("\n")
++	return nil
++}
++
++// Write implements vfs.WritableDynamicBytesSource.Write.
++func (d *freezerStateData) Write(ctx context.Context, _ *vfs.FileDescription, src usermem.IOSequence, offset int64) (int64, error) {
++	return d.WriteBackground(ctx, src)
++}
++
++// WriteBackground implements writableControllerFileImpl.WriteBackground.
++func (d *freezerStateData) WriteBackground(ctx context.Context, src usermem.IOSequence) (int64, error) {
++	buf := copyScratchBufferFromContext(ctx, int(hostarch.PageSize))
++	n, err := src.CopyIn(ctx, buf)
++	if err != nil {
++		return 0, err
++	}
++	// As Linux's legacy_freezer.c:freezer_write(), which takes no other
++	// state.
++	switch strings.TrimSpace(string(buf[:n])) {
++	case "THAWED":
++		d.c.setSelf(false)
++	case "FROZEN":
++		d.c.setSelf(true)
++	default:
++		return 0, linuxerr.EINVAL
++	}
++	return int64(n), nil
++}
++
++// freezerFlagData implements freezer.self_freezing and
++// freezer.parent_freezing.
++//
++// +stateify savable
++type freezerFlagData struct {
++	c    *freezerController
++	self bool
++}
++
++// Generate implements vfs.DynamicBytesSource.Generate.
++func (d *freezerFlagData) Generate(ctx context.Context, buf *bytes.Buffer) error {
++	var freezing bool
++	if d.self {
++		freezing = d.c.self.Load()
++	} else {
++		freezing = d.c.parentFreezer().freezing()
++	}
++	if freezing {
++		buf.WriteString("1\n")
++	} else {
++		buf.WriteString("0\n")
++	}
++	return nil
++}
+diff --git a/pkg/sentry/kernel/cgroup.go b/pkg/sentry/kernel/cgroup.go
+index 7563b02..bad019f 100644
+--- a/pkg/sentry/kernel/cgroup.go
++++ b/pkg/sentry/kernel/cgroup.go
+@@ -44,13 +44,14 @@ const (
+ 	CgroupControllerCPUAcct = CgroupControllerType("cpuacct")
+ 	CgroupControllerCPUSet  = CgroupControllerType("cpuset")
+ 	CgroupControllerDevices = CgroupControllerType("devices")
++	CgroupControllerFreezer = CgroupControllerType("freezer")
+ 	CgroupControllerJob     = CgroupControllerType("job")
+ 	CgroupControllerMemory  = CgroupControllerType("memory")
+ 	CgroupControllerPIDs    = CgroupControllerType("pids")
+ )
+ 
+ // CgroupCtrls is the list of cgroup controllers.
+-var CgroupCtrls = []CgroupControllerType{"cpu", "cpuacct", "cpuset", "devices", "job", "memory", "pids"}
++var CgroupCtrls = []CgroupControllerType{"cpu", "cpuacct", "cpuset", "devices", "freezer", "job", "memory", "pids"}
+ 
+ // ParseCgroupController parses a string as a CgroupControllerType.
+ func ParseCgroupController(val string) (CgroupControllerType, error) {
+@@ -63,6 +64,8 @@ func ParseCgroupController(val string) (CgroupControllerType, error) {
+ 		return CgroupControllerCPUSet, nil
+ 	case "devices":
+ 		return CgroupControllerDevices, nil
++	case "freezer":
++		return CgroupControllerFreezer, nil
+ 	case "job":
+ 		return CgroupControllerJob, nil
+ 	case "memory":
+@@ -225,6 +228,11 @@ type CgroupImpl interface {
+ 
+ 	// ID returns the id of this cgroup.
+ 	ID() uint32
++
++	// Freezing returns true if this cgroup has the freezer controller and is
++	// freezing: FROZEN was written to its freezer.state or an ancestor's, and
++	// THAWED not since. It is a snapshot in time.
++	Freezing() bool
+ }
+ 
+ // hierarchy represents a cgroupfs filesystem instance, with a unique set of
+diff --git a/pkg/sentry/kernel/oom.go b/pkg/sentry/kernel/oom.go
+index cd3af74..07b1b22 100644
+--- a/pkg/sentry/kernel/oom.go
++++ b/pkg/sentry/kernel/oom.go
+@@ -140,6 +140,7 @@ func (o *oomKiller) round() {
+ 	o.mu.Lock()
+ 	o.kills[victim.memCgID]++
+ 	o.mu.Unlock()
++	victim.tg.exemptFromCgroupFreezer()
+ 	victim.tg.SendSignal(&linux.SignalInfo{
+ 		Signo: int32(linux.SIGKILL),
+ 		Code:  linux.SI_KERNEL,
+diff --git a/pkg/sentry/kernel/task.go b/pkg/sentry/kernel/task.go
+index 7e0b2ab..fbb2e9c 100644
+--- a/pkg/sentry/kernel/task.go
++++ b/pkg/sentry/kernel/task.go
+@@ -233,6 +233,24 @@ type Task struct {
+ 	// Protected by the signal mutex.
+ 	freezeCreditCgroup Cgroup2
+ 
++	// cgroupFrozen is true while cgroup v1's freezer stops t: one of t's
++	// cgroups is freezing, and t has not started to exit and is not exempt.
++	// While it is true, t holds one count of stopCount. Unlike a group stop,
++	// it is not visible to wait or ptrace, and SIGKILL does not end it, as in
++	// Linux's kernel/cgroup/legacy_freezer.c.
++	//
++	// cgroupFrozen is written with the signal mutex locked and may be read
++	// without it.
++	cgroupFrozen atomicbitops.Bool
++
++	// cgroupFreezerExempt is true once cgroup v1's freezer may no longer stop
++	// t: t was chosen by the OOM killer, as Linux's freezing() spares an OOM
++	// victim, or the sandbox is ending.
++	//
++	// cgroupFreezerExempt is written with the signal mutex locked and may be
++	// read without it.
++	cgroupFreezerExempt atomicbitops.Bool
++
+ 	// If groupStopAcknowledged is true, the task has already acknowledged that
+ 	// it is entering the most recent group stop that has been initiated on its
+ 	// thread group.
+@@ -269,8 +287,8 @@ type Task struct {
+ 
+ 	// stopCount is the number of active external stops (calls to
+ 	// Task.BeginExternalStop that have not been paired with a call to
+-	// Task.EndExternalStop), plus 1 if stop is not nil. Hence stopCount is
+-	// non-zero if the task goroutine should stop.
++	// Task.EndExternalStop), plus 1 if stop is not nil, plus 1 if cgroupFrozen
++	// is true. Hence stopCount is non-zero if the task goroutine should stop.
+ 	//
+ 	// Mutating stopCount requires both locking the signal mutex and using
+ 	// atomic memory operations. Reading stopCount requires either locking the
+@@ -779,6 +797,9 @@ func (t *Task) afterLoad(gocontext.Context) {
+ 	if t.stop != nil {
+ 		t.stopCount = atomicbitops.FromInt32(1)
+ 	}
++	if t.cgroupFrozen.Load() {
++		t.stopCount.Add(1)
++	}
+ 	t.endStopCond.L = &t.tg.signalHandlers.mu
+ 	t.rseqPreempted = true
+ 	t.futexWaiter = futex.NewWaiter()
+diff --git a/pkg/sentry/kernel/task_cgroup.go b/pkg/sentry/kernel/task_cgroup.go
+index 8222e4f..1c7b31d 100644
+--- a/pkg/sentry/kernel/task_cgroup.go
++++ b/pkg/sentry/kernel/task_cgroup.go
+@@ -331,6 +331,9 @@ func (tg *ThreadGroup) MigrateCgroup(dst Cgroup) error {
+ 	for _, ctx := range ctxs {
+ 		ctx.Commit()
+ 	}
++	for _, ctx := range ctxs {
++		ctx.t.SyncCgroupFreezer()
++	}
+ 
+ 	return nil
+ }
+@@ -345,9 +348,116 @@ func (t *Task) MigrateCgroup(dst Cgroup) error {
+ 		return err
+ 	}
+ 	ctx.Commit()
++	t.SyncCgroupFreezer()
+ 	return nil
+ }
+ 
++// SyncCgroupFreezer stops t while one of its cgroups is freezing, and lets it
++// run again once none is, as cgroup v1's freezer controller does in Linux's
++// kernel/cgroup/legacy_freezer.c. cgroupfs calls it for each task of a cgroup
++// whose freezer.state changes, and the kernel for a task that is created in a
++// cgroup or moves to another. It does not wait for t to stop.
++func (t *Task) SyncCgroupFreezer() {
++	sh := t.tg.signalLock()
++	defer sh.mu.Unlock()
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	t.syncCgroupFreezerLocked()
++}
++
++// Preconditions: The signal mutex must be locked.
++//
++// +checklocks:t.mu
++func (t *Task) syncCgroupFreezerLocked() {
++	// As in Linux, a task that has started to exit is not frozen.
++	freeze := false
++	if !t.cgroupFreezerExempt.Load() && !t.tg.cgroupFreezerExempt.Load() && t.ExitState() == TaskExitNone {
++		for c := range t.cgroups {
++			if c.Freezing() {
++				freeze = true
++				break
++			}
++		}
++	}
++	if freeze == t.cgroupFrozen.Load() {
++		return
++	}
++	if !freeze {
++		t.thawCgroupFreezerLocked()
++		return
++	}
++	t.cgroupFrozen.Store(true)
++	t.beginStopLocked()
++	t.interrupt()
++}
++
++// thawCgroupFreezerLocked ends the stop of cgroup v1's freezer on t.
++//
++// Preconditions: The signal mutex must be locked. t.cgroupFrozen is true.
++func (t *Task) thawCgroupFreezerLocked() {
++	t.cgroupFrozen.Store(false)
++	// t.canReceiveSignalLocked() skips frozen tasks, so we may need to handle
++	// signals that were sent while we were frozen.
++	if (t.pendingSignals.pendingSet.RacyLoad()|t.tg.pendingSignals.pendingSet.RacyLoad())&^t.signalMask.RacyLoad() != 0 {
++		t.interrupt()
++	}
++	t.endStopLocked()
++}
++
++// exemptFromCgroupFreezerLocked thaws t if cgroup v1's freezer stops it, and
++// keeps the freezer from stopping it again.
++//
++// Preconditions: The signal mutex must be locked.
++func (t *Task) exemptFromCgroupFreezerLocked() {
++	t.cgroupFreezerExempt.Store(true)
++	if t.cgroupFrozen.Load() {
++		t.thawCgroupFreezerLocked()
++	}
++}
++
++// exemptFromCgroupFreezer exempts tg from cgroup v1's freezer, as Linux's
++// mm/oom_kill.c:mark_oom_victim() thaws the OOM killer's victim, which could
++// not free its memory while frozen. The exemption is the thread group's, so a
++// thread created after it, while the group is being killed, does not start
++// frozen either (the publication gap the OOM killer would otherwise leave:
++// it signals the group after exempting the threads it can see).
++func (tg *ThreadGroup) exemptFromCgroupFreezer() {
++	tg.pidns.owner.mu.RLock()
++	defer tg.pidns.owner.mu.RUnlock()
++	tg.signalHandlers.mu.Lock()
++	defer tg.signalHandlers.mu.Unlock()
++	tg.exemptFromCgroupFreezerLocked()
++}
++
++// exemptFromCgroupFreezerLocked is exemptFromCgroupFreezer with the signal
++// mutex held.
++//
++// Preconditions: The signal mutex must be locked.
++func (tg *ThreadGroup) exemptFromCgroupFreezerLocked() {
++	tg.cgroupFreezerExempt.Store(true)
++	for t := tg.tasks.Front(); t != nil; t = t.Next() {
++		if t.cgroupFrozen.Load() {
++			t.thawCgroupFreezerLocked()
++		}
++	}
++}
++
++// CgroupFreezerFrozen returns true if t keeps no freezing cgroup from being
++// FROZEN: cgroup v1's freezer has stopped it, or will not stop it because it
++// is exiting or exempt. It is a snapshot in time.
++func (t *Task) CgroupFreezerFrozen() bool {
++	if !t.cgroupFrozen.Load() {
++		return t.cgroupFreezerExempt.Load() || t.tg.cgroupFreezerExempt.Load() || t.ExitState() != TaskExitNone
++	}
++	// A task that has not started yet stops before it runs.
++	switch t.TaskGoroutineState() {
++	case TaskGoroutineStopped, TaskGoroutineNonexistent:
++		return true
++	default:
++		return false
++	}
++}
++
+ // TaskCgroupEntry represents a line in /proc/<pid>/cgroup, and is used to
+ // format a cgroup for display.
+ type TaskCgroupEntry struct {
+diff --git a/pkg/sentry/kernel/task_exit.go b/pkg/sentry/kernel/task_exit.go
+index 1ae593e..4867808 100644
+--- a/pkg/sentry/kernel/task_exit.go
++++ b/pkg/sentry/kernel/task_exit.go
+@@ -234,6 +234,7 @@ func (ts *TaskSet) Kill(ws linux.WaitStatus) {
+ 			t.tg.exiting = true
+ 			t.tg.exitStatus = ws
+ 		}
++		t.exemptFromCgroupFreezerLocked()
+ 		t.killLocked()
+ 		t.tg.signalHandlers.mu.Unlock()
+ 	}
+@@ -402,6 +403,13 @@ func (t *Task) exitThreadGroup() bool {
+ 	// Can't defer unlock: see below.
+ 
+ 	t.advanceExitStateLocked(TaskExitNone, TaskExitInitiated)
++	// A task that has begun to exit must not be held by cgroup v1's freezer:
++	// it leaves its cgroups below (LeaveCgroups), so a freeze raised between
++	// its last doStop and here would never be thawed (THAWED no longer
++	// reaches it and SIGKILL does not end a freeze), and it would never
++	// become waitable. As in Linux, whose freezer does not stop a task
++	// between its exit cleanup and its exit notification.
++	t.exemptFromCgroupFreezerLocked()
+ 	t.tg.activeTasks--
+ 	last := t.tg.activeTasks == 0
+ 
+@@ -439,6 +447,12 @@ func (t *Task) exitChildrenLocked() {
+ 				continue
+ 			}
+ 			other.signalHandlers.mu.Lock()
++			if t.tg.pidns == t.tg.pidns.owner.Root {
++				// The sandbox ends with the root PID namespace's init, so
++				// cgroup v1's freezer must not keep its tasks from exiting,
++				// as nothing in the sandbox is left to thaw them.
++				other.exemptFromCgroupFreezerLocked()
++			}
+ 			other.leader.sendForcedSignalLocked(&linux.SignalInfo{
+ 				Signo: int32(linux.SIGKILL),
+ 			}, true /* group */)
+diff --git a/pkg/sentry/kernel/task_sched.go b/pkg/sentry/kernel/task_sched.go
+index f1bafaa..2113928 100644
+--- a/pkg/sentry/kernel/task_sched.go
++++ b/pkg/sentry/kernel/task_sched.go
+@@ -374,6 +374,10 @@ func (t *Task) StateStatus() string {
+ 	case TaskGoroutineStopped:
+ 		sh := t.tg.signalLock()
+ 		defer sh.mu.Unlock()
++		// As Linux reports a frozen task, even in a group stop.
++		if t.cgroupFrozen.Load() {
++			return "D (disk sleep)"
++		}
+ 		switch t.stop.(type) {
+ 		case *groupStop:
+ 			return "T (stopped)"
+diff --git a/pkg/sentry/kernel/task_signals.go b/pkg/sentry/kernel/task_signals.go
+index 2e424cc..cc3afc1 100644
+--- a/pkg/sentry/kernel/task_signals.go
++++ b/pkg/sentry/kernel/task_signals.go
+@@ -734,8 +734,8 @@ func (t *Task) canReceiveSignalLocked(sig linux.Signal) bool {
+ 	//		signal mask when it transitions from TaskExitNone to TaskExitInitiated.
+ 	//	- No special case for SIGKILL: SIGKILL already interrupted all tasks in the
+ 	//		task group via applySignalSideEffects => killLocked.
+-	//	- Do not choose stopped tasks, which cannot handle signals.
+-	if t.stop != nil {
++	//	- Do not choose stopped or frozen tasks, which cannot handle signals.
++	if t.stop != nil || t.cgroupFrozen.Load() {
+ 		return false
+ 	}
+ 	//	- Do not choose tasks that have already been interrupted, as they may be
+diff --git a/pkg/sentry/kernel/task_start.go b/pkg/sentry/kernel/task_start.go
+index 64d3402..538616a 100644
+--- a/pkg/sentry/kernel/task_start.go
++++ b/pkg/sentry/kernel/task_start.go
+@@ -459,6 +459,8 @@ func (ts *TaskSet) newTask(ctx context.Context, cfg *TaskConfig) (*Task, error)
+ 	// As a final step, initialize the platform context. This may require
+ 	// other pieces to be initialized as the task is used the context.
+ 	t.p = cfg.Kernel.Platform.NewContext(t.AsyncContext())
++	// A task created in a freezing cgroup is frozen before it runs.
++	t.syncCgroupFreezerLocked()
+ 	t.mu.Unlock()
+ 	tg.signalHandlers.mu.Unlock()
+ 
+diff --git a/pkg/sentry/kernel/thread_group.go b/pkg/sentry/kernel/thread_group.go
+index 676adef..afefb5c 100644
+--- a/pkg/sentry/kernel/thread_group.go
++++ b/pkg/sentry/kernel/thread_group.go
+@@ -279,6 +279,15 @@ type ThreadGroup struct {
+ 	// TODO(gvisor.dev/issue/1967)
+ 	oomScoreAdj atomicbitops.Int32
+ 
++	// cgroupFreezerExempt is true once cgroup v1's freezer may no longer stop
++	// any task of the thread group: the group is being killed, by the OOM
++	// killer of patch 0009 or sandbox teardown, or is group-exiting. A task
++	// of the group inherits it, so one created while the group is being
++	// killed does not start frozen (as Linux's signal->oom_mm is shared by
++	// the threads a tsk_is_oom_victim() check spares). It is written with the
++	// signal mutex locked and may be read without it.
++	cgroupFreezerExempt atomicbitops.Bool
++
+ 	// isChildSubreaper and hasChildSubreaper correspond to Linux's
+ 	// signal_struct::is_child_subreaper and has_child_subreaper.
+ 	//
+diff --git a/runsc/container/trace_test.go b/runsc/container/trace_test.go
+index bab5ae7..0cb911b 100644
+--- a/runsc/container/trace_test.go
++++ b/runsc/container/trace_test.go
+@@ -413,16 +413,17 @@ func TestProcfsDump(t *testing.T) {
+ 	}
+ 
+ 	wantCgroup := []procfs.CgroupEntry{
+-		{HierarchyID: 7, Controllers: "pids", Path: "/"},
+-		{HierarchyID: 6, Controllers: "memory", Path: "/"},
+-		{HierarchyID: 5, Controllers: "job", Path: "/"},
++		{HierarchyID: 8, Controllers: "pids", Path: "/"},
++		{HierarchyID: 7, Controllers: "memory", Path: "/"},
++		{HierarchyID: 6, Controllers: "job", Path: "/"},
++		{HierarchyID: 5, Controllers: "freezer", Path: "/"},
+ 		{HierarchyID: 4, Controllers: "devices", Path: "/"},
+ 		{HierarchyID: 3, Controllers: "cpuset", Path: "/"},
+ 		{HierarchyID: 2, Controllers: "cpuacct", Path: "/"},
+ 		{HierarchyID: 1, Controllers: "cpu", Path: "/"},
+ 	}
+ 	if len(procfsDump[0].Cgroup) != len(wantCgroup) {
+-		t.Errorf("expected 7 cgroup controllers, got %+v", procfsDump[0].Cgroup)
++		t.Errorf("expected %d cgroup controllers, got %+v", len(wantCgroup), procfsDump[0].Cgroup)
+ 	} else {
+ 		for i, cgroup := range procfsDump[0].Cgroup {
+ 			if cgroup != wantCgroup[i] {
+diff --git a/test/syscalls/linux/BUILD b/test/syscalls/linux/BUILD
+index 099bbe3..f61c60c 100644
+--- a/test/syscalls/linux/BUILD
++++ b/test/syscalls/linux/BUILD
+@@ -5539,6 +5539,7 @@ cc_binary(
+         "//test/util:fs_util",
+         "//test/util:logging",
+         "//test/util:mount_util",
++        "//test/util:multiprocess_util",
+         "//test/util:posix_error",
+         "//test/util:save_util",
+         "//test/util:temp_path",
+diff --git a/test/syscalls/linux/cgroup.cc b/test/syscalls/linux/cgroup.cc
+index d42b058..7d5dfe8 100644
+--- a/test/syscalls/linux/cgroup.cc
++++ b/test/syscalls/linux/cgroup.cc
+@@ -16,17 +16,22 @@
+ // which isn't expected to work, or be safe on a general linux system.
+ 
+ #include <fcntl.h>
++#include <grp.h>
+ #include <limits.h>
+ #include <linux/capability.h>
+ #include <linux/magic.h>
+ #include <poll.h>
++#include <signal.h>
+ #include <sys/inotify.h>
++#include <sys/mman.h>
+ #include <sys/mount.h>
+ #include <sys/stat.h>
+ #include <sys/statfs.h>
+ #include <sys/syscall.h>
++#include <sys/wait.h>
+ #include <unistd.h>
+ 
++#include <atomic>
+ #include <cerrno>
+ #include <cstdint>
+ #include <cstdio>
+@@ -57,6 +62,7 @@
+ #include "test/util/linux_capability_util.h"
+ #include "test/util/logging.h"
+ #include "test/util/mount_util.h"
++#include "test/util/multiprocess_util.h"
+ #include "test/util/posix_error.h"
+ #include "test/util/save_util.h"
+ #include "test/util/temp_path.h"
+@@ -78,7 +84,7 @@ using ::testing::Key;
+ using ::testing::Not;
+ 
+ std::vector<std::string> known_controllers = {
+-    "cpu", "cpuset", "cpuacct", "devices", "job", "memory", "pids",
++    "cpu", "cpuset", "cpuacct", "devices", "freezer", "job", "memory", "pids",
+ };
+ 
+ bool CgroupsAvailable() {
+@@ -883,7 +889,7 @@ TEST(ProcCgroups, ProcCgroupsEntries) {
+   Cgroup mem = Cgroup::RootCgroup("/sys/fs/cgroup/memory");
+   absl::flat_hash_map<std::string, CgroupsEntry> entries =
+       ASSERT_NO_ERRNO_AND_VALUE(ProcCgroupsEntries());
+-  EXPECT_EQ(entries.size(), 7);
++  EXPECT_EQ(entries.size(), known_controllers.size());
+   ASSERT_TRUE(entries.contains("memory"));
+   CgroupsEntry mem_e = entries["memory"];
+   EXPECT_EQ(mem_e.subsys_name, "memory");
+@@ -897,7 +903,7 @@ TEST(ProcCgroups, ProcCgroupsEntries) {
+ 
+   Cgroup cpu = Cgroup::RootCgroup("/sys/fs/cgroup/cpu");
+   entries = ASSERT_NO_ERRNO_AND_VALUE(ProcCgroupsEntries());
+-  EXPECT_EQ(entries.size(), 7);
++  EXPECT_EQ(entries.size(), known_controllers.size());
+   EXPECT_TRUE(entries.contains("memory"));  // Still have memory entry.
+   ASSERT_TRUE(entries.contains("cpu"));
+   CgroupsEntry cpu_e = entries["cpu"];
+@@ -917,7 +923,7 @@ TEST(ProcPIDCgroup, Entries) {
+   absl::flat_hash_map<std::string, PIDCgroupEntry> entries =
+       ASSERT_NO_ERRNO_AND_VALUE(ProcPIDCgroupEntries(getpid()));
+   // All controllers are mounted.
+-  EXPECT_EQ(entries.size(), 7);
++  EXPECT_EQ(entries.size(), known_controllers.size());
+   PIDCgroupEntry mem_e = entries["memory"];
+   EXPECT_GE(mem_e.hierarchy, 1);
+   EXPECT_EQ(mem_e.controllers, "memory");
+@@ -927,7 +933,7 @@ TEST(ProcPIDCgroup, Entries) {
+   Cgroup c1 = Cgroup::RootCgroup("/sys/fs/cgroup/cpu");
+   entries = ASSERT_NO_ERRNO_AND_VALUE(ProcPIDCgroupEntries(getpid()));
+   // All controllers are mounted.
+-  EXPECT_EQ(entries.size(), 7);
++  EXPECT_EQ(entries.size(), known_controllers.size());
+   EXPECT_TRUE(entries.contains("memory"));  // Still have memory entry.
+   PIDCgroupEntry cpu_e = entries["cpu"];
+   EXPECT_GE(cpu_e.hierarchy, 1);
+@@ -1172,6 +1178,397 @@ TEST(Cgroup, ProcSelfCgroupNoV2LineIfUnmounted) {
+   EXPECT_FALSE(absl::StrContains(content, "0::"));
+ }
+ 
++// The freezer tests also run on Linux, given CAP_SYS_ADMIN in the initial
++// cgroup namespace, where they mount cgroup v1's freezer hierarchy.
++class CgroupFreezer : public ::testing::Test {
++ protected:
++  void SetUp() override {
++    SKIP_IF(!TEST_CHECK_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++    mounter_ = std::make_unique<Mounter>(
++        ASSERT_NO_ERRNO_AND_VALUE(TempPath::CreateDir()));
++    PosixErrorOr<Cgroup> top = mounter_->MountCgroupfs("freezer");
++    if (!top.ok() && !IsRunningOnGvisor()) {
++      GTEST_SKIP() << "cannot mount cgroup v1's freezer: " << top.error().ToString();
++    }
++    ASSERT_NO_ERRNO(top);
++    top_.emplace(top.ValueOrDie());
++  }
++
++  // Creates a child of c that is removed at the end of the test, after the
++  // children created after it. Linux may take a moment to let go of a thread
++  // that has just exited.
++  Cgroup Child(const Cgroup& c, absl::string_view name) {
++    Cgroup child = TEST_CHECK_NO_ERRNO_AND_VALUE(c.CreateChild(name));
++    std::string path = child.Path();
++    cleanups_.emplace_back([path] {
++      absl::Time deadline = absl::Now() + absl::Seconds(5);
++      while (rmdir(path.c_str()) < 0 && errno == EBUSY &&
++             absl::Now() < deadline) {
++        absl::SleepFor(absl::Milliseconds(10));
++      }
++    });
++    return child;
++  }
++
++  void TearDown() override {
++    while (!cleanups_.empty()) {
++      cleanups_.pop_back();
++    }
++  }
++
++  std::unique_ptr<Mounter> mounter_;
++  std::optional<Cgroup> top_;
++  std::vector<Cleanup> cleanups_;
++};
++
++// Waits until c's freezer.state reads want.
++PosixError WaitForFreezerState(const Cgroup& c, absl::string_view want) {
++  std::string got;
++  absl::Time deadline = absl::Now() + absl::Seconds(10);
++  while (absl::Now() < deadline) {
++    ASSIGN_OR_RETURN_ERRNO(got, c.ReadControlFile("freezer.state"));
++    if (got == absl::StrCat(want, "\n")) {
++      return NoError();
++    }
++    absl::SleepFor(absl::Milliseconds(5));
++  }
++  return PosixError(ETIMEDOUT, absl::StrCat("freezer.state is ", got));
++}
++
++// Counters is memory shared with child processes, which count in it.
++struct Counters {
++  std::atomic<uint64_t> busy;
++  std::atomic<uint64_t> sleeping;
++};
++
++Counters* MapCounters() {
++  void* p = mmap(nullptr, sizeof(Counters), PROT_READ | PROT_WRITE,
++                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++  TEST_CHECK(p != MAP_FAILED);
++  return new (p) Counters();
++}
++
++// Forks a process that counts in *counter until it is killed, busily or
++// sleeping between counts.
++pid_t ForkCounter(std::atomic<uint64_t>* counter, bool sleep) {
++  pid_t pid = fork();
++  if (pid == 0) {
++    while (true) {
++      counter->fetch_add(1);
++      if (sleep) {
++        usleep(1000);
++      }
++    }
++  }
++  TEST_CHECK(pid > 0);
++  return pid;
++}
++
++// Returns true if *counter does not move for 100 ms.
++bool Stopped(const std::atomic<uint64_t>* counter) {
++  uint64_t before = counter->load();
++  absl::SleepFor(absl::Milliseconds(100));
++  return counter->load() == before;
++}
++
++// Returns true if *counter moves within 10 s.
++bool Moves(const std::atomic<uint64_t>* counter) {
++  uint64_t before = counter->load();
++  absl::Time deadline = absl::Now() + absl::Seconds(10);
++  while (absl::Now() < deadline) {
++    if (counter->load() != before) {
++      return true;
++    }
++    absl::SleepFor(absl::Milliseconds(1));
++  }
++  return false;
++}
++
++char ProcState(pid_t pid) {
++  std::string stat = TEST_CHECK_NO_ERRNO_AND_VALUE(
++      GetContents(absl::StrCat("/proc/", pid, "/stat")));
++  size_t paren = stat.rfind(')');
++  TEST_CHECK(paren != std::string::npos && paren + 2 < stat.size());
++  return stat[paren + 2];
++}
++
++void KillAndReap(pid_t pid) {
++  kill(pid, SIGKILL);
++  int status;
++  waitpid(pid, &status, 0);
++}
++
++// Returns a cleanup that thaws c, which must precede reaping a process that c
++// may hold.
++Cleanup Thaw(const Cgroup& c) {
++  return Cleanup([c] { c.WriteControlFile("freezer.state", "THAWED"); });
++}
++
++TEST_F(CgroupFreezer, ControlFiles) {
++  // As in Linux, the root cgroup has no freezer files.
++  EXPECT_THAT(Exists(top_->Relpath("freezer.state")),
++              IsPosixErrorOkAndHolds(false));
++  EXPECT_THAT(Exists(top_->Relpath("freezer.self_freezing")),
++              IsPosixErrorOkAndHolds(false));
++  EXPECT_THAT(Exists(top_->Relpath("freezer.parent_freezing")),
++              IsPosixErrorOkAndHolds(false));
++
++  Cgroup a = Child(*top_, "ale_freezer_a");
++  Cgroup b = Child(a, "b");
++  EXPECT_THAT(a.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("THAWED\n"));
++  EXPECT_THAT(a.ReadControlFile("freezer.self_freezing"),
++              IsPosixErrorOkAndHolds("0\n"));
++  EXPECT_THAT(a.ReadControlFile("freezer.parent_freezing"),
++              IsPosixErrorOkAndHolds("0\n"));
++
++  // An empty cgroup is FROZEN at once, and so are its descendants, those
++  // created afterwards too.
++  ASSERT_NO_ERRNO(a.WriteControlFile("freezer.state", "FROZEN"));
++  EXPECT_THAT(a.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("FROZEN\n"));
++  EXPECT_THAT(a.ReadControlFile("freezer.self_freezing"),
++              IsPosixErrorOkAndHolds("1\n"));
++  EXPECT_THAT(a.ReadControlFile("freezer.parent_freezing"),
++              IsPosixErrorOkAndHolds("0\n"));
++  EXPECT_THAT(b.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("FROZEN\n"));
++  EXPECT_THAT(b.ReadControlFile("freezer.self_freezing"),
++              IsPosixErrorOkAndHolds("0\n"));
++  EXPECT_THAT(b.ReadControlFile("freezer.parent_freezing"),
++              IsPosixErrorOkAndHolds("1\n"));
++  Cgroup c = Child(b, "c");
++  EXPECT_THAT(c.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("FROZEN\n"));
++  EXPECT_THAT(c.ReadControlFile("freezer.parent_freezing"),
++              IsPosixErrorOkAndHolds("1\n"));
++
++  // Thawing a descendant of a freezing cgroup changes nothing.
++  ASSERT_NO_ERRNO(b.WriteControlFile("freezer.state", "THAWED"));
++  EXPECT_THAT(b.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("FROZEN\n"));
++
++  // The value is stripped of white space; nothing else is taken.
++  ASSERT_NO_ERRNO(b.WriteControlFile("freezer.state", " FROZEN \n"));
++  EXPECT_THAT(b.ReadControlFile("freezer.self_freezing"),
++              IsPosixErrorOkAndHolds("1\n"));
++  EXPECT_THAT(b.WriteControlFile("freezer.state", "FREEZING"),
++              PosixErrorIs(EINVAL, _));
++  EXPECT_THAT(b.WriteControlFile("freezer.state", "frozen"),
++              PosixErrorIs(EINVAL, _));
++  EXPECT_THAT(b.WriteControlFile("freezer.state", "1"),
++              PosixErrorIs(EINVAL, _));
++
++  // b stays frozen of its own when a thaws.
++  ASSERT_NO_ERRNO(a.WriteControlFile("freezer.state", "THAWED"));
++  EXPECT_THAT(a.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("THAWED\n"));
++  EXPECT_THAT(b.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("FROZEN\n"));
++  EXPECT_THAT(b.ReadControlFile("freezer.parent_freezing"),
++              IsPosixErrorOkAndHolds("0\n"));
++  EXPECT_THAT(c.ReadControlFile("freezer.parent_freezing"),
++              IsPosixErrorOkAndHolds("1\n"));
++  ASSERT_NO_ERRNO(b.WriteControlFile("freezer.state", "THAWED"));
++  EXPECT_THAT(c.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("THAWED\n"));
++}
++
++TEST_F(CgroupFreezer, FreezesDescendants) {
++  const DisableSave ds;  // Timing-sensitive.
++  Cgroup a = Child(*top_, "ale_freezer_a");
++  Cgroup b = Child(a, "b");
++  Counters* n = MapCounters();
++  pid_t busy = ForkCounter(&n->busy, false);
++  auto kill_busy = Cleanup([busy] { KillAndReap(busy); });
++  pid_t sleeping = ForkCounter(&n->sleeping, true);
++  auto kill_sleeping = Cleanup([sleeping] { KillAndReap(sleeping); });
++  auto thaw = Thaw(a);
++  ASSERT_NO_ERRNO(a.Enter(busy));
++  ASSERT_NO_ERRNO(b.Enter(sleeping));
++  ASSERT_TRUE(Moves(&n->busy));
++  ASSERT_TRUE(Moves(&n->sleeping));
++
++  ASSERT_NO_ERRNO(a.WriteControlFile("freezer.state", "FROZEN"));
++  ASSERT_NO_ERRNO(WaitForFreezerState(a, "FROZEN"));
++  EXPECT_THAT(b.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("FROZEN\n"));
++  EXPECT_TRUE(Stopped(&n->busy));
++  EXPECT_TRUE(Stopped(&n->sleeping));
++  // A frozen task is not stopped as SIGSTOP stops it: wait does not report
++  // it, and /proc shows it in uninterruptible sleep.
++  int status;
++  EXPECT_THAT(waitpid(busy, &status, WNOHANG | WUNTRACED),
++              SyscallSucceedsWithValue(0));
++  EXPECT_EQ(ProcState(busy), 'D');
++  EXPECT_EQ(ProcState(sleeping), 'D');
++
++  ASSERT_NO_ERRNO(a.WriteControlFile("freezer.state", "THAWED"));
++  EXPECT_THAT(a.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("THAWED\n"));
++  EXPECT_TRUE(Moves(&n->busy));
++  EXPECT_TRUE(Moves(&n->sleeping));
++}
++
++TEST_F(CgroupFreezer, KilledTaskExitsWhenThawed) {
++  const DisableSave ds;  // Timing-sensitive.
++  Cgroup a = Child(*top_, "ale_freezer_a");
++  Counters* n = MapCounters();
++  pid_t pid = ForkCounter(&n->busy, false);
++  auto kill_pid = Cleanup([pid] { KillAndReap(pid); });
++  auto thaw = Thaw(a);
++  ASSERT_NO_ERRNO(a.Enter(pid));
++  ASSERT_NO_ERRNO(a.WriteControlFile("freezer.state", "FROZEN"));
++  ASSERT_NO_ERRNO(WaitForFreezerState(a, "FROZEN"));
++
++  // As in Linux, a frozen task that is sent SIGKILL exits once it is thawed.
++  ASSERT_THAT(kill(pid, SIGKILL), SyscallSucceeds());
++  absl::SleepFor(absl::Milliseconds(200));
++  int status;
++  EXPECT_THAT(waitpid(pid, &status, WNOHANG), SyscallSucceedsWithValue(0));
++  EXPECT_THAT(a.ReadControlFile("freezer.state"),
++              IsPosixErrorOkAndHolds("FROZEN\n"));
++
++  ASSERT_NO_ERRNO(a.WriteControlFile("freezer.state", "THAWED"));
++  ASSERT_THAT(waitpid(pid, &status, 0), SyscallSucceedsWithValue(pid));
++  kill_pid.Release();
++  EXPECT_TRUE(WIFSIGNALED(status));
++  EXPECT_EQ(WTERMSIG(status), SIGKILL);
++}
++
++TEST_F(CgroupFreezer, MigrationFreezesAndThaws) {
++  const DisableSave ds;  // Timing-sensitive.
++  Cgroup thawed = Child(*top_, "ale_freezer_thawed");
++  Cgroup frozen = Child(*top_, "ale_freezer_frozen");
++  ASSERT_NO_ERRNO(frozen.WriteControlFile("freezer.state", "FROZEN"));
++  Counters* n = MapCounters();
++  pid_t pid = ForkCounter(&n->busy, false);
++  auto kill_pid = Cleanup([pid] { KillAndReap(pid); });
++  auto thaw = Thaw(frozen);
++  ASSERT_NO_ERRNO(thawed.Enter(pid));
++  ASSERT_TRUE(Moves(&n->busy));
++
++  ASSERT_NO_ERRNO(frozen.Enter(pid));
++  ASSERT_NO_ERRNO(WaitForFreezerState(frozen, "FROZEN"));
++  EXPECT_TRUE(Stopped(&n->busy));
++
++  ASSERT_NO_ERRNO(thawed.Enter(pid));
++  EXPECT_TRUE(Moves(&n->busy));
++}
++
++TEST_F(CgroupFreezer, ExitWhileFreezeToggles) {
++  // A task that is exiting must not be left parked by a freeze raised while it
++  // runs its exit path: once it leaves its cgroups, THAWED cannot reach it and
++  // SIGKILL does not end a freeze, so it would never be reaped. Churn
++  // short-lived children through a cgroup while toggling its freezer, and make
++  // sure every child is reaped once the cgroup is thawed.
++  const DisableSave ds;  // Timing-sensitive.
++  Cgroup a = Child(*top_, "ale_freezer_exit");
++  for (int i = 0; i < 400; ++i) {
++    pid_t pid = fork();
++    if (pid == 0) {
++      _exit(0);
++    }
++    ASSERT_GT(pid, 0);
++    // Place the child in the cgroup; it may already have exited.
++    a.Enter(pid).IgnoreError();
++    // Toggle the freezer around the child's exit.
++    a.WriteControlFile("freezer.state", "FROZEN").IgnoreError();
++    a.WriteControlFile("freezer.state", "THAWED").IgnoreError();
++    // The child must be reaped; poll rather than block forever on a bug.
++    int status = 0;
++    bool reaped = false;
++    absl::Time deadline = absl::Now() + absl::Seconds(20);
++    while (absl::Now() < deadline) {
++      pid_t w = waitpid(pid, &status, WNOHANG);
++      if (w == pid) {
++        reaped = true;
++        break;
++      }
++      ASSERT_THAT(w, SyscallSucceeds());
++      // In case the loop lost a race, leave the cgroup thawed.
++      a.WriteControlFile("freezer.state", "THAWED").IgnoreError();
++      absl::SleepFor(absl::Milliseconds(1));
++    }
++    ASSERT_TRUE(reaped) << "child " << pid << " not reaped at iteration " << i;
++  }
++}
++
++TEST_F(CgroupFreezer, MigrationChecksCredentials) {
++  // Writing a process to cgroup.procs or tasks moves it into the cgroup, which
++  // can freeze it; as Linux's __cgroup1_procs_write(), a writer whose effective
++  // UID is not the global root and does not match the target's real or saved
++  // UID is refused (EACCES), so a user with a delegated freezer subtree cannot
++  // freeze another user's process.
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SETUID)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SETGID)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_CHOWN)));
++  Cgroup a = Child(*top_, "ale_freezer_creds");
++  const std::string procs = a.Relpath("cgroup.procs");
++  const std::string tasks = a.Relpath("tasks");
++  const pid_t root_pid = getpid();  // This process runs as root.
++  // Delegate the subtree to uid 65534, so it may open the files; the write is
++  // then refused by the credential check, not by file permissions.
++  ASSERT_THAT(chown(a.Path().c_str(), 65534, 65534), SyscallSucceeds());
++  ASSERT_THAT(chown(procs.c_str(), 65534, 65534), SyscallSucceeds());
++  ASSERT_THAT(chown(tasks.c_str(), 65534, 65534), SyscallSucceeds());
++
++  EXPECT_THAT(InForkedProcess([&] {
++                TEST_PCHECK(setgroups(0, nullptr) == 0);
++                TEST_PCHECK(setgid(65534) == 0);
++                TEST_PCHECK(setuid(65534) == 0);
++                // Moving a root-owned process in is refused.
++                int fd = open(procs.c_str(), O_WRONLY);
++                TEST_PCHECK(fd >= 0);
++                std::string s = absl::StrCat(root_pid);
++                TEST_CHECK(write(fd, s.data(), s.size()) == -1);
++                TEST_CHECK(errno == EACCES);
++                close(fd);
++                fd = open(tasks.c_str(), O_WRONLY);
++                TEST_PCHECK(fd >= 0);
++                TEST_CHECK(write(fd, s.data(), s.size()) == -1);
++                TEST_CHECK(errno == EACCES);
++                close(fd);
++                // Moving itself in is allowed (its own UID).
++                fd = open(procs.c_str(), O_WRONLY);
++                TEST_PCHECK(fd >= 0);
++                std::string self = absl::StrCat(getpid());
++                TEST_CHECK(write(fd, self.data(), self.size()) ==
++                           static_cast<ssize_t>(self.size()));
++                close(fd);
++              }),
++              IsPosixErrorOkAndHolds(0));
++
++  // Root is never refused; the cgroup still holds only root's process.
++  EXPECT_NO_ERRNO(a.WriteControlFile("freezer.state", "THAWED"));
++}
++
++TEST_F(CgroupFreezer, FreezesOneThread) {
++  const DisableSave ds;  // Timing-sensitive.
++  Cgroup a = Child(*top_, "ale_freezer_a");
++  std::atomic<uint64_t> counter(0);
++  std::atomic<pid_t> tid(0);
++  std::atomic<bool> done(false);
++  ScopedThread thread([&] {
++    tid.store(syscall(SYS_gettid));
++    while (!done.load()) {
++      counter.fetch_add(1);
++    }
++  });
++  auto stop = Cleanup([&] { done.store(true); });
++  while (tid.load() == 0) {
++    absl::SleepFor(absl::Milliseconds(1));
++  }
++  auto thaw = Thaw(a);
++  ASSERT_NO_ERRNO(a.EnterThread(tid.load()));
++  ASSERT_NO_ERRNO(a.WriteControlFile("freezer.state", "FROZEN"));
++  // The other threads of the process, this one too, go on.
++  ASSERT_NO_ERRNO(WaitForFreezerState(a, "FROZEN"));
++  EXPECT_TRUE(Stopped(&counter));
++  ASSERT_NO_ERRNO(a.WriteControlFile("freezer.state", "THAWED"));
++  EXPECT_TRUE(Moves(&counter));
++}
++
+ }  // namespace
+ }  // namespace testing
+ }  // namespace gvisor

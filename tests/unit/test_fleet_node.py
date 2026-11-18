@@ -295,9 +295,9 @@ class TestDeclaration:
         assert ContainerFeature.RAW_SOCKETS in gvisor.container_features
         assert ContainerFeature.NESTED_CONTAINERS in nested.container_features
         assert runc.container_features == {ContainerFeature.RAW_SOCKETS}
-        # Each holds a Sandbox to its storage_mb, which placement matches by the rule a Run's
-        # selection uses, but for a container engine's storage on volumes.
-        assert [p.storage_limit for p in (runc, kata, gvisor, nested)] == [True, True, True, False]
+        # Each holds a Sandbox to its storage_mb, a container engine's volumes included, which
+        # placement matches by the rule a Run's selection uses.
+        assert all(p.storage_limit for p in (runc, kata, gvisor, nested))
         # Only a leaf that attaches GPUs offers the Node's, by their models and memory, and
         # says how a Sandbox that shares one is held to its share.
         # 81559 MiB less the driver's 470 and the Node's margin of 2048.
