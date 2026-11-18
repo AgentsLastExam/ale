@@ -50,10 +50,19 @@ class Watch:
     other Sandbox's measurement.
     """
 
-    def __init__(self, container: str, limit_mb: int, act: Callable[[int], Awaitable[None]]):
+    def __init__(
+        self,
+        container: str,
+        limit_mb: int,
+        act: Callable[[int], Awaitable[None]],
+        *,
+        base: int = 0,
+    ):
         self.container = container
         #: What the Sandbox may write over its image, its Task's ``storage_mb``, in MiB.
         self.limit_mb = limit_mb
+        #: What the snapshot it booted from holds over that image, in bytes, which counts too.
+        self.base = base
         self._act = act
         self._task = asyncio.get_running_loop().create_task(self._poll())
 
@@ -83,6 +92,6 @@ class Watch:
             failing = False
             if size is None:
                 return
-            if size > self.limit_mb << 20:
-                await self._act(size)
+            if size + self.base > self.limit_mb << 20:
+                await self._act(size + self.base)
                 return

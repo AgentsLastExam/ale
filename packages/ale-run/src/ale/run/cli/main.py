@@ -208,7 +208,7 @@ def reverify(
     reference: Annotated[str, typer.Argument(help="Task or collection filesystem path")],
     source_run: Annotated[
         Path,
-        typer.Argument(help="Prior run or episode directory with a retained solver"),
+        typer.Argument(help="Prior run or episode directory with a kept or snapshotted solver"),
     ],
     config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
     overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
@@ -218,7 +218,7 @@ def reverify(
         typer.Option("--episode-retries", min=0, help="Extra attempts for incomplete episodes"),
     ] = None,
 ) -> None:
-    """Re-run separate verification against retained solver output."""
+    """Re-run current verification against retained solvers without their agent."""
     flags = [*(overrides or [])]
     if episode_retries is not None:
         flags.append(f"episode_retries={episode_retries}")

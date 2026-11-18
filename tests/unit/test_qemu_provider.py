@@ -37,6 +37,7 @@ from ale.core.sandbox import (
     ResolvedImage,
     ResourceAllocation,
     SandboxRequest,
+    SandboxRole,
 )
 from ale.core.taskspec import (
     ImageKind,
@@ -1122,21 +1123,30 @@ def test_windows_health_must_declare_its_agent_identity() -> None:
         )
 
 
+@pytest.mark.parametrize("role", [SandboxRole.SOLVER, SandboxRole.VERIFIER])
 @pytest.mark.parametrize("sudo", [False, True])
 @pytest.mark.parametrize(
     "framework_admin,agent_admin", [(True, False), (True, True), (False, False)]
 )
 async def test_windows_privileges_must_match_framework_and_agent_roles(
-    sudo: bool, framework_admin: bool, agent_admin: bool
+    sudo: bool, framework_admin: bool, agent_admin: bool, role: SandboxRole
 ) -> None:
+    """The framework must be Administrator, and an agent's account exactly as elevated as
+    asked; a verifier runs no agent, so its account is left as its disk has it."""
+    asked: list[str | None] = []
+
     class Client:
         async def exec(self, argv, *, run_as, timeout_sec):
+            asked.append(run_as)
             elevated = framework_admin if run_as is None else agent_admin
             return 0, f"{int(elevated)}\r\n", "", False
 
-    check = QemuProvider()._verify_windows_privileges(Client(), "user", sudo)
-    if framework_admin and agent_admin == sudo:
+    sandbox = request(os=OperatingSystem.WINDOWS, role=role, sudo=sudo)
+    check = QemuProvider()._verify_windows_privileges(Client(), "user", sandbox)
+    agent = role is not SandboxRole.VERIFIER
+    if framework_admin and (not agent or agent_admin == sudo):
         await check
+        assert asked == ([None, "user"] if agent else [None])
     else:
         with pytest.raises(ProviderCapabilityError, match=r"Windows .* token"):
             await check

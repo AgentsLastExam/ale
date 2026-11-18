@@ -125,6 +125,7 @@ class _Provider:
         )
 
     refusals = Provider.refusals
+    refusals_with_verifier = Provider.refusals_with_verifier
     unserved = Provider.unserved
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:

@@ -72,22 +72,26 @@ it took, the snapshots it keeps, and its free disk. A Node silent for 30 seconds
 ## Placement
 
 A Run asks for each Sandbox with a **demand**: kind, operating system, architecture,
-network mode, resources with their container features, the image's key, the Run's
-framework identity, the episode's retention, and any snapshot it boots from. A Sandbox runs
-the framework of the engine driving it, so only a Node with the same framework identity
-serves it. Every Node prepares the images it serves itself, and Nodes never copy images
-from one another; an image's **key** is the identity of what it is prepared from, which the
-Run knows before any Node prepares it, and a Node keeps each image it prepared under its
-key.
+network mode, resources with their container features, the image's key, the Run's framework
+identity, the episode's retention, any snapshot it boots from, and, for the solver of a
+snapshot verifier, the verifier's resources. A Sandbox runs the framework of the engine
+driving it, so only a Node with the same framework identity serves it. Every Node prepares
+the images it serves itself, and Nodes never copy images from one another; an image's
+**key** is the identity of what it is prepared from, which the Run knows before any Node
+prepares it, and a Node keeps each image it prepared under its key.
 
 1. **Filter.** A Node is a candidate when it is online and not draining, has a profile that
    serves the demand, has not refused this Sandbox, and can be reached by its Run. Profiles
    serve demands by the one rule a Run uses to choose a Provider, and placement takes the
    Node's first that serves it, so a Node prefers its leaves in its own order. A boot from a
-   snapshot is served only by the Node that keeps the snapshot. A demand that no registered
-   Node could serve even when idle fails at once, naming what the closest profile misses in
-   the words of a Run's own selection, as does a boot from a snapshot whose Node refused it
-   or cannot be reached by its Run.
+   snapshot is served only by the Node that keeps the snapshot, with the leaf that saved it,
+   even when another of its Node's leaves would serve it first. The solver of a snapshot
+   verifier needs one profile that serves both and a Node whose whole capacity holds the
+   verifier, since the verifier boots there. A demand that no registered Node could serve
+   even when idle fails at once, naming what the closest profile misses in the words of a
+   Run's own selection, as does a boot from a snapshot whose leaf does not serve it, whose
+   Node could never hold it or its snapshot verifier, or whose Node refused it or cannot be
+   reached by its Run.
 2. **Score** each candidate by the estimated time to a ready Sandbox there, and take the
    lowest; ties go to a fixed per-image order of Nodes (rendezvous hashing), which keeps each
    image on the same few Nodes.
@@ -106,7 +110,7 @@ key.
      left, from their measured lifetimes; one that has outlived all of them, a retained one,
      or one with none measured is not expected to end. One not yet ready first has the rest
      of its image's preparation and its create time to go. Solvers and verifiers are
-     measured apart, as a separate verifier that reuses the solver's image ends far sooner.
+     measured apart, as a verifier that reuses the solver's image ends far sooner.
      The requests already waiting for that Node take its room first. A full Node that lacks
      the image is never waited for.
 
@@ -187,10 +191,11 @@ Sandbox objects a local Run would, so every guarantee of the
 Run's own machine; the agent only carries the calls.
 
 - **Creation.** The agent creates a Sandbox only on a grant that names this Node and whose
-  demand matches the request's kind, system, network mode, resources and snapshot, only from
-  the image this Node prepared for the grant's image key, and only when its own count of what
-  it holds has room. A refusal names the Node's reason, and the Run asks the control plane
-  for another Node. Asking again for the same Sandbox joins the creation under way.
+  demand matches the request's kind, system, network mode, resources, snapshot and snapshot
+  verifier, only from the image this Node prepared for the grant's image key, and only when
+  its own count of what it holds has room. A refusal names the Node's reason, and the Run
+  asks the control plane for another Node. Asking again for the same Sandbox joins the
+  creation under way.
 - **The Sandbox API** mirrors the Sandbox contract. A command streams its output while it
   runs and is cancelled in the Sandbox when its caller goes away. A Run's directory arrives
   as a tar stream that keeps its links, and the Node's Sandbox uploads it, so upload

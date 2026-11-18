@@ -43,7 +43,12 @@ from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
 from ale.run.assets import observe_task_assets
-from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
+from ale.run.episode import (
+    EpisodeResult,
+    check_retention,
+    run_episode,
+    run_episode_with_retries,
+)
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import Limits, SessionRegistry
@@ -64,7 +69,12 @@ from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
-from ale.run.protocol.episode_protocol import EpisodeProtocol, Resume, ReverificationProtocol
+from ale.run.protocol.episode_protocol import (
+    EpisodeProtocol,
+    Resume,
+    ReverificationProtocol,
+    SolverSnapshot,
+)
 from ale.run.provenance import (
     ProvenanceInputs,
     agent_provenance,
@@ -536,10 +546,16 @@ async def _reverify(
                 unclassified[str(task.spec.name)] = outcome
             elif isinstance(outcome, BaseException):
                 raise outcome
-        # Each solver is the one its source episode kept, on the Provider that kept it.
+        # Each solver is the one its source episode kept, on the Provider that kept it, and
+        # so is a snapshot verifier's, which is selected with its source below.
         _note(
             await providers.select(
-                [task for task in unique if str(task.spec.name) not in unclassified],
+                [
+                    task
+                    for task in unique
+                    if str(task.spec.name) not in unclassified
+                    and task.spec.verify.environment_mode is not VerificationMode.SNAPSHOT
+                ],
                 solvers=False,
             )
         )
@@ -553,7 +569,9 @@ async def _reverify(
         run_dir = runs_dir / f"reverify-{uuid.uuid4().hex[:8]}"
         failures = 0
         planned: list[tuple[ManifestTask, Callable[[], Awaitable[EpisodeResult]]]] = []
-        for source_dir, source_result, source_lock, handle in sources:
+        for source_dir, source_result, source_lock, retained in sources:
+            handle = retained.handle
+            assert handle is not None
             task = by_name.get(str(source_lock.task.name))
             if task is None:
                 typer.echo(
@@ -603,28 +621,43 @@ async def _reverify(
                 typer.echo(f"{task.spec.name}: source RunLock has no solver allocation", err=True)
                 failures += 1
                 continue
-            # Reverification reuses an existing solver, not a freshly rebuilt image.
-            # Each source episode owns its exact prepared image and immutable provenance.
+            snapshot = task.spec.verify.environment_mode is VerificationMode.SNAPSHOT
+            if snapshot != (retained.outcome == "snapshotted"):
+                typer.echo(
+                    f"{task.spec.name}: "
+                    + (
+                        "its verifier boots from a snapshot of the source episode's solver, and "
+                        f"episode {source_result.episode_id} kept its solver running instead; "
+                        "run the solver again with sandbox_retention.solver = 'snapshot'"
+                        if snapshot
+                        else f"episode {source_result.episode_id} kept only a snapshot of its "
+                        "solver, and its verification needs the solver running; run the solver "
+                        "again with sandbox_retention.solver = 'keep'"
+                    ),
+                    err=True,
+                )
+                failures += 1
+                continue
+            if "verifier" in retained.roles and (
+                task.spec.verify.environment_mode is not VerificationMode.SHARED
+            ):
+                typer.echo(
+                    f"{task.spec.name}: episode {source_result.episode_id} kept the Sandbox its "
+                    "shared verifier ran in, whose disk holds what that verifier changed, and "
+                    f"{task.spec.verify.environment_mode} verification needs the solver as its "
+                    "agent left it; run the solver again with this Task",
+                    err=True,
+                )
+                failures += 1
+                continue
             task = copy.copy(task)
             task.provider = source_lock.resources.effective.provider
-            image = source_lock.image
-            task.prepared_image = PreparedTaskImage(
-                kind=image.declaration.kind,
-                source="solver-local" if image.source == "local" else "external-ref",
-                input_identity=image.input_identity,
-                image_source_identity=image.image_source_identity,
-                runtime_ref=(
-                    image.prepared_identity
-                    if image.declaration.kind is ImageKind.CONTAINER
-                    else image.runtime_ref
-                ),
-                prepared_identity=image.prepared_identity,
-                base_materials=image.base_materials,
-                resolved_reference=image.resolved_reference,
-                builder_identity=image.builder_identity,
-            )
             try:
                 task.asset_observation = observed_assets
+                task.prepared_image = await _reused_solver_image(task, source_lock, providers)
+                if snapshot:
+                    # Booted from the snapshot, which only the Provider that saved it holds.
+                    _note(await providers.select([task], solvers=False))
                 prepared = await prepare_verifier_image_result(
                     task, providers.get(task.verifier_provider or task.provider)
                 )
@@ -667,8 +700,19 @@ async def _reverify(
                 source_dir: Path = source_dir,
                 provenance: ProvenanceInputs = provenance,
                 episode_id: str = episode_id,
+                snapshot: bool = snapshot,
             ) -> EpisodeResult:
-                solver = await _attach_retained(handle, request, source_lock, providers)
+                solver: Sandbox | SolverSnapshot
+                if snapshot:
+                    assert source_lock.resources is not None
+                    solver = SolverSnapshot(
+                        handle=handle,
+                        episode_id=request.episode_id,
+                        resolved_image=_recorded_image(source_lock),
+                        allocation=source_lock.resources.effective,
+                    )
+                else:
+                    solver = await _attach_retained(handle, request, source_lock, providers)
                 return await run_episode(
                     task,
                     ReverificationProtocol(
@@ -698,12 +742,12 @@ async def _reverify(
             typer.echo(str(error), err=True)
             return EXIT_BAD_REFERENCE
         for task, execute in planned:
-            # Shared verification mutates its source; only separate verification has a
-            # fresh verifier Sandbox on every attempt.
+            # Shared verification mutates its source; a verifier of its own is a fresh
+            # Sandbox on every attempt.
             retries = (
-                settings.episode_retries
-                if task.spec.verify.environment_mode is VerificationMode.SEPARATE
-                else 0
+                0
+                if task.spec.verify.environment_mode is VerificationMode.SHARED
+                else settings.episode_retries
             )
             try:
                 result = await run_episode_with_retries(
@@ -724,9 +768,42 @@ async def _reverify(
             await gateway.stop()
 
 
+async def _reused_solver_image(
+    task: ManifestTask, lock: RunLock, providers: ProviderRegistry
+) -> PreparedTaskImage:
+    """The image of the solver ``lock`` recorded, which reverification reuses rather than
+    builds again: each source episode owns its exact prepared image and provenance.
+
+    The Fleet prepares images on its Nodes, which keep them under the key the Run gave
+    them, so a solver of the Fleet's is named by that key again: its Node still holds the
+    image, and the control plane checks the key as it hands the Sandbox over or boots its
+    snapshot.
+    """
+    if task.provider == FleetProvider.name:
+        return (await prepare_task_image_result(task, providers.get(task.provider))).image
+    image = lock.image
+    return PreparedTaskImage(
+        kind=image.declaration.kind,
+        source="solver-local" if image.source == "local" else "external-ref",
+        input_identity=image.input_identity,
+        image_source_identity=image.image_source_identity,
+        runtime_ref=(
+            image.prepared_identity
+            if image.declaration.kind is ImageKind.CONTAINER
+            else image.runtime_ref
+        ),
+        prepared_identity=image.prepared_identity,
+        base_materials=image.base_materials,
+        resolved_reference=image.resolved_reference,
+        builder_identity=image.builder_identity,
+    )
+
+
 def _retained_source_episodes(
     source_run: Path,
-) -> tuple[tuple[Path, ResultRecord, RunLock, str], ...]:
+) -> tuple[tuple[Path, ResultRecord, RunLock, SandboxOutcome], ...]:
+    """The episodes under ``source_run`` that kept their solver, running or as a snapshot,
+    each with that outcome."""
     source_run = source_run.expanduser().resolve()
     result_paths = (
         (source_run / "result.json",)
@@ -748,15 +825,15 @@ def _retained_source_episodes(
                 sandbox
                 for sandbox in result.sandboxes
                 if "solver" in sandbox.roles
-                and sandbox.outcome == "retained"
+                and sandbox.outcome in {"retained", "snapshotted"}
                 and sandbox.handle is not None
             ),
             None,
         )
         if retained is not None:
-            episodes.append((result_path.parent, result, lock, retained.handle))
+            episodes.append((result_path.parent, result, lock, retained))
     if not episodes:
-        raise ValueError(f"no retained solver episode found under {source_run}")
+        raise ValueError(f"no episode under {source_run} kept its solver or a snapshot of it")
     return tuple(episodes)
 
 
@@ -818,6 +895,16 @@ def _continued(episode_dir: Path, tasks: list[ManifestTask], settings: RunConfig
     if result.continuation is None or retained is None or retained.handle is None:
         raise TaskDefinitionError(
             f"episode {result.episode_id} left no retained solver and native session"
+        )
+    if (
+        retained.outcome == "retained"
+        and tasks[0].spec.verify.environment_mode is VerificationMode.SNAPSHOT
+    ):
+        # Its verifier would boot from a snapshot of it, whose save stops the kept solver.
+        raise TaskDefinitionError(
+            f"episode {result.episode_id} kept its solver running, which snapshot "
+            "verification would save and destroy; continue from a snapshot of it instead, "
+            "kept with sandbox_retention.solver = 'snapshot'"
         )
     return _Continued(result, lock, trajectory, retained, retained.handle)
 
@@ -1188,8 +1275,11 @@ async def _prepare_images(
     prepare each image once for each Provider that runs it.
 
     A ``continued`` solver that boots from a snapshot needs one, and must be selected to the
-    Provider that kept it, which alone holds its Sandbox or snapshot.
+    Provider that kept it, which alone holds its Sandbox or snapshot. A retention that cannot
+    hold for a Task is refused first.
     """
+    for task in tasks:
+        check_retention(task.spec, providers.settings.sandbox_retention)
     await resolve_image_kinds(tasks)
     _note(
         await providers.select(
@@ -1376,6 +1466,12 @@ async def _plan_on_fleet(
                 task.spec.network,
                 task.spec.resources,
                 settings.episodes,
+                verifier=(
+                    task.spec.verify.resources.as_resources()
+                    if task.spec.verify.environment_mode is VerificationMode.SNAPSHOT
+                    and task.spec.verify.resources is not None
+                    else None
+                ),
             )
         )
     fleet = providers.fleet

@@ -529,3 +529,62 @@ def test_verifier_dockerfile_requires_separate_verification(tmp_path: Path) -> N
     (task / "tests/Dockerfile").write_text("FROM scratch\n")
     with pytest.raises(TaskDefinitionError, match="requires separate"):
         load_tasks(task)
+    edit(task, {"verifier": {"environment_mode": "snapshot"}})
+    with pytest.raises(TaskDefinitionError, match="requires separate"):
+        load_tasks(task)
+
+
+def test_a_snapshot_verifier_is_named_and_sized_but_never_given_an_image(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    edit(task, {"environment": {"cpus": 2, "memory_mb": 2048}})
+    # Harbor's rule stands: a verifier environment alone makes a separate verifier.
+    edit(task, {"verifier": {"environment": {"cpus": 1}}})
+    assert load_tasks(task)[0].spec.verify.environment_mode is VerificationMode.SEPARATE
+
+    # Without the table, it gets the solver's size, as a separate one does.
+    edit(task, {"verifier": {"environment_mode": "snapshot", "environment": None}})
+    verify = load_tasks(task)[0].spec.verify
+    assert verify.environment_mode is VerificationMode.SNAPSHOT
+    assert verify.image is None
+    assert verify.resources is not None
+    resources = verify.resources.as_resources()
+    assert (resources.cpus, resources.memory_mb) == (2, 2048)
+
+    sized = {
+        "cpus": 8,
+        "memory_mb": 65536,
+        "storage_mb": 204800,
+        "gpus": 8,
+        "gpu_types": ["H100"],
+        "gpu_memory_mb": 40960,
+        "container_features": ["perf"],
+        "env": {"WORLD": "8"},
+    }
+    edit(task, {"verifier": {"environment": sized}})
+    loaded = load_tasks(task)[0]
+    verify = loaded.spec.verify
+    assert verify.image is None and loaded.verifier_image_source_digest is None
+    assert verify.resources is not None
+    assert verify.resources.as_resources().model_dump(exclude={"sudo"}) == {
+        **{key: value for key, value in sized.items() if key != "env"},
+        "gpu_types": ("H100",),
+        "container_features": (ContainerFeature.PERF,),
+    }
+    assert loaded.spec.variables.verifier_environment == {"WORLD": "8"}
+
+
+@pytest.mark.parametrize(
+    ("layer", "message"),
+    [
+        ({"image": "example/verifier:v1"}, "cannot set image"),
+        ({"build_timeout_sec": 60}, "cannot set build_timeout_sec"),
+    ],
+)
+def test_a_snapshot_verifier_refuses_what_only_an_image_takes(
+    tmp_path: Path, layer: dict[str, object], message: str
+) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    edit(task, {"verifier": {"environment_mode": "snapshot", "environment": layer}})
+    with pytest.raises(TaskDefinitionError, match=message):
+        load_tasks(task)
+    assert any(message in finding.message for finding in lint_repository(task))

@@ -9,6 +9,8 @@ Read [`README.md`](README.md) and `docs/specs/fleet.md` before changing the Flee
 - The engine never imports `ale.fleet`. What a Run needs from the Fleet goes through the
   FleetProvider in `ale-run` and the protocol in `ale.core.fleet`.
 - A protocol change raises `PROTOCOL_VERSION` when an older peer would misread it.
+- Problems peculiar to the Fleet as a Provider, with their decisions, are in
+  [`providers/fleet/AGENTS.md`](../ale-run/src/ale/run/providers/fleet/AGENTS.md).
 
 Run `just lint && just test`, and `tests/conformance/test_provider_fleet.py` on a machine
 with Docker for any change to the node agent, the FleetProvider or the protocol.

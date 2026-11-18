@@ -881,8 +881,7 @@ def _starts(monkeypatch: pytest.MonkeyPatch, runtime: str) -> None:
     monkeypatch.setattr(DockerProvider, "_connect", connect)
     monkeypatch.setattr(DockerProvider, "_guest_contract", contract)
     monkeypatch.setattr(DockerProvider, "_container_gpus", container_gpus)
-    monkeypatch.setattr("ale.run.providers.docker.provider.set_elevation", nothing)
-    monkeypatch.setattr("ale.run.providers.docker.provider.verify_identities", nothing)
+    monkeypatch.setattr("ale.run.providers.docker.provider.set_and_prove_elevation", nothing)
     monkeypatch.setattr("ale.run.providers.docker.provider._GvisorConfinement.wire", nothing)
     monkeypatch.setattr("ale.run.providers.docker.provider._watcher", no_watcher)
     # Inspected as Docker records the runtime the Sandbox was started under.
@@ -1092,6 +1091,11 @@ async def test_a_shared_sandbox_records_its_reservation_and_is_watched_while_a_r
     )
     kept, snapshotted, destroyed = sandboxes
     await kept.retain(roles=("solver",), reason="kept")
+
+    async def written(container: str) -> int:
+        return 0
+
+    monkeypatch.setattr("ale.run.providers.docker.provider.storage.written", written)
     await snapshotted.snapshot(roles=("solver",), reason="kept")
     await destroyed.destroy()
     assert provider._watchdog._watched == {}

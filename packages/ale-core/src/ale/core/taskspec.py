@@ -364,12 +364,17 @@ class ToolProvision(BaseModel):
 
 
 class VerificationMode(StrEnum):
+    """Where the verifier runs: in the solver's Sandbox (``shared``, Harbor's), in a new one
+    of its own image given the declared artifacts (``separate``, Harbor's), or in a new one
+    booted from a snapshot of the solver's disk (``snapshot``, ALE's)."""
+
     SHARED = "shared"
     SEPARATE = "separate"
+    SNAPSHOT = "snapshot"
 
 
 class VerifierResources(BaseModel):
-    """Explicit resources for a physically separate verifier sandbox."""
+    """Explicit resources for a verifier Sandbox apart from the solver's."""
 
     model_config = _FROZEN
 
@@ -408,8 +413,11 @@ class VerifySpec(BaseModel):
         if self.environment_mode is VerificationMode.SHARED:
             if self.image is not None or self.resources is not None:
                 raise ValueError("shared verification cannot declare image or resources")
-        elif self.resources is None:
-            raise ValueError("separate verification requires explicit resources")
+            return self
+        if self.resources is None:
+            raise ValueError(f"{self.environment_mode} verification requires explicit resources")
+        if self.environment_mode is VerificationMode.SNAPSHOT and self.image is not None:
+            raise ValueError("a snapshot verifier boots from the solver's snapshot, not an image")
         return self
 
 
@@ -595,8 +603,8 @@ class TaskVariables(BaseModel):
     verifier: dict[str, str] = Field(default_factory=dict)
     """``[verifier].env``: the verifier only."""
     verifier_environment: dict[str, str] | None = None
-    """``[verifier.environment].env``. ``None`` without that table: a separate verifier then
-    receives ``environment``, as Harbor copies ``[environment]`` for it."""
+    """``[verifier.environment].env``. ``None`` without that table: a verifier in a Sandbox of
+    its own then receives ``environment``, as Harbor copies ``[environment]`` for it."""
     solution: dict[str, str] = Field(default_factory=dict)
     """``[solution].env``: the oracle only."""
     mcp_headers: dict[str, dict[str, str]] = Field(default_factory=dict)
@@ -615,8 +623,8 @@ class TaskVariables(BaseModel):
         return {**self.environment, **self.solution}
 
     def verification(self, mode: VerificationMode) -> dict[str, str]:
-        separate = mode is VerificationMode.SEPARATE and self.verifier_environment is not None
-        return {**(self.verifier_environment if separate else self.environment), **self.verifier}
+        own = mode is not VerificationMode.SHARED and self.verifier_environment is not None
+        return {**(self.verifier_environment if own else self.environment), **self.verifier}
 
 
 class TaskSpec(BaseModel):
@@ -886,7 +894,8 @@ class AgentTable(BaseModel):
 
 
 class VerifierEnvironmentTable(BaseModel):
-    """``[verifier.environment]``: a separate verifier's own image and resources.
+    """``[verifier.environment]``: a separate verifier's own image and resources, or a
+    snapshot verifier's resources.
 
     ``cpus`` and ``memory_mb`` fall back to ``[environment]``'s.
     """
@@ -918,7 +927,8 @@ class VerifierTable(BaseModel):
 
     @property
     def mode(self) -> VerificationMode:
-        """Harbor's resolution: separate when a verifier environment is declared."""
+        """Harbor's resolution: separate when a verifier environment is declared; a snapshot
+        verifier is always named."""
         if self.environment_mode is not None:
             return self.environment_mode
         if self.environment is not None:
@@ -928,9 +938,18 @@ class VerifierTable(BaseModel):
     # --- validation ---
 
     @model_validator(mode="after")
-    def _shared_has_no_environment(self) -> Self:
-        if self.environment_mode is VerificationMode.SHARED and self.environment is not None:
+    def _environment_fits_the_mode(self) -> Self:
+        if self.environment is None:
+            return self
+        if self.environment_mode is VerificationMode.SHARED:
             raise ValueError("environment_mode 'shared' cannot declare [verifier.environment]")
+        if self.environment_mode is VerificationMode.SNAPSHOT and (
+            image_keys := sorted({"image", "build_timeout_sec"} & self.environment.model_fields_set)
+        ):
+            raise ValueError(
+                "environment_mode 'snapshot' boots the verifier from the solver's snapshot, so "
+                f"[verifier.environment] cannot set {' or '.join(image_keys)}"
+            )
         return self
 
 

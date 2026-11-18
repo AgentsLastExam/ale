@@ -4,10 +4,21 @@ from pathlib import Path
 import pytest
 from tests.support import edit_task_config
 
+from ale.core.result import SandboxOutcome
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
+
+
+def _kept(handle: str) -> SandboxOutcome:
+    return SandboxOutcome(
+        roles=("solver",),
+        requested="keep",
+        outcome="retained",
+        provider=handle.partition(":")[0],
+        handle=handle,
+    )
 
 
 @pytest.mark.parametrize(
@@ -134,7 +145,9 @@ async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
     monkeypatch.setattr(
         task_cli,
         "_retained_source_episodes",
-        lambda _: ((tmp_path / "source", SimpleNamespace(episode_id="old"), lock, "docker:old"),),
+        lambda _: (
+            (tmp_path / "source", SimpleNamespace(episode_id="old"), lock, _kept("docker:old")),
+        ),
     )
     attach = AsyncMock(side_effect=AssertionError("must reject before attachment"))
     monkeypatch.setattr(task_cli, "_attach_retained", attach)
@@ -196,7 +209,9 @@ async def test_reverify_takes_the_solver_kind_from_its_run_and_reads_only_the_ve
     monkeypatch.setattr(
         task_cli,
         "_retained_source_episodes",
-        lambda _: ((tmp_path / "source", SimpleNamespace(episode_id="old"), lock, "qemu:old"),),
+        lambda _: (
+            (tmp_path / "source", SimpleNamespace(episode_id="old"), lock, _kept("qemu:old")),
+        ),
     )
     monkeypatch.setattr(task_cli, "observe_task_assets", lambda task: None)
     read: list[str] = []
@@ -252,7 +267,9 @@ async def test_reverify_fails_only_the_task_whose_image_no_registry_answers_for(
     monkeypatch.setattr(
         task_cli,
         "_retained_source_episodes",
-        lambda _: ((tmp_path / "source", SimpleNamespace(episode_id="old"), lock, "docker:old"),),
+        lambda _: (
+            (tmp_path / "source", SimpleNamespace(episode_id="old"), lock, _kept("docker:old")),
+        ),
     )
 
     async def unreachable(reference: str) -> object:
@@ -267,3 +284,99 @@ async def test_reverify_fails_only_the_task_whose_image_no_registry_answers_for(
     (refusal,) = capsys.readouterr().err.splitlines()
     assert refusal.startswith(f"{task.spec.name}: ")
     assert refusal.endswith("cannot read the manifest of ghcr.io/acme/gone:1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "kept", "refusal"),
+    [
+        ("snapshot", "retained", "kept its solver running instead"),
+        ("separate", "snapshotted", "kept only a snapshot of its solver"),
+        ("snapshot", "unserved", "its verifier boots from the snapshot docker:runc keeps"),
+        ("separate", "shared", "kept the Sandbox its shared verifier ran in"),
+        ("snapshot", "shared-snapshot", "kept the Sandbox its shared verifier ran in"),
+    ],
+)
+async def test_reverify_refuses_a_source_its_verification_cannot_use(
+    tmp_path, monkeypatch, capsys, mode, kept, refusal
+):
+    """A snapshot verifier needs its source's solver snapshot, on a Provider that serves it;
+    verification of another topology needs the solver running. A verifier of its own needs
+    the solver as its agent left it, not a Sandbox a shared verifier changed."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from tests.support import edit_task_config
+    from tests.unit.test_runtime_contracts import make_lock
+
+    from ale.core.config import RunConfig
+    from ale.run.cli import tasks as task_cli
+
+    root = scaffold_task(tmp_path / "task")
+    # docker:runc gives no perf, which this snapshot verifier asks for.
+    environment = {"container_features": ["perf"]} if kept == "unserved" else {"cpus": 1}
+    edit_task_config(root, {"verifier": {"environment_mode": mode, "environment": environment}})
+    task = load_tasks(root)[0]
+    lock = make_lock()
+    lock = lock.model_copy(
+        update={
+            "task": lock.task.model_copy(
+                update={"name": task.spec.name, "non_verifier_digest": task.non_verifier_digest}
+            ),
+            "image": lock.image.model_copy(update={"declaration": task.spec.image}),
+        }
+    )
+    running = kept in {"retained", "shared"}
+    outcome = SandboxOutcome(
+        roles=("solver", "verifier") if kept.startswith("shared") else ("solver",),
+        requested="keep" if running else "snapshot",
+        outcome="retained" if running else "snapshotted",
+        provider="docker",
+        handle="docker:old" if running else "docker:snapshot:old",
+    )
+    monkeypatch.setattr(
+        task_cli,
+        "_retained_source_episodes",
+        lambda _: ((tmp_path / "source", SimpleNamespace(episode_id="old"), lock, outcome),),
+    )
+    monkeypatch.setattr(task_cli, "observe_task_assets", lambda task: None)
+    attach = AsyncMock(side_effect=AssertionError("must reject before attachment"))
+    monkeypatch.setattr(task_cli, "_attach_retained", attach)
+    episode = AsyncMock(side_effect=AssertionError("must reject before any episode"))
+    monkeypatch.setattr(task_cli, "run_episode", episode)
+    code = await task_cli._reverify(str(root), tmp_path / "source", RunConfig(), tmp_path / "runs")
+    assert code == task_cli.EXIT_SOME_FAILED
+    attach.assert_not_called()
+    episode.assert_not_called()
+    assert refusal in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["snapshot", "separate"])
+async def test_a_fleet_solver_is_reverified_with_the_image_its_nodes_keep(tmp_path, mode):
+    """The Fleet prepares images on its Nodes, under the key the Run gives them: a solver
+    of the Fleet's, reused by a verifier that boots from its snapshot or from its image, is
+    named by that key again, which the Fleet then accepts."""
+    from types import SimpleNamespace
+
+    from tests.support import edit_task_config
+    from tests.unit.test_runtime_contracts import make_lock
+
+    from ale.core.config import RunConfig
+    from ale.run.cli import tasks as task_cli
+    from ale.run.providers import ProviderRegistry
+    from ale.run.providers.fleet import FleetProvider
+    from ale.run.task_images import prepare_verifier_image_result
+
+    root = scaffold_task(tmp_path / "task")
+    edit_task_config(root, {"verifier": {"environment_mode": mode, "environment": {"cpus": 1}}})
+    task = load_tasks(root)[0]
+    fleet = FleetProvider(SimpleNamespace(recipes={}))  # type: ignore[arg-type]
+    registry = ProviderRegistry(RunConfig())
+    registry._instances["fleet"] = fleet
+    task.provider = task.verifier_provider = "fleet"
+    image = await task_cli._reused_solver_image(task, make_lock(), registry)
+    assert await fleet.prepare_image(image) is image
+    task.prepared_image = image
+    reused = await prepare_verifier_image_result(task, fleet)
+    assert reused is not None and await fleet.prepare_image(reused.image) is image

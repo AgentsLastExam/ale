@@ -128,7 +128,8 @@ class Task(ABC):
         self.provider: str | None = None
         """The provider id the Run selected to start the solver's Sandbox."""
         self.verifier_provider: str | None = None
-        """The provider id selected for a separate verifier's Sandbox."""
+        """The provider id selected for a verifier's own Sandbox: a separate verifier's, or a
+        snapshot verifier's, which is its solver's."""
         self.prepared_image: PreparedTaskImage | None = None
         self.prepared_verifier_image: PreparedTaskImage | None = None
         self.asset_observation: TaskAssetObservation | None = None

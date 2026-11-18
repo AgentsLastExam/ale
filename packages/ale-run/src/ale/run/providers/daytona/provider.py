@@ -89,7 +89,7 @@ from ale.run.providers.daytona.image import (
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.memory import WATCHER, GuestEvents
-from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.privileges import set_and_prove_elevation
 from ale.run.sources import cache_root
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -811,10 +811,7 @@ class DaytonaProvider(Provider):
             agent_home, has_desktop = await _guest_contract(client)
             await _require_framework(client, request)
             await memory.watch(ssh)
-            await set_elevation(
-                client, request.user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
-            )
-            await verify_identities(client, request.user, sudo=request.sudo)
+            await set_and_prove_elevation(client, request, request.user)
             await _seal_daemon(client, request.user)
             if request.resources.gpus:
                 await _register_driver_libraries(client)

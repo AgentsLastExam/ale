@@ -134,7 +134,7 @@ class GuestUnreachableError(EnvironmentError_):
 class ResourceExhaustedError(GuestUnreachableError):
     """The Sandbox, or the guest service in it, was lost to its memory or its storage: the
     agent's result in the Sandbox it ran in from its phase on, and a Task defect in setup or
-    in a separate verifier."""
+    in a separate or snapshot verifier."""
 
 
 class MemoryExhaustedError(ResourceExhaustedError):

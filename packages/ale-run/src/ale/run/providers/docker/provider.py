@@ -85,7 +85,7 @@ from ale.run.process import run
 from ale.run.providers import machine_arch, memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, storage, subnets, tc
-from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.privileges import set_and_prove_elevation
 from ale.run.transport import GuestClient, StdioTransport
 
 __all__ = [
@@ -113,6 +113,9 @@ GPU_LABEL = "ale.gpus"
 #: What a Sandbox that shares its GPUs reserved on each, in MiB.
 GPU_MEMORY_LABEL = "ale.gpu_memory_mb"
 PREPARED_LABEL = "ale.prepared"
+#: On a container, the bytes written over its Task's image that the snapshot it booted from
+#: holds, which its ``storage_mb`` counts; on a snapshot, all it holds over that image.
+WRITTEN_LABEL = "ale.written"
 HANDLE_PREFIX = "docker:"
 #: A snapshot is a local image in this repository, tagged with its Sandbox's ID.
 SNAPSHOT_REPOSITORY = "ale-snapshot"
@@ -1153,6 +1156,7 @@ class DockerSandbox(Sandbox):
         watchdog: gpu_sharing.Watchdog,
         host_ports: rootless.HostPorts,
         guest_kernel: bool = False,
+        written: int = 0,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -1181,6 +1185,12 @@ class DockerSandbox(Sandbox):
         #: What measures what it writes while it names ``storage_mb`` and this process drives
         #: it.
         self._storage: storage.Watch | None = None
+        #: What the snapshot it booted from holds over its Task's image, in bytes, which its
+        #: ``storage_mb`` counts as a disk of that size would; 0 for one of the image itself.
+        self.written = written
+        #: Set while it is committed as a snapshot: a commit cut short may have finished in
+        #: the daemon, and destroying the Sandbox then removes the image it left.
+        self._committing = False
         #: The Host's ports of its Provider, of which it holds its own until it ends here.
         self._host_ports = host_ports
         #: The context of the phase that last ran a command in it, in which what the watchdog
@@ -1346,7 +1356,7 @@ class DockerSandbox(Sandbox):
             )
         if self.allocation.storage_mb is not None:
             self._storage = storage.Watch(
-                self.container_id, self.allocation.storage_mb, self.wrote_past
+                self.container_id, self.allocation.storage_mb, self.wrote_past, base=self.written
             )
 
     def _unwatch(self) -> None:
@@ -1371,8 +1381,10 @@ class DockerSandbox(Sandbox):
         """
         storage_mb = self.allocation.storage_mb
         written_mb = -(-written >> 20)  # rounded up, so that it shows past the limit
+        writer = "it and the snapshot it booted from" if self.written else "it"
         found = (
-            f"it wrote {written_mb} MiB over its image, past the {storage_mb} MiB its Task declares"
+            f"{writer} wrote {written_mb} MiB over its image, past the {storage_mb} MiB its "
+            "Task declares"
         )
         message = f"ALE's storage watch stopped the Sandbox: {found}"
         _log.info("%s: %s", self.container, message)
@@ -1458,6 +1470,14 @@ class DockerSandbox(Sandbox):
             if code != 0:
                 # Its container keeps its disk until removed: say so where the operator looks.
                 _log.warning("could not remove %s: %s", self.container, stderr.strip())
+            if self._committing:
+                # A snapshot that was never handed back is no one's: it goes with its Sandbox.
+                # Its container went first, which fails a commit of it still in the daemon, so
+                # only an image the daemon finished can be left (see AGENTS.md).
+                reference = f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}"
+                code, _, stderr = await _docker("rmi", reference, timeout=120)
+                if code != 0 and "no such image" not in stderr.lower():
+                    _log.warning("could not remove %s: %s", reference, stderr.strip())
         finally:
             # Even when the container's removal failed or timed out: the network is the
             # sandbox's alone, and one Docker still finds attached is logged by name.
@@ -1497,18 +1517,25 @@ class DockerSandbox(Sandbox):
         code, _, stderr = await _docker("stop", "--time", "30", self.container, timeout=120)
         if code != 0:
             raise ProviderStartError(f"could not stop {self.container}: {stderr.strip()}")
+        # What it holds over its Task's image: what it wrote, over what it booted from.
+        layer = await storage.written(self.container)
+        if layer is None:
+            raise ProviderStartError(f"{self.container} is gone; its disk cannot be saved")
+        self._committing = True
         code, _, stderr = await _docker(
             "commit",
             "--change", f"LABEL {RETENTION_LABEL}=snapshot",
             "--change", f'LABEL {GPU_LABEL}=""',
             "--change", f'LABEL {GPU_MEMORY_LABEL}=""',
             "--change", f"LABEL {PREPARED_LABEL}={self.request.prepared_image.prepared_identity}",
+            "--change", f"LABEL {WRITTEN_LABEL}={self.written + layer}",
             self.container,
             f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}",
             timeout=1800,
         )  # fmt: skip
         if code != 0:
             raise ProviderStartError(f"could not commit {self.container}: {stderr.strip()}")
+        self._committing = False
         handle = f"{SNAPSHOT_PREFIX}{self.sandbox_id}"
         return RetainedSandbox(
             provider="docker",
@@ -1739,8 +1766,9 @@ class DockerProvider(Provider):
             candidates = _eligible_gpus(await self._host_gpus(), self.gpus, resources)
         #: What it reserves on each GPU, which it shares; None when it takes them whole.
         shared = resources.gpu_memory_mb if resources.gpus else None
+        written = 0
         if request.snapshot is not None:
-            resolved_image = await self._snapshot_image(request.snapshot, request)
+            resolved_image, written = await self._snapshot_image(request.snapshot, request)
         else:
             resolved_image = await resolve_prepared_container_image(request.prepared_image)
             if problems := await self.check_image(resolved_image.observed_ref):
@@ -1766,6 +1794,7 @@ class DockerProvider(Provider):
             "--label", f"{ROLE_LABEL}={request.role.value}",
             "--label", f"{RETENTION_LABEL}={request.retention}",
             "--label", f"{NETWORK_LABEL}={request.network.mode.value}",
+            "--label", f"{WRITTEN_LABEL}={written}",
             "--cpus", str(resources.cpus),
             "--memory", memory_limit,
             "--memory-swap", memory_limit,
@@ -1868,10 +1897,7 @@ class DockerProvider(Provider):
             if isolated:
                 await confinement.seal_guest(client)
             agent_home, has_desktop = await self._guest_contract(client)
-            await set_elevation(
-                client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
-            )
-            await verify_identities(client, agent_user, sudo=request.sudo)
+            await set_and_prove_elevation(client, request, agent_user)
             observed_gpu: tuple[GpuDevice, ...] = ()
             if admitted:
                 observed_gpu = _verify_docker_gpu(admitted, await self._container_gpus(client))
@@ -1937,6 +1963,7 @@ class DockerProvider(Provider):
             watchdog=self._watchdog,
             host_ports=self._host_ports,
             guest_kernel=runtime.guest_kernel,
+            written=written,
         )
         sandbox.watch()
         return sandbox
@@ -2216,19 +2243,23 @@ class DockerProvider(Provider):
             )
         return found
 
-    async def _snapshot_image(self, handle: str, request: SandboxRequest) -> ResolvedImage:
-        """The snapshot a Sandbox boots from, which must come from the Task's prepared image."""
+    async def _snapshot_image(
+        self, handle: str, request: SandboxRequest
+    ) -> tuple[ResolvedImage, int]:
+        """The snapshot a Sandbox boots from, which must come from the Task's prepared image,
+        and the bytes it holds over that image."""
         labels, identity = await _snapshot_record(handle)
         if labels.get(PREPARED_LABEL) != request.prepared_image.prepared_identity:
             raise ProviderCapabilityError(
                 f"{handle!r} was not taken from the Task's prepared solver image"
             )
-        return ResolvedImage(
+        image = ResolvedImage(
             kind=ImageKind.CONTAINER,
             prepared_identity=request.prepared_image.prepared_identity,
             observed_identity=identity,
             observed_ref=identity,
         )
+        return image, int(labels.get(WRITTEN_LABEL) or 0)
 
     async def destroy_retained(self, handle: str) -> None:
         if handle.startswith(SNAPSHOT_PREFIX):
@@ -2374,6 +2405,7 @@ class DockerProvider(Provider):
             watchdog=self._watchdog,
             host_ports=self._host_ports,
             guest_kernel=runtime.guest_kernel,
+            written=int(labels.get(WRITTEN_LABEL) or 0),
         )
         if sealed:
             try:

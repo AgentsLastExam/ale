@@ -77,7 +77,7 @@ from ale.run.process import run
 from ale.run.providers import relay
 from ale.run.providers.desktop import require_resolution
 from ale.run.providers.docker.provider import only_vanished
-from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.privileges import set_and_prove_elevation
 from ale.run.providers.runner import (
     HOST_IP,
     Console,
@@ -833,12 +833,9 @@ class QemuProvider(Provider):
                 await self._await_desktop(client)
                 desktop = await require_resolution(client, request.desktop_resolution)
             if request.os is OperatingSystem.WINDOWS:
-                await self._verify_windows_privileges(client, agent_user, request.sudo)
+                await self._verify_windows_privileges(client, agent_user, request)
             else:
-                await set_elevation(
-                    client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
-                )
-                await verify_identities(client, agent_user, sudo=request.sudo)
+                await set_and_prove_elevation(client, request, agent_user)
             file_client = await _connect(host_port, guest_token, console)
             clients.append(file_client)
         except BaseException:
@@ -1214,9 +1211,13 @@ class QemuProvider(Provider):
         return user, home, bool(health.get("gui"))
 
     async def _verify_windows_privileges(
-        self, client: GuestClient, agent_user: str, sudo: bool
+        self, client: GuestClient, agent_user: str, request: SandboxRequest
     ) -> None:
-        """Check actual tokens, including the default limited agent, before any Task code."""
+        """Check actual tokens, including the default limited agent, before any Task code.
+
+        A verifier runs no agent, and verification runs as Administrator, so in one only the
+        framework's token is checked.
+        """
         command = [
             "powershell.exe",
             "-NoProfile",
@@ -1226,7 +1227,10 @@ class QemuProvider(Provider):
             "[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("
             "[Security.Principal.WindowsBuiltInRole]::Administrator)",
         ]
-        for user, expected in ((None, True), (agent_user, sudo)):
+        checks: list[tuple[str | None, bool]] = [(None, True)]
+        if request.role is not SandboxRole.VERIFIER:
+            checks.append((agent_user, request.sudo))
+        for user, expected in checks:
             code, output, stderr, timed_out = await client.exec(
                 command, run_as=user, timeout_sec=30
             )

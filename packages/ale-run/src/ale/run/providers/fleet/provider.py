@@ -676,7 +676,7 @@ class FleetProvider(Provider):
             return reasons
         return min(
             (
-                leaf(profile.provider).refusals(needs, user=user, role=role)
+                leaf(profile.provider).refusals_with_verifier(needs, user=user, role=role)
                 for profile in profiles
                 if not unmet(profile, needs)
             ),
@@ -738,6 +738,7 @@ class FleetProvider(Provider):
         operating_system: OperatingSystem,
         network_mode: NetworkMode,
         resources: Resources,
+        verifier: Resources | None = None,
     ) -> SandboxDemand:
         return SandboxDemand(
             kind=image.kind,
@@ -747,6 +748,7 @@ class FleetProvider(Provider):
             resources=resources,
             image=image.prepared_identity,
             framework=fleet_framework_identity(),
+            verifier=verifier,
         )
 
     def plan_item(
@@ -757,9 +759,11 @@ class FleetProvider(Provider):
         network: NetworkPolicy,
         resources: Resources,
         episodes: int,
+        verifier: Resources | None = None,
     ) -> PlanItem:
-        """One Task's line of the Run's plan."""
-        demand = self._demand(image, operating_system, network.mode, resources)
+        """One Task's line of the Run's plan; ``verifier`` the resources of its snapshot
+        verifier, whose Node and leaf are its solver's."""
+        demand = self._demand(image, operating_system, network.mode, resources, verifier)
         return PlanItem(task=task, demand=demand, episodes=episodes)
 
     async def create(self, request: SandboxRequest) -> Sandbox:
@@ -771,7 +775,11 @@ class FleetProvider(Provider):
                 update={"snapshot": _named(request.snapshot, SNAPSHOT_PREFIX)}
             )
         demand = self._demand(
-            request.prepared_image, request.os, request.network.mode, request.resources
+            request.prepared_image,
+            request.os,
+            request.network.mode,
+            request.resources,
+            request.snapshot_verifier,
         ).model_copy(update={"retention": request.retention, "snapshot": request.snapshot})
         sandbox_id = _sandbox_id(request.episode_id)
         asked = time.monotonic()
@@ -803,7 +811,11 @@ class FleetProvider(Provider):
         client = self.client
         await self.prepare_image(request.prepared_image)
         demand = self._demand(
-            request.prepared_image, request.os, request.network.mode, request.resources
+            request.prepared_image,
+            request.os,
+            request.network.mode,
+            request.resources,
+            request.snapshot_verifier,
         ).model_copy(update={"retention": request.retention})
         placement = await client.adopt(
             AcquireRequest(

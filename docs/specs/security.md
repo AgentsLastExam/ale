@@ -257,7 +257,9 @@ cannot write system paths, and cannot elevate unless its task asked; by
 `tests/` and `calibration/` are copied into a sandbox only for their own phases, and of
 `calibration/` only the case an oracle runs. While the evaluated agent works they are not
 access-controlled — they are not there. In separate mode only the immutable declared
-artifact snapshot is restored; the solver filesystem is not transferred wholesale.
+artifact snapshot is restored; the solver filesystem is not transferred wholesale. A
+snapshot verifier boots from the solver's disk once every stage of the Task has been
+removed from it.
 
 This is why there is no "secret" flag on a Task file. A flag is a promise about behaviour
 that some future code path could forget to check; a file that was never uploaded cannot
@@ -292,12 +294,13 @@ a Judge failure according to its own scoring policy.
 ## 7. A result carries what produced it
 
 `RunLock` records the explicit Task name, complete Task-folder source digest, source and
-commit when available, exact locally built image content, for the solver and a separate
-verifier the Provider selected and the leaf that started the Sandbox with its container
-runtime, requested and effective resources, GPU allocation and sandbox observations, agent
-version and integrity, harness family, one optional Task-asset repository/path/commit/dirty
-observation, the name and value source of each Task variable, verification topology and
-image/resources, sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
+commit when available, exact locally built image content, for the solver and a separate or
+snapshot verifier the Provider selected and the leaf that started the Sandbox with its
+container runtime, requested and effective resources, GPU allocation and sandbox
+observations, agent version and integrity, harness family, one optional Task-asset
+repository/path/commit/dirty observation, the name and value source of each Task variable,
+verification topology and image/resources, sandbox lifecycle outcomes, config hash, seed,
+and the engine's own commit.
 Leaves of one kind isolate a Task differently and give it different kernel features, so a
 result names the one that ran it, under a scheduler too.
 
@@ -354,10 +357,12 @@ before a Judge changes the live workspace.
 ## 11. Debug retention is explicit and sanitized
 
 Run configuration, not Task content, decides whether solver and verifier sandboxes are
-destroyed, kept, or (the solver) saved as a snapshot. Default is destroy. Before a kept
-sandbox or a snapshot receives a durable handle, required evidence capture finishes, every
-stage of its Task (setup, tests and an oracle's calibration case), the verifier directory
-and known credentials are removed, and episode capabilities are revoked.
+destroyed, kept, or (the solver) saved as a snapshot. Default is destroy. Snapshot
+verification saves the solver whatever that configuration says, as
+[Teardown and retention](episode-protocol.md#teardown-and-retention) specifies. Before a
+kept sandbox or a snapshot receives a durable handle, required evidence capture finishes,
+every stage of its Task (setup, tests and an oracle's calibration case), the verifier
+directory and known credentials are removed, and episode capabilities are revoked.
 A later episode may hand the solver to another evaluated agent, which must not find
 verification there. Subscription credentials stay in the
 checkout-local Host profile and therefore require no retained-Sandbox cleanup.
@@ -413,9 +418,26 @@ build was benign to begin with.
 **Processes the agent leaves running.** ALE does not stop processes the agent started,
 because a Task may ask the agent to deploy a service that verification then checks. In
 shared verification such a process keeps running while verification has open egress for
-its Judges, so it can still change the Sandbox before or during scoring. A Task that needs a
-strict boundary uses separate verification, which restores only the declared artifacts into
-a fresh Sandbox.
+its Judges, so it can still change the Sandbox before or during scoring. A snapshot verifier
+boots fresh, so no process the agent left survives into it, but whatever the agent set to
+start at boot starts again: its account's desktop autostart entries, its `HKCU` Run keys and
+Startup folder on Windows, and, with sudo, system services. A Task that needs a strict
+boundary uses separate verification, which restores only the declared artifacts into a
+fresh Sandbox.
+
+**Programs on the agent's disk.** A shared or snapshot verifier runs as root on the disk the
+agent left. With `[agent].sudo` the agent could change any program there, the image's
+Python that `ALE_VERIFY_PYTHON` selects included, and so what the verifier computes; without
+it, only what its account can write. A Task whose verifier must not run agent-changed code
+withholds sudo or uses separate verification, on its own image or the solver's, which
+restores only the declared artifacts into a fresh Sandbox.
+
+**Unscored rather than low.** With `[agent].sudo` the agent can also make what runs on its
+disk after it fail under snapshot verification: the sanitation before the solver's save, the
+save itself, and the boot of a verifier from the snapshot. The Episode then ends without a
+score, as an environment or Task error, rather than with a low one; a sanitation that fails
+before a retention only forces the Sandbox's destruction. A Task where that difference
+matters withholds sudo.
 
 **Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
 physical GPUs, whole or by device memory, are admitted per sandbox or rejected. Network

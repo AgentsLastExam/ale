@@ -403,12 +403,14 @@ def _named_kind(image: str, operating_system: OperatingSystem) -> ImageKind | No
 
 
 def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
-    """Harbor's verifier semantics; a Windows or macOS verifier image is a VM."""
+    """Harbor's verifier semantics; a Windows or macOS verifier image is a VM. A snapshot
+    verifier boots from the solver's snapshot, so it has resources and no image."""
     verifier = config.verifier
+    mode = verifier.mode
     dockerfile = folder.verifier_dockerfile
-    if verifier.mode is VerificationMode.SHARED:
-        if dockerfile is not None:
-            raise TaskDefinitionError("tests/Dockerfile requires separate verification")
+    if mode is not VerificationMode.SEPARATE and dockerfile is not None:
+        raise TaskDefinitionError("tests/Dockerfile requires separate verification")
+    if mode is VerificationMode.SHARED:
         return VerifySpec()
     operating_system = config.environment.os
     if dockerfile is not None and operating_system is not OperatingSystem.LINUX:
@@ -418,7 +420,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         )
 
     environment = verifier.environment
-    # Without a verifier environment, a separate verifier gets the solver's resources.
+    # Without a verifier environment, the verifier gets the solver's resources.
     sized = environment or config.environment
     named = environment.image if environment is not None else None
     user = config.agent.user
@@ -443,7 +445,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         gpu_memory_mb=sized.gpu_memory_mb,
         container_features=sized.container_features,
     )
-    return VerifySpec(environment_mode=VerificationMode.SEPARATE, image=image, resources=resources)
+    return VerifySpec(environment_mode=mode, image=image, resources=resources)
 
 
 def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
