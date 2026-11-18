@@ -29,6 +29,7 @@ from ale.core.fleet import (
     ImageInputs,
     SandboxDemand,
     SandboxStatus,
+    SnapshotHolding,
     sign_grant,
     verify_grant,
 )
@@ -349,6 +350,62 @@ class TestDeclaration:
 
 
 class TestCreation:
+    async def test_a_boot_from_a_snapshot_is_admitted_on_the_leaf_that_saved_it(
+        self, tmp_path: Path, clock: Clock
+    ) -> None:
+        """Lending runc before Kata, the Node still admits a boot from Kata's snapshot with
+        Kata's profile, though runc's would serve its demand first."""
+        leaves = {
+            name: MemoryProvider(name, saves_snapshots=True)
+            for name in ("docker:runc", "docker:kata")
+        }
+        settings = NodeSettings(
+            name="box",
+            control_url="http://127.0.0.1:9",
+            address="http://box:7471",
+            host="127.0.0.1",
+            providers=tuple(leaves),
+            reserve_cpus=0,
+            reserve_memory_mb=0,
+            state_dir=tmp_path,
+        )
+        declaration, providers = await probe(settings, make=leaves.__getitem__)
+        agent = NodeAgent(
+            settings, TOKEN, declaration=declaration, providers=providers, clock=clock
+        )
+        assert await agent.images.prepare(INPUTS) == IMAGE
+        saved = request(retention="snapshot")
+        demand = SandboxDemand(
+            kind=saved.image_kind,
+            os=saved.os,
+            arch=agent.declaration.platform.arch,
+            network_mode=saved.network.mode,
+            resources=saved.resources,
+            image=KEY,
+            framework=fleet_framework_identity(),
+        )
+        agent.snapshots["sandbox-0001"] = node_module._Snapshot(
+            holding=SnapshotHolding(
+                snapshot_id="sandbox-0001",
+                provider="docker:kata",
+                demand=demand.model_copy(update={"retention": "snapshot"}),
+                created_at=clock.now,
+            ),
+            handle="docker:snapshot:sandbox-0001",
+        )
+        boot = request(snapshot="sandbox-0001", cpus=2)
+        grant = Grant(
+            sandbox_id="sandbox-0002",
+            run_id="run-aaaaaaaa",
+            node="box",
+            demand=demand.model_copy(
+                update={"resources": boot.resources, "snapshot": "sandbox-0001"}
+            ),
+            expires_at=clock.now + 60,
+        )
+        _, profile = agent.admit(grant, boot)
+        assert profile.provider == "docker:kata"
+
     async def test_the_node_creates_only_on_its_own_grant(
         self, client: TestClient, agent: NodeAgent, provider: MemoryProvider
     ) -> None:

@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ale.core.capability import CapabilityProfile, GpuHold, accepts_model, closest, unmet
 from ale.core.fleet import NodeDeclaration, SandboxDemand
-from ale.core.taskspec import ImageKind, OperatingSystem
+from ale.core.taskspec import ImageKind, OperatingSystem, Resources
 
 __all__ = [
     "Busy",
@@ -85,8 +85,9 @@ class NodeView:
     draining: bool = False
     images: frozenset[str] = frozenset()
     """The keys of the images the Node prepared and keeps."""
-    snapshots: frozenset[str] = frozenset()
-    """The snapshots the Node keeps, which only it can boot from."""
+    snapshots: Mapping[str, str] = field(default_factory=dict)
+    """The snapshots the Node keeps, which only it can boot from, each with the provider id
+    of the leaf that saved it, which alone boots from it."""
     holds: tuple[Holds, ...] = ()
     busy: tuple[Busy, ...] = ()
     """When each of ``holds``, in order, is expected to be freed; one past their end never is."""
@@ -147,13 +148,22 @@ def _free(
     return cpus, memory, slots, gpus
 
 
-def _profile(declaration: NodeDeclaration, demand: SandboxDemand) -> CapabilityProfile | None:
+def _profile(
+    declaration: NodeDeclaration, demand: SandboxDemand, *, leaf: str | None = None
+) -> CapabilityProfile | None:
     """The Node's first profile, in the order it prefers its leaves, that serves
-    ``demand``."""
+    ``demand``; with ``leaf``, the first of that leaf's."""
     if declaration.framework != demand.framework:
         return None
     needs = demand.needs
-    return next((p for p in declaration.profiles if not unmet(p, needs)), None)
+    return next(
+        (
+            p
+            for p in declaration.profiles
+            if (leaf is None or p.provider == leaf) and not unmet(p, needs)
+        ),
+        None,
+    )
 
 
 def _slots(profile: CapabilityProfile) -> int:
@@ -168,15 +178,15 @@ def _whole(demand: SandboxDemand, profile: CapabilityProfile) -> bool:
     return demand.resources.gpu_memory_mb is None or profile.gpu_hold is GpuHold.WHOLE
 
 
-def _gpus(available: dict[str, int], demand: SandboxDemand) -> dict[str, int] | None:
-    """Which of a Node's GPUs that no Sandbox holds whole the demand would take, or None when
-    too few fit it."""
-    wanted = demand.resources.gpus
+def _gpus(available: dict[str, int], resources: Resources) -> dict[str, int] | None:
+    """Which of a Node's GPUs that no Sandbox holds whole a Sandbox of ``resources`` would
+    take, or None when too few fit it."""
+    wanted = resources.gpus
     taken: dict[str, int] = {}
     for model, free in available.items():
         if wanted == 0:
             break
-        if free > 0 and accepts_model(demand.resources.gpu_types, model):
+        if free > 0 and accepts_model(resources.gpu_types, model):
             count = min(free, wanted)
             taken[model] = count
             wanted -= count
@@ -198,8 +208,30 @@ def _shortage(
         return f"{name} has {max(memory, 0)} MB free memory"
     if _slots(profile) > slots:
         return f"{name} has no free macOS VM slot"
-    if resources.gpus and _gpus(gpus, demand) is None:
+    if resources.gpus and _gpus(gpus, resources) is None:
         return f"{name} has too few free GPUs of an accepted model"
+    return None
+
+
+def short_in_all(
+    declaration: NodeDeclaration, resources: Resources, profile: CapabilityProfile
+) -> str | None:
+    """Why a Node never holds a Sandbox of ``resources`` on a leaf of ``profile``, even when
+    it holds nothing else, or None when it does."""
+    total = declaration.resources
+    name = declaration.name
+    if resources.cpus > total.cpus:
+        return f"{name} has {total.cpus} CPUs in all, and it asks for {resources.cpus}"
+    if resources.memory_mb > total.memory_mb:
+        return (
+            f"{name} has {total.memory_mb} MB of memory in all, and it asks for "
+            f"{resources.memory_mb} MB"
+        )
+    if _slots(profile) > total.macos_vm_slots:
+        return f"{name} has no macOS VM slot"
+    gpus = {pool.model: pool.count for pool in total.gpus}
+    if resources.gpus and _gpus(gpus, resources) is None:
+        return f"{name} has fewer than {resources.gpus} GPUs of an accepted model in all"
     return None
 
 
@@ -256,7 +288,10 @@ def choose(
             continue
         if demand.snapshot is not None and demand.snapshot not in node.snapshots:
             continue
-        profile = _profile(node.declaration, demand)
+        # A Sandbox booted from a snapshot may need other resources than the one saved, which
+        # the Node's first leaf for them need not be; it boots on the leaf that saved it.
+        leaf = node.snapshots[demand.snapshot] if demand.snapshot is not None else None
+        profile = _profile(node.declaration, demand, leaf=leaf)
         if profile is None:
             continue
         image = demand.image
@@ -287,7 +322,7 @@ def choose(
             cpus=demand.resources.cpus,
             memory_mb=demand.resources.memory_mb,
             macos_vm_slots=_slots(profile),
-            gpus=(_gpus(free_gpus, demand) or {}) if whole else {},
+            gpus=(_gpus(free_gpus, demand.resources) or {}) if whole else {},
             image=image,
         )
         key = (score, _rendezvous(image, node.name))
@@ -336,14 +371,7 @@ def unservable(demand: SandboxDemand, nodes: Iterable[NodeView]) -> str | None:
         # In the words a Run's own selection uses for it.
         return f"no Node serves this {sandbox}: " + "; ".join(closest(offered, demand.needs))
     for node, profile in matching:
-        total = node.declaration.resources
-        gpus = {pool.model: pool.count for pool in total.gpus}
-        if (
-            resources.cpus <= total.cpus
-            and resources.memory_mb <= total.memory_mb
-            and _slots(profile) <= total.macos_vm_slots
-            and (not resources.gpus or _gpus(gpus, demand) is not None)
-        ):
+        if short_in_all(node.declaration, resources, profile) is None:
             return None
     return (
         f"no Node that offers a {sandbox} has {resources.cpus} CPUs, {resources.memory_mb} MB"

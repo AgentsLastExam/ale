@@ -30,6 +30,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import NoReturn
 
+from ale.core.capability import closest, unmet
 from ale.core.fleet import (
     PROTOCOL_VERSION,
     AcquireRequest,
@@ -62,6 +63,7 @@ from ale.fleet.placement import (
     assign,
     choose,
     remaining_sec,
+    short_in_all,
     unservable,
 )
 from ale.fleet.status import (
@@ -418,11 +420,11 @@ class ControlPlane:
                 online=node.online,
                 draining=node.draining,
                 images=images[name],
-                snapshots=frozenset(
-                    snapshot.snapshot_id
+                snapshots={
+                    snapshot.snapshot_id: snapshot.provider
                     for snapshot in self.snapshots.values()
                     if snapshot.node == name and not snapshot.released
-                ),
+                },
                 holds=tuple(holds.get(name, ())),
                 busy=tuple(busy.get(name, ())),
                 startup_sec=startup_sec.get(name, {}),
@@ -646,10 +648,14 @@ class ControlPlane:
         return self.placement(sandbox_id)
 
     def _hopeless(self, record: SandboxRecord) -> str | None:
-        """Why no Node the Sandbox may go to could ever serve it, or None when one could."""
+        """Why no Node the Sandbox may go to could ever serve it, or None when one could.
+
+        A boot from a snapshot has one Node and one leaf to go to, whose whole capacity
+        decides at once: it is never left waiting for room that Node cannot give.
+        """
         avoided = self._avoided(record)
-        if (reason := self._unbootable(record.demand, avoided)) is not None:
-            return reason
+        if record.demand.snapshot is not None:
+            return self._unbootable(record.demand, avoided)
         return unservable(record.demand, [v for v in self.views() if v.name not in avoided])
 
     def report(self, sandbox_id: str, report: StartReport) -> None:
@@ -696,6 +702,25 @@ class ControlPlane:
                 f"snapshot {demand.snapshot} is on {snapshot.node}, which refused this Sandbox "
                 "or its Run cannot reach"
             )
+        node = self.nodes.get(snapshot.node)
+        if node is None:
+            return None
+        # Only the leaf that saved it boots from it, whatever else its Node lends, and only
+        # within that Node's capacity.
+        leaf = [p for p in node.declaration.profiles if p.provider == snapshot.provider]
+        if node.declaration.framework != demand.framework:
+            return (
+                f"snapshot {demand.snapshot} is on {snapshot.node}, which runs another engine's "
+                "framework"
+            )
+        if why := closest(leaf, demand.needs):
+            return (
+                f"snapshot {demand.snapshot} is {snapshot.provider}'s on {snapshot.node}, "
+                f"which does not serve this Sandbox: {'; '.join(why)}"
+            )
+        profile = next(p for p in leaf if not unmet(p, demand.needs))
+        if why := short_in_all(node.declaration, demand.resources, profile):
+            return f"snapshot {demand.snapshot} is on {snapshot.node}, which cannot hold it: {why}"
         return None
 
     def retain(self, sandbox_id: str, retention: Retention) -> None:

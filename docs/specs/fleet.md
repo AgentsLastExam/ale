@@ -84,10 +84,12 @@ key.
    serves the demand, has not refused this Sandbox, and can be reached by its Run. Profiles
    serve demands by the one rule a Run uses to choose a Provider, and placement takes the
    Node's first that serves it, so a Node prefers its leaves in its own order. A boot from a
-   snapshot is served only by the Node that keeps the snapshot. A demand that no registered
+   snapshot is served only by the Node that keeps the snapshot, with the leaf that saved it,
+   even when another of its Node's leaves would serve it first. A demand that no registered
    Node could serve even when idle fails at once, naming what the closest profile misses in
-   the words of a Run's own selection, as does a boot from a snapshot whose Node refused it
-   or cannot be reached by its Run.
+   the words of a Run's own selection, as does a boot from a snapshot whose leaf does not
+   serve it, whose Node could never hold it, or whose Node refused it or cannot be reached
+   by its Run.
 2. **Score** each candidate by the estimated time to a ready Sandbox there, and take the
    lowest; ties go to a fixed per-image order of Nodes (rendezvous hashing), which keeps each
    image on the same few Nodes.

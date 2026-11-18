@@ -1072,6 +1072,77 @@ class TestRetention:
         later = ask(control, 4, container(snapshot=source.sandbox_id), run="run-bbbbbbbb")
         assert later.status is SandboxStatus.FAILED and "cannot reach" in later.reason
 
+    def test_a_snapshot_boots_on_the_leaf_that_saved_it_whatever_it_asks_for(
+        self, control: ControlPlane
+    ) -> None:
+        """A Sandbox booted from a snapshot, such as a continuation that asks for more CPUs
+        and none of its container features, goes to the leaf that saved it, though another of
+        its Node's would serve it first."""
+        runc = DOCKER.model_copy(update={"snapshot": True})
+        kata = runc.model_copy(
+            update={
+                "provider": "docker:kata",
+                "container_features": frozenset({ContainerFeature.PERF}),
+            }
+        )
+        control.register(linux("box").model_copy(update={"profiles": (runc, kata)}))
+        solver = container(retention="snapshot")
+        solver = solver.model_copy(
+            update={
+                "resources": solver.resources.model_copy(
+                    update={"container_features": (ContainerFeature.PERF,)}
+                )
+            }
+        )
+        source = ask(control, 1, solver)
+        assert control.sandboxes[source.sandbox_id].provider == "docker:kata"
+        beat(control, "box", (source.sandbox_id, "ready"))
+        control.snapshot(source.sandbox_id, KEPT)
+        control.release(source.sandbox_id)
+        continued = ask(control, 2, container(snapshot=source.sandbox_id, cpus=8))
+        assert continued.node == "box"
+        assert control.sandboxes[continued.sandbox_id].provider == "docker:kata"
+        # One the leaf that saved it cannot serve fails at once, naming why.
+        gpu = container(snapshot=source.sandbox_id)
+        gpu = gpu.model_copy(update={"resources": gpu.resources.model_copy(update={"gpus": 1})})
+        refused = ask(control, 3, gpu)
+        assert refused.status is SandboxStatus.FAILED
+        assert refused.reason.startswith(
+            f"snapshot {source.sandbox_id} is docker:kata's on box, which does not serve"
+        )
+
+    def test_a_snapshot_boot_larger_than_its_node_fails_at_once(
+        self, control: ControlPlane
+    ) -> None:
+        """A boot from a snapshot has one Node to go to, so one that Node could never hold,
+        by its CPUs or by its GPUs, fails as it is asked for rather than waiting."""
+        gpus = NodeResources(
+            cpus=16, memory_mb=65536, disk_gb=1000, gpus=(GpuPool(model=H100, count=1),)
+        )
+        attaching = DOCKER.model_copy(
+            update={"snapshot": True, "gpus": True, "gpu_models": (GpuModel(name=H100),)}
+        )
+        control.register(
+            linux("box").model_copy(update={"resources": gpus, "profiles": (attaching,)})
+        )
+        source = ask(control, 1, container(retention="snapshot"))
+        beat(control, "box", (source.sandbox_id, "ready"))
+        control.snapshot(source.sandbox_id, KEPT)
+        control.release(source.sandbox_id)
+        big = ask(control, 2, container(snapshot=source.sandbox_id, cpus=32))
+        assert (big.status, big.reason) == (
+            SandboxStatus.FAILED,
+            f"snapshot {source.sandbox_id} is on box, which cannot hold it: "
+            "box has 16 CPUs in all, and it asks for 32",
+        )
+        eight = container(snapshot=source.sandbox_id)
+        eight = eight.model_copy(
+            update={"resources": eight.resources.model_copy(update={"gpus": 8})}
+        )
+        refused = ask(control, 3, eight)
+        assert refused.status is SandboxStatus.FAILED
+        assert refused.reason.endswith("box has fewer than 8 GPUs of an accepted model in all")
+
     def test_a_node_that_saves_no_snapshots_takes_none(self, control: ControlPlane) -> None:
         control.register(linux("plain"))
         placement = ask(control, 1, container(retention="snapshot"))

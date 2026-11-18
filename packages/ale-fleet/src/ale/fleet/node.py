@@ -753,7 +753,10 @@ class NodeAgent:
             declaration=view.declaration,
             holds=view.holds,
             images=frozenset({grant.demand.image}),
-            snapshots=frozenset(self.snapshots),
+            snapshots={
+                snapshot_id: snapshot.holding.provider
+                for snapshot_id, snapshot in self.snapshots.items()
+            },
         )
         choice, reason = choose(grant.demand, [view])
         if choice is None:
