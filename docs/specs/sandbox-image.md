@@ -291,7 +291,7 @@ language. Authoring details belong to [Task authoring](task-authoring.md#environ
 
 Windows 10 has no public ISO build path in ALE. The current Windows base starts from the GCP
 image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
-recipe installs and pins ALE's cross-platform components, and `compact.sh` validates the
+recipe installs and pins ALE's cross-platform components, and `compact.sh` checks the
 resulting qcow2 and rewrites it uncompressed. Episodes always cold-boot a fresh overlay,
 over a retention snapshot when they continue one. ALE creates no ready snapshot or warm
 pool; the [Fleet](fleet.md) places Sandboxes on other machines but starts none before a

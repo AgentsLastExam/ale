@@ -371,8 +371,8 @@ Every Docker sandbox, QEMU runner and Daytona sandbox is labeled with ALE owners
 episode, role and requested retention (Docker and QEMU also with allocated GPU identity).
 Daytona's organization may be shared, so listing and destroying act only on sandboxes that
 carry ALE's labels, and every snapshot records the same. Retained sandboxes and snapshots
-remain discoverable through `ale sandbox list` and removable only through a validated
-ALE-managed handle.
+remain discoverable through `ale sandbox list` and removable only through an ALE-managed
+handle, which ALE checks before it acts.
 Live labels also prevent a retained GPU from being assigned to another ALE sandbox.
 Retention does not change rewards or verification records.
 

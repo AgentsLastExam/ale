@@ -7,7 +7,7 @@ Project: `ale` — the Agents' Last Exam orchestration and evaluation framework.
 This constitution governs only durable, project-wide constraints. It MUST NOT
 prescribe a concrete transport, provider, package or directory layout, model-routing
 mechanism, credential-delivery mechanism, runtime version, storage path, external
-registry, or exact validation algorithm.
+registry, or exact checking algorithm.
 
 Concrete designs, and the reasons for them, MUST live in versioned specifications.
 They MAY change without a constitutional amendment when the principles below
@@ -18,7 +18,7 @@ remain satisfied.
 ### I. Explicit, Versioned Contracts
 
 Data and behavior that cross a component, process, repository, or trust boundary MUST
-have an explicit owner and a documented, validated contract. Persisted or public
+have an explicit owner and a documented contract that is checked. Persisted or public
 contracts MUST be versioned, and breaking changes MUST include a migration or an
 explicit compatibility boundary.
 
@@ -106,7 +106,7 @@ MUST NOT be promoted into this constitution merely to make a current design hard
 change.
 
 Behavior-changing work MUST include tests proportional to its risk, and user-facing
-workflows MUST have an executable validation path. Failed required checks MUST block
+workflows MUST have an executable way to check them. Failed required checks MUST block
 publication or release. Exact test matrices, task-admission criteria, and release gates
 belong to their owning specifications and workflows.
 
@@ -135,4 +135,4 @@ at the correct level of authority.
   current normative specs independently. Compliance with one does not imply compliance
   with the other.
 
-**Version**: 4.0.1 | **Ratified**: 2026-07-24 | **Last Amended**: 2026-10-15
+**Version**: 4.0.2 | **Ratified**: 2026-07-24 | **Last Amended**: 2026-11-17

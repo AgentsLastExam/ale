@@ -69,7 +69,7 @@ Setup is optional and runs once.
 ### Agent or oracle
 
 ALE rejects unsupported Harness/OS combinations before provisioning. It installs the
-selected Harness and its declared resources, validates staged stdio MCP
+selected Harness and its declared resources, checks staged stdio MCP
 commands, then applies the Task network policy. Autonomous Harnesses launch inside the
 sandbox, in `[agent].workdir` or else the agent's home; Policy Harnesses drive the
 framework-owned `TaskEnv`. The evaluated solver and

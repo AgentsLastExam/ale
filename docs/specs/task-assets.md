@@ -43,9 +43,10 @@ and declare external dependencies. Linux has no required package format. For Win
 software requiring repackaging, prefer the
 [MSIX workflow](../guides/windows-task-images.md). No Task depends on another Task's files.
 
-Record the source, version, integrity hash, compatible base, and deployment requirements. Keep
-credentials out of assets. Validate from a clean base as the actual agent user, including required
-writes, child tools and save/reopen, without repeating the interactive acquisition process.
+Record the source, version, integrity hash, compatible base, and deployment requirements.
+Keep credentials out of assets. Test from a clean base as the actual agent user, including
+required writes, child tools and save/reopen, without repeating the interactive acquisition
+process.
 
 Asset commands treat these as ordinary Task-local files and mirror their paths to HF. They do
 not consolidate software into a repository-level directory.

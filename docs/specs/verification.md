@@ -28,7 +28,7 @@ check = checks.text_equals("/home/user/output/answer.txt", "42")
 write({"reward": check["score"], "answer": check})
 ```
 
-`write(result)` validates and rounds `reward`, then atomically replaces `verification.json`
+`write(result)` checks and rounds `reward`, then atomically replaces `verification.json`
 with the complete result and `reward.json` with `{"reward": ...}`, without modifying the
 caller's object. It does not end the program or mark the episode successful. Repeated
 calls replace the previous result. Other languages or Python programs may write the same
@@ -82,7 +82,7 @@ write(verify())
 trajectory=False, mcp_servers=())` returns a normal dictionary. `kind` is `llm` or
 `agent`. Names label logs and need not be unique. Optional `output_schema` uses JSON
 Schema draft 04, 06 or 07; without it the response must still be a JSON object. Schema
-validation does not insert defaults or coerce values. References must be self-contained;
+checking does not insert defaults or coerce values. References must be self-contained;
 external schema downloads are unsupported. Task Python handles all subsequent scoring.
 
 Both Judge kinds use the model provider, model and reasoning effort configured by the run.
@@ -119,8 +119,8 @@ inline text; `trajectory=True` includes the solver trajectory. Missing or unusab
 raises `EvidenceError`; the tool does not decide that it deserves zero. Authors should check
 expected submissions before invoking a Judge and assign missing or unusable submissions
 the task's intended deductions or zero score. Passing missing evidence to a Judge still
-raises. Invalid JSON or schema-mismatched model output receives the validation error and
-schema for up to three repair attempts after the initial response; only exhaustion raises.
+raises. Invalid JSON or schema-mismatched model output receives the error and the schema
+for up to three repair attempts after the initial response; only exhaustion raises.
 An unhandled Judge failure is not a score.
 
 Evidence is bounded: 20 MiB per file, 32 MiB per invocation, 256 KiB for inline references,

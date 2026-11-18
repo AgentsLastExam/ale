@@ -18,7 +18,7 @@ Task code may write `reward.json` directly without this package. The program mus
 successfully for ALE to accept it. Judge logs are independent.
 
 The package imports neither `ale.core` nor `ale.run`. ALE stages its pinned pure-Python
-schema validator alongside it. See [Verification](../../docs/specs/verification.md).
+JSON Schema library alongside it. See [Verification](../../docs/specs/verification.md).
 
 ```bash
 uv run pytest packages/ale-verify/tests

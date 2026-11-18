@@ -8,7 +8,7 @@ Harness.
   token; provider credentials and upstream selection remain Host-side.
 - Keep native configuration and state below `HarnessSession.home`; never discover the
   operator's ordinary agent home.
-- Validate settings and optional resources before launch. Unknown settings fail closed.
+- Check settings and optional resources before launch. Unknown settings fail closed.
 - Pin the native program version and record a meaningful integrity identity.
 - Native logs are evidence, not canonical trajectory. Parsing must be deterministic and
   preserve malformed/incomplete evidence as explicit issues.

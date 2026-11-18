@@ -532,7 +532,7 @@ its root-only stage directory, not to Harbor's `/tests`, and runs the entry with
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
 absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
 own when it has one, since that is where the Task installs what `verify.py` imports, and
-otherwise the framework's own. It stages `ale_verify` and its schema validator into that
+otherwise the framework's own. It stages `ale_verify` and its JSON Schema library into that
 interpreter's site-packages, checks the import, then sets `ALE_VERIFY_PYTHON` in the
 entrypoint's process environment.
 It is available to the tests and their child processes, including during `calibrate` and

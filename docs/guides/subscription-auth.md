@@ -37,7 +37,7 @@ GROK_HOME="$PWD/.ale/auth/grok-build" grok login
 chmod 0600 .ale/auth/grok-build/auth.json
 ```
 
-ALE validates that JSON profiles are regular files owned by the current user with mode
+ALE checks that JSON profiles are regular files owned by the current user with mode
 `0600`. It reads and refreshes only these checkout-local profiles. Ordinary Host agent
 profiles are never discovered, changed or logged out.
 

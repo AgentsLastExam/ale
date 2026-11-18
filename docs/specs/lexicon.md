@@ -21,7 +21,7 @@ Normative. Every term below has exactly one meaning.
 | **Task id** | `[task].name`, Harbor's `org/name` with each part a lowercase slug, unique in its collection. Where it names a file, directory, container or image it is the one component `org.name`. | not derived from the folder path |
 | **Environment** | The Task's definition of the machine the agent starts on: `[environment]` and `environment/`. | never a Sandbox or the episode protocol |
 | **Task source digest** | A digest of the Task folder's canonical paths, bytes, executable bits, and symlink targets, pruning only the [asset roots](task-assets.md) and generated state. | not a hash of `task.toml` alone or of asset bytes |
-| **TaskSpec** | The frozen, serializable specification of one Task: its validated `task.toml` and its instruction. | not the folder on disk |
+| **TaskSpec** | The frozen, serializable specification of one Task: its checked `task.toml` and its instruction. | not the folder on disk |
 | **Task operating system** | `linux` (default), or explicit `windows` or `macos`; it selects path and stage-entry semantics and must match the prepared image. | not a Provider name inferred from an image tag |
 | **Task** | One self-contained Task folder bound to its TaskSpec and standard behavior. | not a collection or loader |
 | **Task collection** | A directory or source that contains several independent Task folders for selection. | not a Task and not an execution contract |
@@ -47,7 +47,7 @@ Normative. Every term below has exactly one meaning.
 | **CLI Harness** | An Autonomous Harness that runs one pinned native command-line agent through `CliHarness`, sharing its prompt delivery, evidence layout, and continuation rules. | not a wrapper for arbitrary commands |
 | **Harness Preset** | Complete version-controlled configuration automatically selected for one Harness. | not an implicit constructor default |
 | **Skill Source** | An operator's explicitly declared local directory containing one Skill or immediate Skill collection. | never ambient host agent state |
-| **MCP Server** | A validated stdio or Streamable HTTP server definition made available to an agent. | not a vendor-native config file |
+| **MCP Server** | A checked stdio or Streamable HTTP server definition made available to an agent. | not a vendor-native config file |
 | **Effective Agent Resources** | The Task's Skill directory and MCP servers with the deduplicated preset-, Run-, and CLI-declared ones, which replace a Task's of the same name. | never ambient configuration |
 | **CUA Desktop MCP** (`cua-desktop`) | ALE's built-in screen-control MCP server selected at Run level. | not selected by a Task or automatically injected by an image |
 | **Desktop resolution** | The size, in logical pixels (points on macOS), that every Sandbox's desktop starts at, set by the Run's `desktop_resolution` and checked by the Provider; [Desktop resolution](sandbox-image.md#desktop-resolution). | never part of a prepared image or its identity, nor the size of the screenshots an agent's tools return |
