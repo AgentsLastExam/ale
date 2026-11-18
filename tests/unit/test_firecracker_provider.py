@@ -13,6 +13,7 @@ import json
 import os
 import tarfile
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -393,6 +394,29 @@ async def test_the_layer_chain_is_capped_before_the_guest_is_stopped(
         await deep.snapshot(roles=("solver",), reason="test")
     assert recorder.calls == []
     assert not (tmp_path / "snapshots").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_that_would_save_on_a_full_layer_stack_is_refused_up_front(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Sandbox booted from a snapshot of MAX_LAYERS layers could not be saved again, so one
+    that will be, kept as a snapshot or saved for its snapshot verifier, never starts."""
+    _snapshot(tmp_path, disks=["rootfs.ext4", *(f"layer-{i}.ext4" for i in range(MAX_LAYERS))])
+    for index in range(MAX_LAYERS):
+        (tmp_path / "snapshots/e1-abc" / f"layer-{index}.ext4").write_bytes(b"disk")
+    recorder = _Recorder()
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
+    provider = FirecrackerProvider(snapshot_dir=tmp_path / "snapshots")
+    monkeypatch.setattr(provider, "preflight", AsyncMock())
+    handle = f"{SNAPSHOT_PREFIX}e1-abc"
+    for saving in (
+        {"retention": "snapshot"},
+        {"snapshot_verifier": Resources(cpus=4, memory_mb=4096)},
+    ):
+        with pytest.raises(ProviderCapabilityError, match="saves no snapshot"):
+            await provider.create(request(snapshot=handle, **saving))
+    assert recorder.calls == []
 
 
 @pytest.mark.asyncio

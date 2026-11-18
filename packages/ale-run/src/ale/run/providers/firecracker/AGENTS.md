@@ -27,3 +27,16 @@ is refused before it boots, as the Task's error.
   fill, while the copy's blocks also count the filesystem's own structures.
 - A `storage_mb` the snapshot fills is the Task's error, as on Docker, whose watch ends such
   a Sandbox as storage-exhausted at once, the Task's result in a verifier of its own.
+
+## A Sandbox that will be saved can boot from a snapshot it cannot save again
+
+**Problem.** A microVM stacks at most eight layers, so one booted from a snapshot of eight
+fails when it is saved, after the agent's whole run, as a snapshot verifier's solver or a
+solver kept as a snapshot would be.
+
+**Solution.** `create` refuses, before it boots anything, a request that will be saved,
+`retention = "snapshot"` or a snapshot verifier's, whose snapshot already stacks eight.
+
+**Decisions.**
+- Refused rather than flattened: merging the layers would copy the whole disk, which the
+  layers exist to avoid.

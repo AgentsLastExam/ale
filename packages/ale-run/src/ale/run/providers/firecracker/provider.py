@@ -689,6 +689,12 @@ class FirecrackerProvider(Provider):
         else:
             resolved_image = await self._disk(request)
             layers = ()
+        saves = request.retention == "snapshot" or request.snapshot_verifier is not None
+        if saves and len(layers) >= MAX_LAYERS:
+            raise ProviderCapabilityError(
+                f"{request.snapshot} stacks {len(layers)} layers, the most a microVM boots, so "
+                "a Sandbox booted from it saves no snapshot"
+            )
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-fc-{uuid.uuid4().hex[:10]}"
