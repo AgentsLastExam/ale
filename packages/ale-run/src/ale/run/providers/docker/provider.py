@@ -19,8 +19,8 @@ confinement.
 
 A Sandbox takes its GPUs whole, or shares each with others by the device memory its Task
 names, admitted by what is free and watched while it lives (``gpu_sharing.py``). One that
-names ``storage_mb`` is measured while it lives, and stopped once it has written more
-(``storage.py``). Under rootless
+names ``storage_mb`` is measured while it lives, its Docker volumes included, and stopped once
+it has written more (``storage.py``, ``volumes.py``). Under rootless
 Docker, whose bridges are in a network namespace of rootlesskit's, a listener there relays
 each of its connections to the Host's Gateway and proxy (``rootless.py``).
 """
@@ -84,7 +84,16 @@ from ale.run.iptables import GATEWAY_CHAIN
 from ale.run.process import run
 from ale.run.providers import machine_arch, memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, storage, subnets, tc
+from ale.run.providers.docker import (
+    gpu_sharing,
+    gvisor,
+    kata,
+    rootless,
+    storage,
+    subnets,
+    tc,
+    volumes,
+)
 from ale.run.providers.privileges import set_elevation, verify_identities
 from ale.run.transport import GuestClient, StdioTransport
 
@@ -1153,6 +1162,7 @@ class DockerSandbox(Sandbox):
         watchdog: gpu_sharing.Watchdog,
         host_ports: rootless.HostPorts,
         guest_kernel: bool = False,
+        meter: volumes.Meter | None = None,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -1179,8 +1189,9 @@ class DockerSandbox(Sandbox):
         #: process drives it.
         self._watchdog = watchdog
         #: What measures what it writes while it names ``storage_mb`` and this process drives
-        #: it.
+        #: it, and what measures its volumes meanwhile.
         self._storage: storage.Watch | None = None
+        self._meter = meter
         #: The Host's ports of its Provider, of which it holds its own until it ends here.
         self._host_ports = host_ports
         #: The context of the phase that last ran a command in it, in which what the watchdog
@@ -1208,7 +1219,7 @@ class DockerSandbox(Sandbox):
     async def _release(self) -> None:
         """Stop watching it and let go of the Host's ports, then end its sessions: ALE's own
         end is no death."""
-        self._unwatch()
+        await self._unwatch()
         self._host_ports.release(self.container)
         if self._stopping is not None:
             self._stopping.cancel()
@@ -1346,13 +1357,15 @@ class DockerSandbox(Sandbox):
             )
         if self.allocation.storage_mb is not None:
             self._storage = storage.Watch(
-                self.container_id, self.allocation.storage_mb, self.wrote_past
+                self.container_id, self.allocation.storage_mb, self.wrote_past, self._meter
             )
 
-    def _unwatch(self) -> None:
+    async def _unwatch(self) -> None:
+        """Watch it no more; the storage watch's helper is gone when this returns, so that it
+        holds none of the Sandbox's volumes."""
         self._watchdog.unwatch(self.container_id)
         if self._storage is not None:
-            self._storage.stop()
+            await self._storage.stop()
 
     def _stop_for(self, reason: GuestUnreachableError) -> None:
         """Have every call from now on, and each that waits on it now, raise ``reason``:
@@ -1403,7 +1416,7 @@ class DockerSandbox(Sandbox):
             f"gpu_memory_mb of {gpu.memory_mb} MiB"
         )
         if gpu.hold is GpuHold.LIMIT:
-            self._unwatch()
+            await self._unwatch()
             self._stop_for(
                 GuestUnreachableError(
                     f"the sandbox itself died: ALE's GPU memory watchdog stopped it: {found}, "
@@ -1547,6 +1560,8 @@ class DockerProvider(Provider):
         self._checked: dict[str, list[str]] = {}
         self._gpu_models: tuple[GpuModel, ...] | None = None
         self._daemon: str | None = None
+        #: Whether the daemon counts ``SizeRw`` in blocks, as its containerd image store does.
+        self._blocks: bool | None = None
         self._networks = _Networks()
         self._watchdog = gpu_sharing.Watchdog()
         self._host_ports = rootless.HostPorts(self._rootless_bridges)
@@ -1560,9 +1575,7 @@ class DockerProvider(Provider):
         models = await self._models() if runtime.gpus else ()
         profiles = []
         for features in runtime.feature_sets:
-            # A commit keeps no volume and what a Sandbox writes to one is not measured
-            # (storage.py), so a Sandbox with storage on one saves no snapshot and is held to
-            # no storage_mb.
+            # A commit keeps no volume, so a Sandbox with storage on one saves no snapshot.
             on_volumes = any(runtime.grants[feature].volumes for feature in features)
             profiles.append(
                 CapabilityProfile(
@@ -1576,7 +1589,8 @@ class DockerProvider(Provider):
                     gpus=bool(models),
                     gpu_models=models,
                     gpu_hold=runtime.gpu_hold if models else GpuHold.WHOLE,
-                    storage_limit=not on_volumes,
+                    # What it writes, its volumes included, is measured (storage.py).
+                    storage_limit=True,
                     container_features=features,
                 )
             )
@@ -1784,6 +1798,8 @@ class DockerProvider(Provider):
         admitted: tuple[GpuDevice, ...] = ()
         sessions: list[_Session] = []
         watcher: memory.GuestEvents | None = None
+        #: Its Docker volumes, by the directory each is at.
+        mounted: dict[str, str] = {}
         try:
             # Its network, if it has one of its own, is created here, so that every failure
             # from now on removes it.
@@ -1826,6 +1842,8 @@ class DockerProvider(Provider):
                 code, started_id, stderr = await _docker(
                     *argv, resolved_image.observed_ref, timeout=_START_SEC
                 )
+                if code == 0 and grant.volumes:
+                    mounted = await volumes.mounted(container)
             if code != 0:
                 if resources.gpus:
                     raise ProviderCapabilityError(
@@ -1884,6 +1902,7 @@ class DockerProvider(Provider):
             sessions.append(
                 await self._connect(container, agent_user, resources.memory_mb, watcher)
             )
+            meter = await self._meter(container, mounted, resources.storage_mb)
         except BaseException:
             self._host_ports.release(container)
             await asyncio.gather(
@@ -1937,9 +1956,21 @@ class DockerProvider(Provider):
             watchdog=self._watchdog,
             host_ports=self._host_ports,
             guest_kernel=runtime.guest_kernel,
+            meter=meter,
         )
         sandbox.watch()
         return sandbox
+
+    async def _meter(
+        self, container: str, mounted: Mapping[str, str], storage_mb: int | None
+    ) -> volumes.Meter | None:
+        """What measures the volumes of a Sandbox held to its ``storage_mb``, as the daemon
+        counts ``SizeRw``, which this Provider reads once."""
+        if not mounted or storage_mb is None:
+            return None
+        if self._blocks is None:
+            self._blocks = await volumes.counts_blocks()
+        return volumes.Meter(container, mounted.values(), blocks=self._blocks)
 
     async def _rootless_bridges(self) -> rootless.Namespaces | None:
         """Where the daemon's bridges are when it is rootless and they are not in this
@@ -2268,6 +2299,9 @@ class DockerProvider(Provider):
             for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
             if name.startswith("ale-net-")
         )
+        if volumes.of(record.get("Mounts") or []):
+            # A storage watch's helper that outlived its process still holds them.
+            await volumes.gone(volumes.meter_name(container))
         code, _, stderr = await _docker("rm", "-f", "-v", container, timeout=_REMOVE_SEC)
         if code != 0:
             raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
@@ -2343,6 +2377,7 @@ class DockerProvider(Provider):
         agent_user = request.user
         watcher = await _watcher(container, runtime)
         memory_mb = allocation.memory_mb
+        mounted = volumes.of(record.get("Mounts") or [])
         session: _Session | None = None
         try:
             await self._host_ports.hold(container, _ports_on_host(request))
@@ -2351,6 +2386,7 @@ class DockerProvider(Provider):
             session = await self._connect(container, agent_user, memory_mb, watcher)
             agent_home, _ = await self._guest_contract(session.client)
             file_session = await self._connect(container, agent_user, memory_mb, watcher)
+            meter = await self._meter(container, mounted, allocation.storage_mb)
         except BaseException:
             self._host_ports.release(container)
             if session is not None:
@@ -2374,6 +2410,7 @@ class DockerProvider(Provider):
             watchdog=self._watchdog,
             host_ports=self._host_ports,
             guest_kernel=runtime.guest_kernel,
+            meter=meter,
         )
         if sealed:
             try:

@@ -72,8 +72,8 @@ from nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose 
 not accept or have the memory it needs on each. A Sandbox that names `storage_mb` goes only
 to a leaf that holds it to that: under QEMU, Firecracker, Orchard and Daytona by a disk of
 its own, at least that size, as each one's section says, and under Docker by measuring what
-it writes and ending it past the limit, but in `docker:gvisor`'s profile for
-`nested_containers` ([Docker writable storage](#docker-writable-storage)). A Node's profiles
+it writes, its Docker volumes included, and ending it past the limit
+([Docker writable storage](#docker-writable-storage)). A Node's profiles
 are its leaves', each limited to the CPUs and memory the Node lends in all. A Node lends
 Docker under any of its runtimes, QEMU and Orchard, but not Firecracker.
 
@@ -550,7 +550,9 @@ names `storage_mb` to it as Kubernetes holds a Pod to its `ephemeral-storage`
 ([`docker/storage.py`](docker/storage.py)): every 5 s while a Run or a Node drives it, the
 leaf reads what the Sandbox has written over its image, `SizeRw` of
 `docker container inspect --size`, which the daemon counts on the Host, outside the
-Sandbox's reach. Once that passes `storage_mb` MiB the leaf kills the container and logs, in
+Sandbox's reach, together with what the Sandbox's Docker volumes take, such as a container
+engine's storage ([gVisor](#docker-on-gvisor)), which a helper of its own measures (below).
+Once that passes `storage_mb` MiB the leaf kills the container and logs, in
 the phase of the command that ran last, `ALE's storage watch stopped the Sandbox: it wrote
 4102 MiB over its image, past the 4096 MiB its Task declares`; the Sandbox's next call,
 and one that waits on it then, raises `StorageExhaustedError` with the same sizes, which
@@ -558,7 +560,12 @@ ends the Episode as `storage_exhausted`
 ([Episode protocol](../../../../../../docs/specs/episode-protocol.md#agent-or-oracle)). A
 Node's leaf measures as a Run's does, and the error crosses to the Run by name. Nothing is
 asked of the daemon's setup: Docker 29.1.3 rootful and 29.9.3 rootless, both with the
-containerd image store on ext4, counted alike, and so did every runtime:
+containerd image store on ext4, counted alike, and so did every runtime. That store counts
+the blocks of the layer's entries, its directories included; a classic graph driver
+(`overlay2`, the containerd store turned off) counts the bytes of its files instead,
+directories not and a sparse file's holes too (a file of 1 byte counted 8192 against 1,
+64 MiB made with `truncate` 4096 against 64 MiB, 1000 empty files 24576 against 0;
+rootless 29.9.3):
 
 | Written in the Sandbox | Counted |
 |---|---|
@@ -568,7 +575,7 @@ containerd image store on ext4, counted alike, and so did every runtime:
 | Empty files | their directories' blocks: 100,000 count 2.5 MiB |
 | A file deleted while a process holds it open | nothing, though it holds the Host's disk until it is closed |
 | `/dev/shm` or another tmpfs | nothing: it is memory, which `memory_mb` holds |
-| A volume, as the container engine's storage of a Sandbox that asks for `nested_containers` | nothing, so `docker:gvisor`'s profile for `nested_containers` holds no Sandbox to `storage_mb`, which goes to the next Provider listed that does: Docker sizes a volume only in `docker system df -v`, which sizes every volume and layer of the daemon, in 4 to 6 s with 80 volumes, and fails when a container goes meanwhile |
+| A Docker volume, as the container engine's storage of a Sandbox that asks for `nested_containers` | what it takes on the Host's disk, counted as the daemon counts `SizeRw`, at the next measurement: an engine's containers that wrote 2 GiB to their layers, on the volume, ended a Sandbox of 1024 MiB |
 
 What ALE writes counts as the Sandbox's own, as on a disk of that size: a ready Sandbox of
 the container base has written 3.4 MiB, and 16 MiB 30 s later, the framework's Python
@@ -589,6 +596,29 @@ Docker 29.9.3, rootless, on a busy disk array (Linux 5.15, 384 cores under a loa
 
 So a Sandbox may write about 5 GiB past its limit on a fast disk before it ends, and all of
 a Host's Sandboxes together no more than its disk takes in 5 s, which the Host keeps free.
+
+ALE runs unprivileged and cannot read a rootful daemon's volume directories, nor, under
+rootless Docker, the files of an engine's containers, which belong to sub-UIDs. So for each
+watched Sandbox with volumes a helper runs (`<container>-storage`: ALE's QEMU runner under
+runc, with no network and the Sandbox's volumes mounted read-only by name), started with
+`docker run -i --rm` at the first measurement, which answers each line on its stdin with one
+walk over all of them, a hard link counted once: GNU `du`'s blocks under the containerd
+image store, the bytes of every file but a directory under a classic graph driver, as
+`docker info` says once per Provider. It ends with its stdin, so with ALE's process (the
+container was gone 0.2 s after its CLI was killed), and it is removed before the Sandbox,
+since Docker keeps an anonymous volume another container mounts when the Sandbox is removed
+with its volumes, even once that one goes. Measured on an engine's storage of ubuntu,
+python, node and busybox images, one built and one stopped container, about 20,800 entries
+and 725 MB, 20 times each, the containerd store, rootful Docker 29.1.3 on NVMe (112 cores, a
+load of about 25) and rootless Docker 29.9.3 on a GCP persistent disk (128 cores, nearly
+idle):
+
+| | Rootful | Rootless |
+|---|---|---|
+| One measurement by the helper kept running | 0.09 to 0.13 s, about as much of `du`'s CPU, none of the daemons' | 0.05 s, about as much of `du`'s CPU, none of the daemons' |
+| One `docker run --rm` of the same helper per measurement, for comparison | 0.31 to 0.40 s, and 0.22 s of dockerd's and containerd's CPU besides the shim's | 0.25 to 0.31 s, and 0.08 s of their CPU |
+| `SizeRw` beside it, for comparison | 0.04 s, and 0.05 s of their CPU | 0.03 s, and 0.02 s of their CPU |
+
 What measuring leaves to the agent, such as `df` in the Sandbox showing the Host's disk and
 a write past the limit succeeding rather than failing as on a full disk, is
 [issue #152](https://github.com/AgentsLastExam/ale/issues/152).
@@ -690,7 +720,7 @@ kernel log must say `Starting gVisor`, and `docker cp` must see what the Sandbox
 | `runsc` ignores the setuid bit of a program, `sudo` among them, unless it runs with `--allow-suid` | Every registration passes `--allow-suid`, so the agent elevates through `sudo` as under runc |
 | `perf_event_open`, `bpf` and `io_uring_setup` fail whatever is granted (`ENODEV`, `EPERM` or `EINVAL`, `ENOSYS`) | Its profiles give none of them |
 | netstack implements nf_tables only under `--TESTONLY-nftables`, without which the `iptables` of Debian, Ubuntu and Alpine, Docker and Podman fail (`Failed to initialize nft: Protocol not supported`); with it, the Sentry's netlink takes nf_tables messages from any process holding `CAP_NET_ADMIN` in a network namespace, as every process does in one it creates | A Sandbox that asks for `nested_containers` runs under `runsc-nested`, with `--cap-add NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE`, which stay in the Sentry: the engine's bridges and rules, its mounts and namespaces, and an init script's limits, such as Debian's raising open files. No other sandbox reaches nf_tables. netstack runs ALE's chains, which stay in its iptables tables, before the engine's nf_tables rules, as Linux runs both; unlike Linux, which tracks and NATs a connection once for both, each tracks and NATs it on its own (patch 0008) |
-| The sandbox's root is the Host's overlayfs, which refuses to create the whiteouts (a 0:0 character device) by which an engine's overlay layers mark what they delete: an engine that keeps its images there fails to start a container (`symlink /proc/mounts …/etc/mtab: file exists`) or to delete a file of its image | `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` each get a Docker volume of their own, which starts with what the image holds there and goes with the sandbox. A commit keeps no volume and the storage watch does not measure one, so the profile for container engines takes no snapshots and holds no Sandbox to `storage_mb` ([Docker writable storage](#docker-writable-storage)) |
+| The sandbox's root is the Host's overlayfs, which refuses to create the whiteouts (a 0:0 character device) by which an engine's overlay layers mark what they delete: an engine that keeps its images there fails to start a container (`symlink /proc/mounts …/etc/mtab: file exists`) or to delete a file of its image | `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` each get a Docker volume of their own, which starts with what the image holds there and goes with the sandbox. A commit keeps no volume, so the profile for container engines takes no snapshots; the storage watch measures them ([Docker writable storage](#docker-writable-storage)) |
 | A dockerd that can open a packet socket but not write one, as under `--net-raw`, fails to start a container (`failed to advertise addresses: operation not supported`, the `docker.io` 29.1.3 of Ubuntu 22.04 and 24.04); one that cannot open one only warns | `runsc-nested` passes no `--net-raw`, so a nested container has no raw socket, and a Sandbox has `raw_sockets` or `nested_containers`, in a profile each |
 
 Under `runsc-nested`, Ubuntu 22.04's and 24.04's `docker.io` 29.1.3 installed during the run

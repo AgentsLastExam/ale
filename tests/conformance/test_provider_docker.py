@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import time
@@ -12,14 +11,14 @@ from typing import Literal
 import pytest
 from tests.support import CONTAINER_BASE, skip_without_gvisor, skip_without_kata
 
-from ale.core.errors import GuestUnreachableError, MemoryExhaustedError
+from ale.core.errors import GuestUnreachableError, MemoryExhaustedError, StorageExhaustedError
 from ale.core.sandbox import SANDBOX_GATEWAY_PORT, Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.core.testkit import NESTED_CHECKS, ProviderConformance
 from ale.run import guestd
 from ale.run.framework import framework_identity
 from ale.run.providers import missing_features
-from ale.run.providers.docker import gvisor, kata, storage
+from ale.run.providers.docker import gvisor, kata, storage, volumes
 from ale.run.providers.docker.provider import (
     DockerProvider,
     DockerSandbox,
@@ -594,34 +593,84 @@ docker pull -q busybox:1.36.1 >/dev/null
 """
 
 
-async def _volumes(container: str) -> dict[str, str]:
-    """The Docker volumes a container mounts, by the directory each is mounted at."""
-    code, raw, stderr = await _docker(
-        "inspect", "--format", "{{json .Mounts}}", container, timeout=30
-    )
-    assert code == 0, stderr
-    return {m["Destination"]: m["Name"] for m in json.loads(raw) if m["Type"] == "volume"}
+async def _engine_request(
+    provider: DockerProvider, episode: str, **resources: int
+) -> SandboxRequest:
+    """A Sandbox that runs a container engine, with ``resources`` beside the plain ones."""
+    request = await _plain_request(provider, episode, ContainerFeature.NESTED_CONTAINERS)
+    return request.model_copy(update={"resources": request.resources.model_copy(update=resources)})
+
+
+async def _exists(kind: str, name: str) -> bool:
+    code, _, _ = await _docker(kind, "inspect", name, timeout=30)
+    return code == 0
 
 
 @pytest.mark.asyncio
 async def test_a_gvisor_sandbox_with_a_container_engine_keeps_its_storage_on_volumes() -> None:
     """Under the runtime registered for container engines, which may mount, with each of
-    the engines' storage directories on a volume of its own that goes with the Sandbox. A
-    Sandbox that did not ask has none of it."""
+    the engines' storage directories on a volume of its own that goes with the Sandbox, the
+    storage watch's helper, which mounts them while it measures them, gone first. A Sandbox
+    that did not ask has none of it."""
     skip_without_gvisor()
     provider = DockerProvider(runtime="gvisor")
     async with await provider.create(await _plain_request(provider, "gvisor-no-engine")) as sandbox:
         assert sandbox.allocation.runtime == gvisor.RUNTIME
-        assert await _volumes(sandbox.container) == {}
-    asked = await _plain_request(provider, "gvisor-engine", ContainerFeature.NESTED_CONTAINERS)
+        assert await volumes.mounted(sandbox.container) == {}
+    asked = await _engine_request(provider, "gvisor-engine", storage_mb=4096)
     async with await provider.create(asked) as sandbox:
         assert sandbox.allocation.runtime == gvisor.NESTED
         assert await missing_features(sandbox, {ContainerFeature.MOUNT}) == {}
-        volumes = await _volumes(sandbox.container)
-        assert set(volumes) == set(gvisor.ENGINE_STORAGE)
-    for name in volumes.values():
-        code, _, _ = await _docker("volume", "inspect", name, timeout=30)
-        assert code != 0, f"volume {name} outlived its Sandbox"
+        mounted = await volumes.mounted(sandbox.container)
+        assert set(mounted) == set(gvisor.ENGINE_STORAGE)
+        meter = volumes.meter_name(sandbox.container)
+        for _ in range(60):
+            if await _exists("container", meter):
+                break
+            await asyncio.sleep(1)
+        else:
+            pytest.fail(f"no helper {meter} measured the Sandbox's volumes")
+    assert not await _exists("container", meter), f"{meter} outlived its Sandbox"
+    for name in mounted.values():
+        assert not await _exists("volume", name), f"volume {name} outlived its Sandbox"
+
+
+@pytest.mark.asyncio
+async def test_a_gvisor_sandbox_whose_container_engine_writes_past_its_storage_is_stopped() -> None:
+    """What the engine's containers write lands on its volumes, which count beside the
+    Sandbox's own writable layer: past its storage_mb the Sandbox is stopped as one that wrote
+    to its layer is, within a measurement and the kill."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = await _engine_request(
+        provider, "gvisor-engine-storage", memory_mb=2048, storage_mb=1024
+    )
+    async with await provider.create(request) as sandbox:
+        await sandbox.open_egress()
+        installed = await sandbox.exec(["sh", "-c", _INSTALL_ENGINE], timeout_sec=600)
+        assert installed.ok, installed.stderr[-2000:]
+        layer = await storage.written(sandbox.container)
+        assert layer is not None and layer < 1024 << 20, f"the engine alone wrote {layer} bytes"
+        # Kept once it exits: the layer of a container removed at once goes before a
+        # measurement can see it.
+        fill = (
+            "docker run --name ale-fill --network none busybox:1.36.1 "
+            "dd if=/dev/zero of=/fill bs=1M count=2048"
+        )
+        loop = asyncio.get_running_loop()
+        try:
+            filled = await sandbox.exec(["sh", "-c", fill], timeout_sec=600)
+            assert filled.ok, filled.stderr[-2000:]
+            deadline = loop.time() + storage.WATCH_SEC + 15
+            while loop.time() < deadline:
+                await sandbox.exec(["true"], timeout_sec=30)
+                await asyncio.sleep(1)
+        except StorageExhaustedError as ended:
+            assert "past the 1024 MiB its Task declares" in str(ended), ended
+            return
+        pytest.fail(
+            "its engine's container wrote 2048 MiB past its storage_mb of 1024, and it went on"
+        )
 
 
 @pytest.mark.asyncio

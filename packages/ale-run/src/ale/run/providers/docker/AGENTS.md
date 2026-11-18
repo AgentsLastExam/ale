@@ -367,8 +367,8 @@ its own.
   A commit keeps no volume, so the profile for container engines takes no snapshots,
   rather than lose the engine's images and containers in one: an engine's layers,
   whiteouts among them, cannot be part of an image's layer, whose whiteouts would read as
-  the layer's own. Nor does it hold a Sandbox to `storage_mb`, since what is written to a
-  volume is not measured ([Writable storage](#writable-storage)).
+  the layer's own. The storage watch measures them through a helper
+  ([A container engine's volumes](#a-container-engines-volumes-in-the-storage-watch)).
 - gVisor's own gaps are closed as ALE patches that do what Linux does, rather than worked
   around in the Sandbox, so that a Task needs nothing for gVisor.
 - ALE's chains stay in iptables rather than move to nf_tables, whose gVisor implementation
@@ -642,21 +642,24 @@ under rootless Docker and off xfs mounted with `pquota`, so there such a Sandbox
   service creates a snapshot without the container's storage options
   (`daemon/containerd/image_snapshot.go`, v29.1.3).
 - `SizeRw` of `docker container inspect --size` is the blocks of the container's writable
-  layer, as containerd's snapshotter (or the classic driver) walks it on the Host. It counts
-  what runc, gVisor registered with `--overlay2=none` and Kata (virtio-fs, `cache=auto`)
-  write alike, by the next read, under rootful Docker 29.1.3 and rootless 29.9.3 alike; not
-  a volume, a tmpfs, the holes of a sparse file, nor a file deleted while still open. The
-  README has the table, and the costs: a walk takes about 1 s of the daemons' CPU per
-  100,000 files, rootful or rootless, and a Sandbox wrote at up to 0.95 GB/s to an NVMe
-  disk.
+  layer, its directories included, as containerd's snapshotter walks it on the Host. It
+  counts what runc, gVisor registered with `--overlay2=none` and Kata (virtio-fs,
+  `cache=auto`) write alike, by the next read, under rootful Docker 29.1.3 and rootless
+  29.9.3 alike; not a volume, a tmpfs, the holes of a sparse file, nor a file deleted while
+  still open. A classic graph driver (`overlay2`) counts the bytes of its files instead,
+  directories not and a sparse file's holes too (rootless 29.9.3 with
+  `containerd-snapshotter` false). The README has the table, and the costs: a walk takes
+  about 1 s of the daemons' CPU per 100,000 files, rootful or rootless, and a Sandbox wrote
+  at up to 0.95 GB/s to an NVMe disk.
 - A ready Sandbox of the container base holds 3.4 MiB in its layer, and 16 MiB 30 s later.
 
 **Solution.** Every Docker leaf holds a Sandbox that names `storage_mb` to it by measuring:
 [`storage.py`](storage.py) reads its `SizeRw` every 5 s while this process drives it, and
 past `storage_mb` MiB the Sandbox kills the container, logs the stop to the execution trace
 as the GPU watchdog logs a kill, and has its sessions raise `StorageExhaustedError`, which
-the episode records as `storage_exhausted`. Only the profile for container engines, whose
-storage is on volumes, declares no `storage_limit`. What measuring leaves to the agent is
+the episode records as `storage_exhausted`. What a Sandbox's Docker volumes take counts too
+([A container engine's volumes](#a-container-engines-volumes-in-the-storage-watch)).
+What measuring leaves to the agent is
 [issue #152](https://github.com/AgentsLastExam/ale/issues/152).
 
 **Decisions.**
@@ -676,9 +679,6 @@ storage is on volumes, declares no `storage_limit`. What measuring leaves to the
   one `inspect` naming all 51 took 3.1 s and `docker ps --size` 1.3 s.
 - Kill the container, as the GPU watchdog stops a gVisor Sandbox, rather than stop it
   gracefully: a Sandbox past its limit should write nothing more.
-- No measure of volumes: `docker system df -v`, Docker's only report of a volume's size,
-  sizes every volume and layer of the daemon (4 to 6 s with 80 volumes) and failed when a
-  container went meanwhile, so the profile for container engines declares no limit.
 - Alternatives measured and not taken:
   - gVisor's root overlay with a size (`dev.gvisor.flag.overlay2=root:self,size=N`): `df`
     shows the limit and a write past it fails with `ENOSPC`, rootful and rootless, but every
@@ -690,3 +690,47 @@ storage is on volumes, declares no `storage_limit`. What measuring leaves to the
     xfs mounted with `pquota`, rootful, which a Host would have to switch to.
   - Firecracker, which gives each Sandbox a disk of its size: it attaches no GPU and needs
     `/dev/kvm`.
+
+## A container engine's volumes in the storage watch
+
+**Problem.** The storage watch read only `SizeRw`, which counts no volume, so the profile for
+container engines, whose storage is on volumes
+([above](#a-container-engine-in-a-gvisor-sandbox)), held no Sandbox to `storage_mb`: a Task
+that runs Docker and names `storage_mb`, as ale-tasks-base's `docker_in_vm` names 8192, found
+no Docker leaf.
+
+**Context.** Measured in November 2026 under rootful Docker 29.1.3 (Linux 7.0) and rootless
+29.9.3 (Linux 6.12), the containerd image store, ALE's runsc 0.1.2 under `runsc-nested`, on
+the storage of a `docker:29-dind` engine that had pulled ubuntu, python, node and busybox,
+built an image whose layers delete a file and replace a directory, and stopped a container
+with a named volume: about 20,800 entries and 725 MB.
+- A rootful daemon's volume directories are root's alone, and under rootless Docker the files
+  of the engine's containers belong to sub-UIDs; root in a runc helper of the daemon's reads
+  them all, with Docker's default capabilities.
+- `docker rm -v` keeps an anonymous volume another container mounts, and the volume stays
+  once that container goes too.
+- A helper started with `docker run -i --rm` was gone 0.18 to 0.24 s after its CLI was
+  killed with `SIGKILL`.
+- One `du` of the store took 0.05 to 0.13 s and as much of its CPU; a `docker run --rm` per
+  measurement took 0.25 to 0.40 s and 0.08 to 0.22 s of dockerd's and containerd's CPU
+  besides its shim's (the README has the table).
+
+**Solution.** A watched Sandbox's volumes are measured by one helper outside it, kept running
+beside `SizeRw`, in the daemon's unit ([`volumes.py`](volumes.py),
+[Docker writable storage](../README.md#docker-writable-storage)).
+
+**Decisions.**
+- Keep the volumes and count them, as Kubernetes counts a Pod's `emptyDir` volumes into its
+  `ephemeral-storage`, rather than refuse limits to the profile that needs them most.
+- From a helper of the daemon's, never through guestd: root in the Sandbox could hide what
+  it wrote under a mount, the walk would be charged to the Sandbox, and ALE's own user can
+  read no volume. The helper mounts the volumes read-only by name, under runc, with no
+  network.
+- In the daemon's unit: `du`'s blocks under the containerd store, the bytes of every file
+  but a directory under a classic graph driver, so that one limit means one thing on a
+  daemon.
+- One helper per watched Sandbox, kept running and asked by a line on its stdin, rather than
+  one per measurement: a quarter to a third of the time, and none of the daemons' CPU, every
+  5 s for every such Sandbox. It ends with its stdin, so a crashed run leaves none, and it
+  is removed before the Sandbox, whose volumes Docker would otherwise keep; discarding a
+  Sandbox by its handle removes one left behind first.
