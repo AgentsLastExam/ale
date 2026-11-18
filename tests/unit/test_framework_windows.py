@@ -1,14 +1,19 @@
-"""The Windows framework installer: what it reads from a disk's registry and what it writes."""
+"""The Windows framework: what its installer reads from a disk's registry and what it writes,
+and how the boot service it registers answers Windows."""
 
 from __future__ import annotations
 
+import ctypes
+import importlib.util
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from ale.run import framework_windows as installer
+from ale.run import guestd
 
 pytestmark = pytest.mark.unit
 
@@ -112,6 +117,25 @@ def test_the_service_is_registered_in_the_control_set_the_disk_boots_from(regist
     registry({})
     with pytest.raises(installer.Lacks, match="no control set"):
         installer.service_key(Path("/hives"), "user", "172.30.0.1")
+
+
+@pytest.mark.parametrize(("control", "stops"), [(1, True), (4, False), (5, True)])
+def test_the_service_stops_guestd_only_when_told_to_stop(
+    monkeypatch: pytest.MonkeyPatch, control: int, stops: bool
+) -> None:
+    """Stop (1) and shutdown (5) end the service, and guestd with it. An interrogation (4)
+    must not: Windows sends one minutes after boot, and taken for a shutdown it ended every
+    long Windows command with a lost guest."""
+    # Windows runs the service as a script; it declares Windows callback types as it loads.
+    monkeypatch.setattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE, raising=False)
+    spec = importlib.util.spec_from_file_location("service", guestd.SOURCE / "service.py")
+    assert spec is not None and spec.loader is not None
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    service = object.__new__(script.Service)
+    service.stopping = threading.Event()
+    assert service._control(control) == 0
+    assert service.stopping.is_set() is stops
 
 
 def test_the_framework_is_installed_and_its_marker_written_last(

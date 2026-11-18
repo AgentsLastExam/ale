@@ -36,7 +36,11 @@ _CUA_DRIVER_ARGS = (
 )
 _SYSTEM, _ADMINISTRATORS, _USERS = "*S-1-5-18", "*S-1-5-32-544", "*S-1-5-32-545"
 
-_STOP, _SHUTDOWN = 0x1, 0x4
+#: The controls the service accepts (``SERVICE_ACCEPT_*``) and the codes the service control
+#: manager sends for them (``SERVICE_CONTROL_*``), numbered apart: code 4 is an interrogation,
+#: which any program may send at any time and which asks only for the service's status.
+_ACCEPT_STOP, _ACCEPT_SHUTDOWN = 0x1, 0x4
+_CONTROL_STOP, _CONTROL_SHUTDOWN = 0x1, 0x5
 _RUNNING, _STOPPED = 4, 1
 _SERVICE_WIN32_OWN_PROCESS = 0x10
 _CREATE_UNICODE_ENVIRONMENT, _CREATE_NEW_CONSOLE = 0x400, 0x10
@@ -170,9 +174,7 @@ class Service:
     def _serve(self) -> None:
         @_HANDLER
         def control(code, event, data, context):  # type: ignore[no-untyped-def]
-            if code in (_STOP, _SHUTDOWN):
-                self.stopping.set()
-            return 0
+            return self._control(code)
 
         self.status.value = self.security.RegisterServiceCtrlHandlerExW(NAME, control, None)
         self._report(_RUNNING)
@@ -184,8 +186,15 @@ class Service:
             failure = 1
         self._report(_STOPPED, failure)
 
+    def _control(self, code: int) -> int:
+        """Stop when the service is told to stop or Windows shuts down; answer any other
+        control, an interrogation above all, with the status already reported."""
+        if code in (_CONTROL_STOP, _CONTROL_SHUTDOWN):
+            self.stopping.set()
+        return 0
+
     def _report(self, state: int, failure: int = 0) -> None:
-        accepted = _STOP | _SHUTDOWN if state == _RUNNING else 0
+        accepted = _ACCEPT_STOP | _ACCEPT_SHUTDOWN if state == _RUNNING else 0
         status = _Status(_SERVICE_WIN32_OWN_PROCESS, state, accepted, failure, 0, 0, 0)
         self.security.SetServiceStatus(self.status, ctypes.byref(status))
 
