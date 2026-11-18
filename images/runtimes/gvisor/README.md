@@ -25,6 +25,7 @@ sent upstream; a stock `runsc` lacks them.
 | `0017-nftables-xt-mark-and-multiport` | Rules that `iptables-nft` writes with the `MARK` target and the `mark` and `multiport` matches, as the CNI portmap plugin and netavark write to publish ports, work as in Linux instead of failing. |
 | `0018-nftables-meta-mark-set-and-anonymous-sets` | `meta mark set`, sets without data, and anonymous sets named, found and freed as Linux does them, which netavark's nftables driver (Debian 13, Fedora) uses, work instead of failing with `Operation not supported`. |
 | `0019-cgroupfs-v1-freezer-controller` | Every sandbox has cgroup v1's freezer: writing `FROZEN` to a cgroup's `freezer.state` stops its tasks and its descendants' until it is thawed, as in Linux, so that `podman exec` with crun, `podman pause` and `docker pause` work instead of failing for want of `freezer.state` ([Container engines in a sandbox](#container-engines-in-a-sandbox)). |
+| `0020-cgroupfs-pids-max-enforced` | A fork past a cgroup's own `pids.max`, as an engine's `--pids-limit` in a sandbox sets it on the container's cgroup, fails with `EAGAIN`, as in Linux, instead of only when the task's pids cgroup happened to be the first of its cgroups (upstream commit 173505fa3); an ancestor's `pids.max` is still not enforced, as upstream. |
 
 Each patch's header says what it changes, why, and how it was verified.
 
@@ -179,11 +180,12 @@ containers' cgroups in them. The `tmpfs` that holds them is read-only, so Podman
 standard error that it cannot create the hierarchies gVisor lacks (`Failed to add conmon to
 cgroupfs sandbox cgroup: creating cgroup for blkio: mkdir /sys/fs/cgroup/blkio: read-only
 file system`); only its `conmon` stays out of a cgroup of its own. A Podman container sees
-the sandbox's cgroups at `/sys/fs/cgroup`, not its own, which Docker's containers see. A
-nested container's `--memory` and `--cpus` reach its cgroup, but nothing in the sandbox
-enforces them: a container given `--memory 64m` allocated 200 MiB, and one given
-`--cpus 0.5` ran a busy loop on a whole CPU. The sandbox's own `--memory` and `--cpus`
-bound all of its containers together.
+the sandbox's cgroups at `/sys/fs/cgroup`, not its own, which Docker's containers see. Of a
+nested container's limits, its own cgroup's `--pids-limit` holds (patch 0020), though an
+ancestor cgroup's `pids.max` is not enforced, as upstream; `--memory` and `--cpus` reach
+the container's cgroup, but nothing in the sandbox enforces them: a container given
+`--memory 64m` allocated 200 MiB, and one given `--cpus 0.5` ran a busy loop on a whole
+CPU. The sandbox's own `--memory` and `--cpus` bound all of its containers together.
 
 ## Out of memory
 

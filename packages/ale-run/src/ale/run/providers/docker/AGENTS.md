@@ -374,12 +374,13 @@ its own.
   the netlink, sysctls, ioctl and nf_tables that its CNI plugins, netavark and crun use
   behave as Linux's, and patch 0019 gives gVisor cgroup v1's freezer, through which crun
   runs `podman exec` and both engines pause a container.
-- A nested container's `--memory` and `--cpus` stay unenforced: gVisor's cgroupfs only
-  stores them, and enforcing them takes memory accounting with an OOM kill in each nested
-  cgroup and CPU throttling in the Sentry. The Sandbox's own limits, which its Task
-  declares, bound all of its containers together. A Podman container sees the Sandbox's
-  cgroups, since gVisor's cgroup namespaces root only cgroup v2 and crun then binds a v1
-  controller whole; its limits are still set on its own cgroup.
+- A nested container's `--pids-limit` holds (patch 0020), but its `--memory` and `--cpus`
+  stay unenforced: gVisor's cgroupfs only stores them, and enforcing them takes memory
+  accounting with an OOM kill in each nested cgroup and CPU throttling in the Sentry. The
+  Sandbox's own limits, which its Task declares, bound all of its containers together. A
+  Podman container sees the Sandbox's cgroups, since gVisor's cgroup namespaces root only
+  cgroup v2 and crun then binds a v1 controller whole; its limits are still set on its own
+  cgroup.
 
 ## A Sandbox's swap
 
