@@ -24,6 +24,7 @@ sent upstream; a stock `runsc` lacks them.
 | `0016-proc-sysctls-per-network-namespace` | `/proc/sys/net/ipv4/conf/<interface>` and `/proc/sys/net/ipv6/conf/<interface>`, and `net.ipv4.ping_group_range`, exist, belong to the network namespace they are looked up in and check access at every read and write, as in Linux: netavark writes the first two, crun writes the last for every Podman container. |
 | `0017-nftables-xt-mark-and-multiport` | Rules that `iptables-nft` writes with the `MARK` target and the `mark` and `multiport` matches, as the CNI portmap plugin and netavark write to publish ports, work as in Linux instead of failing. |
 | `0018-nftables-meta-mark-set-and-anonymous-sets` | `meta mark set`, sets without data, and anonymous sets named, found and freed as Linux does them, which netavark's nftables driver (Debian 13, Fedora) uses, work instead of failing with `Operation not supported`. |
+| `0019-cgroupfs-v1-freezer-controller` | Every sandbox has cgroup v1's freezer: writing `FROZEN` to a cgroup's `freezer.state` stops its tasks and its descendants' until it is thawed, as in Linux, so that `podman exec` with crun, `podman pause` and `docker pause` work instead of failing for want of `freezer.state` ([Container engines in a sandbox](#container-engines-in-a-sandbox)). |
 
 Each patch's header says what it changes, why, and how it was verified.
 
@@ -152,25 +153,37 @@ the session bus at `$DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`, els
 Under `runsc-nested`, with `--cap-add NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE` and the
 engine's storage on volumes, Docker and Podman run as root in a sandbox on networks of
 their own. Each of these ran a container, which reached the Internet, published a port to
-the sandbox's loopback and its own address, and was stopped and started; ran containers
-that resolved each other by name on a network it created; built an image whose `RUN` steps
-reached the Internet and deleted a file of the base image; and removed the image:
+the sandbox's loopback and its own address, ran a command through `exec`, answered nothing
+on that port while it was paused, and was stopped and started; ran containers that resolved
+each other by name on a network it created; built an image whose `RUN` steps reached the
+Internet and deleted a file of the base image; removed the image; and removed a paused
+container by force:
 
 | Engine | Network | Rootful Docker 29.1.3, Linux 7.0 | Rootless Docker 29.9.3, Linux 6.12 |
 |---|---|---|---|
-| Docker: Ubuntu 22.04's and 24.04's `docker.io` 29.1.3, Debian 12's 20.10.24, Docker CE 29.10.0, `docker:29-dind` (9 ways of installing and starting it) | its bridge, `iptables-nft` | all, `docker exec` too | all, `docker exec` too |
-| Podman 4.9.3, Ubuntu 24.04 | CNI plugins 1.1.1, `iptables-nft` | all but `podman exec` | all but `podman exec` |
-| Podman 4.9.3, Ubuntu 24.04 | netavark 1.4.0, `iptables-nft` | all but `podman exec` | all but `podman exec` |
-| Podman 5.4.2, Debian 13 | netavark 1.14.0, nftables | all but `podman exec` | all but `podman exec` |
-| Podman 5.8.9, Fedora 43 | netavark 1.17.2, nftables | all but `podman exec` | all but `podman exec` |
+| Docker: Ubuntu 22.04's and 24.04's `docker.io` 29.1.3, Debian 12's 20.10.24, Docker CE 29.10.0, `docker:29-dind` (9 ways of installing and starting it) | its bridge, `iptables-nft` | all | all |
+| Podman 4.9.3, Ubuntu 24.04 | CNI plugins 1.1.1, `iptables-nft` | all | all |
+| Podman 4.9.3, Ubuntu 24.04 | netavark 1.4.0, `iptables-nft` | all | all |
+| Podman 5.4.2, Debian 13 | netavark 1.14.0, nftables | all | all |
+| Podman 5.8.9, Fedora 43 | netavark 1.17.2, nftables | all | all |
 
 Patches 0010 to 0018 are what Podman's networks needed; with ALE's 0.1.2, only Podman's
-`--network host` worked. `podman exec` fails with crun, Podman's default OCI runtime, which
-reads the container's `freezer.state` in cgroup v1's freezer hierarchy, which gVisor's
-cgroups lack (`error opening file /sys/fs/cgroup/freezer/.../freezer.state`); with runc
-(`podman --runtime runc`, Ubuntu 24.04's runc 1.3.4 with netavark) it works, and so do the
-other nine. Podman warns on standard error that the sandbox's cgroups are read-only.
-Rootless Podman in a sandbox (slirp4netns, pasta) was not tried.
+`--network host` worked. Patch 0019 is what `podman exec` needed with crun, Podman's
+default OCI runtime, which reads the container's `freezer.state` in cgroup v1's freezer
+hierarchy, and what `docker pause` and `podman pause` needed. Rootless Podman in a sandbox
+(slirp4netns, pasta) was not tried.
+
+An engine in a sandbox finds gVisor's cgroup v1 controllers (`cpu`, `cpuacct`, `cpuset`,
+`devices`, `freezer`, `job`, `memory` and `pids`) under `/sys/fs/cgroup` and creates its
+containers' cgroups in them. The `tmpfs` that holds them is read-only, so Podman warns on
+standard error that it cannot create the hierarchies gVisor lacks (`Failed to add conmon to
+cgroupfs sandbox cgroup: creating cgroup for blkio: mkdir /sys/fs/cgroup/blkio: read-only
+file system`); only its `conmon` stays out of a cgroup of its own. A Podman container sees
+the sandbox's cgroups at `/sys/fs/cgroup`, not its own, which Docker's containers see. A
+nested container's `--memory` and `--cpus` reach its cgroup, but nothing in the sandbox
+enforces them: a container given `--memory 64m` allocated 200 MiB, and one given
+`--cpus 0.5` ran a busy loop on a whole CPU. The sandbox's own `--memory` and `--cpus`
+bound all of its containers together.
 
 ## Out of memory
 

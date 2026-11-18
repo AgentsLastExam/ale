@@ -729,12 +729,15 @@ and started with `dockerd`, Docker CE 29.10.0 preinstalled and started with `ser
 start` or `dockerd`, Debian 12's `docker.io` 20.10.24 started with `service docker start`,
 and `docker:29-dind`'s entrypoint each ran containers that reached the Internet, published a
 port to the sandbox, resolved each other on a network of their own, built an image and
-deleted files of their image, and `docker exec`, `stop` and `start` worked. Ubuntu's
-`docker.io` ships no init script, so `service docker start` fails for it under runc too.
-Rootful Podman runs on networks of its own too: Ubuntu 24.04's Podman 4.9.3 on its CNI
-backend and on netavark 1.4, Debian 13's 5.4.2 and Fedora 43's 5.8.9 on netavark's nftables
-driver each did all of that but `podman exec`, which crun, Podman's default OCI runtime,
-fails for want of cgroup v1's freezer; under `podman --runtime runc` it works too
+deleted files of their image; `docker exec`, `pause`, `stop` and `start` worked, and a
+paused container was removed by force. Ubuntu's `docker.io` ships no init script, so
+`service docker start` fails for it under runc too. Rootful Podman runs on networks of its
+own too: Ubuntu 24.04's Podman 4.9.3 on its CNI backend and on netavark 1.4, Debian 13's
+5.4.2 and Fedora 43's 5.8.9 on netavark's nftables driver each did all of that, `podman
+exec` and `pause` included, which crun, Podman's default OCI runtime, does through cgroup
+v1's freezer. A nested container's `--memory` and `--cpus` reach its cgroup, but nothing in
+the sandbox enforces them; the sandbox's own limits bound all of its containers together. A
+Podman container sees the sandbox's cgroups at `/sys/fs/cgroup` rather than its own
 ([gVisor runtime](../../../../../../images/runtimes/gvisor/README.md#container-engines-in-a-sandbox)).
 
 The filters and chains confine IPv4. The Provider creates a sandbox's network without IPv6;
