@@ -148,6 +148,16 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 | Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `ale-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
 | Fleet | The Node's Provider saves it on that Node, as in its row, and Sandboxes that boot from it are placed there, on the leaf that saved it ([Placement](../../../../../../docs/specs/fleet.md#placement)). The Fleet's handle for it is `fleet:snapshot:<sandbox>`; destroying it has the Node's Provider destroy it at the Node's next heartbeat |
 
+How each counts what a snapshot holds against the `storage_mb` of a Sandbox booted from it
+([Resources](../../../../../../docs/specs/task-authoring.md#resources-and-network)):
+
+| Provider | What the snapshot holds, and how it counts |
+|---|---|
+| Docker | A commit labels the image `ale.written` with the bytes written over the Task's image, the container's `SizeRw` measured once it has stopped plus what the snapshot it booted from held. A container booted from it carries that label, and the [storage watch](#docker-writable-storage) adds it to every measurement |
+| QEMU | The overlay is the larger of the snapshot's virtual size and `storage_mb` plus its overhead, and the guest's root filesystem already holds what the solver wrote |
+| Firecracker | `snapshot.json` records `written_mb`, the writable disk's use as the guest's `df /` showed it before shutdown plus what the snapshot it booted from held; a microVM booted from it gets a writable disk of `storage_mb` less that, plus the overhead, and one whose `storage_mb` that already fills is refused before it boots, as the Task's error |
+| Orchard | The clone is the snapshot's disk, at least `storage_mb`, with the solver's files on it |
+
 ## Reattaching by handle
 
 A Sandbox's `handle` names it to `reattach` and `discard`, by which another process on the

@@ -223,6 +223,17 @@ def _scripted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
     return calls
 
 
+#: What a scripted container has written over its image, in bytes, as a commit measures it.
+WRITTEN = 3 << 20
+
+
+def _measured_at_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def written(container: str) -> int:
+        return WRITTEN
+
+    monkeypatch.setattr("ale.run.providers.docker.provider.storage.written", written)
+
+
 def _created(calls: list[tuple[str, ...]]) -> list[tuple[str, IPv4Network, str, bool]]:
     """Each network the scripted docker CLI created: its name, subnet and gateway, and
     whether it is internal."""
@@ -346,6 +357,7 @@ def _sandbox() -> DockerSandbox:
     sandbox._context = contextvars.copy_context()
     sandbox.container_id = "f" * 64
     sandbox._relay = None
+    sandbox.written = 0
     sandbox._committing = False
     return sandbox
 
@@ -356,6 +368,7 @@ async def test_a_sealed_snapshot_gives_the_account_its_settings_back_first(
 ) -> None:
     """The committed image outlives the relay its system proxy names."""
     calls = _scripted(monkeypatch)
+    _measured_at_commit(monkeypatch)
 
     async def egress_relay(proxy: str | None, **_: object) -> str | None:
         calls.append(("egress_relay", str(proxy)))
@@ -382,6 +395,7 @@ async def test_a_snapshot_commits_the_stopped_container_without_its_gpus(
 ) -> None:
     """A Sandbox booted from it, whose labels the image's are, holds and reserves nothing."""
     calls = _scripted(monkeypatch)
+    _measured_at_commit(monkeypatch)
     retained = await _sandbox().snapshot(roles=("solver",), reason="kept")
     assert calls == [
         ("stop", "--time", "30", "ale-e1-abcdef"),
@@ -395,12 +409,28 @@ async def test_a_snapshot_commits_the_stopped_container_without_its_gpus(
             'LABEL ale.gpu_memory_mb=""',
             "--change",
             f"LABEL ale.prepared={DIGEST}",
+            "--change",
+            f"LABEL ale.written={WRITTEN}",
             "ale-e1-abcdef",
             "ale-snapshot:e1-abcdef",
         ),
     ]
     assert retained.handle == "docker:snapshot:e1-abcdef"
     assert retained.gpu_devices == ()
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_of_a_snapshot_holds_what_both_wrote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its storage counts what the snapshot it booted from holds, as a disk of that size
+    would, so the next snapshot holds both."""
+    calls = _scripted(monkeypatch)
+    _measured_at_commit(monkeypatch)
+    sandbox = _sandbox()
+    sandbox.written = 5 << 20
+    await sandbox.snapshot(roles=("solver",), reason="kept")
+    assert f"LABEL ale.written={(5 << 20) + WRITTEN}" in calls[1]
 
 
 @pytest.mark.asyncio
@@ -411,6 +441,7 @@ async def test_a_commit_cut_short_leaves_no_snapshot_behind(
     removes its container, which fails a commit still under way, then the image it named,
     and only one never handed back."""
     calls = _scripted(monkeypatch)
+    _measured_at_commit(monkeypatch)
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         calls.append(argv)
@@ -460,9 +491,13 @@ async def test_a_snapshot_boots_only_for_the_tasks_prepared_image(
 
     monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
     provider = DockerProvider()
-    image = await provider._snapshot_image("docker:snapshot:e1-abcdef", request())
+    image, written = await provider._snapshot_image("docker:snapshot:e1-abcdef", request())
     assert (image.observed_identity, image.observed_ref) == ("sha256:" + "5" * 64,) * 2
     assert image.prepared_identity == DIGEST
+    assert written == 0
+    labels["ale.written"] = "4096"
+    _, written = await provider._snapshot_image("docker:snapshot:e1-abcdef", request())
+    assert written == 4096
 
     labels["ale.prepared"] = "sha256:" + "1" * 64
     with pytest.raises(ProviderCapabilityError, match="prepared solver image"):
@@ -1789,6 +1824,25 @@ def _sized_sandbox(storage_mb: int = 1024) -> DockerSandbox:
         _Session([], sandbox.container, 1024),
     )
     return sandbox
+
+
+async def test_a_sandbox_booted_from_a_snapshot_counts_what_the_snapshot_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its storage_mb holds what the snapshot wrote over the Task's image as well as its own
+    writes, as a disk of that size would."""
+    calls = _scripted(monkeypatch)
+    _measured(monkeypatch, (0, f"{200 << 20}\n", ""))
+    sandbox = _sized_sandbox()
+    sandbox.written = 900 << 20
+    sandbox.watch()
+    await _until(lambda: ("kill", sandbox.container) in calls)
+    ended = await sandbox._sessions[0].explain(GuestUnreachableError("guest session closed"))
+    assert str(ended) == (
+        "ALE stopped the sandbox: it and the snapshot it booted from wrote 1100 MiB over its "
+        "image, past the 1024 MiB its Task declares"
+    )
+    await sandbox._release()
 
 
 async def test_a_sandbox_that_writes_past_its_storage_is_stopped_and_says_so(

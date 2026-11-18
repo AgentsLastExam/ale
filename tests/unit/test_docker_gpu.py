@@ -1091,6 +1091,11 @@ async def test_a_shared_sandbox_records_its_reservation_and_is_watched_while_a_r
     )
     kept, snapshotted, destroyed = sandboxes
     await kept.retain(roles=("solver",), reason="kept")
+
+    async def written(container: str) -> int:
+        return 0
+
+    monkeypatch.setattr("ale.run.providers.docker.provider.storage.written", written)
     await snapshotted.snapshot(roles=("solver",), reason="kept")
     await destroyed.destroy()
     assert provider._watchdog._watched == {}

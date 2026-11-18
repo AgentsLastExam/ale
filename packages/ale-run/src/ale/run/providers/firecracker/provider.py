@@ -43,7 +43,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
@@ -135,6 +135,9 @@ EPISODE_LABEL = "ale.firecracker.episode"
 ROLE_LABEL = "ale.firecracker.role"
 RETENTION_LABEL = "ale.firecracker.retention"
 STORAGE_LABEL = "ale.firecracker.storage"
+#: What the snapshot a microVM booted from holds over its image, in MiB, which a later Run
+#: that drives the kept microVM again counts as its own.
+WRITTEN_LABEL = "ale.firecracker.written_mb"
 HANDLE_PREFIX = "firecracker:"
 SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 SNAPSHOT_RECORD = "snapshot.json"
@@ -317,6 +320,7 @@ class FirecrackerSandbox(Sandbox):
         host_ip: str,
         snapshot_dir: Path,
         runner_image: str,
+        written_mb: int = 0,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -332,6 +336,9 @@ class FirecrackerSandbox(Sandbox):
         self.host_ip = host_ip
         self.snapshot_dir = snapshot_dir
         self.runner_image = runner_image
+        #: What the snapshot it booted from holds over its Task's image, in MiB, which its
+        #: ``storage_mb`` counts as a disk of that size would; 0 for one of the image itself.
+        self.written_mb = written_mb
         self._client = client
         self._file_client = file_client
         self._sealed = False
@@ -476,6 +483,14 @@ class FirecrackerSandbox(Sandbox):
                 "a Firecracker sandbox can boot"
             )
         target = self.snapshot_dir / self.sandbox_id
+        # What it holds over its Task's image: what it wrote, over what it booted from.
+        try:
+            _, used, _ = await self._client.disk_usage("/")
+        except Exception as exc:
+            raise ProviderStartError(
+                f"could not measure what {self.container} wrote: {exc}"
+            ) from exc
+        written_mb = self.written_mb + -(-used >> 20)
         target.mkdir(parents=True)
         try:
             await self._power_off()
@@ -493,6 +508,7 @@ class FirecrackerSandbox(Sandbox):
                 "os": self.request.os.value,
                 "prepared_identity": self.request.prepared_image.prepared_identity,
                 "disks": names,
+                "written_mb": written_mb,
                 # What it booted from, which covers the disks under the new layer, then that layer.
                 "identity": "sha256:"
                 + hashlib.sha256(
@@ -659,8 +675,17 @@ class FirecrackerProvider(Provider):
     async def create(self, request: SandboxRequest) -> FirecrackerSandbox:
         await self.accepts(request)
         await self.preflight()
+        written_mb = 0
         if request.snapshot is not None:
-            resolved_image, layers = self._snapshot_image(request.snapshot, request)
+            resolved_image, layers, written_mb = self._snapshot_image(request.snapshot, request)
+            requested = request.resources.storage_mb
+            if requested is not None and written_mb >= requested:
+                # A disk of that size holding the snapshot would be full: the Task asks for too
+                # little, as Docker would find it, ending the Sandbox as soon as it measures it.
+                raise TaskError(
+                    f"{request.snapshot} holds {written_mb} MB written over the Task's image, "
+                    f"which fills the storage_mb of {requested} MB of a Sandbox booted from it"
+                )
         else:
             resolved_image = await self._disk(request)
             layers = ()
@@ -674,7 +699,13 @@ class FirecrackerProvider(Provider):
             self._write_config(storage, request, container.removeprefix("ale-fc-"), len(layers))
             host_port = free_port()
             await self._boot(
-                container, request, storage, Path(resolved_image.observed_ref), layers, host_port
+                container,
+                request,
+                storage,
+                Path(resolved_image.observed_ref),
+                layers,
+                host_port,
+                written_mb=written_mb,
             )
         except BaseException:
             # A failed or cancelled `docker run` may still have created the container.
@@ -690,7 +721,9 @@ class FirecrackerProvider(Provider):
             client = await self._first_connection(container, host_port, token, console)
             clients.append(client)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
-            storage_mb = await self._root_capacity_mb(client, request.resources.storage_mb)
+            storage_mb = await self._root_capacity_mb(
+                client, request.resources.storage_mb, written_mb
+            )
             desktop: DesktopResolution | None = None
             if has_desktop:
                 await self._await_desktop(client)
@@ -731,6 +764,7 @@ class FirecrackerProvider(Provider):
             host_ip=host_ip,
             snapshot_dir=self.snapshot_dir,
             runner_image=self.runner_image,
+            written_mb=written_mb,
         )
         try:
             if request.network.mode is NetworkMode.OPEN:
@@ -872,9 +906,16 @@ class FirecrackerProvider(Provider):
         rootfs: Path,
         layers: tuple[Path, ...],
         host_port: int,
+        *,
+        written_mb: int = 0,
     ) -> None:
-        """Start the runner, which makes the writable disk and starts the microVM."""
-        storage_mb = request.resources.storage_mb or DEFAULT_STORAGE_MB
+        """Start the runner, which makes the writable disk and starts the microVM.
+
+        The disk leaves room for what ``storage_mb`` holds beyond ``written_mb``, what the
+        snapshot it boots from holds, as a disk of that size holding that snapshot would.
+        """
+        requested = request.resources.storage_mb
+        storage_mb = DEFAULT_STORAGE_MB if requested is None else requested - written_mb
         argv = [
             "docker", "run", "--detach", *HELPER_RUNTIME, "--name", name,
             "--label", f"{MANAGED_LABEL}=true",
@@ -882,6 +923,7 @@ class FirecrackerProvider(Provider):
             "--label", f"{ROLE_LABEL}={request.role.value}",
             "--label", f"{RETENTION_LABEL}={request.retention}",
             "--label", f"{STORAGE_LABEL}={storage.resolve()}",
+            "--label", f"{WRITTEN_LABEL}={written_mb}",
             "--device", "/dev/kvm", "--device", "/dev/net/tun",
             # The runner builds and confines the guest's network itself.
             "--cap-add", "NET_ADMIN", "--sysctl", "net.ipv4.ip_forward=1",
@@ -981,16 +1023,20 @@ class FirecrackerProvider(Provider):
             )
         return user, home, bool(health.get("gui"))
 
-    async def _root_capacity_mb(self, client: GuestClient, requested: int | None) -> int:
-        """The writable root's capacity as the guest sees it; at least what was requested."""
+    async def _root_capacity_mb(
+        self, client: GuestClient, requested: int | None, written_mb: int
+    ) -> int:
+        """The storage the microVM has: its writable root's capacity as the guest sees it,
+        over the ``written_mb`` its snapshot holds; at least what was requested."""
         try:
             total, _, _ = await client.disk_usage("/")
         except Exception as exc:
             raise ProviderStartError(f"could not observe the root filesystem: {exc}") from exc
-        capacity = total // (1024 * 1024)
+        capacity = written_mb + total // (1024 * 1024)
         if requested is not None and capacity < requested:
+            held = f", {written_mb} MB of it its snapshot's," if written_mb else ""
             raise ProviderCapabilityError(
-                f"the microVM's root holds {capacity} MB, the Task requests {requested} MB"
+                f"the microVM's root holds {capacity} MB{held} and the Task requests {requested} MB"
             )
         return capacity
 
@@ -1127,8 +1173,9 @@ class FirecrackerProvider(Provider):
 
     def _snapshot_image(
         self, handle: str, request: SandboxRequest
-    ) -> tuple[ResolvedImage, tuple[Path, ...]]:
-        """The root disk and layers a microVM boots from a snapshot of the Task's own image."""
+    ) -> tuple[ResolvedImage, tuple[Path, ...], int]:
+        """The root disk and layers a microVM boots from a snapshot of the Task's own image,
+        and the MiB the snapshot holds over that image."""
         record = self._snapshot_record(handle)
         if record.get("prepared_identity") != request.prepared_image.prepared_identity:
             raise ProviderCapabilityError(
@@ -1144,6 +1191,7 @@ class FirecrackerProvider(Provider):
                 observed_ref=str(disks[0]),
             ),
             tuple(disks[1:]),
+            int(record.get("written_mb") or 0),
         )
 
     async def _destroy_snapshot(self, handle: str) -> None:
@@ -1252,4 +1300,5 @@ class FirecrackerProvider(Provider):
             host_ip=host_ip,
             snapshot_dir=self.snapshot_dir,
             runner_image=self.runner_image,
+            written_mb=int(labels.get(WRITTEN_LABEL) or 0),
         )

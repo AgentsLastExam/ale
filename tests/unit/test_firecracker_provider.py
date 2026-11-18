@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from ale.core.capability import Arch
-from ale.core.errors import ProviderCapabilityError
+from ale.core.errors import ProviderCapabilityError, TaskError
 from ale.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
@@ -37,11 +37,14 @@ from ale.core.taskspec import (
 )
 from ale.run.providers.firecracker import guest_init
 from ale.run.providers.firecracker.provider import (
+    DEFAULT_STORAGE_MB,
     GUEST_TAP,
     HOST_IP,
     MAX_LAYERS,
     SNAPSHOT_PREFIX,
     SNAPSHOT_RECORD,
+    STORAGE_OVERHEAD_MB,
+    WRITTEN_LABEL,
     FirecrackerProvider,
     FirecrackerSandbox,
     _inject,
@@ -335,6 +338,7 @@ def _snapshot(tmp_path: Path, name: str = "e1-abc", **record: object) -> Path:
         "prepared_identity": DIGEST,
         "disks": ["rootfs.ext4", "layer-0.ext4", "layer-1.ext4"],
         "identity": "sha256:" + "2" * 64,
+        "written_mb": 700,
     }
     (directory / SNAPSHOT_RECORD).write_text(json.dumps(base | record))
     return directory
@@ -343,10 +347,11 @@ def _snapshot(tmp_path: Path, name: str = "e1-abc", **record: object) -> Path:
 def test_a_snapshot_boots_its_root_under_its_layers_in_order(tmp_path: Path) -> None:
     directory = _snapshot(tmp_path)
     provider = FirecrackerProvider(snapshot_dir=tmp_path / "snapshots")
-    image, layers = provider._snapshot_image(f"{SNAPSHOT_PREFIX}e1-abc", request())
+    image, layers, written_mb = provider._snapshot_image(f"{SNAPSHOT_PREFIX}e1-abc", request())
     assert image.observed_ref == str(directory / "rootfs.ext4")
     assert image.observed_identity == "sha256:" + "2" * 64
     assert layers == (directory / "layer-0.ext4", directory / "layer-1.ext4")
+    assert written_mb == 700
     listed = provider._list_snapshots()
     assert [item["handle"] for item in listed] == [f"{SNAPSHOT_PREFIX}e1-abc"]
 
@@ -388,6 +393,133 @@ async def test_the_layer_chain_is_capped_before_the_guest_is_stopped(
         await deep.snapshot(roles=("solver",), reason="test")
     assert recorder.calls == []
     assert not (tmp_path / "snapshots").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_boot_has_room_for_its_storage_beyond_what_the_snapshot_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its writable disk leaves storage_mb less what the snapshot holds, as a disk of
+    storage_mb holding the snapshot would; without storage_mb, the usual default."""
+    recorder = _Recorder()
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
+    provider = FirecrackerProvider(snapshot_dir=tmp_path / "snapshots")
+    sized = request(resources=Resources(cpus=2, memory_mb=2048, storage_mb=4096))
+    for req, written in ((sized, 700), (sized, 0), (request(), 700)):
+        await provider._boot(
+            "ale-fc-x", req, tmp_path, tmp_path / "rootfs.ext4", (), 4100, written_mb=written
+        )
+    disks = [next(arg for arg in call if arg.startswith("RW_DISK_MB=")) for call in recorder.calls]
+    assert disks == [
+        f"RW_DISK_MB={4096 - 700 + STORAGE_OVERHEAD_MB}",
+        f"RW_DISK_MB={4096 + STORAGE_OVERHEAD_MB}",
+        f"RW_DISK_MB={DEFAULT_STORAGE_MB + STORAGE_OVERHEAD_MB}",
+    ]
+    # The runner carries what its snapshot holds, for a later Run that drives it again.
+    labels = [next(arg for arg in call if arg.startswith(WRITTEN_LABEL)) for call in recorder.calls]
+    assert labels == [f"{WRITTEN_LABEL}=700", f"{WRITTEN_LABEL}=0", f"{WRITTEN_LABEL}=700"]
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_that_fills_the_storage_asked_for_is_refused_before_it_boots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A disk of storage_mb holding the snapshot would be full: the Task asks for too little,
+    which is the Task's error, as Docker's watch finds it, before anything starts."""
+    _snapshot(tmp_path)
+    recorder = _Recorder()
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
+    provider = FirecrackerProvider(snapshot_dir=tmp_path / "snapshots")
+
+    async def nothing(*_: object, **__: object) -> None:
+        return None
+
+    monkeypatch.setattr(provider, "accepts", nothing)
+    monkeypatch.setattr(provider, "preflight", nothing)
+    full = request(
+        snapshot=f"{SNAPSHOT_PREFIX}e1-abc",
+        resources=Resources(cpus=2, memory_mb=2048, storage_mb=700),
+    )
+    with pytest.raises(TaskError, match=r"holds 700 MB .* storage_mb of 700 MB"):
+        await provider.create(full)
+    assert recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_storage_a_microvm_has_counts_what_its_snapshot_holds() -> None:
+    """Its root's capacity over what the snapshot holds; one short of what the Task asks for
+    names both."""
+
+    class Root:
+        async def disk_usage(self, path: str) -> tuple[int, int, int]:
+            return 3000 << 20, 0, 3000 << 20
+
+    provider = FirecrackerProvider()
+    assert await provider._root_capacity_mb(Root(), 3700, 700) == 3700  # type: ignore[arg-type]
+    with pytest.raises(
+        ProviderCapabilityError, match="holds 3700 MB, 700 MB of it its snapshot's,"
+    ):
+        await provider._root_capacity_mb(Root(), 4096, 700)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_kept_microvm_driven_again_counts_what_its_snapshot_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later Run reads what the snapshot it booted from holds back from its runner, so its
+    storage counts it as the Run that booted it did."""
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    (storage / "guest-token").write_text("token")
+    rootfs = tmp_path / "rootfs.ext4"
+    record = {
+        "Name": "/ale-fc-x",
+        "Config": {
+            "Labels": {
+                "ale.firecracker.managed": "true",
+                "ale.firecracker.retention": "keep",
+                "ale.firecracker.storage": str(storage),
+                "ale.firecracker.role": "solver",
+                WRITTEN_LABEL: "700",
+            }
+        },
+        "State": {"Running": True},
+        "Mounts": [
+            {"Type": "bind", "Source": str(storage), "Destination": "/storage"},
+            {"Type": "bind", "Source": str(rootfs), "Destination": "/images/rootfs.ext4"},
+        ],
+        "NetworkSettings": {"Ports": {"7000/tcp": [{"HostPort": "4100"}]}},
+    }
+    provider = FirecrackerProvider(snapshot_dir=tmp_path / "snapshots")
+
+    async def inspect(container: str) -> dict:
+        return record
+
+    async def connect(*_: object) -> _Client:
+        return _Client()
+
+    async def contract(*_: object) -> tuple[str, str, bool]:
+        return "user", "/home/user", False
+
+    async def wire(*_: object) -> str:
+        return "172.17.0.1"
+
+    monkeypatch.setattr(provider, "_inspect", inspect)
+    monkeypatch.setattr(provider, "_read_guest_contract", contract)
+    monkeypatch.setattr(provider, "_wire_network", wire)
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._connect", connect)
+    monkeypatch.setattr(
+        "ale.run.providers.firecracker.provider.read_guest_token", lambda _storage: "token"
+    )
+    monkeypatch.setattr("ale.run.providers.firecracker.provider.GUEST_PORT", 7000)
+    kept = sandbox(request(), tmp_path)
+    attached = await provider.attach_retained(
+        "firecracker:ale-fc-x",
+        request(),
+        kept.allocation,
+        kept.resolved_image.model_copy(update={"observed_ref": str(rootfs)}),
+    )
+    assert attached.written_mb == 700
 
 
 @pytest.mark.asyncio

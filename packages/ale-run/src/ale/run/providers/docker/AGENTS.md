@@ -691,6 +691,26 @@ storage is on volumes, declares no `storage_limit`. What measuring leaves to the
   - Firecracker, which gives each Sandbox a disk of its size: it attaches no GPU and needs
     `/dev/kvm`.
 
+## A Sandbox booted from a snapshot was held to its own writes alone
+
+**Problem.** A container booted from a snapshot, as a snapshot verifier or a continuation
+is, could write `storage_mb` over the snapshot, however much the snapshot already held, so
+it had more room than a disk of that size holding the snapshot (November 2026, found
+comparing Providers for snapshot verification: QEMU's and Orchard's disks hold the
+snapshot's files).
+
+**Context.** The storage watch measures `SizeRw`, the container's writable layer, which for
+a container booted from a committed image holds only what it wrote since. The commit's own
+layer is not in it, and an image's `Size` covers every layer below it.
+
+**Solution.** A commit measures the stopped container's `SizeRw` and labels the image
+`ale.written` with that plus what the snapshot the container booted from held; a container
+booted from a snapshot carries the label, which a reattaching run reads back, and the watch
+adds it to each measurement (`storage.Watch(base=...)`).
+
+**Decision.** A label rather than measuring the image: `SizeRw` at commit is exactly the
+layer the commit adds, and costs one measurement the watch already makes.
+
 ## A commit cut short could leave a snapshot no record names
 
 **Problem.** A `docker commit` cancelled with its episode, as a Run's cancellation or the
