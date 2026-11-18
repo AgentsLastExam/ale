@@ -28,6 +28,10 @@ and the gVisor tests only where Docker registers ALE's build of `runsc` under ev
 README shows
 ([gVisor](../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
 
+The Station suite runs only where `ALE_TEST_STATION` names a Station's `ale-host` SSH
+destination whose Lanes it may lease
+([Station guide](../docs/guides/station.md#run-tasks-on-it)).
+
 Run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin, and
 `just test-vm` after changing VM or Windows behavior. CI's backend jobs run all three. After
 changing macOS behavior, run the Orchard suites on a Mac
@@ -37,9 +41,10 @@ and runs every CLI in a macOS VM instead of a container: one of an image of the 
 base with Node.js, built once.
 
 Tests that require infrastructure must carry the matching marker (`needs_docker`,
-`needs_kvm`, `needs_orchard`, `needs_gui`, `needs_llm`, `needs_cli_install`, or a Hugging
-Face marker) so local and CI runs can select them deliberately. Prefer testing the public
-contract; use private helpers only when the helper itself is the behavior under test.
+`needs_kvm`, `needs_orchard`, `needs_station`, `needs_daytona`, `needs_gpu`, `needs_gui`,
+`needs_llm`, `needs_cli_install`, or a Hugging Face marker) so local and CI runs can select
+them deliberately. Prefer testing the public contract; use private helpers only when the
+helper itself is the behavior under test.
 
 Live acceptance tests make billed model calls, so CI runs none of them: a change to what
 one covers runs it locally before merging. Most run only with

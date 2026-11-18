@@ -1,8 +1,8 @@
 """ale-guestd — the in-sandbox execution service.
 
 Every exec, file transfer and screenshot goes through here, so the host side is
-identical for containers and virtual machines and providers only have to attach a
-transport.
+identical for containers, virtual machines and a Station's Lanes, and providers only have
+to attach a transport.
 
 Constraints that shape this file:
 
@@ -125,7 +125,14 @@ class Handler:
         env.update(params.get("env") or {})
         cwd = params.get("cwd")
         timeout = params.get("timeout_sec")
-        if os.name == "nt" and argv and not os.path.dirname(argv[0]):
+        # A limited agent on Windows runs through windows.py, with its own account's
+        # environment rather than guestd's, which may be the system's.
+        launched = (
+            os.name == "nt"
+            and bool(params.get("run_as"))
+            and os.environ.get("ALE_AGENT_SUDO") != "1"
+        )
+        if os.name == "nt" and argv and not os.path.dirname(argv[0]) and not launched:
             # Windows looks for a bare program name in the starting program's own directory
             # first, which is the framework's Python; found on PATH it is the image's, as
             # on Linux.
@@ -146,9 +153,10 @@ class Handler:
             popen_kwargs["start_new_session"] = True
         popen_kwargs.update(_drop_to(params.get("run_as"), env))
         try:
-            if os.name == "nt" and params.get("run_as") and os.environ.get("ALE_AGENT_SUDO") != "1":
+            if launched:
                 # The elevated launcher must never inherit agent-controlled cwd or Python
-                # startup settings. Pass those only to its limited-token child.
+                # startup settings. Pass those only to its limited-token child, with the
+                # variables the request sets and the Driver pipe guestd was told of.
                 proc = subprocess.Popen(
                     [sys.executable, "-I", "-S", str(Path(__file__).with_name("windows.py"))],
                     stdin=subprocess.PIPE,
@@ -158,16 +166,13 @@ class Handler:
                 )
                 assert proc.stdin is not None
                 with proc.stdin:
-                    proc.stdin.write(
-                        json.dumps(
-                            {
-                                "argv": argv,
-                                "shell": shell_cmd,
-                                "cwd": cwd,
-                                "env": env,
-                            }
-                        ).encode("utf-8")
-                    )
+                    request = {
+                        "argv": argv,
+                        "shell": shell_cmd,
+                        "cwd": cwd,
+                        "env": _agent_variables(params.get("env") or {}),
+                    }
+                    proc.stdin.write(json.dumps(request).encode("utf-8") + b"\n")
             elif shell_cmd:
                 proc = subprocess.Popen(shell_cmd, shell=True, **popen_kwargs)
             else:
@@ -569,6 +574,23 @@ def _refuse_links(path: Path) -> None:
             raise ProtocolError(ERR_BAD_REQUEST, f"path passes through a link: {current}")
 
 
+def _opened_at(descriptor: int, path: Path) -> bool:
+    """Whether a Windows file descriptor is the very file ``path`` names, through no link."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes as w
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetFinalPathNameByHandleW.restype = w.DWORD
+    kernel.GetFinalPathNameByHandleW.argtypes = [w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD]
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel.GetFinalPathNameByHandleW(msvcrt.get_osfhandle(descriptor), buffer, 32768, 0)
+    if not length:
+        raise ctypes.WinError(ctypes.get_last_error())
+    final = buffer.value.removeprefix("\\\\?\\")
+    return final.casefold() == os.path.normpath(os.path.abspath(path)).casefold()
+
+
 def _clear_link(path: Path) -> None:
     """Remove a link at ``path`` itself, leaving what it points at alone."""
     try:
@@ -619,6 +641,10 @@ def _open_regular(path: Path) -> Iterator[BinaryIO]:
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         with os.fdopen(os.open(path, flags), "rb") as handle:
+            if os.name == "nt" and not _opened_at(handle.fileno(), path):
+                # Windows has no O_NOFOLLOW, and on a machine whose accounts are several
+                # agents, one may swap a directory for a junction after the check above.
+                raise ProtocolError(ERR_BAD_REQUEST, f"path passes through a link: {path}")
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise ProtocolError(ERR_BAD_REQUEST, f"not a regular file: {path}")
             yield handle
@@ -859,15 +885,28 @@ def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
 
     Silently ignored when we are not root — a guest service that is already unprivileged
     cannot drop further, and refusing would break images that run as a normal user.
+
+    Windows guestd serves one agent, the account whose desktop it runs on, which need not be
+    its own: the system can serve another account's session. It runs that agent's commands
+    through ``windows.py`` with the desktop's limited token, or with its own token when the
+    agent may elevate and guestd runs as the agent, and refuses every other account.
     """
     if os.name == "nt":
-        if name and name.casefold() not in {
-            _current_user().casefold(),
-            _current_user().rsplit("\\", 1)[-1].casefold(),
-        }:
+        agent = os.environ.get("ALE_AGENT_USER") or _current_user()
+        if name and name.casefold() != agent.casefold():
             raise ProtocolError(
                 ERR_UNSUPPORTED,
-                f"Windows guestd is running as {_current_user()!r}, not requested user {name!r}",
+                f"Windows guestd serves the agent account {agent!r}, not {name!r}",
+            )
+        if (
+            name
+            and os.environ.get("ALE_AGENT_SUDO") == "1"
+            and _current_user().casefold() != agent.casefold()
+        ):
+            raise ProtocolError(
+                ERR_UNSUPPORTED,
+                f"an elevated agent runs with guestd's own token, and guestd runs as "
+                f"{_current_user()!r}, not as {agent!r}",
             )
         return {}
     if not name or os.geteuid() != 0:
@@ -911,6 +950,14 @@ def _drop_to(name: str | None, env: dict[str, str]) -> dict[str, Any]:
     return {"preexec_fn": preexec}
 
 
+def _agent_variables(requested: dict[str, str]) -> dict[str, str]:
+    """What a limited Windows agent command sets in its account's own environment: the
+    request's variables, and the pipe of the desktop's Cua Driver when guestd was told it,
+    for the agent's own desktop client."""
+    driver = os.environ.get("ALE_CUA_DRIVER_SOCKET")
+    return {**({"ALE_CUA_DRIVER_SOCKET": driver} if driver else {}), **requested}
+
+
 def _home_of(name: str) -> str:
     """The account's home directory, from the image's own account database."""
     if os.name == "nt":
@@ -938,6 +985,12 @@ def _owner_of(name: str | None) -> tuple[int, int] | None:
 
 
 def _current_user() -> str:
+    """The account guestd runs as; on Windows its token's, which may differ from the
+    account its environment describes."""
+    if os.name == "nt":
+        from gui import token_account
+
+        return token_account()
     try:
         import getpass
 

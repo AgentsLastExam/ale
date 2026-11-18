@@ -267,9 +267,9 @@ class MemoryGuest:
                     if path == root or path.startswith(root + "/"):
                         del self.files[path]
             return 0, b""
-        if len(argv) == 5 and argv[3] == "inspect":
+        if len(argv) == 6 and argv[4] == "inspect":
             # The image may have no Python of its own; the framework always has one.
-            assert argv[0] == MACOS_PYTHON
+            assert argv[:2] == [MACOS_PYTHON, "-I"]
             self.stages.append("capture")
             entries = (
                 [{"source": OUTPUT, "kind": "file", "mode": self.modes[OUTPUT]}]
@@ -277,11 +277,11 @@ class MemoryGuest:
                 else []
             )
             return 0, json.dumps({"entries": entries, "skipped": [], "truncated": False}).encode()
-        if len(argv) == 5 and argv[3] == "read":
-            return 0, self.files[argv[4]]
-        if argv[:2] == [MACOS_PYTHON, "-c"] and "p.parent).mkdir" in argv[2]:
+        if len(argv) == 6 and argv[4] == "read":
+            return 0, self.files[argv[5]]
+        if argv[:3] == [MACOS_PYTHON, "-I", "-c"] and "p.parent).mkdir" in argv[3]:
             assert "run_as" not in params
-            self.files.pop(argv[3], None)
+            self.files.pop(argv[4], None)
             return 0, b""
         if argv[:2] == ["chmod", "--"]:
             assert "run_as" not in params

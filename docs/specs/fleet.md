@@ -50,7 +50,8 @@ own `preflight`, given no needs, and profiles reported on the machine, a check t
 leaves having passed in one Sandbox of the leaf, and an operator can only narrow it
 (labels, resources kept for the machine itself, fewer leaves, their order). The operator
 names the leaves a Node lends by provider id, most preferred first, as a Run names its
-Providers; a Node lends no scheduler, since it is itself where Sandboxes start.
+Providers; a Node lends no scheduler, since it is itself where Sandboxes start, and no
+`station`, whose Sandboxes start on a Station rather than on the Node.
 
 | Part | Holds |
 |---|---|

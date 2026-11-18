@@ -36,6 +36,10 @@ software/version, with underscores rather than nested version directories. Reuse
 existing package before preparing another. Slow acquisition or compilation can also justify an
 offline asset. Installed VM state alone is not a rebuildable asset.
 
+Software that no image can hold, such as licensed software bound to the machine it is
+installed on, is neither installed nor an asset: the Task names it, and a machine its
+operator keeps provides it ([Software](task-authoring.md#software)).
+
 Keep deployment scripts and Task-specific configuration beside the build definition: the
 Dockerfile of a Linux container, `build.sh` of a Linux or macOS VM, `build.ps1` on Windows.
 Scripts consume Task-local materials, choose their own extraction or installation method,

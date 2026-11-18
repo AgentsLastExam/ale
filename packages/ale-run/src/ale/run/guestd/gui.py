@@ -16,8 +16,17 @@ from typing import Any
 COORDINATE_SPACE = 1000
 #: Where guestd's Cua Driver server listens on Linux.
 _LINUX_SOCKET = "/tmp/ale-cua-driver.sock"
-#: The pipe the Windows boot service (``service.py``) has Cua Driver serve on.
-_WINDOWS_PIPE = r"\\.\pipe\ale-cua-driver"
+#: The pipe Cua Driver serves a Windows desktop on, named after the desktop's account, so
+#: that each account signed in to one machine has its own; whoever starts the Driver in the
+#: session, such as the boot service (``service.py``), starts it there. A Station names it
+#: ``ale-cua-driver-<account>-<random>`` for each lease and tells guestd so in
+#: ``ALE_CUA_DRIVER_SOCKET``; a client that is not told looks for the pipe its own account
+#: serves.
+_WINDOWS_PIPE = r"\\.\pipe\ale-cua-driver-{account}"
+#: Who may own the pipe a Windows desktop's Driver serves, besides the desktop's account:
+#: Administrators, the owner of what an elevated process makes, which no other account
+#: can make the owner of a pipe it creates.
+_ADMINISTRATORS = "S-1-5-32-544"
 #: Where the framework installs Cua Driver on Windows; a Linux image has it on PATH.
 _WINDOWS_DRIVER = os.path.join(
     os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "ALE", "cua-driver", "cua-driver.exe"
@@ -172,10 +181,13 @@ def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             "params": {"name": tool, "arguments": arguments or {}},
         },
     ]
+    stdin = "".join(json.dumps(message) + "\n" for message in messages)
+    if os.name == "nt":
+        command, stdin = _as_desktop_account(command, stdin, socket)
     try:
         result = subprocess.run(
             command,
-            input="".join(json.dumps(message) + "\n" for message in messages),
+            input=stdin,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -221,6 +233,212 @@ def _as_daemon_owner(socket: str | None) -> dict[str, Any]:
     return {"env": env, "preexec_fn": _demote(account)}
 
 
+def _as_desktop_account(
+    command: list[str], stdin: str, socket: str | None
+) -> tuple[list[str], str]:
+    """The Windows counterpart of :func:`_as_daemon_owner`: the client and its input, run
+    with the desktop account's token when guestd runs as another account.
+
+    Cua Driver's pipe admits only the account that serves it, so the system serving another
+    account's session cannot connect. ``windows.py`` then runs the client with the limited
+    token of that account's desktop, as it runs agent commands, and hands it the messages
+    that follow its request. Either way the pipe must belong to the desktop's account first:
+    on a machine several accounts share, another one could serve a name that went free when
+    the Driver exited, and would take the desktop's input and give it screenshots.
+    """
+    if token_account().casefold() == desktop_account().casefold():
+        if socket:
+            require_own_pipe(socket)
+        return command, stdin
+    launcher = os.path.join(os.path.dirname(os.path.abspath(__file__)), "windows.py")
+    request = json.dumps({"argv": command, "env": {}, "pipe": socket})
+    return [sys.executable, "-I", "-S", launcher], f"{request}\n{stdin}"
+
+
+def require_own_pipe(pipe: str, token: Any = None) -> None:
+    """Refuse a Windows pipe that the account of ``token``, this process's by default, does
+    not serve; one that does not exist is left for the Driver's client to report."""
+    try:
+        server = pipe_server(pipe, token)
+    except OSError as exc:
+        raise GuiUnavailable(f"{pipe} is not this desktop's Cua Driver: {exc}") from exc
+    if server is not None and server not in {token_sid(token), _ADMINISTRATORS}:
+        raise GuiUnavailable(f"{pipe} is served by {server or 'an account it cannot tell'}")
+
+
+def pipe_server(pipe: str, token: Any = None) -> str | None:
+    """Who serves the Windows pipe ``pipe``, opened as the account of ``token`` if one is
+    given: the SID that owns the pipe, the account whose process made it; "" if that
+    cannot be told, and None if no process serves it.
+
+    Cua Driver lets go at once of a client whose process is another account's, even one
+    acting as its own, so the owner may be gone by the time it is asked for; the process
+    is known as the pipe connects, and its account is then read from it instead. The pipe
+    is opened for identification only, so its server cannot act as this account.
+    """
+    import ctypes
+    from ctypes import wintypes as w
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.CreateFileW.argtypes = [
+        w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE,
+    ]  # fmt: skip
+    kernel.WaitNamedPipeW.argtypes = [w.LPCWSTR, w.DWORD]
+    kernel.GetNamedPipeServerProcessId.argtypes = [w.HANDLE, ctypes.POINTER(w.ULONG)]
+    kernel.OpenProcess.restype = w.HANDLE
+    kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.LocalFree.argtypes = [w.LPVOID]
+    security.ImpersonateLoggedOnUser.argtypes = [w.HANDLE]
+    security.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+    security.GetSecurityInfo.restype = w.DWORD
+    security.GetSecurityInfo.argtypes = [
+        w.HANDLE, ctypes.c_int, w.DWORD, ctypes.POINTER(w.LPVOID), w.LPVOID, w.LPVOID,
+        w.LPVOID, ctypes.POINTER(w.LPVOID),
+    ]  # fmt: skip
+    security.ConvertSidToStringSidW.argtypes = [w.LPVOID, ctypes.POINTER(w.LPWSTR)]
+    invalid = w.HANDLE(-1).value
+    if token is not None and not security.ImpersonateLoggedOnUser(token):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        for _ in range(10):
+            # GENERIC_READ | GENERIC_WRITE; SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION.
+            handle = kernel.CreateFileW(pipe, 0xC0000000, 0, None, 3, 0x00110000, None)
+            if handle not in (None, 0, invalid):
+                break
+            error = ctypes.get_last_error()
+            if error in (2, 3):  # no such pipe
+                return None
+            if error != 231:  # ERROR_PIPE_BUSY
+                raise ctypes.WinError(error)
+            kernel.WaitNamedPipeW(pipe, 1000)
+        else:
+            raise OSError(f"{pipe} stayed busy")
+    finally:
+        if token is not None:
+            security.RevertToSelf()
+    try:
+        process = w.ULONG()
+        if not kernel.GetNamedPipeServerProcessId(handle, ctypes.byref(process)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        owner, descriptor = w.LPVOID(), w.LPVOID()
+        if security.GetSecurityInfo(
+            handle, 6, 0x1, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor)
+        ):  # SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION; the server let go meanwhile
+            served = ""
+            opened = kernel.OpenProcess(0x1000, False, process.value)  # QUERY_LIMITED_INFO
+            if opened:
+                server = w.HANDLE()
+                if security.OpenProcessToken(opened, 0x0008, ctypes.byref(server)):
+                    try:
+                        served = token_sid(server)
+                    finally:
+                        kernel.CloseHandle(server)
+                kernel.CloseHandle(opened)
+            return served
+        try:
+            text = w.LPWSTR()
+            if not security.ConvertSidToStringSidW(owner, ctypes.byref(text)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                return str(text.value)
+            finally:
+                kernel.LocalFree(text)
+        finally:
+            kernel.LocalFree(descriptor)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def desktop_account() -> str:
+    """The account whose Windows desktop this is: the agent's, when the framework names it,
+    or else this process's own."""
+    return os.environ.get("ALE_AGENT_USER") or token_account()
+
+
+def token_account(token: Any = None) -> str:
+    """The name of the account a Windows token belongs to, this process's own by default.
+
+    A process's token says who it is, where ``USERNAME`` says only what its environment
+    does: the system serving an account's session has that account's environment.
+    """
+    return _token_user(token)[1]
+
+
+def token_sid(token: Any = None) -> str:
+    """The SID of the account a Windows token belongs to, this process's own by default."""
+    return _token_user(token)[0]
+
+
+def _token_user(token: Any) -> tuple[str, str]:
+    import ctypes
+    from ctypes import wintypes as w
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.LocalFree.argtypes = [w.LPVOID]
+    security.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+    security.GetTokenInformation.argtypes = [
+        w.HANDLE,
+        ctypes.c_int,
+        w.LPVOID,
+        w.DWORD,
+        ctypes.POINTER(w.DWORD),
+    ]
+    security.LookupAccountSidW.argtypes = [
+        w.LPCWSTR,
+        w.LPVOID,
+        w.LPWSTR,
+        ctypes.POINTER(w.DWORD),
+        w.LPWSTR,
+        ctypes.POINTER(w.DWORD),
+        ctypes.POINTER(w.DWORD),
+    ]
+    security.ConvertSidToStringSidW.argtypes = [w.LPVOID, ctypes.POINTER(w.LPWSTR)]
+
+    def check(succeeded: int) -> None:
+        if not succeeded:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    own = w.HANDLE()
+    if token is None:
+        query = 0x0008  # TOKEN_QUERY
+        check(security.OpenProcessToken(kernel.GetCurrentProcess(), query, ctypes.byref(own)))
+        token = own
+    try:
+        size = w.DWORD()
+        security.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))  # TokenUser's size
+        user = ctypes.create_string_buffer(size.value)
+        check(security.GetTokenInformation(token, 1, user, size, ctypes.byref(size)))
+        sid = ctypes.c_void_p.from_buffer(user).value  # TOKEN_USER begins with the SID's address
+        name, domain = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(256)
+        name_size, domain_size, kind = w.DWORD(256), w.DWORD(256), w.DWORD()
+        check(
+            security.LookupAccountSidW(
+                None,
+                sid,
+                name,
+                ctypes.byref(name_size),
+                domain,
+                ctypes.byref(domain_size),
+                ctypes.byref(kind),
+            )
+        )
+        text = w.LPWSTR()
+        check(security.ConvertSidToStringSidW(sid, ctypes.byref(text)))
+        try:
+            return str(text.value), name.value
+        finally:
+            kernel.LocalFree(text)
+    finally:
+        if own:
+            kernel.CloseHandle(own)
+
+
 def _replies(output: str) -> list[dict[str, Any]]:
     replies = []
     for line in output.splitlines():
@@ -232,8 +450,30 @@ def _replies(output: str) -> list[dict[str, Any]]:
 
 
 def _socket() -> str | None:
-    configured = os.environ.get("ALE_CUA_DRIVER_SOCKET")
-    return configured or (_WINDOWS_PIPE if os.name == "nt" else _LINUX_SOCKET)
+    if configured := os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+        return configured
+    return _own_pipe(desktop_account()) if os.name == "nt" else _LINUX_SOCKET
+
+
+def _own_pipe(account: str) -> str:
+    """The pipe of ``account``'s Cua Driver: one named after the account, or after it and a
+    lease, that the account owns. An agent's own MCP server looks for it this way, since a
+    CLI may pass its MCP servers none of the variables it was given."""
+    named = f"ale-cua-driver-{account}".casefold()
+    try:
+        names = os.listdir("\\\\.\\pipe\\")
+    except OSError:
+        names = []
+    for name in sorted(names):
+        if name.casefold() != named and not name.casefold().startswith(named + "-"):
+            continue
+        pipe = "\\\\.\\pipe\\" + name
+        try:
+            require_own_pipe(pipe)
+        except GuiUnavailable:
+            continue
+        return pipe
+    return _WINDOWS_PIPE.format(account=account)
 
 
 def _start_server() -> bool:
@@ -241,8 +481,9 @@ def _start_server() -> bool:
 
     The image only has to run a desktop: the engine installed Cua Driver, and guestd
     starts it as the agent account with the environment of that account's session, so
-    capture and input reach the screen the agent sees. Windows starts it with the session,
-    and on macOS the Orchard Provider starts it as each sandbox boots.
+    capture and input reach the screen the agent sees. On Windows whoever starts guestd in
+    the session starts it there too, and on macOS the Orchard Provider starts it as each
+    sandbox boots.
     """
     global _server
     if os.name == "nt" or sys.platform == "darwin" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):

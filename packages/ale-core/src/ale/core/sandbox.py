@@ -2,8 +2,8 @@
 
 A sandbox is an isolated execution instance; a provider supplies them. Everything that
 happens inside a sandbox — commands, files, screenshots, input — goes through the guest
-service, so this interface is identical for containers and virtual machines and there
-is no provider-specific path for callers to special-case.
+service, so this interface is identical for containers, virtual machines and a Station's
+Lanes, and there is no provider-specific path for callers to special-case.
 """
 
 from __future__ import annotations
@@ -230,7 +230,8 @@ class SandboxRequest(BaseModel):
     sudo: bool = False
     """Whether the agent user may elevate. Declared by the task, recorded in provenance."""
     user: str = Field(default="user", pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
-    """The agent account, named by the Task's ``[agent].user``."""
+    """The agent account, named by the Task's ``[agent].user``. A Provider whose machine
+    decides the account ignores it; :attr:`Sandbox.agent_user` reports the one used."""
     desktop_resolution: DesktopResolution = DesktopResolution()
     """The size of the desktop, when the image has one; a Run setting, never the image's."""
 
@@ -398,6 +399,15 @@ class Sandbox(ABC):
         return self.request.gateway_url
 
     @property
+    def stage_root(self) -> str:
+        """The directory below which the framework stages a Task's files, which only the
+        framework's identity may open: ``C:\\ProgramData\\ALE`` on Windows, ``/opt/ale``
+        elsewhere. A Provider whose Sandboxes share one machine gives each its own."""
+        if self.request.os is OperatingSystem.WINDOWS:
+            return "C:\\ProgramData\\ALE"
+        return "/opt/ale"
+
+    @property
     def handle(self) -> str | None:
         """What this Sandbox's Provider names it by in :meth:`Provider.reattach` and
         :meth:`Provider.discard`; None where the Provider cannot reattach to it."""
@@ -516,10 +526,10 @@ SandboxCheck = Callable[[Sandbox], Awaitable[None]]
 class Provider(ABC):
     """Supplies Sandboxes.
 
-    A leaf starts them on the machine it runs on; a scheduler places them on machines it
-    manages, which start them with the leaves there. Both declare what they can start as
-    capability profiles, which every check of a request compares through
-    :func:`~ale.core.capability.unmet`.
+    A leaf starts them on one machine, the one it runs on or a Station whose Lanes it
+    leases; a scheduler places them on machines it manages, which start them with the leaves
+    there. Both declare what they can start as capability profiles, which every check of a
+    request compares through :func:`~ale.core.capability.unmet`.
     """
 
     name: str

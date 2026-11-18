@@ -1,7 +1,7 @@
 # Episode protocol
 
 The episode protocol (`EpisodeProtocol`) turns one prepared Task instance into one Episode
-using the same phase ordering for container and VM sandboxes.
+using the same phase ordering for every Sandbox: a container, a VM or a Station's Lane.
 
 ## Inputs
 
@@ -48,36 +48,42 @@ Each Sandbox comes from the Provider the Run selected for its Task and role befo
 episode began ([Provider selection](sandbox-image.md#provider-selection)); a continuation
 continues on the Provider that kept its solver. The Provider admits the requested
 resources, creates the sandbox, and returns the image and resource allocation it actually
-started. Those observations, rather than the request alone, enter RunLock.
+started. Those observations, rather than the request alone, enter RunLock. Every Sandbox
+starts from its prepared image, whatever an earlier one did: a Station's Lane, which serves
+one Sandbox after another, starts from the baseline its Station reset it to and checked, as
+far as that reset reaches ([Provider contract](sandbox-image.md#provider-contract); what it
+does not undo is in [Security](security.md#what-is-not-defended-against)).
 
 Shared verification provisions one physical sandbox with role `shared`. Separate
 verification provisions a `solver` sandbox first and a `verifier` sandbox only after
 solver evidence capture.
 
-The image declares the agent account and home. ALE does not add a Task path prefix or
-pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and macOS
-and `C:\ProgramData\ALE` on Windows.
+The image declares the agent account and home, or the Lane does on a Station. ALE does not
+add a Task path prefix or pre-create declared artifacts. Framework staging uses the
+Sandbox's stage root, which only the framework's identity opens: `/opt/ale` on Linux and
+macOS and `C:\ProgramData\ALE` on Windows, or one of its own below that for each Lane of a
+Station, whose Lanes share the machine's.
 
 ### Setup
 
 If `environment/setup/` exists, ALE uploads the complete directory to `setup` under the
-staging root, opens egress, and executes `setup.sh` on Linux and macOS or `setup.ps1` on
+stage root, opens egress, and executes `setup.sh` on Linux and macOS or `setup.ps1` on
 Windows with that directory as cwd, so its files are available by ordinary relative paths.
 Setup is optional and runs once.
 
 ### Agent or oracle
 
 ALE rejects unsupported Harness/OS combinations before provisioning. It installs the
-selected Harness and its declared resources, validates staged stdio MCP
-commands, then applies the Task network policy. Autonomous Harnesses launch inside the
-sandbox, in `[agent].workdir` or else the agent's home; Policy Harnesses drive the
-framework-owned `TaskEnv`. The evaluated solver and
-the validation oracle both run as the image's agent account. Windows autonomous CLI
-Harnesses use the base's native Node.js and Git Bash.
+selected Harness and its declared resources, validates staged stdio MCP commands, then
+applies the Task network policy. Autonomous Harnesses launch inside the sandbox, in
+`[agent].workdir` or else the agent's home; Policy Harnesses drive the framework-owned
+`TaskEnv`. The evaluated solver and the validation oracle both run as the image's agent
+account, or the Lane's. Windows autonomous CLI Harnesses use the native Node.js and Git Bash
+that the Windows base, or a Station's setup, installs.
 
 `solution/` is uploaded only for an oracle episode and is absent for an evaluated solver.
-`tests/` is also absent throughout this phase. Answers are withheld by when they are
-staged and by the root-only staging directory, not by a conventional path or a flag a Task
+`tests/` is also absent throughout this phase. Answers are withheld by when they are staged
+and by the stage root only the framework opens, not by a conventional path or a flag a Task
 must remember.
 
 An agent run that ends early, by a timeout, a limit, a failure or a refusal, moves on to
@@ -137,11 +143,18 @@ verification it inspects no artifact path and copies nothing.
 
 Shared verification uploads `tests/` into the completed solver sandbox. Separate
 verification first releases or retains the solver according to run policy, provisions a
-fresh verifier sandbox, restores captured artifacts to their original absolute paths,
-and uploads the same `tests/`. It never reruns setup or copies the solver filesystem.
+fresh verifier sandbox, restores the captured artifacts, and uploads the same `tests/`. It
+never reruns setup or copies the solver filesystem. An artifact declared by an absolute path
+returns to that path. One declared relative goes below the verifier's start directory, its
+agent account's home with `[agent].workdir` below it, as it was below the solver's, because
+the verifier's account need not have the solver's home. Every stage receives the home of
+the agent account in its own Sandbox as `ALE_HOME`, so separate verification finds those
+artifacts there.
 
 Verification runs as framework-controlled Task code with open egress and elevated privileges
-(root on Linux and macOS, Administrator on Windows), in both shared and separate modes. Task
+(root on Linux and macOS, Administrator on Windows), in both shared and separate modes, and
+follows the operating system of the Sandbox it runs in, which a separate verifier may name
+apart from the Task's ([Verifier images](sandbox-image.md#verifier-images)). Task
 code may explicitly drop privileges when executing a submitted program. ALE stages
 `ale_verify`, the instruction, optional solver trajectory, and run-level Judge
 configuration, then executes the OS entry from the verification staging directory. Linux and
@@ -197,8 +210,8 @@ because a running Sandbox keeps its allocation, role and desktop; one booted fro
 snapshot takes the Task's and the Run's. The model, settings, instruction and verification
 may differ; the RunLock records this episode's own and names the earlier one in
 `resumed_from`. The agent finds this run's
-Gateway at the address it was given, since every Sandbox reaches its Gateway at the same
-one.
+Gateway at the address it was given, since a Provider that keeps solvers gives a Sandbox
+the same Gateway address in every run.
 
 A kept solver is adopted, so the episode's own retention decides its fate, and keeping it
 again lets a further episode continue. A snapshot is left as it was, so it can be

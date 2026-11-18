@@ -75,6 +75,12 @@ longer holds what the agent or the framework left running in it
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#restricted-networking)).
 A Mac without that filter refuses restricted Tasks before provisioning.
 
+A Station's Lanes share their machine's network stack and loopback, and nothing outside a
+Lane stands between it and the network, so the Station Provider serves `open` Tasks only
+and refuses the rest before a Lane is leased. Its Lanes reach their Gateways as Daytona's
+sandboxes do, over SSH, each at a loopback address of its own that no other Lane can take;
+another Lane can connect there, but holds no token the Gateway accepts.
+
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
 declare it, and the declaration is recorded in provenance.
 
@@ -200,13 +206,15 @@ Gateway this way. `[environment].env` reaches the agent, and the agent can read 
 
 ## 4. The agent cannot change what it is measured under
 
-The agent runs as the account the image declares, and so does the oracle that stands in for
-it during validation. Framework work runs as root on Linux and macOS and Administrator on
-Windows. Windows guestd stays in the interactive session but launches agent commands with
-the desktop's limited token. Only the Host's SMBIOS `ale-sudo` marker, supplied for
-`request.sudo`, permits elevated agent commands. The Provider verifies both tokens before
-Task code runs; image builds request elevation explicitly. Material visibility still follows
-phase ordering. See [Permissions](sandbox-image.md#permissions).
+The agent runs as the account the image declares, or its Lane on a Station, and so does the
+oracle that stands in for it during validation. Framework work runs as root on Linux and
+macOS and Administrator on Windows. Windows guestd stays in the agent's interactive session,
+whichever of the agent and the system it runs as, but launches agent commands with the
+limited token of the session's desktop, and only when that desktop is the agent's. Only the
+Host's SMBIOS `ale-sudo` marker, supplied for `request.sudo`, permits elevated agent
+commands. The Provider verifies both tokens before Task code runs; image builds request
+elevation explicitly. Material visibility still follows phase ordering. See
+[Permissions](sandbox-image.md#permissions).
 
 This is what stops an agent rewriting the network policy that isolates it, the clock its
 timeouts are measured against, or the guest service driving its own sandbox. None of that
@@ -232,8 +240,10 @@ guest claims; anything else is refused before an operation runs. The claim is so
 nothing but trusted image services runs in a cold-booted guest before that connection. Linux
 keeps the claimed token in root-only `/run/ale/guestd-token`, so a restarted guest service
 stays claimed while a reboot or a saved disk carries none; Windows keeps it in memory.
-Container guest services are `docker exec` sessions with no listener, and a macOS VM's are
-`--stdio` sessions over Orchard's authenticated exec, which listen on nothing.
+Container guest services are `docker exec` sessions with no listener, a macOS VM's are
+`--stdio` sessions over Orchard's authenticated exec, and a Station's Lane's are `--stdio`
+sessions over SSH to its service, which only the Host's key reaches; none listens on
+anything.
 
 Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The Provider
 blocks every non-root user from it and proves that as the agent before handing the
@@ -298,16 +308,22 @@ version and integrity, harness family, one optional Task-asset repository/path/c
 observation, the name and value source of each Task variable, verification topology and
 image/resources, sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 Leaves of one kind isolate a Task differently and give it different kernel features, so a
-result names the one that ran it, under a scheduler too.
+result names the one that ran it, under a scheduler too. A Task that names software runs on
+a machine its operator keeps and changes, which ALE can name but not rebuild: its result
+names the Station, the Lane and the generation the Lane was reset to, and its observed image
+identity covers the Lane's baseline and the software's entries in the Station's manifest.
+Neither shows software the operator upgrades in place, so two such results compare only as
+far as the operator kept the machine the same.
 
 A reportable result is one that can be published, such as on a leaderboard, because it can
-be reproduced exactly. Its Task must be committed in a git repository with no uncommitted
-changes under the Task path: the lock records the repository's origin URL without any
-credentials in it (or its path when it has none), the commit and the Task path. The engine commit, effective resources
-and committed assets must also be recorded. A run whose lock cannot back a reportable
-result says why; `--require-reportable` turns that into a non-zero exit for official runs. Final Task-image publication is not part of
-the current contract; future delivery may add it without changing the self-contained
-Task source contract.
+be reproduced exactly, or, for a Task that names software, compared as above. Its Task must
+be committed in a git repository with no uncommitted changes under the Task path: the lock
+records the repository's origin URL without any credentials in it (or its path when it has
+none), the commit and the Task path. The engine commit, effective resources and committed
+assets must also be recorded. A run whose lock cannot back a reportable result says why;
+`--require-reportable` turns that into a non-zero exit for official runs. Final Task-image
+publication is not part of the current contract; future delivery may add it without changing
+the self-contained Task source contract.
 
 ## 8. Agent resources are declared, not discovered
 
@@ -370,6 +386,23 @@ ALE-managed handle.
 Live labels also prevent a retained GPU from being assigned to another ALE sandbox.
 Retention does not change rewards or verification records.
 
+## 12. Sandboxes that share a machine are kept apart and reset
+
+A Provider may run several Sandboxes on one machine at once, and one after another in the
+same account, as a Station's Lanes do; it then gives with the machine's accounts what a
+container or a VM gives by construction. Each Sandbox's agent has an account of its own,
+whose files, processes and desktop no other Sandbox reaches, and on such a machine framework
+commands never run with the agent's environment or with a program the agent can replace.
+After every Sandbox its account is reset from outside it and checked before it serves
+another: one that fails the check serves no Sandbox and is never destroyed, and nothing a
+Sandbox started, its tokens included, reaches the next. How a Station does this, and what
+its reset does not undo, is in
+[Station notes](../../packages/ale-run/src/ale/run/providers/station/AGENTS.md).
+
+Verified by `tests/unit/test_stationd.py` for the reset, the check and the fencing, and by
+the conformance suite of every Provider, the Station's included, for a Sandbox that follows
+another and for two at once.
+
 ---
 
 ## What is **not** defended against
@@ -394,7 +427,7 @@ Which leaf gives which kernel, and how a GPU reaches each, is in
 Each [container feature](task-authoring.md#container-features) a Task names exposes more of
 the kernel its Sandbox runs on; no Provider widens a Sandbox for a feature it did not
 name. On Daytona, Daytona itself sees everything in the sandbox and in the image pushed
-to its registry.
+to its registry. On a Station, its operator, an administrator there, sees every Lane.
 
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
 succeeds the tunnel is opaque by design — the point is to reach a declared host, not to
@@ -416,14 +449,22 @@ strict boundary uses separate verification, which restores only the declared art
 a fresh Sandbox.
 
 **Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
-physical GPUs, whole or by device memory, are admitted per sandbox or rejected. Network
-bandwidth and resources consumed by processes outside ALE are not reserved; concurrent
-workloads can still starve each other. On a GPU that Sandboxes share, one can take another's
-device memory: where nothing limits it, for the seconds until its Provider's watchdog kills
-the process while a Run holds the Sandbox, and for as long as it likes once the Sandbox is
-kept after its Run, since nothing watches it then; and, under any runtime, through managed
-memory, which neither gVisor's limit nor any process's row in `nvidia-smi`, and so no
-watchdog, sees.
+physical GPUs, whole or by device memory, are admitted per sandbox or rejected, except a
+Station's Lanes' CPUs and memory (below). Network bandwidth and resources consumed by
+processes outside ALE are not reserved; concurrent workloads can still starve each other.
+On a GPU that Sandboxes share, one can take another's device memory: where nothing limits
+it, for the seconds until its Provider's watchdog kills the process while a Run holds the
+Sandbox, and for as long as it likes once the Sandbox is kept after its Run, since nothing
+watches it then; and, under any runtime, through managed memory, which neither gVisor's
+limit nor any process's row in `nvidia-smi`, and so no watchdog, sees.
 
 **Side channels between concurrent episodes.** Sandboxes are separate containers on
-separate bridges, but they share a kernel, a page cache and a clock.
+separate bridges, but they share a kernel, a page cache and a clock. A Station's Lanes share
+the whole machine.
+
+**What a Station's Lanes share.** A Station's Lanes share its network stack and loopback,
+its CPUs and memory, which nothing limits per Lane, and whatever every account may write
+outside what the reset restores, so one Lane's agent can reach, slow or leave something for
+another's. And the machine is its operator's: they may change it between results in ways its
+RunLock does not show ([§7](#7-a-result-carries-what-produced-it)). What the reset restores
+is in [Station notes](../../packages/ale-run/src/ale/run/providers/station/AGENTS.md).

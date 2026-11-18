@@ -29,7 +29,7 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.task import ResolvedVariables, TaskSourceContext
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import Artifact, TaskSpec
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Rewards
 
@@ -82,15 +82,18 @@ class ArtifactSink(Protocol):
 
     enabled: bool
 
-    async def collect(
-        self, sandbox: Sandbox, source: str, name: str, exclude: tuple[str, ...] = ()
-    ) -> None: ...
+    async def collect(self, sandbox: Sandbox, artifact: Artifact, start: str) -> None:
+        """Copy what ``artifact`` declares out of the solver ``sandbox``; a relative
+        declaration is below ``start``, the solver's start directory."""
+        ...
 
-    async def restore(self, sandbox: Sandbox) -> None: ...
+    async def restore(self, sandbox: Sandbox, start: str) -> None:
+        """Write the copies into the verifier ``sandbox``: an artifact declared absolute
+        where it was, one declared relative below ``start``, the verifier's own start
+        directory, as it was below the solver's."""
+        ...
 
     def cleanup(self) -> None: ...
-
-    def path(self, name: str) -> Path: ...
 
 
 class EventSink(Protocol):

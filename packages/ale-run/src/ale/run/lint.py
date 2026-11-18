@@ -107,15 +107,14 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             )
 
     config = _read_config(folder.root / TASK_CONFIG)
-    environment = config.get("environment")
-    try:
-        operating_system = OperatingSystem(
-            environment.get("os", "linux") if isinstance(environment, dict) else "linux"
-        )
-    except ValueError:
-        operating_system = OperatingSystem.LINUX
-    for stage in (Stage.TESTS, Stage.SOLUTION):
-        entry = f"{stage}/{stage.entry(operating_system)}"
+    environment, verifier = config.get("environment"), config.get("verifier")
+    operating_system = _operating_system(environment, OperatingSystem.LINUX)
+    # A separate verifier may run another system, whose tests entry it runs.
+    verifier_os = _operating_system(
+        verifier.get("environment") if isinstance(verifier, dict) else None, operating_system
+    )
+    for stage, system in ((Stage.TESTS, verifier_os), (Stage.SOLUTION, operating_system)):
+        entry = f"{stage}/{stage.entry(system)}"
         if not (folder.root / entry).is_file():
             findings.append(Finding(folder.root, f"no {entry}"))
     if not (folder.root / INSTRUCTION).is_file():
@@ -139,11 +138,14 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             folder.dockerfile is not None or folder.build_script(operating_system) is None
         )
         script = BUILD_SCRIPTS[operating_system]
-        image_build = "the image's Dockerfile" if dockerfile else f"environment/{script}"
+        place = "in the image's Dockerfile" if dockerfile else f"in environment/{script}"
+        if isinstance(environment, dict) and "software" in environment:
+            # Nothing is built: the machine that has the software is the image.
+            place = "on the machine that has [environment].software"
         findings.append(
             Finding(
                 setup,
-                f"fixed installation or download belongs in {image_build}; "
+                f"fixed installation or download belongs {place}; "
                 "setup is for episode-dynamic initialization",
             )
         )
@@ -233,6 +235,15 @@ def _check_variables(path: Path, config: dict[str, object]) -> list[Finding]:
                     )
                 )
     return findings
+
+
+def _operating_system(table: object, default: OperatingSystem) -> OperatingSystem:
+    """The ``os`` a table names, as far as it is valid; loading reports one that is not."""
+    value = table.get("os") if isinstance(table, dict) else None
+    try:
+        return OperatingSystem(value.lower()) if isinstance(value, str) else default
+    except ValueError:
+        return default
 
 
 def _read_config(path: Path) -> dict[str, object]:

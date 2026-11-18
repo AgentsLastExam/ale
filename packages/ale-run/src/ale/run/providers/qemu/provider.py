@@ -77,7 +77,12 @@ from ale.run.process import run
 from ale.run.providers import relay
 from ale.run.providers.desktop import require_resolution
 from ale.run.providers.docker.provider import only_vanished
-from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.privileges import (
+    reset_windows_acl,
+    set_elevation,
+    verify_identities,
+    verify_windows_identities,
+)
 from ale.run.providers.runner import (
     HOST_IP,
     Console,
@@ -251,56 +256,14 @@ async def _run(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
     return await run(*argv, timeout=timeout)
 
 
-_WINDOWS_ACL = """
-$ErrorActionPreference = 'Stop'
-$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-$admins = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-$users = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
-$owner = $admins
-if ($agent) {
-    $owner = [System.Security.Principal.NTAccount]::new($agent).Translate(
-        [System.Security.Principal.SecurityIdentifier])
-}
-$items = @(Get-Item -LiteralPath $target -Force) +
-    @(Get-ChildItem -LiteralPath $target -Force -Recurse)
-foreach ($item in $items) {
-    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
-    $inherit = [System.Security.AccessControl.InheritanceFlags]::None
-    if ($item.PSIsContainer) {
-        $acl = [System.Security.AccessControl.DirectorySecurity]::new()
-        $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-    } else {
-        $acl = [System.Security.AccessControl.FileSecurity]::new()
-    }
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.SetOwner($owner)
-    foreach ($sid in @($system, $admins, $users)) {
-        $rights = if ($sid -eq $users) { 'ReadAndExecute' } else { 'FullControl' }
-        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-            $sid, $rights, $inherit, 'None', 'Allow'))
-    }
-    if ($agent) {
-        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-            $owner, 'Modify', $inherit, 'None', 'Allow'))
-    }
-    Set-Acl -LiteralPath $item.FullName -AclObject $acl
-}
-"""
-
-
-async def _reset_windows_acl(client: GuestClient, target: str, *, agent: str | None) -> None:
-    """Replace inherited ACLs on an uploaded tree; the agent may modify its own uploads.
-
-    guestd writes the tree with Windows' inherited ACLs, which say nothing about who the
-    upload was for; this resets them the way Linux uploads get their modes and owner.
-    """
-    target_literal = target.replace("'", "''")
-    agent_literal = (agent or "").replace("'", "''")
-    command = f"$target = '{target_literal}'; $agent = '{agent_literal}';\n"
-    argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command + _WINDOWS_ACL]
-    code, _, stderr, _ = await client.exec(argv)
-    if code != 0:
-        raise ProviderStartError(f"could not set upload permissions for {target}: {stderr.strip()}")
+async def _verify_windows_privileges(client: GuestClient, agent_user: str, *, sudo: bool) -> None:
+    """Check actual tokens, including the default limited agent, before any Task code."""
+    try:
+        await verify_windows_identities(client, agent_user, sudo=sudo)
+    except ProviderCapabilityError as error:
+        raise ProviderCapabilityError(
+            f"{error}; rebuild the image with the current ALE framework and UAC enabled"
+        ) from error
 
 
 class QemuSandbox(Sandbox):
@@ -433,7 +396,7 @@ class QemuSandbox(Sandbox):
         run_as = self._as(identity)
         await self._client.upload_dir(source, str(target), run_as=run_as)
         if self.request.os is OperatingSystem.WINDOWS:
-            await _reset_windows_acl(self._client, str(target), agent=run_as)
+            await reset_windows_acl(self._client, str(target), agent=run_as, private=False)
 
     async def screenshot(self) -> bytes:
         return await self._client.screenshot()
@@ -833,7 +796,7 @@ class QemuProvider(Provider):
                 await self._await_desktop(client)
                 desktop = await require_resolution(client, request.desktop_resolution)
             if request.os is OperatingSystem.WINDOWS:
-                await self._verify_windows_privileges(client, agent_user, request.sudo)
+                await _verify_windows_privileges(client, agent_user, sudo=request.sudo)
             else:
                 await set_elevation(
                     client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
@@ -1212,31 +1175,6 @@ class QemuProvider(Provider):
                 f"guestd names {user!r} at {home!r} as the agent account, but that home is absent"
             )
         return user, home, bool(health.get("gui"))
-
-    async def _verify_windows_privileges(
-        self, client: GuestClient, agent_user: str, sudo: bool
-    ) -> None:
-        """Check actual tokens, including the default limited agent, before any Task code."""
-        command = [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[int]([Security.Principal.WindowsPrincipal]"
-            "[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("
-            "[Security.Principal.WindowsBuiltInRole]::Administrator)",
-        ]
-        for user, expected in ((None, True), (agent_user, sudo)):
-            code, output, stderr, timed_out = await client.exec(
-                command, run_as=user, timeout_sec=30
-            )
-            if code != 0 or timed_out or output.strip() != str(int(expected)):
-                role = "framework" if user is None else "agent"
-                required = "Administrator" if expected else "limited"
-                raise ProviderCapabilityError(
-                    f"Windows {role} must run with a {required} token; rebuild the image "
-                    f"with the current ALE framework and UAC enabled: {stderr.strip()}"
-                )
 
     async def list_retained(self) -> list[dict[str, object]]:
         if shutil.which("docker") is None:

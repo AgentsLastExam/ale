@@ -46,6 +46,8 @@ def host_checks(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 class RewardsSandbox:
     """A verifier directory holding ``reward.json`` and, optionally, ``verification.json``."""
 
+    request = SimpleNamespace(os=OperatingSystem.LINUX)
+
     def __init__(self, reward: object, verification: object = None) -> None:
         self.files = {
             name: value if isinstance(value, bytes) else json.dumps(value).encode()

@@ -34,19 +34,22 @@ my-task/
     └── solve.sh               # solve.ps1 on Windows
 ```
 
-Required files are `task.toml`, `instruction.md`, and the tests and solution entries for the
-Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and macOS, `test.ps1` and
-`solve.ps1` on Windows. `[environment].image` and `environment/` decide the solver's image:
+Required files are `task.toml`, `instruction.md`, the solution entry for the Task OS and the
+tests entry for the verifier's OS, the Task's unless a separate verifier names another:
+`solve.sh` and `test.sh` on Linux and macOS, `solve.ps1` and `test.ps1` on Windows.
+The solver's image follows from `environment/` and `[environment]`'s `image` or `software`:
 
 - `environment/Dockerfile` builds a Linux container. It names its base in `FROM`, so an
   `image` beside it fails, and any `build.sh` beside it is only a file in its context.
 - `environment/build.sh` on Linux and macOS, `environment/build.ps1` on Windows, builds a VM
   on the VM image `image` names.
 - `image` alone is used directly.
+- `[environment].software` names licensed software instead of an image; see
+  [Software](#software).
 
-Windows and macOS Tasks run only in VMs, so a Dockerfile fails there. A Linux image used
-directly is a VM when `image` is an absolute path to a qcow2 or names an ALE VM disk, and a
-container when it names a container image
+Windows and macOS Tasks run in VMs, or on a machine that has the software they name, so a
+Dockerfile fails there. A Linux image used directly is a VM when `image` is an absolute path
+to a qcow2 or names an ALE VM disk, and a container when it names a container image
 ([Sandbox image](sandbox-image.md#source-selection-and-identity)). Every image build has
 `environment/` as its context, `setup/` excluded.
 
@@ -78,6 +81,7 @@ network_justification = "the Task reads one publisher's live catalog"
 [environment]                               # the solver's machine
 os = "linux"                                # linux | windows | macos; default linux
 # image = "registry.example/image:tag"      # ALE; used directly, or a build script's base
+# software = ["rhino-7"]                    # ALE; licensed software instead of an image
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
 cpus = 1                                    # whole CPUs; default 1
 memory_mb = 4096                            # default 4096
@@ -111,6 +115,7 @@ environment_mode = "separate"               # shared | separate
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 
 [verifier.environment]                      # a separate verifier's own sandbox
+os = "linux"                                # default [environment].os
 # image = "registry.example/verifier:tag"   # ALE; used directly instead of tests/Dockerfile
 build_timeout_sec = 3600                    # default 3600
 cpus = 1                                    # default [environment].cpus
@@ -145,8 +150,9 @@ These values differ from Harbor's:
   it, so some defaults differ: `cpus` is 1, `memory_mb` 4096 and `[agent].timeout_sec` 900, where
   Harbor sets no limit; `[agent].user` is `user`, not the image's `USER`;
   `[agent].network_mode` is `no-network`, not `public`; `build_timeout_sec` is 3600, not 600.
-- `os = "windows"` is a VM with `.ps1` stage entries, because ALE runs Windows in VMs, where
-  PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
+- `os = "windows"` is a VM, or a machine that has the software the Task names, with `.ps1`
+  stage entries, because ALE runs Windows there, where PowerShell is always available;
+  Harbor's is a Windows container with `.bat` entries.
 - `os = "macos"` is ALE's: a macOS VM with `.sh` stage entries, which Harbor does not run.
 - `artifacts` may be globs, and nothing is collected undeclared, where Harbor always collects
   `/logs/artifacts`.
@@ -166,7 +172,9 @@ that same destination; do not declare one path while instructing the agent to us
 ### Artifact copying
 
 `artifacts` accepts file paths, directory paths, and globs such as `*.sgf` or `**/*.json`. A
-relative path is below the directory the agent starts in. A table adds `exclude`, patterns that
+relative path is below the directory the agent starts in, and a separate verifier receives
+it below its own start directory, the same `[agent].workdir` below its own account's home;
+an absolute path is restored where it was. A table adds `exclude`, patterns that
 match as `tar --exclude` does, as in Harbor: `.venv` is that name at any depth and `*.pyc` every
 such file. ALE never walks what it leaves out, so a dependency tree costs nothing.
 
@@ -196,9 +204,16 @@ Its image is `[verifier.environment].image`, a Linux container built from
 [Verifier images](sandbox-image.md#verifier-images) says. The Verification APIs and records
 are defined only in [Verification](verification.md).
 
+`[verifier.environment].os` runs the verifier on another system than the solver, such as a
+Linux container that reads a file a Windows program saved, when the verifier's tools exist
+only there. Its `tests/` entry, verifier directory and Python are that system's. It needs
+an image of its own, since the solver's runs another system, and receives only artifacts
+declared relative, below its own start directory, with `[agent].workdir` relative too: an
+absolute path on one system names nothing on the other.
+
 ### Resources and network
 
-`[environment]` selects container or VM behavior; Tasks never name a Provider.
+`[environment]` selects container, VM or software behavior; Tasks never name a Provider.
 `[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches
 only the Gateway, `allowlist` also the declared hosts, `public` everything. An
 `allowed_hosts` entry `pypi.org` is that host alone, `*.pypi.org` that host and every name
@@ -317,8 +332,8 @@ Sandbox by accident. An empty value counts as unset, as in a shell. `run`, `vali
 called, and fail naming each Task's missing variables; `[solution].env` is resolved only for
 the oracle. As in Harbor, `${...}` inside other text is not a reference and stays as written.
 Values travel in each command's environment through the guest service, never in an image, a
-Sandbox's configuration or a Host command line, so container and VM, Linux, Windows and
-macOS receive them the same way.
+Sandbox's configuration or a Host command line, so every Sandbox, a container, a VM or a
+Station's Lane, on Linux, Windows or macOS, receives them the same way.
 
 A variable is a credential when its name, or the name it refers to, contains `KEY`, `SECRET`,
 `TOKEN` (not `TOKENS`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `ale lint` fails a credential
@@ -425,6 +440,27 @@ it, and the build fails if the account is missing or lives elsewhere. Such an ac
 sign in automatically with its first login settings done, as the
 [macOS guide](../guides/macos-orchard.md#choose-an-image) says.
 
+### Software
+
+A Task whose program cannot be put in an image, such as licensed software bound to the
+machine it is installed on, names it instead: `[environment].software = ["rhino-7"]` lists
+the ids of the software its agent needs, each once, as a Provider that serves software knows
+them. ALE builds nothing for it, so such a Task has no `environment/Dockerfile`, build
+script or `image`. The machine that has the software decides the agent's account and home,
+so the Task sets no `[agent].user`, declares only relative `artifacts` and a relative
+`[agent].workdir`, and its instruction may name paths relative to where the agent starts.
+A separate verifier with an image of its own, `[verifier.environment].image` or
+`tests/Dockerfile`, verifies it, often on another system
+([Verification topology](#verification-topology)), because verification never runs on the
+machine its operator keeps. A Run refuses the Task when no Provider it lists serves the
+software.
+
+The `station` leaf serves such a Task's solver in a Lane of a Station whose manifest names
+every id it lists, and only when the Task declares `network_mode = "public"`, with its
+justification, and no `[agent].sudo` or `storage_mb`, since its Lanes share their machine
+([Station guide](../guides/station.md),
+[Providers](../../packages/ale-run/src/ale/run/providers/README.md#station)).
+
 ## environment/setup/
 
 `environment/setup/` is optional framework-controlled initialization executed after the
@@ -442,7 +478,9 @@ explicitly set required ownership, write and execute permissions instead of rely
 `instruction.md` is the evaluated-agent instruction, used verbatim. Its input and output paths
 refer to the declared initial environment and artifacts. Use literal sandbox paths:
 `/home/user/...` on Linux, `/Users/user/...` on macOS and `C:\Users\user\...` on Windows.
-ALE does not add or rewrite a workspace prefix.
+ALE does not add or rewrite a workspace prefix. A Task that names software, whose machine
+decides the agent's home, uses paths relative to where the agent starts instead
+([Software](#software)).
 
 ## Skills and MCP servers
 
@@ -484,8 +522,10 @@ that run; the RunLock records what the run used. See
 whose root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
-directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
-absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
+directory as cwd. Stage code uses ordinary relative paths. It finds a solver output at the
+absolute path `artifacts` declares, or one declared relative below its start directory:
+`[agent].workdir` below `ALE_HOME`, the home of the agent account in the Sandbox it runs in.
+Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
 own when it has one, since that is where the Task installs what `verify.py` imports, and
 otherwise the framework's own. It stages `ale_verify` and its schema validator into that
 interpreter's site-packages, checks the import, then sets `ALE_VERIFY_PYTHON` in the

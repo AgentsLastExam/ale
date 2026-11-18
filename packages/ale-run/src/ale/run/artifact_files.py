@@ -97,10 +97,31 @@ def read(path: str) -> None:
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, "rb") as source:
+        if os.name == "nt" and not _opened_at(source.fileno(), path):
+            # Windows has no O_NOFOLLOW, and where several agents share a machine one may
+            # swap a directory on the path for a junction after the check above.
+            raise ValueError(f"{path} passes through a link")
         if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
             raise ValueError("artifact is no longer a regular file")
         while block := source.read(1024 * 1024):
             sys.stdout.buffer.write(block)
+
+
+def _opened_at(descriptor: int, path: str) -> bool:
+    """Whether a Windows file descriptor is the very file ``path`` names, through no link."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes as w
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel.GetFinalPathNameByHandleW.restype = w.DWORD
+    kernel.GetFinalPathNameByHandleW.argtypes = [w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD]
+    buffer = ctypes.create_unicode_buffer(32768)
+    handle = msvcrt.get_osfhandle(descriptor)  # type: ignore[attr-defined]
+    if not kernel.GetFinalPathNameByHandleW(handle, buffer, 32768, 0):
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
+    final = buffer.value.removeprefix("\\\\?\\")
+    return final.casefold() == os.path.normpath(os.path.abspath(path)).casefold()
 
 
 def _excluded(parts: tuple[str, ...], patterns: Sequence[str]) -> bool:

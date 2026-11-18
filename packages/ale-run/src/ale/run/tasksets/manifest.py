@@ -119,7 +119,7 @@ class TaskFolder:
 
     def image_source_digest(self, image: ImageSpec) -> str | None:
         """What a solver image is built from: its build context, without assets."""
-        if image.ref is not None:
+        if image.ref is not None or image.kind is ImageKind.STATION:
             return None
         return tree_digest(self.environment_dir, exclude=("assets", SETUP_DIR))
 
@@ -277,7 +277,7 @@ def _load_folder(folder: TaskFolder) -> ManifestTask:
         config = TaskConfig.model_validate(_read_toml(path))
     except ValidationError as exc:
         raise TaskDefinitionError(f"invalid {path}: {describe(exc)}") from exc
-    _require_files(folder, config.environment.os)
+    _require_files(folder, config)
     try:
         spec = _spec(config, folder)
     except ValidationError as exc:
@@ -335,13 +335,22 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
 
     A Dockerfile builds a Linux container and names its base in ``FROM``. A build script
     (``build.ps1`` on Windows, ``build.sh`` elsewhere) builds a VM on ``image``. ``image``
-    alone is used directly.
+    alone is used directly. ``software`` names licensed software instead, which nothing
+    builds.
     """
     environment, user = config.environment, config.agent.user
     operating_system, image = environment.os, environment.image
     linux = operating_system is OperatingSystem.LINUX
     label, script = _OS_LABELS[operating_system], BUILD_SCRIPTS[operating_system]
     timeout = environment.build_timeout_sec
+    if environment.software is not None:
+        built = [folder.dockerfile, *(folder.build_script(system) for system in BUILD_SCRIPTS)]
+        for path in filter(None, built):
+            raise TaskDefinitionError(
+                "a Task that names [environment].software has no image to build; "
+                f"remove environment/{path.name}"
+            )
+        return ImageSpec(kind=ImageKind.STATION, software=environment.software)
     if operating_system is not OperatingSystem.WINDOWS and _file(
         folder.environment_dir / WINDOWS_BUILD
     ):
@@ -380,6 +389,12 @@ def _named_kind(image: str, operating_system: OperatingSystem) -> ImageKind | No
     return None
 
 
+def _verifier_os(config: TaskConfig) -> OperatingSystem:
+    """``[verifier.environment].os``, or else the Task's."""
+    environment = config.verifier.environment
+    return (environment.os if environment else None) or config.environment.os
+
+
 def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     """Harbor's verifier semantics; a Windows or macOS verifier image is a VM."""
     verifier = config.verifier
@@ -388,7 +403,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         if dockerfile is not None:
             raise TaskDefinitionError("tests/Dockerfile requires separate verification")
         return VerifySpec()
-    operating_system = config.environment.os
+    operating_system = _verifier_os(config)
     if dockerfile is not None and operating_system is not OperatingSystem.LINUX:
         raise TaskDefinitionError(
             "only a Linux verifier builds tests/Dockerfile; reuse the solver image or name "
@@ -421,15 +436,22 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         gpu_memory_mb=sized.gpu_memory_mb,
         container_features=sized.container_features,
     )
-    return VerifySpec(environment_mode=VerificationMode.SEPARATE, image=image, resources=resources)
+    return VerifySpec(
+        environment_mode=VerificationMode.SEPARATE,
+        os=environment.os if environment else None,
+        image=image,
+        resources=resources,
+    )
 
 
-def _require_files(folder: TaskFolder, operating_system: OperatingSystem) -> None:
+def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
+    """The Task's files: its tests entry is its verifier's system's, and its solution's the
+    Task's own."""
     required = (
         folder.root / TASK_CONFIG,
         folder.root / INSTRUCTION,
-        folder.root / Stage.TESTS / Stage.TESTS.entry(operating_system),
-        folder.root / Stage.SOLUTION / Stage.SOLUTION.entry(operating_system),
+        folder.root / Stage.TESTS / Stage.TESTS.entry(_verifier_os(config)),
+        folder.root / Stage.SOLUTION / Stage.SOLUTION.entry(config.environment.os),
     )
     missing = [path.relative_to(folder.root).as_posix() for path in required if not path.is_file()]
     if missing:

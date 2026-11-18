@@ -1,0 +1,27 @@
+# Does a Station's Lane serve a Task end to end? The agent saves a note with Notepad, the
+# software the Station names, and a Linux container verifies the note below its own start
+# directory, where ALE restores the relative artifact.
+schema_version = "0.2.0"
+artifacts = ["output"]
+
+[task]
+name = "agentslastexam/station-notepad"
+keywords = ["windows", "station", "smoke"]
+
+[metadata]
+network_justification = "a Station's Lanes share its network, so it serves open Tasks only"
+
+[environment]
+os = "windows"
+software = ["notepad"]
+
+[agent]
+timeout_sec = 600
+network_mode = "public"
+
+[verifier]
+timeout_sec = 120
+
+[verifier.environment]
+os = "linux"
+image = "ghcr.io/agentslastexam/container-ubuntu22-base:0.1.1"

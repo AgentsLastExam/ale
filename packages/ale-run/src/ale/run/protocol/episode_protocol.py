@@ -128,13 +128,11 @@ class _StageLayout:
         return self.root.joinpath(*parts)
 
 
-def _layout(operating_system: OperatingSystem) -> _StageLayout:
-    root: PurePath = (
-        PureWindowsPath("C:/ProgramData/ALE")
-        if operating_system is OperatingSystem.WINDOWS
-        else PurePosixPath("/opt/ale")
-    )
-    return _StageLayout(root)
+def _layout(sandbox: Sandbox) -> _StageLayout:
+    """The Sandbox's own stage root, which a Provider whose Sandboxes share a machine gives
+    each of them apart."""
+    windows = sandbox.request.os is OperatingSystem.WINDOWS
+    return _StageLayout((PureWindowsPath if windows else PurePosixPath)(sandbox.stage_root))
 
 
 def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
@@ -254,7 +252,7 @@ def _sandbox_path(operating_system: OperatingSystem, root: str, *parts: str) -> 
 
 
 def _powershell(command: str) -> list[str]:
-    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
+    return [guestd.WINDOWS_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command]
 
 
 def _powershell_literal(value: str) -> str:
@@ -339,7 +337,9 @@ class EpisodeProtocol:
                 await ctx.sandboxes.release(sandbox)
                 verifier = await self._provision_verifier(ctx)
                 try:
-                    await ctx.artifacts.restore(verifier)
+                    await ctx.artifacts.restore(
+                        verifier, ctx.spec.start_directory(verifier.agent_home, verifier.request.os)
+                    )
                     return await self._verify(task, ctx, verifier)
                 finally:
                     await self._sanitize_for_retention(ctx, verifier)
@@ -407,7 +407,7 @@ class EpisodeProtocol:
             sandbox = await ctx.sandboxes.acquire(
                 request.model_copy(update={"snapshot": resume.source.handle})
             )
-            holder = await _agent_episode(sandbox, spec.os)
+            holder = await _agent_episode(sandbox)
             if holder != resume.source.episode_id:
                 raise ProviderCapabilityError(
                     f"snapshot {resume.source.handle} holds "
@@ -420,14 +420,14 @@ class EpisodeProtocol:
             async def attach(request: SandboxRequest) -> Sandbox:
                 # Checked before the lease owns it: a refused Sandbox is not ours to destroy.
                 attached = await attach_retained(request)
-                await _require_agent_episode(attached, spec.os, resume.source.episode_id)
+                await _require_agent_episode(attached, resume.source.episode_id)
                 return attached
 
             sandbox = await ctx.sandboxes.adopt(request, attach)
         if resume is not None:
             # Claimed before anything changes it, so the earlier episode's records no
             # longer lead to this Sandbox, whatever happens to this episode.
-            await _write_agent_episode(sandbox, spec.os, ctx.episode_id)
+            await _write_agent_episode(sandbox, ctx.episode_id)
             ctx.resumed_from = resume.source
         # The image the Sandbox runs: the request's, or one a Fleet Node prepared for it.
         ctx.prepared_image = sandbox.request.prepared_image
@@ -446,7 +446,7 @@ class EpisodeProtocol:
             raise TaskError("separate verification image/resources were not prepared")
         request = SandboxRequest(
             episode_id=ctx.episode_id,
-            os=ctx.spec.os,
+            os=ctx.spec.verifier_os,
             role=SandboxRole.VERIFIER,
             prepared_image=ctx.prepared_verifier_image,
             resources=resources.as_resources(),
@@ -481,7 +481,7 @@ class EpisodeProtocol:
             return
 
         if setup_dir := folder.stage_dir(Stage.SETUP):
-            target = _layout(ctx.spec.os).path(Stage.SETUP)
+            target = _layout(sandbox).path(Stage.SETUP)
             await sandbox.upload_dir(str(setup_dir), str(target))
             if folder.stage_entry(Stage.SETUP, ctx.spec.os):
                 await self._run_stage(ctx, sandbox, target, Phase.SETUP)
@@ -779,19 +779,22 @@ class EpisodeProtocol:
         if tests_dir is None:
             raise TaskError("task has no tests stage")
 
-        layout = _layout(ctx.spec.os)
+        # Everything below follows the system of the Sandbox verification runs in, which a
+        # separate verifier may name apart from the Task's.
+        operating_system = sandbox.request.os
+        layout = _layout(sandbox)
         tests_root = layout.path(Stage.TESTS)
-        removed = await self._clear_stages(ctx, sandbox, (Stage.TESTS,))
+        removed = await self._clear_stages(sandbox, (Stage.TESTS,))
         if not removed.ok:
             raise TaskError(
                 "could not clear the previous tests stage: "
                 + (removed.stderr.strip() or f"exit {removed.exit_code}")
             )
         # Whatever the agent or an earlier attempt left there is no result of this one.
-        reset = await sandbox.exec(_verifier_dir_command(ctx.spec.os, remove=False))
+        reset = await sandbox.exec(_verifier_dir_command(operating_system, remove=False))
         if not reset.ok:
             raise TaskError(
-                f"could not prepare {_verifier_dir(ctx.spec.os)}: "
+                f"could not prepare {_verifier_dir(operating_system)}: "
                 + (reset.stderr.strip() or f"exit {reset.exit_code}")
             )
         await sandbox.upload_dir(str(tests_dir), str(tests_root))
@@ -808,7 +811,7 @@ class EpisodeProtocol:
         # the agent could not. The agent has already finished; nothing it does can follow.
         await sandbox.open_egress()
 
-        python, destination = await self._site_packages(ctx, sandbox)
+        python, destination = await self._site_packages(sandbox)
         framework_source, framework_version, framework_hash = installed_ale_verify()
         await sandbox.upload_dir(
             str(framework_source),
@@ -851,7 +854,7 @@ class EpisodeProtocol:
             ctx.verification_config, ctx.judge_tokens, sandbox.gateway_url
         )
         await sandbox.write_file(
-            str(_layout(ctx.spec.os).path(Stage.TESTS, "config.json")),
+            str(_layout(sandbox).path(Stage.TESTS, "config.json")),
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         )
         ctx.verification_command_env = command_env
@@ -862,7 +865,7 @@ class EpisodeProtocol:
         invocations = []
         for name in ("llm-judge.jsonl", "agent-judge.jsonl"):
             try:
-                raw = await sandbox.read_file(str(_layout(ctx.spec.os).path(Stage.TESTS, name)))
+                raw = await sandbox.read_file(str(_layout(sandbox).path(Stage.TESTS, name)))
             except Exception:
                 continue
             text = redactor(raw.decode("utf-8", errors="replace"))
@@ -882,7 +885,7 @@ class EpisodeProtocol:
 
     async def _read_result(self, ctx: EpisodeContext, sandbox: Sandbox) -> dict[str, object]:
         """The verifier's result: ``reward.json``, completed by ``verification.json`` if any."""
-        directory = _verifier_dir(ctx.spec.os)
+        directory = _verifier_dir(sandbox.request.os)
         reward, record = str(directory / "reward.json"), str(directory / "verification.json")
         try:
             written = {item.path for item in await sandbox.list_files(str(directory))}
@@ -941,16 +944,12 @@ class EpisodeProtocol:
             self._parse_harness_trajectory(ctx, collection_failed=collection_failed)
 
         if ctx.artifacts.enabled:
-            for index, artifact in enumerate(ctx.spec.artifacts):
-                path = ctx.spec.artifact_path(artifact, ctx.home)
-                path_type = (
-                    PureWindowsPath if ctx.spec.os is OperatingSystem.WINDOWS else PurePosixPath
-                )
-                name = path_type(path).name or f"artifact-{index}"
-                await ctx.artifacts.collect(sandbox, path, name, artifact.exclude)
+            start = ctx.spec.start_directory(ctx.home)
+            for artifact in ctx.spec.artifacts:
+                await ctx.artifacts.collect(sandbox, artifact, start)
                 logger.info(
                     "artifact collection attempted",
-                    extra={"ale_data": {"source": path, "name": name}},
+                    extra={"ale_data": {"source": artifact.source, "start": start}},
                 )
 
         ctx.solver_evidence_captured = True
@@ -980,44 +979,39 @@ class EpisodeProtocol:
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return True
         # A retained solver may be handed to another agent, so no stage or result of this
-        # Task stays behind, only the agent's own state.
-        result = await self._clear_stages(ctx, sandbox, (Stage.SETUP, Stage.TESTS))
+        # Task stays behind, only the agent's own state, in its own account's home.
+        home, operating_system = sandbox.agent_home, sandbox.request.os
+        result = await self._clear_stages(sandbox, (Stage.SETUP, Stage.TESTS))
         if result.ok:
             result = await self._remove_paths(
-                ctx,
                 sandbox,
                 (
-                    str(solution_dir(ctx.home, ctx.spec.os)),
-                    _sandbox_path(ctx.spec.os, ctx.home, ".codex", "auth.json"),
-                    _sandbox_path(ctx.spec.os, ctx.home, ".claude", ".credentials.json"),
+                    str(solution_dir(home, operating_system)),
+                    _sandbox_path(operating_system, home, ".codex", "auth.json"),
+                    _sandbox_path(operating_system, home, ".claude", ".credentials.json"),
                 ),
             )
         if result.ok:
-            result = await sandbox.exec(_verifier_dir_command(ctx.spec.os, remove=True))
+            result = await sandbox.exec(_verifier_dir_command(operating_system, remove=True))
         reason = None if result.ok else result.stderr.strip() or "retention sanitation failed"
         solver = sandbox.request.role is not SandboxRole.VERIFIER
         if reason is None and self.agent_enabled and solver:
             try:
-                await _write_agent_episode(sandbox, ctx.spec.os, ctx.episode_id)
+                await _write_agent_episode(sandbox, ctx.episode_id)
             except Exception as exc:
                 reason = f"could not record the agent's episode: {exc}"
         ctx.sandboxes.mark_sanitized(sandbox, succeeded=reason is None, reason=reason)
         return reason is None
 
-    async def _clear_stages(
-        self,
-        ctx: EpisodeContext,
-        sandbox: Sandbox,
-        names: Sequence[str],
-    ) -> ExecResult:
+    async def _clear_stages(self, sandbox: Sandbox, names: Sequence[str]) -> ExecResult:
         """Empty the framework's stage directories.
 
         A Windows base creates each one with its own ACL under the protected ALE root, so
         there only its contents go.
         """
-        paths = [str(_layout(ctx.spec.os).path(name)) for name in names]
-        if ctx.spec.os is not OperatingSystem.WINDOWS:
-            return await self._remove_paths(ctx, sandbox, paths)
+        paths = [str(_layout(sandbox).path(name)) for name in names]
+        if sandbox.request.os is not OperatingSystem.WINDOWS:
+            return await self._remove_paths(sandbox, paths)
         return await sandbox.exec(
             _powershell(
                 f"foreach ($stage in {_powershell_list(paths)}) {{ "
@@ -1027,14 +1021,9 @@ class EpisodeProtocol:
             )
         )
 
-    async def _remove_paths(
-        self,
-        ctx: EpisodeContext,
-        sandbox: Sandbox,
-        paths: Sequence[str],
-    ) -> ExecResult:
+    async def _remove_paths(self, sandbox: Sandbox, paths: Sequence[str]) -> ExecResult:
         """Remove paths, skipping missing ones as ``rm -rf`` does; any other failure fails."""
-        if ctx.spec.os is OperatingSystem.WINDOWS:
+        if sandbox.request.os is OperatingSystem.WINDOWS:
             # Not -ErrorAction SilentlyContinue: it hides the error but still exits 1.
             return await sandbox.exec(
                 _powershell(
@@ -1171,9 +1160,10 @@ class EpisodeProtocol:
         *,
         verify_python: str | None = None,
     ) -> int:
-        layout = _layout(ctx.spec.os)
+        operating_system = sandbox.request.os
+        layout = _layout(sandbox)
         stage = Stage.SETUP if phase is Phase.SETUP else Stage.TESTS
-        entry = directory / stage.entry(ctx.spec.os)
+        entry = directory / stage.entry(operating_system)
         variables = ctx.variables.values
         env = {
             **(
@@ -1182,7 +1172,9 @@ class EpisodeProtocol:
                 else variables.verification(ctx.spec.verify.environment_mode)
             ),
             "ALE_STAGE_DIR": str(directory),
-            "ALE_HOME": ctx.home,
+            # The home of the agent account in the Sandbox the stage runs in, a separate
+            # verifier's own: its start directory there holds the artifacts declared relative.
+            "ALE_HOME": sandbox.agent_home,
         }
         if phase is Phase.VERIFY:
             env.update(
@@ -1209,7 +1201,7 @@ class EpisodeProtocol:
         execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
         argv = (
             [
-                "powershell.exe",
+                guestd.WINDOWS_POWERSHELL,
                 "-NoProfile",
                 "-NonInteractive",
                 "-ExecutionPolicy",
@@ -1217,7 +1209,7 @@ class EpisodeProtocol:
                 "-File",
                 entry.name,
             ]
-            if ctx.spec.os is OperatingSystem.WINDOWS
+            if operating_system is OperatingSystem.WINDOWS
             else ["bash", entry.name]
         )
         recorder = CommandRecorder(
@@ -1270,11 +1262,12 @@ class EpisodeProtocol:
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
 
-    async def _site_packages(self, ctx: EpisodeContext, sandbox: Sandbox) -> tuple[str, str]:
+    async def _site_packages(self, sandbox: Sandbox) -> tuple[str, str]:
         """Select the verifier interpreter and its package destination."""
+        operating_system = sandbox.request.os
         destination = (
             "site.getusersitepackages()"
-            if ctx.spec.os is OperatingSystem.WINDOWS
+            if operating_system is OperatingSystem.WINDOWS
             else "sysconfig.get_paths()['purelib']"
         )
         script = (
@@ -1285,13 +1278,14 @@ class EpisodeProtocol:
         )
         # The image's own Python first, since that is where the Task's packages are; the
         # framework's own when the image has none recent enough.
-        candidates = (
-            ("python.exe",) if ctx.spec.os is OperatingSystem.WINDOWS else ("python3", "python3.12")
-        ) + (guestd.PYTHON[ctx.spec.os.value],)
+        windows = operating_system is OperatingSystem.WINDOWS
+        candidates = (("python.exe",) if windows else ("python3", "python3.12")) + (
+            guestd.PYTHON[operating_system.value],
+        )
         failures = []
         for python in candidates:
             argv = [python, "-c", script]
-            if ctx.spec.os is not OperatingSystem.WINDOWS:
+            if not windows:
                 # A missing executable must be a normal probe failure on every Provider.
                 argv = ["sh", "-c", 'command -v "$1" >/dev/null 2>&1 && exec "$@"', "sh", *argv]
             result = await sandbox.exec(argv)
@@ -1428,7 +1422,7 @@ class ReverificationProtocol(EpisodeProtocol):
         self.timeouts = timeouts or RunTimeouts()
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
-        await _require_agent_episode(self.solver, ctx.spec.os, self.solver.request.episode_id)
+        await _require_agent_episode(self.solver, self.solver.request.episode_id)
         ctx.resolved_image = self.solver.resolved_image
         ctx.resource_allocation = self.solver.allocation
         ctx.sandbox_identity = self.sandbox_identity
@@ -1467,7 +1461,9 @@ class ReverificationProtocol(EpisodeProtocol):
         async def verify() -> dict[str, float]:
             verifier = await self._provision_verifier(ctx)
             try:
-                await ctx.artifacts.restore(verifier)
+                await ctx.artifacts.restore(
+                    verifier, ctx.spec.start_directory(verifier.agent_home, verifier.request.os)
+                )
                 return await self._verify(task, ctx, verifier)
             finally:
                 await self._sanitize_for_retention(ctx, verifier)
@@ -1483,33 +1479,29 @@ class ReverificationProtocol(EpisodeProtocol):
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
 
 
-def _agent_episode_path(operating_system: OperatingSystem) -> str:
+def _agent_episode_path(sandbox: Sandbox) -> str:
     """Names the episode whose agent last ran in a solver Sandbox."""
-    return str(_layout(operating_system).path("agent-episode"))
+    return str(_layout(sandbox).path("agent-episode"))
 
 
-async def _write_agent_episode(
-    sandbox: Sandbox, operating_system: OperatingSystem, episode_id: str
-) -> None:
-    await sandbox.write_file(_agent_episode_path(operating_system), episode_id.encode())
+async def _write_agent_episode(sandbox: Sandbox, episode_id: str) -> None:
+    await sandbox.write_file(_agent_episode_path(sandbox), episode_id.encode())
 
 
-async def _agent_episode(sandbox: Sandbox, operating_system: OperatingSystem) -> str | None:
+async def _agent_episode(sandbox: Sandbox) -> str | None:
     try:
-        return (await sandbox.read_file(_agent_episode_path(operating_system))).decode()
+        return (await sandbox.read_file(_agent_episode_path(sandbox))).decode()
     except Exception:
         return None
 
 
-async def _require_agent_episode(
-    sandbox: Sandbox, operating_system: OperatingSystem, episode_id: str
-) -> None:
+async def _require_agent_episode(sandbox: Sandbox, episode_id: str) -> None:
     """A retained solver serves only the episode whose agent state it still holds.
 
     Once a later episode continued it, the earlier episode's handle no longer describes it.
     A refused Sandbox is left retained as it was, only disconnected.
     """
-    holder = await _agent_episode(sandbox, operating_system)
+    holder = await _agent_episode(sandbox)
     if holder == episode_id:
         return
     await sandbox.retain(roles=("solver",), reason="refused: it holds another episode's state")

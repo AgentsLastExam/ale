@@ -15,6 +15,13 @@ Framing is ``type:1 stream:4 length:4`` followed by the payload. Each stream has
 window that the receiver refills as it writes to its socket, so one slow stream never makes
 the reader of the shared pipe wait and never grows an unbounded buffer.
 
+The sandbox side listens on loopback, at ``127.0.0.1`` unless ``--listen`` names another
+address, so that sandboxes sharing one machine's loopback each listen on an address of
+their own. On Windows it binds exclusively: a port bound for reuse there can be bound again
+by another account's socket, which would take the connections meant for this one. Where
+several accounts share the loopback, the side that starts the tunnel may bind the socket
+itself and hand it over (``--accept``), so that the port stays taken between two tunnels.
+
 Standard library only, and no engine imports: this file is copied into images (as
 ``/opt/ale/guestd/tunnel.py``) and imported by the Host from the same source.
 """
@@ -24,8 +31,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import os
+import socket
 import struct
 import sys
+import threading
 from collections.abc import Awaitable, Callable
 
 __all__ = ["Mux", "TunnelError"]
@@ -180,6 +190,40 @@ class Mux:
     # --- listening -------------------------------------------------------------
 
     async def listen(self, port: int, target: int, host: str = "127.0.0.1") -> asyncio.Server:
+        accepted = self._accepted(target)
+        if os.name != "nt":
+            return await asyncio.start_server(accepted, host, port, reuse_address=True)
+        listener = socket.socket()
+        try:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            listener.bind((host, port))
+            return await asyncio.start_server(accepted, sock=listener)
+        except BaseException:
+            listener.close()
+            raise
+
+    def accept(self, listener: socket.socket, target: int) -> None:
+        """Take connections from a listening socket this process was handed, in a thread of
+        its own: the socket outlives the process, so it must not be tied to the event loop's
+        completion port, which a socket can be only once."""
+        loop = asyncio.get_running_loop()
+        accepted = self._accepted(target)
+
+        async def bridge(connection: socket.socket) -> None:
+            reader, writer = await asyncio.open_connection(sock=connection)
+            await accepted(reader, writer)
+
+        def take() -> None:
+            with contextlib.suppress(OSError, RuntimeError):  # the socket or the loop closed
+                while True:
+                    connection, _ = listener.accept()
+                    loop.call_soon_threadsafe(self._later, bridge(connection))
+
+        threading.Thread(target=take, daemon=True).start()
+
+    def _accepted(
+        self, target: int
+    ) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]:
         async def accepted(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             if len(self._streams) >= self._max_streams or self.closed.is_set():
                 writer.close()
@@ -196,7 +240,7 @@ class Mux:
                 return
             await self._bridge(stream, reader, writer)
 
-        return await asyncio.start_server(accepted, host, port, reuse_address=True)
+        return accepted
 
     # --- one stream ------------------------------------------------------------
 
@@ -256,6 +300,10 @@ class Mux:
 
 
 async def _stdio() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    if os.name == "nt":
+        # The Proactor loop reads and writes a pipe with overlapped I/O, which the
+        # synchronous anonymous pipes a Windows process is given for stdio do not take.
+        return _threaded_pipe(sys.stdin.fileno(), sys.stdout.fileno())
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
     await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer)
@@ -265,16 +313,61 @@ async def _stdio() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     return reader, asyncio.StreamWriter(transport, protocol, reader, loop)
 
 
-async def _serve(listeners: list[tuple[int, int]]) -> int:
+def _threaded_pipe(
+    incoming: int, outgoing: int
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """A pipe's two descriptors as a reader and a writer, read and written by threads."""
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+
+    def pump() -> None:
+        with contextlib.suppress(RuntimeError):  # the loop closed first
+            try:
+                while block := os.read(incoming, CHUNK_BYTES):
+                    loop.call_soon_threadsafe(reader.feed_data, block)
+            except OSError:
+                pass
+            loop.call_soon_threadsafe(reader.feed_eof)
+
+    threading.Thread(target=pump, daemon=True).start()
+    return reader, _ThreadedWriter(outgoing)  # type: ignore[return-value]
+
+
+class _ThreadedWriter:
+    """A descriptor as the writer a :class:`Mux` runs over, written whole by a worker thread."""
+
+    def __init__(self, descriptor: int) -> None:
+        self._descriptor = descriptor
+        self._pending = bytearray()
+
+    def write(self, data: bytes) -> None:
+        self._pending += data
+
+    async def drain(self) -> None:
+        if self._pending:
+            data, self._pending = bytes(self._pending), bytearray()
+            await asyncio.to_thread(self._write, memoryview(data))
+
+    def _write(self, data: memoryview) -> None:
+        while data:
+            data = data[os.write(self._descriptor, data) :]
+
+    def close(self) -> None:
+        """Nothing: the descriptor is the process's own and ends with it."""
+
+
+async def _serve(listeners: list[tuple[str, int, int]], sockets: list[tuple[int, int]]) -> int:
     reader, writer = await _stdio()
     mux = Mux(reader, writer)
     servers = []
     try:
-        for port, target in listeners:
-            servers.append(await mux.listen(port, target))
+        for host, port, target in listeners:
+            servers.append(await mux.listen(port, target, host))
     except OSError as exc:
-        print(f"tunnel: cannot listen on port {port}: {exc}", file=sys.stderr, flush=True)
+        print(f"tunnel: cannot listen on {host}:{port}: {exc}", file=sys.stderr, flush=True)
         return 1
+    for descriptor, target in sockets:
+        mux.accept(socket.socket(fileno=descriptor), target)
     await mux.send(READY, 0)
     await mux.run()
     for server in servers:
@@ -282,21 +375,54 @@ async def _serve(listeners: list[tuple[int, int]]) -> int:
     return 0
 
 
+def _listener(spec: str) -> tuple[str, int, int]:
+    """``[HOST:]PORT:TARGET``: where to listen, on ``127.0.0.1`` unless HOST names another
+    address, and the index of the Host's target that each connection goes to."""
+    parts = spec.split(":")
+    host = parts.pop(0) if len(parts) == 3 else "127.0.0.1"
+    try:
+        port, target = (int(part) for part in parts)
+    except ValueError:  # not two numbers
+        port = target = -1
+    if not host or not 0 <= port <= 65535 or not 0 <= target <= 255:
+        raise argparse.ArgumentTypeError(f"not [HOST:]PORT:TARGET with TARGET below 256: {spec!r}")
+    return host, port, target
+
+
+def _socket(spec: str) -> tuple[int, int]:
+    """``SOCKET:TARGET``: a listening socket this process inherited, and the Host's target."""
+    try:
+        descriptor, target = (int(part) for part in spec.split(":"))
+    except ValueError:  # not two numbers
+        descriptor = target = -1
+    if descriptor < 0 or not 0 <= target <= 255:
+        raise argparse.ArgumentTypeError(f"not SOCKET:TARGET with TARGET below 256: {spec!r}")
+    return descriptor, target
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ale-tunnel", description="ALE sandbox tunnel")
     parser.add_argument(
         "--listen",
         action="append",
-        required=True,
-        metavar="PORT:TARGET",
-        help="accept loopback connections on PORT and send them to the Host's TARGET",
+        default=[],
+        type=_listener,
+        metavar="[HOST:]PORT:TARGET",
+        help="accept connections on HOST (127.0.0.1) at PORT and send them to the Host's TARGET",
+    )
+    parser.add_argument(
+        "--accept",
+        action="append",
+        default=[],
+        type=_socket,
+        metavar="SOCKET:TARGET",
+        help="accept connections on the listening SOCKET this process inherited, which its "
+        "parent keeps bound, and send them to the Host's TARGET",
     )
     args = parser.parse_args(argv)
-    listeners = []
-    for spec in args.listen:
-        port, _, target = spec.partition(":")
-        listeners.append((int(port), int(target)))
-    return asyncio.run(_serve(listeners))
+    if not args.listen and not args.accept:
+        parser.error("name at least one --listen or --accept")
+    return asyncio.run(_serve(args.listen, args.accept))
 
 
 if __name__ == "__main__":

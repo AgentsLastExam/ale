@@ -30,7 +30,9 @@ software, inputs, and local services required by that route must already be avai
 download or network workaround is not a feasible blocked-network route. Intrinsic external
 dependencies justify the narrowest practical allowlist. Open access is justified only when
 restriction would materially change the intended capability, with that reason recorded in Task
-metadata.
+metadata. A Task that names software may need a machine that cannot restrict its network
+([Software](task-authoring.md#software)); it then declares open access for that reason, and
+its instruction and verification must not reward what the open network gives.
 
 ## 2. Keep the contract aligned
 

@@ -195,6 +195,21 @@ async def prepare_task_image_result(task: Task, provider: Provider) -> ImagePrep
     folder = _task_folder(task)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, "solver", provider)
+    if kind is ImageKind.STATION:
+        # Software its operator installed on a machine of their own: the Provider that leases
+        # the machine resolves the names, and ALE builds and frames nothing.
+        image = await _stage(
+            "software-resolution",
+            provider.prepare_image(ImageRef(kind=kind, reference=",".join(spec.software))),
+        )
+        return _result(
+            task,
+            "solver",
+            image,
+            ImagePreparationStep(
+                "software-resolution", "executed", image.prepared_identity, image.resolved_reference
+            ),
+        )
     if spec.base_ref is not None:
         base = await _stage(
             "base-resolution",
@@ -356,10 +371,10 @@ async def prepare_verifier_image_result(
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
             )
-        elif task.spec.os is not OperatingSystem.MACOS:
+        elif task.spec.verifier_os is not OperatingSystem.MACOS:
             image, reused = await _stage(
                 "framework-layer",
-                framed_disk(image, operating_system=task.spec.os, user=verify.image.user),
+                framed_disk(image, operating_system=task.spec.verifier_os, user=verify.image.user),
             )
             steps.append(
                 ImagePreparationStep(
@@ -440,7 +455,7 @@ def _on_fleet(
     key = content_hash(
         {
             "role": role,
-            "os": task.spec.os,
+            "os": task.spec.os if role == "solver" else task.spec.verifier_os,
             "image": image.model_dump(mode="json"),
             "storage_mb": task.spec.resources.storage_mb,
             "context": identity,

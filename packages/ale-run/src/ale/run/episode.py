@@ -54,10 +54,10 @@ from ale.core.sandbox import (
     SandboxRole,
 )
 from ale.core.task import ResolvedVariables, Task
-from ale.core.taskspec import NetworkMode, OperatingSystem, Resources, VerificationMode
+from ale.core.taskspec import Artifact, NetworkMode, OperatingSystem, Resources, VerificationMode
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import FINAL_STATUSES, Status, Verdict
-from ale.run import artifact_files
+from ale.run import artifact_files, guestd
 from ale.run.assets import observe_task_assets
 from ale.run.framework import MACOS_PYTHON
 from ale.run.gateway.server import Gateway
@@ -384,15 +384,24 @@ def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxO
     )
 
 
-def _artifact_python(operating_system: OperatingSystem) -> str:
-    """The Python the framework copies artifacts with.
+def _artifact_python(operating_system: OperatingSystem) -> list[str]:
+    """The Python the framework copies artifacts with, isolated (``-I``) from the variables,
+    the user site and the working directory around it, which the agent may have chosen.
 
-    The image's own, except on macOS, which may have none, where it is the framework's.
+    The image's own on Linux; the framework's on macOS, which may have none, and on Windows,
+    where the image's may sit in a directory another account of a shared machine can write.
     """
-    return {
-        OperatingSystem.WINDOWS: "python.exe",
+    python = {
+        OperatingSystem.WINDOWS: guestd.PYTHON["windows"],
         OperatingSystem.MACOS: MACOS_PYTHON,
     }.get(operating_system, "python3")
+    return [python, "-I"]
+
+
+def _sandbox_path_type(
+    operating_system: OperatingSystem,
+) -> type[PurePosixPath] | type[PureWindowsPath]:
+    return PureWindowsPath if operating_system is OperatingSystem.WINDOWS else PurePosixPath
 
 
 @dataclass
@@ -402,6 +411,10 @@ class _Artifacts(ArtifactSink):
     A separate verifier receives the solver's output only through the Host, so separate
     verification always captures it, as in Harbor. Unless run policy collects it, that copy
     is discarded with the episode.
+
+    Each entry keeps the path it was copied from and, for an artifact declared relative,
+    its path below the solver's start directory, so that a verifier whose account has
+    another home receives it below its own.
     """
 
     run_dir: Path
@@ -415,28 +428,28 @@ class _Artifacts(ArtifactSink):
     def root(self) -> Path:
         return self.run_dir / "artifacts"
 
-    async def collect(
-        self, sandbox: Sandbox, source: str, name: str, exclude: tuple[str, ...] = ()
-    ) -> None:
+    async def collect(self, sandbox: Sandbox, artifact: Artifact, start: str) -> None:
         if not self.enabled:
             return
         logger = logging.getLogger("ale.execution")
         python = _artifact_python(sandbox.request.os)
         script = Path(artifact_files.__file__).read_text()
-        path_type = (
-            PureWindowsPath if sandbox.request.os is OperatingSystem.WINDOWS else PurePosixPath
-        )
+        path_type = _sandbox_path_type(sandbox.request.os)
+        declared = path_type(artifact.source)
+        below = None if declared.is_absolute() else path_type(start)
+        source = str(path_type(start) / declared)
         base = path_type(source).parent
         while any(char in str(base) for char in "*?["):
             base = base.parent
         # A separate directory for each declaration prevents basename collisions and
         # keeps snapshot.json reserved for the inventory, even for that literal filename.
         batch = self.root / f"{len(self.collected):04d}"
-        self.collected.append(name)
+        self.collected.append(source)
         captured = {entry["source"] for entry in self.entries}
         try:
             probe = await sandbox.exec(
-                [python, "-c", script, "inspect", source, *exclude], identity=Identity.FRAMEWORK
+                [*python, "-c", script, "inspect", source, *artifact.exclude],
+                identity=Identity.FRAMEWORK,
             )
             if not probe.ok:
                 raise OSError(probe.stderr or "artifact inspection failed")
@@ -453,6 +466,10 @@ class _Artifacts(ArtifactSink):
                         raise ValueError("artifact path escapes its declaration")
                     if remote in captured:
                         continue
+                    # Recorded with forward slashes, whatever the verifier's system.
+                    below_start = (
+                        None if below is None else path_type(remote).relative_to(below).as_posix()
+                    )
                     target = batch.joinpath(*relative.parts)
                     kind = item["kind"]
                     if kind == "directory":
@@ -472,7 +489,7 @@ class _Artifacts(ArtifactSink):
                                     size += len(data)
 
                             copied = await sandbox.exec(
-                                [python, "-c", script, "read", remote],
+                                [*python, "-c", script, "read", remote],
                                 identity=Identity.FRAMEWORK,
                                 output_sink=receive,
                             )
@@ -485,6 +502,7 @@ class _Artifacts(ArtifactSink):
                     self.entries.append(
                         {
                             "source": remote,
+                            "below_start": below_start,
                             "kind": kind,
                             "stored_path": target.relative_to(self.root).as_posix(),
                             "mode": int(item["mode"]),
@@ -499,10 +517,7 @@ class _Artifacts(ArtifactSink):
         except Exception as exc:
             logger.warning("artifact skipped: %s: %s", source, exc)
 
-    def path(self, name: str) -> Path:
-        return self.root / name
-
-    async def restore(self, sandbox: Sandbox) -> None:
+    async def restore(self, sandbox: Sandbox, start: str) -> None:
         if self.truncated:
             # A verifier scoring part of the output gives a wrong score, not a low one.
             raise TaskError(f"artifacts too large to copy whole: {', '.join(self.truncated)}")
@@ -510,22 +525,28 @@ class _Artifacts(ArtifactSink):
             return
         python = _artifact_python(sandbox.request.os)
         roots: list[PurePosixPath | PureWindowsPath] = []
-        path_type = (
-            PureWindowsPath if sandbox.request.os is OperatingSystem.WINDOWS else PurePosixPath
+        path_type = _sandbox_path_type(sandbox.request.os)
+
+        def destination(entry: dict[str, object]) -> PurePosixPath | PureWindowsPath:
+            below_start = entry["below_start"]
+            if below_start is None:
+                return path_type(str(entry["source"]))
+            return path_type(start).joinpath(*PurePosixPath(str(below_start)).parts)
+
+        placed = sorted(
+            ((destination(entry), entry) for entry in self.entries),
+            key=lambda item: len(item[0].parts),
         )
-        for entry in sorted(
-            self.entries, key=lambda item: len(path_type(str(item["source"])).parts)
-        ):
-            source = str(entry["source"])
-            target = self.root / str(entry["stored_path"])
+        for path, entry in placed:
+            written = str(path)
+            stored = self.root / str(entry["stored_path"])
             try:
-                path = path_type(source)
                 clear = not any(path == root or root in path.parents for root in roots)
                 if clear:
                     roots.append(path)
                 prepared = await sandbox.exec(
                     [
-                        python,
+                        *python,
                         "-c",
                         (
                             "import os,pathlib,shutil,sys; p=pathlib.Path(sys.argv[1]); "
@@ -535,7 +556,7 @@ class _Artifacts(ArtifactSink):
                             "else None; "
                             "(p if directory else p.parent).mkdir(parents=True,exist_ok=True)"
                         ),
-                        source,
+                        written,
                         str(entry["kind"]),
                         str(clear),
                     ],
@@ -545,18 +566,18 @@ class _Artifacts(ArtifactSink):
                     raise OSError(prepared.stderr or "cannot prepare artifact destination")
                 if entry["kind"] == "file":
                     await sandbox.write_file(
-                        source, target.read_bytes(), identity=Identity.FRAMEWORK
+                        written, stored.read_bytes(), identity=Identity.FRAMEWORK
                     )
                 if sandbox.request.os is not OperatingSystem.WINDOWS:
                     mode = await sandbox.exec(
-                        ["chmod", "--", f"{int(entry['mode']):o}", source],
+                        ["chmod", "--", f"{int(entry['mode']):o}", written],
                         identity=Identity.FRAMEWORK,
                     )
                     if not mode.ok:
                         raise OSError(mode.stderr or "cannot restore artifact mode")
             except Exception as exc:
                 logging.getLogger("ale.execution").warning(
-                    "artifact restore skipped: %s: %s", source, exc
+                    "artifact restore skipped: %s: %s", written, exc
                 )
 
     def cleanup(self) -> None:

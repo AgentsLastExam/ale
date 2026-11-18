@@ -98,7 +98,7 @@ async def test_shared_verification_has_no_second_prepared_image(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", tuple(ImageKind))
+@pytest.mark.parametrize("kind", [ImageKind.CONTAINER, ImageKind.VM])
 async def test_separate_verifier_reuses_solver_prepared_kind(
     tmp_path: Path, kind: ImageKind
 ) -> None:
@@ -130,7 +130,7 @@ async def test_separate_verifier_reuses_solver_prepared_kind(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", tuple(ImageKind))
+@pytest.mark.parametrize("kind", [ImageKind.CONTAINER, ImageKind.VM])
 async def test_external_separate_verifier_uses_matching_provider(
     tmp_path: Path, kind: ImageKind, framework_layer: None
 ) -> None:
@@ -375,6 +375,45 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_a_relative_artifact_is_restored_below_the_verifiers_own_start_directory(
+    tmp_path: Path,
+) -> None:
+    task = scaffold_task(tmp_path / "relative-artifact")
+    edit_task_config(
+        task,
+        {
+            "artifacts": ["result.txt"],
+            "environment": {"memory_mb": 512},
+            "agent": {"workdir": "output"},
+            "verifier": {"environment": {"cpus": 1, "memory_mb": 512}},
+        },
+    )
+    # The verifier's account is the solver's, with another home and no desktop to start.
+    (task / "tests/Dockerfile").write_text(
+        f"FROM {CONTAINER_BASE}\nENV DISPLAY=\nRUN usermod --move-home --home /srv/grader user\n"
+    )
+    (task / "tests/verify.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "from ale_verify import checks, write\n"
+        "home = Path(os.environ['ALE_HOME'])\n"
+        "v = {}\n"
+        "v['home'] = float(home == Path('/srv/grader'))\n"
+        "v['content'] = checks.text_equals(str(home / 'output/result.txt'), 'hello\\n')['score']\n"
+        "v['moved'] = float(not Path('/home/user/output/result.txt').exists())\n"
+        "v['reward'] = sum(v.values()) / len(v.values())\n"
+        "write(v)\n"
+    )
+
+    result = await execute(task, tmp_path / "runs")
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"reward": 1.0}
+    (entry,) = json.loads((result.run_dir / "artifacts/snapshot.json").read_text())["entries"]
+    assert (entry["source"], entry["below_start"]) == ("/home/user/output/result.txt", "result.txt")
 
 
 @pytest.mark.asyncio

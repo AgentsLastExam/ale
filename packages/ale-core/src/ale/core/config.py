@@ -47,6 +47,7 @@ __all__ = [
     "RunTimeouts",
     "SandboxConfig",
     "SandboxRetentionConfig",
+    "StationProviderConfig",
     "VerificationConfig",
     "ale_repo_path",
     "load_run_config",
@@ -245,10 +246,10 @@ class SandboxRetentionConfig(BaseModel):
     verifier: Literal["destroy", "keep"] = "destroy"
 
 
-#: Every Provider a Run can select, by provider id. A leaf starts Sandboxes on this machine:
-#: Docker under one of its runtimes (``docker:<runtime>``), QEMU, Firecracker or Orchard. A
-#: scheduler places them on machines it manages, with the leaves there: the Fleet on its
-#: Nodes, Daytona on its own.
+#: Every Provider a Run can select, by provider id. A leaf starts Sandboxes on one machine:
+#: on this one, Docker under one of its runtimes (``docker:<runtime>``), QEMU, Firecracker or
+#: Orchard; on a Station its operator keeps, ``station``. A scheduler places them on machines
+#: it manages, with the leaves there: the Fleet on its Nodes, Daytona on its own.
 ProviderId = Literal[
     "docker:runc",
     "docker:kata",
@@ -256,6 +257,7 @@ ProviderId = Literal[
     "qemu",
     "firecracker",
     "orchard",
+    "station",
     "fleet",
     "daytona",
 ]
@@ -301,6 +303,20 @@ class DaytonaProviderConfig(BaseModel):
     """The same limit for sandboxes kept with ``sandbox_retention``."""
 
 
+class StationProviderConfig(BaseModel):
+    """Settings for the station leaf: the Station it leases Lanes of, and how long it waits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    destination: str = Field(default="", pattern=r"^([^\s-]\S*)?$")
+    """The SSH destination of the Station's ``ale-host`` account, such as
+    ``ale-host@station.example`` or an alias of the Host's SSH configuration, which then
+    supplies the key and port."""
+    lane_wait_sec: int = Field(default=1800, ge=0, le=86400, strict=True)
+    """How long a Sandbox waits for a Lane to come free before its episode fails for want of
+    capacity."""
+
+
 class FleetConfig(BaseModel):
     """Where a Run finds its Fleet's control plane. The token is read from the environment."""
 
@@ -322,6 +338,7 @@ class SandboxConfig(BaseModel):
     same way; a scheduler's own leaves are its deployment's to configure."""
     docker: DockerProviderConfig = DockerProviderConfig()
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
+    station: StationProviderConfig = StationProviderConfig()
     fleet: FleetConfig = FleetConfig()
 
     # --- validation ---
@@ -343,6 +360,11 @@ class SandboxConfig(BaseModel):
             )
         if "fleet" in self.providers and not self.fleet.url:
             raise ValueError("the fleet Provider needs sandbox.fleet.url, its control plane")
+        if "station" in self.providers and not self.station.destination:
+            raise ValueError(
+                "the station Provider needs sandbox.station.destination, the SSH destination "
+                "of its Station's ale-host account"
+            )
         return self
 
 

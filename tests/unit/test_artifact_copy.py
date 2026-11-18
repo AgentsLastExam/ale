@@ -14,13 +14,16 @@ import pytest
 
 from ale.core.errors import TaskError
 from ale.core.sandbox import ExecResult, Identity
-from ale.core.taskspec import OperatingSystem, TaskSpec
-from ale.run import artifact_files
+from ale.core.taskspec import Artifact, OperatingSystem, TaskSpec
+from ale.run import artifact_files, guestd
 from ale.run.artifact_files import inspect, read
 from ale.run.episode import _Artifacts
 from ale.run.framework import MACOS_PYTHON
 
 pytestmark = pytest.mark.unit
+
+#: The start directory of a sandbox whose artifacts are all declared absolute.
+HOME = "/home/user"
 
 
 class LocalSandbox:
@@ -114,12 +117,12 @@ async def test_copy_restore_skips_missing_and_links_and_preserves_bytes_types_an
     sandbox = LocalSandbox()
     sandbox.request = SimpleNamespace(os=operating_system)
     sink = _Artifacts(tmp_path / "run")
-    await sink.collect(sandbox, str(tmp_path / "missing"), "missing")
-    await sink.collect(sandbox, str(output), "output")
+    await sink.collect(sandbox, Artifact(source=str(tmp_path / "missing")), HOME)
+    await sink.collect(sandbox, Artifact(source=str(output)), HOME)
     shutil.rmtree(output)
     output.mkdir()
     (output / "stale.txt").write_text("stale")
-    await sink.restore(sandbox)
+    await sink.restore(sandbox, HOME)
     assert (output / "file.txt").read_bytes() == b"data\x00\xff"
     assert not (output / "link.txt").exists()
     assert (output / "file.txt").stat().st_mode & 0o777 == 0o640
@@ -148,9 +151,9 @@ async def test_copy_failure_skips_one_file_and_still_restores_other_files(tmp_pa
             return await super().exec(argv, **kwargs)
 
     sink = _Artifacts(tmp_path / "run")
-    await sink.collect(FailingSandbox(), str(output), "output")
+    await sink.collect(FailingSandbox(), Artifact(source=str(output)), HOME)
     shutil.rmtree(output)
-    await sink.restore(LocalSandbox())
+    await sink.restore(LocalSandbox(), HOME)
     assert not (output / "bad").exists()
     assert (output / "good").read_text() == "good"
     assert "injected read failure" in caplog.text
@@ -163,8 +166,8 @@ async def test_collection_none_never_inspects_guest(tmp_path):
             raise AssertionError("disabled collection touched the guest")
 
     sink = _Artifacts(tmp_path, enabled=False)
-    await sink.collect(NoCalls(), "/anything", "anything")
-    await sink.restore(NoCalls())
+    await sink.collect(NoCalls(), Artifact(source="/anything"), HOME)
+    await sink.restore(NoCalls(), HOME)
     assert not sink.root.exists()
 
 
@@ -206,7 +209,9 @@ def test_exclude_matches_as_tar_does_and_never_walks_what_it_leaves_out(tmp_path
 async def test_a_collected_exclude_reaches_the_sandbox_side(tmp_path):
     project = _project(tmp_path)
     sink = _Artifacts(tmp_path / "run")
-    await sink.collect(LocalSandbox(), str(project), "project", (".venv", "*.pyc"))
+    await sink.collect(
+        LocalSandbox(), Artifact(source=str(project), exclude=(".venv", "*.pyc")), HOME
+    )
     stored = {entry["stored_path"].split("/", 1)[1] for entry in sink.entries}
     assert "project/keep.txt" in stored
     assert not any(".venv" in path or path.endswith(".pyc") for path in stored)
@@ -222,10 +227,10 @@ async def test_a_truncated_artifact_is_never_handed_to_a_verifier(tmp_path, monk
     limited.write_text(source)
     monkeypatch.setattr("ale.run.episode.artifact_files", SimpleNamespace(__file__=str(limited)))
     sink = _Artifacts(tmp_path / "run")
-    await sink.collect(LocalSandbox(), str(project), "project")
+    await sink.collect(LocalSandbox(), Artifact(source=str(project)), HOME)
     assert sink.truncated == [str(project)]
     with pytest.raises(TaskError, match="too large to copy whole"):
-        await sink.restore(LocalSandbox())
+        await sink.restore(LocalSandbox(), HOME)
 
 
 def test_artifacts_accept_file_directory_and_overlapping_glob_paths():
@@ -245,10 +250,10 @@ async def test_overlapping_globs_are_restored_once_even_when_parent_is_declared_
     (output / "game.sgf").write_text("game")
     sandbox = LocalSandbox()
     sink = _Artifacts(tmp_path / "run")
-    await sink.collect(sandbox, str(output / "*.sgf"), "*.sgf")
-    await sink.collect(sandbox, str(output), "output")
+    await sink.collect(sandbox, Artifact(source=str(output / "*.sgf")), HOME)
+    await sink.collect(sandbox, Artifact(source=str(output)), HOME)
     shutil.rmtree(output)
-    await sink.restore(sandbox)
+    await sink.restore(sandbox, HOME)
     assert (output / "game.sgf").read_text() == "game"
     assert len([entry for entry in sink.entries if entry["kind"] == "file"]) == 1
 
@@ -260,7 +265,7 @@ async def test_restore_failure_does_not_prevent_other_outputs(tmp_path, caplog):
     for name in ("bad", "good"):
         (output / name).write_text(name)
     sink = _Artifacts(tmp_path / "run")
-    await sink.collect(LocalSandbox(), str(output), "output")
+    await sink.collect(LocalSandbox(), Artifact(source=str(output)), HOME)
     shutil.rmtree(output)
 
     class FailingWrite(LocalSandbox):
@@ -269,7 +274,7 @@ async def test_restore_failure_does_not_prevent_other_outputs(tmp_path, caplog):
                 raise OSError("injected write failure")
             await super().write_file(path, data, **kwargs)
 
-    await sink.restore(FailingWrite())
+    await sink.restore(FailingWrite(), HOME)
     assert (output / "good").read_text() == "good"
     assert not (output / "bad").exists()
     assert "injected write failure" in caplog.text
@@ -283,3 +288,113 @@ def test_recursive_pattern_and_hidden_directory_contents(tmp_path):
     assert [entry["source"] for entry in matches["entries"]] == [str(tmp_path / "nested/game.sgf")]
     directory = inspect(str(tmp_path / "nest*"))
     assert str(tmp_path / "nested/.notes") in [entry["source"] for entry in directory["entries"]]
+
+
+@pytest.mark.asyncio
+async def test_a_relative_artifact_moves_to_the_verifiers_start_directory(tmp_path):
+    solver, verifier = tmp_path / "solver" / "project", tmp_path / "verifier" / "project"
+    (solver / "output" / "nested").mkdir(parents=True)
+    (solver / "output" / "nested" / "result.txt").write_text("relative")
+    (solver / "scores").mkdir()
+    (solver / "scores" / "a.json").write_text("{}")
+    absolute = tmp_path / "srv" / "report.txt"
+    absolute.parent.mkdir()
+    absolute.write_text("absolute")
+    sandbox = LocalSandbox()
+    sink = _Artifacts(tmp_path / "run")
+    for declared in ("output", "scores/*.json", str(absolute)):
+        await sink.collect(sandbox, Artifact(source=declared), str(solver))
+    recorded = {entry["source"]: entry["below_start"] for entry in sink.entries}
+    assert recorded[str(solver / "output" / "nested" / "result.txt")] == "output/nested/result.txt"
+    assert recorded[str(solver / "scores" / "a.json")] == "scores/a.json"
+    assert recorded[str(absolute)] is None
+    shutil.rmtree(tmp_path / "solver")
+    absolute.unlink()
+
+    await sink.restore(sandbox, str(verifier))
+
+    assert (verifier / "output" / "nested" / "result.txt").read_text() == "relative"
+    assert (verifier / "scores" / "a.json").read_text() == "{}"
+    assert absolute.read_text() == "absolute"
+    assert not (tmp_path / "solver").exists()
+
+
+class WindowsGuest:
+    """A Windows Sandbox as the sink drives it: what ``inspect`` finds for each declaration,
+    the bytes each file reads as, and every path the sink writes."""
+
+    request = SimpleNamespace(os=OperatingSystem.WINDOWS)
+
+    def __init__(self, found: dict[str, list[dict]] | None = None) -> None:
+        self.found = found or {}
+        self.contents = {
+            entry["source"]: entry.pop("bytes")
+            for entries in self.found.values()
+            for entry in entries
+            if "bytes" in entry
+        }
+        self.prepared: list[str] = []
+        self.written: dict[str, bytes] = {}
+
+    async def exec(self, argv, *, identity=Identity.FRAMEWORK, output_sink=None, **kwargs):
+        # The framework's own Python, isolated: the image's may sit where another account of
+        # a shared machine writes, and the agent may have chosen what surrounds it.
+        assert argv[:3] == [guestd.PYTHON["windows"], "-I", "-c"]
+        if argv[4] == "inspect":
+            listing = {"entries": self.found.get(argv[5], []), "skipped": [], "truncated": False}
+            return ExecResult(exit_code=0, stdout=json.dumps(listing))
+        if argv[4] == "read":
+            await output_sink("stdout", self.contents[argv[5]])
+            return ExecResult(exit_code=0)
+        self.prepared.append(argv[4])
+        return ExecResult(exit_code=0)
+
+    async def write_file(self, path, data, *, identity=Identity.FRAMEWORK):
+        self.written[path] = data
+
+
+@pytest.mark.asyncio
+async def test_a_relative_windows_artifact_moves_to_another_accounts_start_directory(tmp_path):
+    output = r"C:\Users\lane-a\Documents\output"
+    solver = WindowsGuest(
+        {
+            output: [
+                {"source": output, "kind": "directory", "mode": 0o777},
+                {
+                    "source": output + r"\model.3dm",
+                    "kind": "file",
+                    "mode": 0o666,
+                    "bytes": b"3dm",
+                },
+            ],
+            r"C:\Exports\summary.txt": [
+                {
+                    "source": r"C:\Exports\summary.txt",
+                    "kind": "file",
+                    "mode": 0o666,
+                    "bytes": b"summary",
+                }
+            ],
+        }
+    )
+    sink = _Artifacts(tmp_path / "run")
+    for declared in ("output", r"C:\Exports\summary.txt"):
+        await sink.collect(solver, Artifact(source=declared), r"C:\Users\lane-a\Documents")
+    assert [entry["below_start"] for entry in sink.entries] == [
+        "output",
+        "output/model.3dm",
+        None,
+    ]
+
+    verifier = WindowsGuest()
+    await sink.restore(verifier, r"C:\Users\lane-b\Documents")
+
+    assert verifier.prepared == [
+        r"C:\Exports\summary.txt",
+        r"C:\Users\lane-b\Documents\output",
+        r"C:\Users\lane-b\Documents\output\model.3dm",
+    ]
+    assert verifier.written == {
+        r"C:\Exports\summary.txt": b"summary",
+        r"C:\Users\lane-b\Documents\output\model.3dm": b"3dm",
+    }

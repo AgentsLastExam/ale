@@ -1,9 +1,12 @@
-"""The agent's elevation, set as every Linux and macOS agent sandbox starts, and its proof.
+"""The agent's elevation, set as every Linux and macOS agent sandbox starts, and its proof;
+on Windows, the proof of both tokens and the access lists of uploads.
 
 Elevation is not part of a prepared image, so one image serves a Task with and without
 ``[agent].sudo``, its solver and its verifier, and a Sandbox continued from a snapshot of
 either. guestd runs as root, so the Provider sets the agent's elevation through it before
-any Task code runs, then proves both identities.
+any Task code runs, then proves both identities. A Windows guestd runs elevated and starts
+the agent's commands with a token the Host's grant decides, which the Provider proves the
+same way.
 """
 
 from __future__ import annotations
@@ -152,3 +155,97 @@ async def _probe(client: GuestClient, user: str | None) -> tuple[str, str]:
         who = user or "the framework"
         raise ProviderStartError(f"could not check the privileges of {who}: {stderr.strip()}")
     return fields[0], fields[1]
+
+
+#: Run as the framework on Windows: replaces the access list of every entry of an uploaded
+#: tree, links aside, with one that grants SYSTEM and Administrators full control, the agent
+#: modify access to its own uploads, and Users read access unless the tree is private.
+_WINDOWS_ACL = """
+$ErrorActionPreference = 'Stop'
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$admins = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+$users = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+$owner = $admins
+if ($agent) {
+    $owner = [System.Security.Principal.NTAccount]::new($agent).Translate(
+        [System.Security.Principal.SecurityIdentifier])
+}
+$granted = @($system, $admins)
+if (-not $private) { $granted += $users }
+$items = @(Get-Item -LiteralPath $target -Force) +
+    @(Get-ChildItem -LiteralPath $target -Force -Recurse)
+foreach ($item in $items) {
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::None
+    if ($item.PSIsContainer) {
+        $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+        $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    } else {
+        $acl = [System.Security.AccessControl.FileSecurity]::new()
+    }
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner($owner)
+    foreach ($sid in $granted) {
+        $rights = if ($sid -eq $users) { 'ReadAndExecute' } else { 'FullControl' }
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, $rights, $inherit, 'None', 'Allow'))
+    }
+    if ($agent) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $owner, 'Modify', $inherit, 'None', 'Allow'))
+    }
+    Set-Acl -LiteralPath $item.FullName -AclObject $acl
+}
+"""
+
+#: Prints 1 when the token it runs with is an Administrator's, 0 otherwise.
+_IS_ADMINISTRATOR = (
+    "[int]([Security.Principal.WindowsPrincipal]"
+    "[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("
+    "[Security.Principal.WindowsBuiltInRole]::Administrator)"
+)
+
+
+def _powershell(command: str) -> list[str]:
+    return [guestd.WINDOWS_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command]
+
+
+async def reset_windows_acl(
+    client: GuestClient, target: str, *, agent: str | None, private: bool
+) -> None:
+    """Replace inherited access lists on an uploaded tree; the agent may modify its own uploads.
+
+    guestd writes the tree with Windows' inherited access lists, which say nothing about who
+    the upload was for; this resets them the way Linux uploads get their modes and owner.
+    Every account holds *Bypass traverse checking*, so a file Users may read can be opened by
+    path below a directory they cannot list: a ``private`` tree grants no account but its
+    identity's, for a machine whose other accounts are other Sandboxes' agents.
+    """
+    command = (
+        f"$target = {_literal(target)}; $agent = {_literal(agent or '')}; "
+        f"$private = ${str(private).lower()};\n"
+    )
+    code, _, stderr, _ = await client.exec(_powershell(command + _WINDOWS_ACL))
+    if code != 0:
+        raise ProviderStartError(f"could not set upload permissions for {target}: {stderr.strip()}")
+
+
+async def verify_windows_identities(client: GuestClient, agent_user: str, *, sudo: bool) -> None:
+    """Prove from their tokens that the framework is an Administrator and the agent is one
+    exactly when ``sudo`` asks, before any Task code runs."""
+    for user, expected in ((None, True), (agent_user, sudo)):
+        code, output, stderr, timed_out = await client.exec(
+            _powershell(_IS_ADMINISTRATOR), run_as=user, timeout_sec=30
+        )
+        if code != 0 or timed_out or output.strip() != str(int(expected)):
+            role = "framework" if user is None else "agent"
+            required = "an Administrator" if expected else "a limited"
+            raise ProviderCapabilityError(
+                f"the Windows {role} must run with {required} token, and does not: "
+                f"{stderr.strip() or output.strip() or 'no answer'}"
+            )
+
+
+def _literal(value: str) -> str:
+    """``value`` as a PowerShell string literal."""
+    return "'" + value.replace("'", "''") + "'"
