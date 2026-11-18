@@ -157,9 +157,10 @@ Updating the shared workflow affects each caller's next run, not already recorde
 
 The shared workflow statically lints Tasks and compiles Python source on Python 3.12.
 It does not execute Task code, pull images, download assets, or call models. Brew
-Workers own actual submitted-Task validation, beta review, and calibration against
-the recorded source/assets revisions. Engine integration and Judge regression tests
-remain in this repository's `ci` workflow. A passing static check is not build evidence.
+Workers own actual submitted-Task calibration (`ale calibrate`), beta review, and solver
+runs against the recorded source/assets revisions. Engine integration and Judge regression
+tests remain in this repository's `ci` workflow. A passing static check is not build
+evidence.
 
 ## Conventions
 

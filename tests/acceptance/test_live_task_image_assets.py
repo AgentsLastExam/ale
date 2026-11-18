@@ -33,7 +33,7 @@ def write_asset_task(repository: Path) -> Path:
     (path / "environment" / "setup").mkdir()
     (path / "environment" / "setup" / "private-marker").write_text("must-not-enter-image")
     (path / "tests" / "private-marker").write_text("must-not-enter-image")
-    (path / "solution" / "private-marker").write_text("must-not-enter-image")
+    (path / "calibration/solution" / "private-marker").write_text("must-not-enter-image")
     return path
 
 

@@ -18,7 +18,7 @@ API directly. Keep the Task input identical between both runs.
 The verifier reads actual saved RTF attributes through macOS AppKit. Nine equal-weight
 checks cover readable RTF, title, event details, updated time, agenda, contact, content
 order, title formatting and body formatting. Whitespace and blank lines are tolerated.
-The oracle supplies a reference RTF to validate these outcome checks.
+The oracle supplies a reference RTF to calibrate these outcome checks.
 
 Run `uv run ale lint tests/fixtures/tasks/macos-textedit-notice` for structural checks.
-Full validation and model runs require the local Orchard from the guide.
+Calibration and model runs require the local Orchard from the guide.

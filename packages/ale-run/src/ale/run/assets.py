@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from ale.core.config import resolve_asset_collection
 from ale.core.errors import AssetError
-from ale.core.task import Task, TaskAssetObservation, TaskSourceContext
+from ale.core.task import CALIBRATION_DIR, Task, TaskAssetObservation, TaskSourceContext
 from ale.run.secrets import hf_token
 
 if TYPE_CHECKING:
@@ -23,12 +23,12 @@ if TYPE_CHECKING:
 
     from ale.run.tasksets.manifest import TaskFolder
 
-#: Where a Task keeps assets, relative to its folder: beside the files that read them.
-#: The Task loader leaves them out of source digests, so it imports this list from here.
+#: Where every Task keeps assets, relative to its folder: beside the files that read them.
+#: Each calibration case, the reference solution among them, has one more,
+#: ``calibration/<case>/assets``; ``asset_roots`` lists them all.
 ASSET_ROOTS: tuple[str, ...] = (
     "environment/assets",
     "tests/assets",
-    "solution/assets",
 )
 DEFAULT_NAMESPACE = "agents-last-exam"
 
@@ -36,6 +36,7 @@ __all__ = [
     "ASSET_ROOTS",
     "AssetRepositorySelection",
     "AssetSyncResult",
+    "asset_roots",
     "asset_status",
     "observe_task_assets",
     "pull_assets",
@@ -68,11 +69,27 @@ class AssetSyncResult:
     tasks: tuple[TaskAssetObservation, ...]
 
 
+def asset_roots(task_root: Path) -> tuple[str, ...]:
+    """The asset roots of the Task folder at ``task_root``, relative to it, whether or not
+    they exist: one for each fixed root and one for each calibration case directory there.
+
+    The Task loader leaves them out of source digests, so it imports this from here.
+    """
+    cases = sorted(path.name for path in (task_root / CALIBRATION_DIR).glob("*/"))
+    return (*ASSET_ROOTS, *(f"{CALIBRATION_DIR}/{case}/assets" for case in cases))
+
+
+def _held_roots(task_root: Path) -> list[str]:
+    """The asset roots that hold files below ``task_root``, as an asset commit's tree does."""
+    return [root for root in asset_roots(task_root) if (task_root / root).is_dir()]
+
+
 def _asset_roots(task: Task | AssetLocation) -> tuple[Path, ...]:
     if task.folder is None:
         return ()
-    validate_asset_paths(task.folder.root)
-    return tuple(path for root in ASSET_ROOTS if (path := task.folder.root / root).is_dir())
+    root = task.folder.root
+    validate_asset_paths(root)
+    return tuple(path for relative in asset_roots(root) if (path := root / relative).is_dir())
 
 
 def _task_path(task: AssetLocation) -> str:
@@ -96,7 +113,14 @@ def observe_task_assets(task: Task | AssetLocation) -> TaskAssetObservation | No
         if not roots and not isinstance(marker, dict):
             return None
         inventory = _asset_inventory(task)
-        dirty = not isinstance(marker, dict) or marker.get("inventory") != inventory
+        # The commit may hold a case's assets that were not placed because the Task had no
+        # such case then; once it has, they are missing.
+        held = marker.get("held", []) if isinstance(marker, dict) else []
+        applicable = asset_roots(task.folder.root)
+        missing = any(
+            root in applicable and not (task.folder.root / root).is_dir() for root in held
+        )
+        dirty = not isinstance(marker, dict) or marker.get("inventory") != inventory or missing
         commit = marker.get("commit") if isinstance(marker, dict) else None
         observation = TaskAssetObservation(
             source.repository_name,
@@ -180,10 +204,15 @@ def pull_assets(
                     token=hf_token(),
                     repo_type="dataset",
                     revision=commit,
+                    # HF's ``*`` matches ``/`` too, so the case pattern also takes deeper
+                    # paths, which no asset root holds.
                     allow_patterns=[
-                        f"{_task_path(task)}/{root}/**"
+                        pattern
                         for task in selection.tasks
-                        for root in ASSET_ROOTS
+                        for pattern in (
+                            *(f"{_task_path(task)}/{root}/**" for root in ASSET_ROOTS),
+                            f"{_task_path(task)}/{CALIBRATION_DIR}/*/assets/**",
+                        )
                     ],
                     local_dir=downloaded,
                 )
@@ -191,7 +220,7 @@ def pull_assets(
                     if not force:
                         _require_absent_assets(selection.tasks)
                     _replace_selected_assets(selection.tasks, downloaded)
-                    observations = _mark_clean(selection, commit)
+                    observations = _mark_clean(selection, commit, downloaded)
             except AssetError:
                 raise
             except Exception as exc:
@@ -211,7 +240,7 @@ def pull_assets(
 
 def _require_absent_assets(tasks: Sequence[AssetLocation]) -> None:
     for task in tasks:
-        for relative in ASSET_ROOTS:
+        for relative in asset_roots(task.folder.root):
             root = task.folder.root / relative
             if root.exists() or root.is_symlink():
                 raise AssetError(
@@ -304,12 +333,14 @@ def ensure_asset_repository(repository_name: str, collection: str | None = None)
 
 
 def _replace_selected_assets(tasks: Sequence[AssetLocation], downloaded: Path) -> None:
+    """Replace each Task's asset roots with ``downloaded``'s; a calibration case's only
+    when the Task has that case's directory."""
     entries: list[tuple[Path, Path, Path]] = []
     for task in tasks:
         task_path = _task_path(task)
         validate_asset_paths(task.folder.root)
         validate_asset_paths(downloaded / task_path)
-        for root in ASSET_ROOTS:
+        for root in asset_roots(task.folder.root):
             source = downloaded / task_path / root
             destination = task.folder.root / root
             backup = destination.with_name(f".{destination.name}.ale-backup")
@@ -338,18 +369,26 @@ def _replace_selected_assets(tasks: Sequence[AssetLocation], downloaded: Path) -
 
 
 def _mark_clean(
-    selection: AssetRepositorySelection, commit: str
+    selection: AssetRepositorySelection, commit: str, tree: Path | None = None
 ) -> tuple[TaskAssetObservation, ...]:
+    """Record each Task's assets as the clean state of ``commit``.
+
+    ``tree`` holds the commit's files at their dataset paths; without it, the commit holds
+    what each Task now has. A marker records the roots the commit holds, so a case's assets
+    left out for want of its directory count as missing once the case is there.
+    """
     state = _read_state(selection.repository_root, selection.repository_name)
     markers = state["tasks"]
     assert isinstance(markers, dict)
     observations: list[TaskAssetObservation] = []
     for task in selection.tasks:
         task_path = _task_path(task)
-        if _asset_roots(task):
+        held = _held_roots(task.folder.root if tree is None else tree / task_path)
+        if _asset_roots(task) or held:
             markers[task_path] = {
                 "commit": commit,
                 "dirty": False,
+                "held": held,
                 "inventory": _asset_inventory(task),
             }
             observations.append(
@@ -385,7 +424,9 @@ def _asset_inventory(task: Task | AssetLocation) -> list[dict[str, int | str]]:
 
 def validate_asset_paths(task_root: Path) -> None:
     """Each asset root and every directory above it must be a real directory."""
-    paths = {task_root / path for root in ASSET_ROOTS for path in (root, *Path(root).parents)}
+    paths = {
+        task_root / path for root in asset_roots(task_root) for path in (root, *Path(root).parents)
+    }
     for path in sorted(paths):
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             raise AssetError(f"asset directory must be a real directory: {path}")

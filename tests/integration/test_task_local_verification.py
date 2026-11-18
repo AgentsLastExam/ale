@@ -218,10 +218,10 @@ async def test_task_local_helper_and_framework_package_are_importable(tmp_path: 
 @pytest.mark.asyncio
 async def test_solution_assets_are_staged_with_the_solution(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "solution-assets")
-    asset = task / "solution/assets/result.txt"
+    asset = task / "calibration/solution/assets/result.txt"
     asset.parent.mkdir(parents=True)
     asset.write_text("hello\n")
-    (task / "solution/solve.sh").write_text(
+    (task / "calibration/solution/solve.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "cp assets/result.txt /home/user/output/result.txt\n"
@@ -308,7 +308,7 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
         "&& chown -R user:user /home/user/output /var/lib/ale-report\n"
     )
     (task / "tests/Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
-    (task / "solution/solve.sh").write_text(
+    (task / "calibration/solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         'printf \'{"status":"ok"}\\n\' > /home/user/output/result.json\n'
         "printf ready > /var/lib/ale-report/state.txt\n"
@@ -358,7 +358,7 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
     setup.parent.mkdir()
     setup.write_text("#!/bin/sh\nset -eu\ntouch /tmp/solver-setup-ran\n")
     setup.chmod(0o755)
-    (task / "solution/solve.sh").write_text(
+    (task / "calibration/solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\nprintf 'hello\\n' > /home/user/output/result.txt\n"
     )
     (task / "tests/verify.py").write_text(
@@ -402,7 +402,7 @@ async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
         "ln -s /root/answers/result.json /root/answers/result.json/loop\n"
     )
     setup.chmod(0o755)
-    (task / "solution/solve.sh").write_text("#!/bin/sh\nset -eu\n[ $(id -u) -ne 0 ]\n")
+    (task / "calibration/solution/solve.sh").write_text("#!/bin/sh\nset -eu\n[ $(id -u) -ne 0 ]\n")
     (task / "tests/verify.py").write_text(
         "import os\n"
         "from pathlib import Path\n"

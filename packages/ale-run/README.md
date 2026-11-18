@@ -13,7 +13,7 @@ CLI → Task loading/image preparation → Episode → EpisodeProtocol
 | Path | Responsibility |
 |---|---|
 | `src/ale/run/cli/main.py` | Typer command definitions and presentation |
-| `src/ale/run/cli/tasks.py` | Task run, validation and image-preparation composition |
+| `src/ale/run/cli/tasks.py` | Task run, calibration and image-preparation composition |
 | `src/ale/run/protocol/` | the episode protocol: phase ordering for one Task episode |
 | `src/ale/run/providers/` | Docker, QEMU, Firecracker, Daytona, Orchard (macOS) and Fleet Sandbox implementations, and the choice among them; see its local README |
 | `src/ale/run/harnesses/` | native agent adapters; see its local README |
@@ -27,14 +27,14 @@ CLI → Task loading/image preparation → Episode → EpisodeProtocol
 ```bash
 uv run ale run TASK --agent claude-code
 uv run ale run NEXT_TASK --agent claude-code --continue-from runs/RUN/EPISODE
-uv run ale validate TASK
+uv run ale calibrate TASK
 uv run ale lint TASK
 uv run ale prepare TASK
 uv run ale sandbox list
 ```
 
 Configuration is layered as CLI overrides, run TOML, Harness preset and model defaults.
-For `run`, `validate`, `prepare`, and `reverify`, `ALE_RUN_CONFIG` selects the default run
+For `run`, `calibrate`, `prepare`, and `reverify`, `ALE_RUN_CONFIG` selects the default run
 TOML when `--config` is absent. An explicit `--config` replaces that default file; `--set`
 overrides values from the selected file. Use `--set section.key=value` for any setting
 without a dedicated flag. `sandbox.providers` lists the Providers that start a Run's

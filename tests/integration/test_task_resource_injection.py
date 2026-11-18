@@ -178,7 +178,7 @@ def _write_task(root: Path) -> Path:
         task / "environment" / "mcp",
         task / "environment" / "skills" / "resource-proof",
         task / "tests",
-        task / "solution",
+        task / "calibration/solution",
     ):
         directory.mkdir(parents=True, exist_ok=True)
     (task / "task.toml").write_text(
@@ -287,11 +287,11 @@ def _write_task(root: Path) -> Path:
         PY
         """).strip()
     )
-    (task / "solution" / "solve.sh").write_text("#!/bin/bash\nexit 0\n")
+    (task / "calibration/solution" / "solve.sh").write_text("#!/bin/bash\nexit 0\n")
     entries = (
         task / "environment" / "setup" / "setup.sh",
         task / "tests" / "test.sh",
-        task / "solution" / "solve.sh",
+        task / "calibration/solution" / "solve.sh",
     )
     for entry in entries:
         entry.chmod(0o755)

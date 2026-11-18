@@ -201,7 +201,7 @@ Gateway this way. `[environment].env` reaches the agent, and the agent can read 
 ## 4. The agent cannot change what it is measured under
 
 The agent runs as the account the image declares, and so does the oracle that stands in for
-it during validation. Framework work runs as root on Linux and macOS and Administrator on
+it during calibration. Framework work runs as root on Linux and macOS and Administrator on
 Windows. Windows guestd stays in the interactive session but launches agent commands with
 the desktop's limited token. Only the Host's SMBIOS `ale-sudo` marker, supplied for
 `request.sudo`, permits elevated agent commands. The Provider verifies both tokens before
@@ -213,9 +213,9 @@ timeouts are measured against, or the guest service driving its own sandbox. Non
 needs malice to matter: a result obtained under conditions the subject could alter is not
 a measurement.
 
-The oracle sharing the agent's limits is the load-bearing half. `ale validate` is the only
-check a task gets before publication, and an oracle with more privilege would pass exactly
-the tasks a real agent then fails on access alone.
+The oracle sharing the agent's limits is the load-bearing half. `ale calibrate` runs every
+[calibration case](task-authoring.md#calibration) as the oracle, and an oracle with more
+privilege would pass exactly the tasks a real agent then fails on access alone.
 
 A task may declare `[agent].sudo` when it genuinely needs to install software or change
 system configuration. The Provider makes the grant at every sandbox start and, without the
@@ -254,9 +254,10 @@ cannot write system paths, and cannot elevate unless its task asked; by
 
 ## 5. Answers are absent, not hidden
 
-`tests/` and `solution/` are copied into a sandbox only for their own phases. While the evaluated agent works they are not access-controlled
-— they are not there. In separate mode only the immutable declared artifact snapshot is
-restored; the solver filesystem is not transferred wholesale.
+`tests/` and `calibration/` are copied into a sandbox only for their own phases, and of
+`calibration/` only the case an oracle runs. While the evaluated agent works they are not
+access-controlled — they are not there. In separate mode only the immutable declared
+artifact snapshot is restored; the solver filesystem is not transferred wholesale.
 
 This is why there is no "secret" flag on a Task file. A flag is a promise about behaviour
 that some future code path could forget to check; a file that was never uploaded cannot
@@ -355,8 +356,8 @@ before a Judge changes the live workspace.
 Run configuration, not Task content, decides whether solver and verifier sandboxes are
 destroyed, kept, or (the solver) saved as a snapshot. Default is destroy. Before a kept
 sandbox or a snapshot receives a durable handle, required evidence capture finishes, every
-stage of its Task (setup, tests and the solution), the verifier directory and known
-credentials are removed, and episode capabilities are revoked.
+stage of its Task (setup, tests and an oracle's calibration case), the verifier directory
+and known credentials are removed, and episode capabilities are revoked.
 A later episode may hand the solver to another evaluated agent, which must not find
 verification there. Subscription credentials stay in the
 checkout-local Host profile and therefore require no retained-Sandbox cleanup.
@@ -380,9 +381,10 @@ security claims rot.
 **A malicious task author.** A Task folder's setup and verification entries run as trusted
 framework-controlled code, and a Task may declare `[agent].sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
-*agent*, not a host from its Task. The gates that exist (`ale lint`, `ale validate`, CI, PR review) are
-aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host Gateway; a
-malicious verifier can only spend its episode's Judge session while that episode runs.
+*agent*, not a host from its Task. The gates that exist (`ale lint`, `ale calibrate`, CI,
+PR review) are aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host
+Gateway; a malicious verifier can only spend its episode's Judge session while that episode
+runs.
 
 **Container escape.** A container Sandbox on a leaf that shares the Host's kernel with it
 has a container's isolation, and a kernel exploit reaches the Host. A leaf whose Sandboxes

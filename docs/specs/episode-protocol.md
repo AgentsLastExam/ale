@@ -72,10 +72,12 @@ selected Harness and its declared resources, validates staged stdio MCP
 commands, then applies the Task network policy. Autonomous Harnesses launch inside the
 sandbox, in `[agent].workdir` or else the agent's home; Policy Harnesses drive the
 framework-owned `TaskEnv`. The evaluated solver and
-the validation oracle both run as the image's agent account. Windows autonomous CLI
-Harnesses use the base's native Node.js and Git Bash.
+the oracle, which runs a calibration case, both run as the image's agent account. Windows
+autonomous CLI Harnesses use the base's native Node.js and Git Bash.
 
-`solution/` is uploaded only for an oracle episode and is absent for an evaluated solver.
+Only the directory of the calibration case the oracle runs is uploaded, the reference
+solution's under `ale run --agent oracle`, and only for an oracle episode; none is present
+for an evaluated solver.
 `tests/` is also absent throughout this phase. Answers are withheld by when they are
 staged and by the root-only staging directory, not by a conventional path or a flag a Task
 must remember.
@@ -162,8 +164,8 @@ so follow-ups that need them keep the Sandbox. A solver to be snapshotted needs 
 that saves snapshots, so selection gives it none that cannot, before anything is
 provisioned.
 Before either, ALE removes every stage of the Task (setup, tests with their Judge state,
-the solution), the verifier directory and known credentials, so a kept solver or a
-snapshot holds only the agent's own state.
+the oracle's calibration case), the verifier directory and known credentials, so a kept
+solver or a snapshot holds only the agent's own state.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
 credential cleanup step. Failure of other required sanitation still forces destruction.
 Result and RunLock record the requested policy, actual Provider outcome, retained handle,
@@ -216,26 +218,27 @@ Shared reverification remains a single attempt because verification may modify t
 source Sandbox; a clean retry requires a new full `ale run`. The original shared attempt
 is still allowed when the retry configuration is nonzero.
 
-## Validation
+## Calibration
 
-`ale validate` uses this same protocol twice with fresh sandboxes:
+`ale calibrate` runs every [calibration case](task-authoring.md#calibration) of a Task
+through this same protocol as the oracle, each a complete episode in fresh Sandboxes:
+`solution` first, then the other cases in the order `task.toml` lists them.
 
-- untouched must complete with `reward` equal to zero;
-- oracle must complete with `reward` equal to one;
-- both use the [two-decimal result precision](verification.md#result) applied to every run;
-  all additional result fields are ignored by validation;
+- a case passes when its episode completes and meets its
+  [expectation](task-authoring.md#calibration);
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures
-  fail validation rather than becoming scores.
+  fail the case rather than becoming scores.
 
-Validation tests Task feasibility and verifier behavior. It is separate from ordinary
-run admission and from endpoint availability checks. The persisted `validation.json`
-records the untouched and oracle attempts, scores, failures, and RunLock references.
+Calibration tests Task feasibility and verifier behavior. It is separate from ordinary
+run admission and from endpoint availability checks. The persisted `calibration.json`
+records, for each case, its expectation, its attempt with scores and RunLock reference, the
+values it observed and its failures, and whether each case and Task passed.
 
-Validation honors `episode_retries` independently for untouched and oracle episodes.
-Every retry starts the complete protocol in fresh Sandboxes. Only each episode's last
-result enters `validation.json`; a completed result with an incorrect reward map fails
-validation without retrying to seek a different score. Attempt retention and cancellation
-follow the [episode result contract](trace.md#result-and-run-status).
+Calibration honors `episode_retries` independently for each case. Every retry starts the
+complete protocol in fresh Sandboxes. Only each case's last result enters
+`calibration.json`; a completed result outside its expectation fails the case without
+retrying to seek a different score. Attempt retention and cancellation follow the
+[episode result contract](trace.md#result-and-run-status).
 
 ## Extension boundary
 

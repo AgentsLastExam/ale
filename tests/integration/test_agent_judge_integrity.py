@@ -135,7 +135,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         f"RUN chmod 755 /usr/local/bin/{binary_name} "
         "&& mkdir -p /home/user/output && chown -R user:user /home/user/output\n"
     )
-    (task_root / "solution" / "solve.sh").write_text(
+    (task_root / "calibration/solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf baseline > /home/user/output/result.txt\n"
     )
     (task_root / "tests" / "test.sh").write_text(

@@ -1,4 +1,4 @@
-"""Create a minimal self-contained Task that lints and validates."""
+"""Create a minimal self-contained Task that lints and calibrates."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def scaffold_task(path: Path, *, force: bool = False) -> Path:
         "environment/Dockerfile": DOCKERFILE,
         "tests/test.sh": TEST_SH,
         "tests/verify.py": VERIFY_PY,
-        "solution/solve.sh": SOLVE_SH,
+        "calibration/solution/solve.sh": SOLVE_SH,
     }
     for relative, content in files.items():
         destination = target / relative

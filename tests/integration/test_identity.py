@@ -59,7 +59,7 @@ async def run_one(task_root: Path, run_dir: Path, **kwargs):  # type: ignore[no-
 
 
 def with_oracle(task_root: Path, body: str) -> None:
-    (task_root / "solution" / "solve.sh").write_text(
+    (task_root / "calibration/solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -uo pipefail\nmkdir -p /home/user/output\n"
         + textwrap.dedent(body)
     )

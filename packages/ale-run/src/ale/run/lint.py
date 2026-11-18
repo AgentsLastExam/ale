@@ -8,8 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ale.core.errors import TaskDefinitionError
-from ale.core.task import Stage
-from ale.core.taskspec import OperatingSystem, VariableReference, is_credential_name
+from ale.core.task import CALIBRATION_DIR, Stage, case_entry
+from ale.core.taskspec import (
+    SOLUTION_CASE,
+    OperatingSystem,
+    VariableReference,
+    is_credential_name,
+)
 from ale.run.tasksets.manifest import (
     BUILD_SCRIPTS,
     ENVIRONMENT_DIR,
@@ -33,7 +38,7 @@ _TOP_LEVEL = {
     INSTRUCTION,
     ENVIRONMENT_DIR,
     Stage.TESTS,
-    Stage.SOLUTION,
+    CALIBRATION_DIR,
     ".ale-cache",
 }
 #: Harbor's way to run sidecars. ALE has one machine per role, so these would silently do nothing.
@@ -96,6 +101,17 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             findings.append(
                 Finding(entry, "unsupported top-level Task entry; move it into its owning stage")
             )
+    calibration = folder.root / CALIBRATION_DIR
+    if calibration.is_symlink() or (calibration.exists() and not calibration.is_dir()):
+        findings.append(Finding(calibration, "calibration must be a directory, not a link or file"))
+    elif calibration.is_dir():
+        for entry in calibration.iterdir():
+            if entry.is_symlink() or not entry.is_dir():
+                findings.append(
+                    Finding(
+                        entry, "calibration/ holds only case directories; move it into its case"
+                    )
+                )
 
     for directory in (folder.environment_dir, folder.root / Stage.TESTS):
         if (directory / _COMPOSE_FILE).is_file():
@@ -114,8 +130,10 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         )
     except ValueError:
         operating_system = OperatingSystem.LINUX
-    for stage in (Stage.TESTS, Stage.SOLUTION):
-        entry = f"{stage}/{stage.entry(operating_system)}"
+    for entry in (
+        f"{Stage.TESTS}/{Stage.TESTS.entry(operating_system)}",
+        f"{CALIBRATION_DIR}/{SOLUTION_CASE}/{case_entry(operating_system)}",
+    ):
         if not (folder.root / entry).is_file():
             findings.append(Finding(folder.root, f"no {entry}"))
     if not (folder.root / INSTRUCTION).is_file():

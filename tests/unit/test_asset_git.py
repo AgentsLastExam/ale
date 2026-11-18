@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support import edit_task_config
 from typer.testing import CliRunner
 
 from ale.core.errors import AssetError
@@ -24,7 +25,12 @@ from ale.run.asset_git import (
     restore_assets,
     write_record,
 )
-from ale.run.assets import asset_status, ensure_asset_repository, select_asset_repositories
+from ale.run.assets import (
+    asset_status,
+    ensure_asset_repository,
+    push_assets,
+    select_asset_repositories,
+)
 from ale.run.cli.main import app
 
 pytestmark = pytest.mark.unit
@@ -313,6 +319,60 @@ def test_removed_assets_have_a_deletion_commit(
     check_assets(task, removed)
     restore_assets(task, first)
     assert (task / "tests/assets/fixture.txt").read_text() == "tests/assets"
+
+
+def _declare_case(task: Path, name: str) -> None:
+    """Give the Task a calibration case ``name``, as a checkout of a revision with it does."""
+    edit_task_config(task, {"calibration": [{"name": name, "expect": {"reward": 0.5}}]})
+    (task / "calibration" / name).mkdir(parents=True, exist_ok=True)
+    (task / "calibration" / name / "solve.sh").write_text("true\n")
+
+
+def _remove_case(task: Path, name: str) -> None:
+    edit_task_config(task, {"calibration": None})
+    shutil.rmtree(task / "calibration" / name)
+
+
+def test_a_calibration_case_keeps_its_assets_until_the_case_goes(
+    write_task_repo, asset_remote: Path, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    task = write_task_repo(asset_roots=("calibration/partial/assets",)) / "tasks/demo"
+    _declare_case(task, "partial")
+    first = checkpoint_assets(task, workspace=tmp_path / "assets", branch="brew/demo")
+    materialize_assets(first, tmp_path / "materialized")
+    asset = "calibration/partial/assets/fixture.txt"
+    assert (tmp_path / "materialized" / asset).read_text() == "calibration/partial/assets"
+
+    _remove_case(task, "partial")
+    removed = checkpoint_assets(task, workspace=first.workspace, branch="brew/demo")
+    assert diff_assets(first, removed) == [asset]
+    check_assets(task, removed)
+
+    # A case's assets come back only into a Task that has the case...
+    restore_assets(task, first)
+    assert not (task / "calibration/partial").exists()
+    assert not asset_status([task])[0].dirty
+    # ...and once the case is back, its absent assets make the Task dirty.
+    _declare_case(task, "partial")
+    assert asset_status([task])[0].dirty
+    restore_assets(task, first)
+    assert (task / asset).read_text() == "calibration/partial/assets"
+    assert not asset_status([task])[0].dirty
+
+
+def test_push_publishes_each_case_s_assets_and_status_reports_them(
+    write_task_repo, asset_remote: Path
+) -> None:  # type: ignore[no-untyped-def]
+    roots = ("calibration/partial/assets", "calibration/solution/assets")
+    task = write_task_repo(asset_roots=roots) / "tasks/demo"
+    _declare_case(task, "partial")
+    (pushed,) = push_assets([task])
+    published = git(asset_remote, "ls-tree", "-r", "--name-only", "main").splitlines()
+    assert {f"tasks/demo/{root}/fixture.txt" for root in roots} <= set(published)
+    (status,) = asset_status([task])
+    assert (status.commit, status.dirty) == (pushed.commit, False)
+    (task / "calibration/partial/assets/fixture.txt").write_text("edited")
+    assert asset_status([task])[0].dirty
 
 
 def test_checkpoint_rejects_unsafe_task_path(tmp_path: Path) -> None:

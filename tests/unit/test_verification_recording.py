@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 from test_runtime_contracts import make_lock
 
+from ale.core.errors import VerifierOutputError
 from ale.core.lock import AleVerifyProvenance, JudgeProvenance
+from ale.core.sandbox import SandboxFile
+from ale.core.taskspec import OperatingSystem
+from ale.run.harnesses.builtin import NopHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.provenance import judge_provenance
 from ale_verify import (
     JudgeAttempt,
@@ -85,3 +92,90 @@ def test_a_lock_in_another_shape_is_rejected_not_reinterpreted() -> None:
     }
     with pytest.raises(ValidationError):
         type(make_lock()).model_validate(payload)
+
+
+class RewardsSandbox:
+    """A verifier directory holding ``reward.json`` and, optionally, ``verification.json``."""
+
+    def __init__(self, reward: object, verification: object = None) -> None:
+        self.files = {
+            name: value if isinstance(value, bytes) else json.dumps(value).encode()
+            for name, value in (("reward.json", reward), ("verification.json", verification))
+            if value is not None
+        }
+
+    async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
+        return tuple(
+            SandboxFile(path=f"{path}/{name}", size=len(data)) for name, data in self.files.items()
+        )
+
+    async def read_file(self, path: str) -> bytes:
+        return self.files[path.rsplit("/", 1)[1]]
+
+
+def _context(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        spec=SimpleNamespace(os=OperatingSystem.LINUX),
+        verification_secrets=(),
+        secrets=(),
+        run_dir=tmp_path,
+    )
+
+
+@pytest.mark.asyncio
+async def test_verifier_accepts_nested_details(tmp_path: Path) -> None:
+    value = {"reward": 1, "details": {"count": 10, "reason": "good"}}
+    sandbox = RewardsSandbox({"reward": 1}, value)
+    observed = await EpisodeProtocol(NopHarness())._read_result(_context(tmp_path), sandbox)
+    assert observed == value
+    assert json.loads((tmp_path / "verification.json").read_text()) == value
+
+
+@pytest.mark.asyncio
+async def test_a_reward_file_alone_is_the_complete_result(tmp_path: Path) -> None:
+    sandbox = RewardsSandbox({"accuracy": 0.25, "reward": 0.5})
+    observed = await EpisodeProtocol(NopHarness())._read_result(_context(tmp_path), sandbox)
+    assert observed == {"accuracy": 0.25, "reward": 0.5}
+    assert json.loads((tmp_path / "verification.json").read_text()) == observed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("raw_score", "expected"), [(0.999, 1.0), (0.994, 0.99), (0.004, 0.0)])
+async def test_the_saved_result_holds_the_rounded_reward(
+    tmp_path: Path, raw_score: float, expected: float
+) -> None:
+    value = {"reward": raw_score, "details": {"raw": raw_score}}
+    sandbox = RewardsSandbox({"reward": raw_score}, value)
+    observed = await EpisodeProtocol(NopHarness())._read_result(_context(tmp_path), sandbox)
+    assert observed == {"reward": expected, "details": {"raw": raw_score}}
+    assert json.loads((tmp_path / "verification.json").read_text()) == observed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reward", "verification"),
+    [
+        ([], None),
+        ({}, None),
+        ({"overall": 1}, None),
+        ({"reward": "1"}, None),
+        ({"reward": True}, None),
+        ({"reward": float("nan")}, None),
+        ({"reward": 1.0001}, None),
+        ({"reward": 1, "details": {"count": 1}}, None),
+        (b"not-json", None),
+        (None, None),
+        (None, {"reward": 1}),
+        ({"reward": 1}, {"reward": 0}),
+        ({"reward": 1}, {"details": "no reward"}),
+        ({"reward": 1}, b"not-json"),
+    ],
+)
+async def test_verifier_rejects_bad_result(
+    tmp_path: Path, reward: object, verification: object
+) -> None:
+    with pytest.raises(VerifierOutputError):
+        await EpisodeProtocol(NopHarness())._read_result(
+            _context(tmp_path), RewardsSandbox(reward, verification)
+        )
+    assert not (tmp_path / "verification.json").exists()

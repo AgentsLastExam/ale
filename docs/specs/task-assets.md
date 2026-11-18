@@ -3,22 +3,22 @@
 Task source, scripts, configuration, and ordinary small fixtures are tracked by Git. Task
 assets are files managed separately because of their size or lifecycle: ignored by Git and
 synchronized with Hugging Face by the commands below. They live in an `assets/` directory
-beside the files of the stage that reads them, at these fixed roots of a
+beside the files of the stage that reads them, at these roots of a
 [Task folder](task-authoring.md):
 
 | Root | Read by |
 |---|---|
 | `environment/assets/` | the image build, container or VM, through its ordinary context |
 | `tests/assets/` | verification |
-| `solution/assets/` | the oracle |
+| `calibration/<case>/assets/` | the oracle of that [case](task-authoring.md#calibration) |
 
 To the runtime they are ordinary files of their stage, uploaded with it and read through
 relative paths such as `assets/reference.json` or `.\assets\seed.json`; `ALE_STAGE_DIR`
 gives a subprocess the stage's absolute path. A stage's assets are therefore as visible as
-the stage: the image build places what the agent sees, and tests and solution assets are
-absent while the evaluated agent works. Setup has no asset root: large data it needs is built
-into the image, at a root-only location when the agent must not read it directly. Running a
-Task never implicitly downloads assets.
+the stage: the image build places what the agent sees, and tests and calibration assets
+are absent while the evaluated agent works. Setup has no asset root: large data it
+needs is built into the image, at a root-only location when the agent must not read it
+directly. Running a Task never implicitly downloads assets.
 Source digests leave the asset roots out; assets have their own commit identity.
 
 ## Offline software
@@ -92,6 +92,9 @@ modification times, and executable bits. Checking dirtiness does not read or has
 uses normal filesystem change detection; modifications preserving all observed metadata
 are outside that guarantee. Restoring a checkpoint restores exactly that Git commit and
 refreshes the inventory. Missing LFS objects are errors, never accepted pointer files.
+Pulling or restoring places a calibration case's assets only in a Task that has that case's
+directory, since a Task's cases come from its source; while the asset commit holds assets
+of a case the Task has but they are absent, the Task counts as dirty.
 
 The public CLI for an orchestrator is:
 

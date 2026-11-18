@@ -310,7 +310,7 @@ def test_minimal_retention_is_smaller_than_debug(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "shared-keep")
-    oracle = task / "solution/solve.sh"
+    oracle = task / "calibration/solution/solve.sh"
     oracle.write_text(
         oracle.read_text()
         + "mkdir -p /home/user/.codex /home/user/.claude\n"
@@ -398,7 +398,7 @@ async def test_shared_failure_still_applies_keep_and_records_the_phase(
         setup.write_text("#!/bin/sh\nexit 7\n")
         setup.chmod(0o755)
     else:
-        oracle = task / "solution/solve.sh"
+        oracle = task / "calibration/solution/solve.sh"
         oracle.write_text("#!/bin/sh\nexit 8\n")
 
     result = await run_episode(

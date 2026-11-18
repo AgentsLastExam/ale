@@ -209,10 +209,10 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
         test=None,
         solve=None,
     )
-    for root_name in ("environment/setup", "solution/assets", "tests/assets"):
+    for root_name in ("environment/setup", "calibration/solution/assets", "tests/assets"):
         (task / root_name).mkdir(parents=True)
     (task / "environment" / "setup" / "seed.txt").write_text("world\n")
-    (task / "solution" / "assets" / "suffix.txt").write_text("verified\n")
+    (task / "calibration/solution" / "assets" / "suffix.txt").write_text("verified\n")
     (task / "tests" / "assets" / "expected-suffix.txt").write_text("verified\n")
 
     if windows:
@@ -233,7 +233,7 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 """
             ).lstrip()
         )
-        (task / "solution" / "solve.ps1").write_text(
+        (task / "calibration/solution" / "solve.ps1").write_text(
             textwrap.dedent(
                 r"""
                 $ErrorActionPreference = "Stop"
@@ -261,7 +261,7 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 """
             )
         )
-        (task / "solution" / "solve.sh").write_text(
+        (task / "calibration/solution" / "solve.sh").write_text(
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -310,7 +310,7 @@ def _write_windows_gui_task(root: Path) -> Path:
     (task / "environment" / "setup" / "screen.txt").write_text(
         "SCREEN_CODE=ALE-5827\r\nANSWER=\r\n"
     )
-    (task / "solution" / "assets" / "answer.txt").write_text(expected)
+    (task / "calibration/solution" / "assets" / "answer.txt").write_text(expected)
     (task / "tests" / "assets" / "answer.txt").write_text(expected)
     (task / "environment" / "setup" / "setup.ps1").write_text(
         textwrap.dedent(
@@ -343,7 +343,7 @@ def _write_windows_gui_task(root: Path) -> Path:
             """
         ).lstrip()
     )
-    (task / "solution" / "solve.ps1").write_text(
+    (task / "calibration/solution" / "solve.ps1").write_text(
         'Copy-Item ".\\assets\\answer.txt" "$env:ALE_HOME\\output\\result.txt" -Force\n'
     )
     (task / "tests" / "verify.py").write_text(

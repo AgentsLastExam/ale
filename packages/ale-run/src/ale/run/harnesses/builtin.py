@@ -1,7 +1,7 @@
 """Harnesses that need no model.
 
-``nop`` proves the machinery without spending anything; ``oracle`` runs the task's own
-known-good solution, which is how a task earns admission — a task nobody can solve is a
+``nop`` proves the machinery without spending anything; ``oracle`` runs one of the task's
+known solutions, which is how a task earns admission — a task nobody can solve is a
 broken task, and finding that out costs one container rather than one agent run.
 """
 
@@ -14,8 +14,8 @@ from ale.core.env import Observation, StepResult
 from ale.core.errors import PhaseTimeoutError
 from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, StepwisePolicy
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.task import Stage
-from ale.core.taskspec import OperatingSystem
+from ale.core.task import case_entry
+from ale.core.taskspec import SOLUTION_CASE, OperatingSystem
 from ale.core.trace import DesktopAction
 
 from ._diagnostics import failure_detail
@@ -24,7 +24,7 @@ __all__ = ["NopHarness", "OracleHarness", "solution_dir"]
 
 
 def solution_dir(home: str, operating_system: OperatingSystem = OperatingSystem.LINUX) -> PurePath:
-    """Where a task's own solution is staged, when one is being run.
+    """Where the calibration case the oracle runs is staged.
 
     In the agent's home, and deliberately not with the rest of the framework's machinery:
     the oracle stands in for the agent and runs as the agent, so a root-only directory
@@ -93,13 +93,18 @@ class ScriptedPolicyHarness(StepwisePolicy):
 
 
 class OracleHarness(AutonomousHarness):
-    """Runs the task's own solution in place of an agent.
+    """Runs one of the task's known solutions in place of an agent.
 
-    The episode protocol stages it before this runs; see :func:`solution_dir`.
+    ``case`` names the calibration case whose directory, ``calibration/<case>/``, runs; by
+    default the reference solution. The episode protocol stages it before this runs; see
+    :func:`solution_dir`.
     """
 
     name = "oracle"
     supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS, OperatingSystem.MACOS)
+
+    def __init__(self, case: str = SOLUTION_CASE) -> None:
+        self.case = case
 
     def version(self) -> str:
         return "1"
@@ -113,7 +118,7 @@ class OracleHarness(AutonomousHarness):
         timeout_sec: float,
     ) -> AgentRun:
         root = solution_dir(session.home, session.os)
-        entry = root / Stage.SOLUTION.entry(session.os)
+        entry = root / case_entry(session.os)
         argv = (
             [
                 "powershell.exe",
@@ -132,13 +137,13 @@ class OracleHarness(AutonomousHarness):
             cwd=str(root),
             # The oracle stands in for an agent, but it is task code and gets the same
             # environment contract a stage does — otherwise a solution that works during
-            # authoring fails during validation for reasons that have nothing to do with it.
-            env={"ALE_HOME": session.home},
+            # authoring fails during calibration for reasons that have nothing to do with it.
+            env={"ALE_HOME": session.home, "ALE_STAGE_DIR": str(root)},
             timeout_sec=timeout_sec,
             # The oracle stands in for the agent, so it meets the agent's limits. An
             # oracle with more privilege would pass exactly the tasks a real agent then
-            # fails on access alone — and this is the only check a task gets before it
-            # is published, so the gate would be blind to the one thing it must catch.
+            # fails on access alone, so calibration would be blind to the one thing it
+            # must catch.
             identity=Identity.AGENT,
         )
         if result.timed_out:

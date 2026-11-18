@@ -6,6 +6,7 @@ import platform
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,7 +39,7 @@ from ale.run.providers.desktop import require_resolution
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.qemu import QemuProvider
 from ale.run.scaffold import scaffold_task
-from ale.run.task_images import ImagePreparationResult
+from ale.run.task_images import ImagePreparationResult, ImagePreparationStep
 from ale.run.tasksets.manifest import ManifestTask, load_task_folder
 
 pytestmark = pytest.mark.unit
@@ -848,3 +849,60 @@ async def test_a_machine_without_docker_lists_none_of_its_sandboxes(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", no_process)
     for name in ("docker", "qemu", "firecracker"):
         assert await provider_named(name).list_retained() == []
+
+
+def test_prepare_uses_selection_and_starts_no_runtime_services(
+    monkeypatch: pytest.MonkeyPatch,
+    write_task_repo,  # type: ignore[no-untyped-def]
+) -> None:
+    repository = write_task_repo("ale-tasks-prepare", tasks=("b", "a"))
+    task_cli = import_module("ale.run.cli.tasks")
+    observed: list[str] = []
+    digest = "sha256:" + "a" * 64
+
+    async def fake_prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
+        observed.extend(str(task.spec.name) for task in tasks)
+        for task in tasks:
+            task.provider = "docker:runc"
+        image = PreparedTaskImage(
+            kind=ImageKind.CONTAINER,
+            source="solver-local",
+            input_identity=digest,
+            image_source_identity=digest,
+            runtime_ref="ale-task:fixture",
+            prepared_identity=digest,
+        )
+        return tuple(
+            ImagePreparationResult(
+                task=str(task.spec.name),
+                role="solver",
+                image=image,
+                steps=(ImagePreparationStep("oci-build", "executed", digest),),
+            )
+            for task in tasks
+        )
+
+    def forbidden(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("prepare started a runtime service")
+
+    monkeypatch.setattr(task_cli, "_prepare_images", fake_prepare)
+    for name in ("Gateway", "Ledger", "EpisodeProtocol"):
+        monkeypatch.setattr(task_cli, name, forbidden)
+
+    result = CliRunner().invoke(app, ["prepare", str(repository)])
+
+    assert result.exit_code == 0, result.output
+    assert observed == ["agentslastexam/a", "agentslastexam/b"]
+    assert "agentslastexam/a solver provider=docker:runc kind=container source=local" in (
+        result.output
+    )
+    assert "oci-build" in result.output
+
+
+def test_prepare_accepts_only_config_and_set_options() -> None:
+    result = CliRunner().invoke(app, ["prepare", "--help"])
+    assert result.exit_code == 0
+    assert "--config" in result.output
+    assert "--set" in result.output
+    for forbidden in ("--runs-dir", "--agent", "--model", "--episodes", "--build"):
+        assert forbidden not in result.output

@@ -39,7 +39,8 @@ still require bounded-memory transport and hashing work.
 2. Package with MSIX Packaging Tool or Windows SDK MakeAppx. Include the signature and public
    certificate needed by the chosen deployment mode; exclude credentials and signing private keys.
 3. Save the package and required offline dependencies in the Task's software asset directory.
-   Keep a short README with hashes, compatible base, deployment requirements and validation results.
+   Keep a short README with hashes, compatible base, deployment requirements and test
+   results.
 4. Supply an unattended deployment recipe in `environment/`. Use MSIX installation/registration for the
    actual agent user, or a tested native deployment recipe that reproduces required registry,
    service and dependency setup. Unpacking an arbitrary MSIX is insufficient. An overlay preserves
@@ -49,18 +50,18 @@ Keep Task-specific configuration outside the reusable package. Publication follo
 [asset contract](../specs/task-assets.md); repository-level software consolidation is not yet
 implemented. Share software only where its license permits.
 
-## Validate
+## Check the Task
 
 From the ALE checkout, run against a complete Task:
 
 ```bash
 uv run ale lint /absolute/path/to/task
 uv run ale prepare /absolute/path/to/task
-uv run ale validate /absolute/path/to/task
+uv run ale calibrate /absolute/path/to/task
 ```
 
 On a fresh base, verify unattended deployment with only the declared inputs and dependencies.
 As the actual agent user, test required GUI/CLI workflows: create, modify, invoke child tools,
 save and reopen. Verify image-cache reuse and isolation between fresh episode overlays. Build
-privileges do not imply agent privileges. Keep validation evidence and qualify GUI Tasks with
-the intended visual agent; see the [image contract](../specs/sandbox-image.md).
+privileges do not imply agent privileges. Keep the evidence of these checks and qualify GUI
+Tasks with the intended visual agent; see the [image contract](../specs/sandbox-image.md).

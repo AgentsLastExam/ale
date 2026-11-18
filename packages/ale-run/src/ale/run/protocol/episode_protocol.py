@@ -80,7 +80,7 @@ from ale.core.trajectory import (
 from ale.core.verdict import Verdict
 from ale.run import guestd
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
-from ale.run.harnesses.builtin import solution_dir
+from ale.run.harnesses.builtin import OracleHarness, solution_dir
 from ale.run.protocol.log_mirror import (
     FINAL_SYNC_TIMEOUT_SEC,
     SYNC_INTERVAL_SEC,
@@ -466,8 +466,8 @@ class EpisodeProtocol:
         """Stage what the task declared, then run its own preparation.
 
         Only agent-visible material is uploaded: the configuration, the tests and the
-        solution stay on the host until they are needed, which is what keeps answers out
-        of reach rather than merely out of sight.
+        calibration cases stay on the host until they are needed, which is what keeps
+        answers out of reach rather than merely out of sight.
 
         Directories come from the task — its asset destinations and the paths it wants
         collected — so a domain that needs a different layout simply declares one.
@@ -508,8 +508,9 @@ class EpisodeProtocol:
                 ctx.agent_stop = error
             return
 
-        if harness.name == "oracle":
-            await self._upload_oracle(ctx, task, sandbox)
+        oracle = harness if isinstance(harness, OracleHarness) else None
+        if oracle is not None:
+            await self._upload_oracle(ctx, task, sandbox, oracle.case)
 
         # Installed first, then sealed. Putting the agent's own CLI in place is our
         # preparation, not its work; an image that has not pre-baked one would otherwise
@@ -547,8 +548,8 @@ class EpisodeProtocol:
                 ctx,
                 sandbox,
                 component="harness-launch",
-                actor="task" if harness.name == "oracle" else "framework",
-                env=variables.oracle() if harness.name == "oracle" else variables.environment,
+                actor="task" if oracle is not None else "framework",
+                env=variables.oracle() if oracle is not None else variables.environment,
             )
             with _limit_terminated(ctx):
                 if self.resume is None:
@@ -1304,11 +1305,15 @@ class EpisodeProtocol:
             + "; ".join(failures)
         )
 
-    async def _upload_oracle(self, ctx: EpisodeContext, task: Task, sandbox: Sandbox) -> None:
+    async def _upload_oracle(
+        self, ctx: EpisodeContext, task: Task, sandbox: Sandbox, case: str
+    ) -> None:
         folder = getattr(task, "folder", None)
-        source = folder.stage_dir(Stage.SOLUTION) if folder else None
+        source = folder.case_dir(case) if folder else None
         if source is None:
-            raise TaskError("validation requires a solution stage, and this task has none")
+            raise TaskError(
+                f"the oracle runs the {case} case, and this task has no solution for it"
+            )
         # As the agent, since the agent is the account that will run it.
         root = solution_dir(ctx.home, ctx.spec.os)
         await sandbox.upload_dir(str(source), str(root), identity=Identity.AGENT)

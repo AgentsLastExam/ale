@@ -233,7 +233,7 @@ context that does not fit fails to be created, and the Sandbox goes on
 ([runtime](../../../../../../images/runtimes/gvisor/README.md#gpu-memory-limit)). Its
 preflight, whenever a Sandbox may share GPUs, checks that `runsc flags` lists
 `-nvproxy-gpu-memory-limit`, which only ALE's build has. Under `docker:runc` nothing holds a
-process to a device memory limit, so every selection (`ale run`, `ale validate`, a
+process to a device memory limit, so every selection (`ale run`, `ale calibrate`, a
 reverification) says once, for the leaf and how many Sandboxes it serves so: `note
 docker:runc watches the gpu_memory_mb of N Sandboxes rather than enforcing it: a process
 past its share is killed`.
