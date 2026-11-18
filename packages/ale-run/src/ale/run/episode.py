@@ -870,6 +870,7 @@ async def run_episode(
             os=task.spec.os,
             authentication=authentication,
             profile_slot_id=profile_slot_id,
+            provider_web_tools=task.spec.network.mode is NetworkMode.OPEN,
         ),
         agent_resources=agent_resources or EffectiveAgentResources(),
         task_source=task.source,

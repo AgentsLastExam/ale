@@ -31,6 +31,14 @@ such as `{ supports_image = true }`, is laid over the catalog's `inputFormat` fo
 model by a rule in the personal provider file. ZCode sends telemetry only when OTLP
 variables are set, and the command unsets them.
 
+ZCode's `WebSearch` is a request of its own carrying the provider's `web_search` server
+tool, which ZCode encodes only for Anthropic Messages. ZCode 0.17.0 offers it only to a
+model whose `supportsNativeWebSearch` property is true, and its built-in rules grant that
+by vendor URL, never to the Gateway's. The provider file therefore sets the property for
+the run's model: true when the Task's network is `open` and the dialect is `anthropic`,
+otherwise false. `WebFetch` fetches from inside the Sandbox and stays under its network
+policy.
+
 ZCode chooses the session ID and reports it in its final `result`; a resume passes it to
 `--resume`. The conversation is in ZCode's SQLite store, `.zcode/cli/db/db.sqlite`, whose
 schema the release does not promise to keep; the parser reads the pinned version's

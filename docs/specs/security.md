@@ -122,9 +122,10 @@ provider:
   refuses the rest in the provider's error format, so an unchecked method cannot slip
   through.
 - **Provider-side network tools follow the Task's network policy.** These are tools the
-  provider runs on its own side that reach the web, such as search grounding. They act
-  outside the Sandbox's network policy, so a request that asks for one is forwarded only
-  for a Task whose network is `open`.
+  provider runs on its own side that reach the web, such as hosted web search or search
+  grounding. They act outside the Sandbox's network policy, so unless the Task's network
+  is `open` each Harness turns them off in its program's own configuration, and a request
+  that asks for one is not forwarded.
 
 A policy refusal is recorded as a `refused` call naming the policy and, unlike a limit,
 does not end the episode. Each dialect's routes, authentication and policies are in the
