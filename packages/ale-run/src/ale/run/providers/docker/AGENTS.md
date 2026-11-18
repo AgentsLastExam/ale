@@ -370,10 +370,10 @@ its own.
   around in the Sandbox, so that a Task needs nothing for gVisor.
 - ALE's chains stay in iptables rather than move to nf_tables, whose gVisor implementation
   has no `REJECT`: a refusal there would wait out the seal's drop again.
-- Podman's storage works on its volume, and its containers run on the host network, but
-  its own networks are not offered: past the recursive bind of a namespace file that gVisor
-  refuses (`EINVAL`, which Linux allows), the CNI bridge plugin's hairpin mode and a netlink
-  request of netavark 1.4 fail too.
+- Podman's storage works on its volume and its own networks work: patches 0010 to 0018 make
+  the netlink, sysctls, ioctl and nf_tables that its CNI plugins, netavark and crun use
+  behave as Linux's. `podman exec` needs runc as Podman's OCI runtime, since crun needs
+  cgroup v1's freezer, which gVisor lacks.
 
 ## A Sandbox's swap
 

@@ -1,0 +1,1054 @@
+proc: interface settings and ping_group_range per network namespace
+
+What:
+- /proc/sys/net/ipv4/conf and /proc/sys/net/ipv6/conf have, besides all and
+  default, a directory for each interface of the network namespace of the
+  task that looks it up, as Linux registers one for each device in its
+  namespace (devinet_sysctl_register(), addrconf_sysctl_register()) and
+  resolves /proc/sys/net in current's namespace (net_ctl_header_lookup()). An
+  open file keeps the namespace it was opened in, and so does the directory
+  of an interface: reached through a file descriptor of it kept across
+  setns(2), its settings are of the namespace it was looked up in, as Linux's
+  proc_sys_lookup() finds a directory's entries in its own sysctl header,
+  while a path looked up again from another namespace is that namespace's
+  (proc_sys_compare(), net_ctl_is_seen()). The directory of an
+  interface holds the settings that container engines and network plugins
+  write: for IPv4 accept_local, accept_redirects, arp_announce, arp_ignore,
+  arp_notify, forwarding, proxy_arp, route_localnet, rp_filter and
+  send_redirects, for IPv6 accept_dad, accept_ra, accept_redirects, autoconf,
+  disable_ipv6 and forwarding, with Linux's defaults. forwarding is the NIC's
+  own forwarding in netstack; the others keep the value written, per
+  interface, and change nothing, as netstack implements none of them. They
+  are dropped when the interface is removed or leaves the namespace, as Linux
+  drops a device's configuration then.
+- /proc/sys/net/ipv4/ping_group_range is the opener's namespace's, written as
+  Linux's ipv4_ping_group_range() takes it: two group IDs from 0 to GID_T_MAX
+  in the writer's user namespace, a value not given kept, an empty range
+  stored as "1 0", read in the reader's user namespace. gVisor lets every
+  group create ping sockets, so every namespace starts at Linux's largest
+  range, "0 4294967294", and the range is not checked when a ping socket is
+  created.
+- A writer with CAP_NET_ADMIN in the user namespace that owns the network
+  namespace of the setting gets the owner's access, as in net/sysctl_net.c:
+  net_ctl_permissions(), and access is checked again at every read and write,
+  as fs/proc/proc_sysctl.c:proc_sys_call_handler() checks sysctl_perm()
+  (EPERM): a file that a privileged process opened is not written through by
+  one that dropped its privileges.
+
+Why: Podman's containers.conf sets net.ipv4.ping_group_range to "0 0" in
+every container's OCI spec, and crun fails a container whose sysctl it cannot
+write: "crun: open `/proc/sys/net/ipv4/ping_group_range`: No such file or
+directory". netavark writes rp_filter and route_localnet of its bridge and
+arp_notify and rp_filter of the container's interface, from inside the
+container's namespace, and fails if one is missing: "netavark: Sysctl error:
+no such sysctl: /proc/sys/net/ipv4/conf/podman0/rp_filter" (1.14), "set
+sysctl net/ipv4/conf/eth0/arp_notify: ... No such file or directory" (1.17);
+1.4 writes route_localnet of the bridge when a port is published. Docker skips
+a setting that is missing; its nested checks pass with them as without.
+
+Not done: the other files of /proc/sys/net, all and default among them, are
+still those of the root network namespace (gvisor.dev/issue/1833), and an
+interface's directory holds only the settings above. Only the directory of an
+interface keeps its namespace: one of /proc/sys/net/ipv4/conf, or of
+/proc/sys/net/ipv4 for ping_group_range, finds its entries in the namespace
+of the task that walks it. gVisor's other sysctl files, as upstream, check
+access when they are opened only. Checkpoint and restore of the written
+values were not tested.
+
+Upstream: upstream PR 16279 and PR 17148, stacked on it (open on 2026-11-17),
+add ip_unprivileged_port_start and ping_group_range per network namespace and
+enforce them; this patch takes the same per-namespace file without the
+enforcement, which would change what every sandbox may do. None adds the
+interface directories. Drop the ping_group_range part when upstream has it.
+
+Verified:
+- The new syscall tests ProcSysNet.InterfaceConf (the directories of a new
+  namespace, values written and read back, forwarding, another namespace's
+  defaults), ProcSysNet.PingGroupRange, .InterfaceConfThroughDirectoryFD
+  (reads and writes through a directory kept across namespaces) and
+  .WriteChecksPermissionsAgain (a process that dropped to uid 65534 writes
+  through a descriptor opened as root: EPERM) pass on Linux 7.0 under runc
+  and on runsc with this patch, under the runtime arguments of runsc and of
+  runsc-nested; the first two fail on ALE's 0.1.2, the last two on ALE's
+  0.1.3 before they were fixed. The whole proc_net_test passes (29
+  tests), as does //pkg/sentry/fsimpl/proc:proc_test.
+- crun started Podman's containers, and netavark 1.4.0, 1.14.0 and 1.17.2
+  set their sysctls, in sandboxes under runsc-nested.
+
+diff --git a/pkg/sentry/fsimpl/proc/tasks_sys.go b/pkg/sentry/fsimpl/proc/tasks_sys.go
+index 981e131..240b918 100644
+--- a/pkg/sentry/fsimpl/proc/tasks_sys.go
++++ b/pkg/sentry/fsimpl/proc/tasks_sys.go
+@@ -18,6 +18,9 @@ import (
+ 	"bytes"
+ 	"fmt"
+ 	"math"
++	"slices"
++	"strconv"
++	"strings"
+ 
+ 	"gvisor.dev/gvisor/pkg/abi/linux"
+ 	"gvisor.dev/gvisor/pkg/atomicbitops"
+@@ -82,12 +85,16 @@ type lazySysDir struct {
+ var _ kernfs.Inode = (*lazySysDir)(nil)
+ 
+ func (fs *filesystem) newLazySysDir(ctx context.Context, creds *auth.Credentials, k *kernel.Kernel, path string) kernfs.Inode {
+-	d := &lazySysDir{
+-		fs:    fs,
+-		k:     k,
+-		creds: creds,
+-		path:  path,
+-	}
++	d := &lazySysDir{}
++	d.init(ctx, fs, creds, k, path)
++	return d
++}
++
++func (d *lazySysDir) init(ctx context.Context, fs *filesystem, creds *auth.Credentials, k *kernel.Kernel, path string) {
++	d.fs = fs
++	d.k = k
++	d.creds = creds
++	d.path = path
+ 	d.StaticDirectory.Init(ctx, creds, linux.UNNAMED_MAJOR, fs.devMinor, fs.NextIno(), 0555, kernfs.GenericDirectoryFDOptions{
+ 		SeekEnd: kernfs.SeekEndZero,
+ 	})
+@@ -96,7 +103,6 @@ func (fs *filesystem) newLazySysDir(ctx context.Context, creds *auth.Credentials
+ 	// Set the link count of the populated directory now, so that Stat does
+ 	// not need to populate d.
+ 	d.IncLinks(uint32(len(sysSubdirs(path))))
+-	return d
+ }
+ 
+ // populate creates the children of d if it is not already populated.
+@@ -191,7 +197,14 @@ func (fs *filesystem) sysDirChildren(ctx context.Context, root *auth.Credentials
+ 		if path != "" {
+ 			subdir = path + "/" + name
+ 		}
+-		children[name] = fs.newLazySysDir(ctx, root, k, subdir)
++		switch subdir {
++		case "net/ipv4/conf":
++			children[name] = fs.newNetConfDir(ctx, root, k, subdir, linux.AF_INET)
++		case "net/ipv6/conf":
++			children[name] = fs.newNetConfDir(ctx, root, k, subdir, linux.AF_INET6)
++		default:
++			children[name] = fs.newLazySysDir(ctx, root, k, subdir)
++		}
+ 	}
+ 	return children
+ }
+@@ -263,6 +276,7 @@ func (fs *filesystem) sysDirFiles(ctx context.Context, root *auth.Credentials, k
+ 		return map[string]kernfs.Inode{
+ 			"ip_forward":          fs.newInode(ctx, root, 0644, &ipForwarding{stack: stack, protocol: ipv4.ProtocolNumber}),
+ 			"ip_local_port_range": fs.newInode(ctx, root, 0644, &portRange{stack: stack}),
++			"ping_group_range":    fs.newInode(ctx, root, 0644, &netnsSysctlFile{sysctl: pingGroupRangeSysctl}),
+ 			"tcp_recovery":        fs.newInode(ctx, root, 0644, &tcpRecoveryData{stack: stack}),
+ 			"tcp_rmem":            fs.newInode(ctx, root, 0644, &tcpMemData{stack: stack, dir: tcpRMem}),
+ 			"tcp_sack":            fs.newInode(ctx, root, 0644, &tcpSackData{stack: stack}),
+@@ -907,3 +921,451 @@ func ParseInt32Vec(ctx context.Context, src usermem.IOSequence, buf []int32) (in
+ 
+ 	return usermem.CopyInt32StringsInVec(ctx, src.IO, src.Addrs, buf, src.Opts)
+ }
++
++// openerNetworkNamespace returns the network namespace of the task in ctx, or
++// the root network namespace if ctx has no task. Linux resolves /proc/sys/net
++// entries in current's network namespace when they are looked up
++// (net/sysctl_net.c:net_ctl_header_lookup()), and an open file keeps referring
++// to that namespace.
++func openerNetworkNamespace(ctx context.Context) *inet.Namespace {
++	if t := kernel.TaskFromContext(ctx); t != nil {
++		return t.NetworkNamespace()
++	}
++	return kernel.KernelFromContext(ctx).RootNetworkNamespace()
++}
++
++// openerNetSysctlStack returns the stack of the opener's network namespace if
++// it keeps per-namespace sysctls.
++func openerNetSysctlStack(ctx context.Context) (*inet.Namespace, inet.Stack, inet.NetSysctlStack, bool) {
++	netns := openerNetworkNamespace(ctx)
++	if netns == nil {
++		return nil, nil, nil, false
++	}
++	stack := netns.Stack()
++	if stack == nil {
++		return nil, nil, nil, false
++	}
++	sysctls, ok := stack.(inet.NetSysctlStack)
++	return netns, stack, sysctls, ok
++}
++
++// interfaceIndex returns the index of the interface of stack named name.
++func interfaceIndex(stack inet.Stack, name string) (int32, bool) {
++	for idx, i := range stack.Interfaces() {
++		if i.Name == name {
++			return idx, true
++		}
++	}
++	return 0, false
++}
++
++// checkNetSysctlPermissions checks access to a /proc/sys/net file of network
++// namespace netns: as in Linux's net/sysctl_net.c:net_ctl_permissions(), a
++// caller with CAP_NET_ADMIN in the user namespace that owns it gets the
++// owner's access.
++func checkNetSysctlPermissions(ctx context.Context, netns *inet.Namespace, attrs *kernfs.InodeAttrs, creds *auth.Credentials, ats vfs.AccessTypes) error {
++	if netns != nil && creds.HasCapabilityIn(linux.CAP_NET_ADMIN, netns.UserNamespace()) {
++		// fs/proc/proc_sysctl.c:proc_sys_permission() never allows execute.
++		owner := vfs.AccessTypes(attrs.Mode().Permissions()>>6) & (vfs.MayRead | vfs.MayWrite | vfs.MayExec)
++		if !ats.MayExec() && ats&owner == ats {
++			return nil
++		}
++		return linuxerr.EACCES
++	}
++	return attrs.CheckPermissions(ctx, creds, ats)
++}
++
++// recheckNetSysctlPermissions checks access to a /proc/sys/net file again when
++// it is read or written, as Linux's fs/proc/proc_sysctl.c:
++// proc_sys_call_handler() does with sysctl_perm(): a file opened by a
++// process that may write it is not written by one that may not.
++func recheckNetSysctlPermissions(ctx context.Context, netns *inet.Namespace, attrs *kernfs.InodeAttrs, ats vfs.AccessTypes) error {
++	if err := checkNetSysctlPermissions(ctx, netns, attrs, auth.CredentialsFromContext(ctx), ats); err != nil {
++		return linuxerr.EPERM
++	}
++	return nil
++}
++
++// netConfDir is /proc/sys/net/ipv4/conf or /proc/sys/net/ipv6/conf: "all" and
++// "default", and a directory for each interface of the opener's network
++// namespace, as Linux registers one for each device in its namespace
++// (net/ipv4/devinet.c:devinet_sysctl_register(),
++// net/ipv6/addrconf.c:addrconf_sysctl_register()).
++//
++// +stateify savable
++type netConfDir struct {
++	lazySysDir
++
++	// family is linux.AF_INET or linux.AF_INET6. Immutable.
++	family uint8
++}
++
++var _ kernfs.Inode = (*netConfDir)(nil)
++
++func (fs *filesystem) newNetConfDir(ctx context.Context, creds *auth.Credentials, k *kernel.Kernel, path string, family uint8) kernfs.Inode {
++	d := &netConfDir{family: family}
++	d.lazySysDir.init(ctx, fs, creds, k, path)
++	return d
++}
++
++// Lookup implements kernfs.Inode.Lookup.
++func (d *netConfDir) Lookup(ctx context.Context, name string) (kernfs.Inode, error) {
++	inode, err := d.lazySysDir.Lookup(ctx, name)
++	if !linuxerr.Equals(linuxerr.ENOENT, err) {
++		return inode, err
++	}
++	netns, stack, sysctls, ok := openerNetSysctlStack(ctx)
++	if !ok {
++		return nil, linuxerr.ENOENT
++	}
++	if _, ok := interfaceIndex(stack, name); !ok {
++		return nil, linuxerr.ENOENT
++	}
++	return d.fs.newNetDevConfDir(ctx, d.creds, netns, d.family, name, sysctls.InterfaceConfNames(d.family)), nil
++}
++
++// IterDirents implements kernfs.Inode.IterDirents. It lists the interfaces of
++// the opener's network namespace after "all" and "default", by name.
++func (d *netConfDir) IterDirents(ctx context.Context, mnt *vfs.Mount, cb vfs.IterDirentsCallback, offset, relOffset int64) (int64, error) {
++	_, stack, _, ok := openerNetSysctlStack(ctx)
++	if !ok {
++		return offset, nil
++	}
++	var names []string
++	for _, i := range stack.Interfaces() {
++		names = append(names, i.Name)
++	}
++	slices.Sort(names)
++	for i := relOffset; i >= 0 && i < int64(len(names)); i++ {
++		dirent := vfs.Dirent{
++			Name:    names[i],
++			Type:    linux.DT_DIR,
++			Ino:     d.fs.NextIno(),
++			NextOff: offset + 1,
++		}
++		if err := cb.Handle(dirent); err != nil {
++			return offset, err
++		}
++		offset++
++	}
++	return offset, nil
++}
++
++// netDevConfDir is /proc/sys/net/ipv4/conf/<interface> or
++// /proc/sys/net/ipv6/conf/<interface>, of the interface of that name in the
++// network namespace of the task that looked it up. As in Linux, whose
++// proc_sys_lookup() finds a directory's entries in the directory's own sysctl
++// header, its files stay that namespace's when they are reached through it,
++// as through a file descriptor of it kept across setns(2).
++//
++// +stateify savable
++type netDevConfDir struct {
++	kernfs.StaticDirectory
++
++	// netns is the network namespace of the interface. Immutable.
++	netns *inet.Namespace
++
++	// name is the interface's name. Immutable.
++	name string
++}
++
++var _ kernfs.Inode = (*netDevConfDir)(nil)
++
++func (fs *filesystem) newNetDevConfDir(ctx context.Context, creds *auth.Credentials, netns *inet.Namespace, family uint8, name string, settings []string) kernfs.Inode {
++	children := make(map[string]kernfs.Inode, len(settings))
++	for _, setting := range settings {
++		f := &netDevConfFile{netns: netns, family: family, ifName: name, name: setting}
++		children[setting] = fs.newInode(ctx, creds, 0644, f)
++	}
++	d := &netDevConfDir{netns: netns, name: name}
++	d.StaticDirectory.Init(ctx, creds, linux.UNNAMED_MAJOR, fs.devMinor, fs.NextIno(), 0555, kernfs.GenericDirectoryFDOptions{
++		SeekEnd: kernfs.SeekEndZero,
++	})
++	d.InitRefs()
++	d.OrderedChildren.Init(kernfs.OrderedChildrenOptions{})
++	d.IncLinks(d.OrderedChildren.Populate(children))
++	return d
++}
++
++// Valid implements kernfs.Inode.Valid. A path looked up again finds the
++// directory of an interface valid while it is of the looker's network
++// namespace and that namespace has an interface of its name, as Linux's
++// proc_sys_revalidate() and proc_sys_compare() take a sysctl entry while its
++// header is registered and seen by current (net_ctl_is_seen()).
++func (d *netDevConfDir) Valid(ctx context.Context, _ *kernfs.Dentry, _ string) bool {
++	if openerNetworkNamespace(ctx) != d.netns {
++		return false
++	}
++	stack := d.netns.Stack()
++	if stack == nil {
++		return false
++	}
++	_, ok := interfaceIndex(stack, d.name)
++	return ok
++}
++
++// netDevConfFile is a setting in /proc/sys/net/ipv4/conf/<interface> or
++// /proc/sys/net/ipv6/conf/<interface>, of the interface of that name in netns.
++//
++// +stateify savable
++type netDevConfFile struct {
++	kernfs.DynamicBytesFile
++
++	// netns, family, ifName and name identify the setting. Immutable.
++	netns  *inet.Namespace
++	family uint8
++	ifName string
++	name   string
++}
++
++var _ dynamicInode = (*netDevConfFile)(nil)
++
++// Init implements dynamicInode.Init.
++func (f *netDevConfFile) Init(ctx context.Context, creds *auth.Credentials, devMajor, devMinor uint32, ino uint64, _ vfs.DynamicBytesSource, perm linux.FileMode) {
++	f.DynamicBytesFile.Init(ctx, creds, devMajor, devMinor, ino, nil, perm)
++	f.SetDataSourceProvider(f)
++}
++
++// CheckPermissions implements kernfs.Inode.CheckPermissions.
++func (f *netDevConfFile) CheckPermissions(ctx context.Context, creds *auth.Credentials, ats vfs.AccessTypes) error {
++	return checkNetSysctlPermissions(ctx, f.netns, &f.InodeAttrs, creds, ats)
++}
++
++// DataSource implements kernfs.DataSourceProvider.DataSource.
++func (f *netDevConfFile) DataSource(ctx context.Context) (vfs.DynamicBytesSource, error) {
++	stack := f.netns.Stack()
++	if stack == nil {
++		return nil, linuxerr.ENOENT
++	}
++	idx, ok := interfaceIndex(stack, f.ifName)
++	if !ok {
++		return nil, linuxerr.ENOENT
++	}
++	return &netDevConfData{file: f, idx: idx}, nil
++}
++
++// Generate implements vfs.DynamicBytesSource.Generate.
++func (*netDevConfFile) Generate(context.Context, *bytes.Buffer) error {
++	panic("unreachable: netDevConfFile has a DataSourceProvider")
++}
++
++// netDevConfData implements vfs.WritableDynamicBytesSource for a setting of
++// one interface. It holds the namespace rather than its stack because a
++// restore gives child namespaces new stacks.
++//
++// +stateify savable
++type netDevConfData struct {
++	// file is the setting. Immutable.
++	file *netDevConfFile
++	idx  int32
++}
++
++var _ vfs.WritableDynamicBytesSource = (*netDevConfData)(nil)
++
++func (d *netDevConfData) sysctls() (inet.NetSysctlStack, error) {
++	sysctls, ok := d.file.netns.Stack().(inet.NetSysctlStack)
++	if !ok {
++		return nil, linuxerr.ENOENT
++	}
++	return sysctls, nil
++}
++
++// Generate implements vfs.DynamicBytesSource.Generate.
++func (d *netDevConfData) Generate(ctx context.Context, buf *bytes.Buffer) error {
++	if err := recheckNetSysctlPermissions(ctx, d.file.netns, &d.file.InodeAttrs, vfs.MayRead); err != nil {
++		return err
++	}
++	sysctls, err := d.sysctls()
++	if err != nil {
++		return err
++	}
++	v, err := sysctls.InterfaceConf(d.idx, d.file.family, d.file.name)
++	if err != nil {
++		return err
++	}
++	_, err = fmt.Fprintf(buf, "%d\n", v)
++	return err
++}
++
++// Write implements vfs.WritableDynamicBytesSource.Write, as Linux's
++// proc_dointvec() does for these settings.
++func (d *netDevConfData) Write(ctx context.Context, _ *vfs.FileDescription, src usermem.IOSequence, offset int64) (int64, error) {
++	if offset != 0 {
++		// No need to handle partial writes thus far.
++		return 0, linuxerr.EINVAL
++	}
++	if err := recheckNetSysctlPermissions(ctx, d.file.netns, &d.file.InodeAttrs, vfs.MayWrite); err != nil {
++		return 0, err
++	}
++	sysctls, err := d.sysctls()
++	if err != nil {
++		return 0, err
++	}
++	buf := make([]int32, 1)
++	n, err := ParseInt32Vec(ctx, src, buf)
++	if err != nil || n == 0 {
++		return 0, err
++	}
++	if err := sysctls.SetInterfaceConf(d.idx, d.file.family, d.file.name, buf[0]); err != nil {
++		return 0, err
++	}
++	return n, nil
++}
++
++// netnsSysctl identifies a netnsSysctlFile.
++//
++// +stateify savable
++type netnsSysctl int
++
++const (
++	pingGroupRangeSysctl netnsSysctl = iota
++)
++
++// netnsSysctlFile is a /proc/sys/net file of the opener's network namespace.
++//
++// +stateify savable
++type netnsSysctlFile struct {
++	kernfs.DynamicBytesFile
++
++	sysctl netnsSysctl
++}
++
++var _ dynamicInode = (*netnsSysctlFile)(nil)
++
++// Init implements dynamicInode.Init.
++func (f *netnsSysctlFile) Init(ctx context.Context, creds *auth.Credentials, devMajor, devMinor uint32, ino uint64, _ vfs.DynamicBytesSource, perm linux.FileMode) {
++	f.DynamicBytesFile.Init(ctx, creds, devMajor, devMinor, ino, nil, perm)
++	f.SetDataSourceProvider(f)
++}
++
++// CheckPermissions implements kernfs.Inode.CheckPermissions.
++func (f *netnsSysctlFile) CheckPermissions(ctx context.Context, creds *auth.Credentials, ats vfs.AccessTypes) error {
++	return checkNetSysctlPermissions(ctx, openerNetworkNamespace(ctx), &f.InodeAttrs, creds, ats)
++}
++
++// DataSource implements kernfs.DataSourceProvider.DataSource.
++func (f *netnsSysctlFile) DataSource(ctx context.Context) (vfs.DynamicBytesSource, error) {
++	netns, _, _, ok := openerNetSysctlStack(ctx)
++	if !ok {
++		return nil, linuxerr.ENOENT
++	}
++	switch f.sysctl {
++	case pingGroupRangeSysctl:
++		return &pingGroupRange{file: f, netns: netns}, nil
++	default:
++		panic(fmt.Sprintf("unknown sysctl: %d", f.sysctl))
++	}
++}
++
++// Generate implements vfs.DynamicBytesSource.Generate.
++func (*netnsSysctlFile) Generate(context.Context, *bytes.Buffer) error {
++	panic("unreachable: netnsSysctlFile has a DataSourceProvider")
++}
++
++// pingGroupRange implements vfs.WritableDynamicBytesSource for
++// /proc/sys/net/ipv4/ping_group_range, as Linux's
++// net/ipv4/sysctl_net_ipv4.c:ipv4_ping_group_range() does. gVisor does not
++// check it when a ping socket is created.
++//
++// +stateify savable
++type pingGroupRange struct {
++	// file is ping_group_range. Immutable.
++	file *netnsSysctlFile
++
++	netns *inet.Namespace
++}
++
++var _ vfs.WritableDynamicBytesSource = (*pingGroupRange)(nil)
++
++// gidTMax is Linux's GID_T_MAX (include/net/ping.h), the largest group ID
++// that ping_group_range takes.
++const gidTMax = math.MaxUint32 - 1
++
++func (p *pingGroupRange) sysctls() (inet.NetSysctlStack, error) {
++	sysctls, ok := p.netns.Stack().(inet.NetSysctlStack)
++	if !ok {
++		return nil, linuxerr.ENOENT
++	}
++	return sysctls, nil
++}
++
++// Generate implements vfs.DynamicBytesSource.Generate. The groups are shown in
++// the reader's user namespace.
++func (p *pingGroupRange) Generate(ctx context.Context, buf *bytes.Buffer) error {
++	if err := recheckNetSysctlPermissions(ctx, p.netns, &p.file.InodeAttrs, vfs.MayRead); err != nil {
++		return err
++	}
++	sysctls, err := p.sysctls()
++	if err != nil {
++		return err
++	}
++	userns := auth.CredentialsFromContext(ctx).UserNamespace
++	low, high := sysctls.PingGroupRange()
++	_, err = fmt.Fprintf(buf, "%d\t%d\n", auth.KGID(low).In(userns).OrOverflow(), auth.KGID(high).In(userns).OrOverflow())
++	return err
++}
++
++// Write implements vfs.WritableDynamicBytesSource.Write. The groups are taken
++// in the writer's user namespace.
++func (p *pingGroupRange) Write(ctx context.Context, _ *vfs.FileDescription, src usermem.IOSequence, offset int64) (int64, error) {
++	if offset != 0 {
++		// No need to handle partial writes thus far.
++		return 0, linuxerr.EINVAL
++	}
++	if err := recheckNetSysctlPermissions(ctx, p.netns, &p.file.InodeAttrs, vfs.MayWrite); err != nil {
++		return 0, err
++	}
++	sysctls, err := p.sysctls()
++	if err != nil {
++		return 0, err
++	}
++	userns := auth.CredentialsFromContext(ctx).UserNamespace
++	low, high := sysctls.PingGroupRange()
++	urange := []uint64{uint64(auth.KGID(low).In(userns).OrOverflow()), uint64(auth.KGID(high).In(userns).OrOverflow())}
++	n, err := parseUint64Vec(ctx, src, urange, gidTMax)
++	if err != nil || n == 0 {
++		return 0, err
++	}
++	kLow := userns.MapToKGID(auth.GID(urange[0]))
++	kHigh := userns.MapToKGID(auth.GID(urange[1]))
++	if !kLow.Ok() || !kHigh.Ok() {
++		return 0, linuxerr.EINVAL
++	}
++	if urange[1] < urange[0] || kHigh < kLow {
++		// An empty range is stored as Linux's "1 0".
++		kLow, kHigh = 1, 0
++	}
++	sysctls.SetPingGroupRange(uint32(kLow), uint32(kHigh))
++	return n, nil
++}
++
++// parseUint64Vec parses whitespace-separated decimal values from src into
++// dsts, as Linux's proc_doulongvec_minmax() does with the range 0 to max: a
++// value that is negative, above max or not a number is EINVAL, and values not
++// given keep theirs.
++func parseUint64Vec(ctx context.Context, src usermem.IOSequence, dsts []uint64, max uint64) (int64, error) {
++	if src.NumBytes() == 0 {
++		return 0, nil
++	}
++	// Limit input size so as not to impact performance if input size is large.
++	src = src.TakeFirst(int(hostarch.PageSize) - 1)
++	buf := make([]byte, src.NumBytes())
++	n, err := src.CopyIn(ctx, buf)
++	if err != nil {
++		return 0, err
++	}
++	fields := strings.Fields(string(buf[:n]))
++	if len(fields) == 0 {
++		return 0, linuxerr.EINVAL
++	}
++	vals := slices.Clone(dsts)
++	for i := 0; i < len(fields) && i < len(vals); i++ {
++		v, err := strconv.ParseUint(fields[i], 10, 64)
++		if err != nil || v > max {
++			return 0, linuxerr.EINVAL
++		}
++		vals[i] = v
++	}
++	copy(dsts, vals)
++	return int64(n), nil
++}
+diff --git a/pkg/sentry/inet/inet.go b/pkg/sentry/inet/inet.go
+index f9b0038..c578d65 100644
+--- a/pkg/sentry/inet/inet.go
++++ b/pkg/sentry/inet/inet.go
+@@ -214,6 +214,31 @@ type BridgePortConfig struct {
+ 	Learning *bool
+ }
+ 
++// NetSysctlStack is implemented by a Stack that keeps the /proc/sys/net
++// settings of its network namespace that are not global in gVisor: those of
++// each interface, in /proc/sys/net/ipv4/conf/<interface> and
++// /proc/sys/net/ipv6/conf/<interface>, and net.ipv4.ping_group_range.
++type NetSysctlStack interface {
++	// InterfaceConf returns the setting name of interface idx for family
++	// (linux.AF_INET or linux.AF_INET6). It fails with ENOENT for a setting
++	// the interface does not have.
++	InterfaceConf(idx int32, family uint8, name string) (int32, error)
++
++	// SetInterfaceConf changes the setting name of interface idx for family.
++	SetInterfaceConf(idx int32, family uint8, name string, v int32) error
++
++	// InterfaceConfNames returns the names of the settings each interface has
++	// for family.
++	InterfaceConfNames(family uint8) []string
++
++	// PingGroupRange returns net.ipv4.ping_group_range, as group IDs in the
++	// root user namespace.
++	PingGroupRange() (low, high uint32)
++
++	// SetPingGroupRange sets net.ipv4.ping_group_range.
++	SetPingGroupRange(low, high uint32)
++}
++
+ // InterfaceAddr contains information about a network interface address.
+ type InterfaceAddr struct {
+ 	// Family is the address family, a Linux AF_* constant.
+diff --git a/pkg/sentry/socket/netstack/stack.go b/pkg/sentry/socket/netstack/stack.go
+index 669d8cd..70f452c 100644
+--- a/pkg/sentry/socket/netstack/stack.go
++++ b/pkg/sentry/socket/netstack/stack.go
+@@ -30,6 +30,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/inet"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+ 	"gvisor.dev/gvisor/pkg/sentry/socket/netlink/nlmsg"
++	"gvisor.dev/gvisor/pkg/sync"
+ 	"gvisor.dev/gvisor/pkg/syserr"
+ 	"gvisor.dev/gvisor/pkg/tcpip"
+ 	"gvisor.dev/gvisor/pkg/tcpip/header"
+@@ -60,6 +61,168 @@ type Stack struct {
+ 
+ 	// ipv6KeepAddrOnDown backs /proc/sys/net/ipv6/conf/all/keep_addr_on_down.
+ 	ipv6KeepAddrOnDown atomicbitops.Bool
++
++	// sysctlMu protects the fields below.
++	sysctlMu sync.Mutex `state:"nosave"`
++
++	// interfaceConf holds the settings of /proc/sys/net/ipv4/conf/<interface>
++	// and /proc/sys/net/ipv6/conf/<interface> that were written, by interface
++	// and then by family-qualified name (see interfaceConfKey).
++	//
++	// +checklocks:sysctlMu
++	interfaceConf map[tcpip.NICID]map[string]int32
++
++	// pingGroupRange is net.ipv4.ping_group_range, once written.
++	//
++	// +checklocks:sysctlMu
++	pingGroupRange [2]uint32
++
++	// pingGroupRangeSet is whether pingGroupRange was written.
++	//
++	// +checklocks:sysctlMu
++	pingGroupRangeSet bool
++}
++
++// interfaceConfDefaults are the settings that each interface has in
++// /proc/sys/net/ipv4/conf/<interface> and /proc/sys/net/ipv6/conf/<interface>,
++// with the defaults of Linux's ipv4_devconf_dflt and ipv6_devconf_dflt. They
++// are those that container engines and network plugins write, such as
++// netavark, the CNI plugins and Docker. Netstack implements none of them but
++// forwarding, which is the NIC's: the others keep the value written and change
++// nothing.
++var interfaceConfDefaults = map[uint8]map[string]int32{
++	linux.AF_INET: {
++		"accept_local":     0,
++		"accept_redirects": 1,
++		"arp_announce":     0,
++		"arp_ignore":       0,
++		"arp_notify":       0,
++		"forwarding":       0,
++		"proxy_arp":        0,
++		"route_localnet":   0,
++		"rp_filter":        0,
++		"send_redirects":   1,
++	},
++	linux.AF_INET6: {
++		"accept_dad":       1,
++		"accept_ra":        1,
++		"accept_redirects": 1,
++		"autoconf":         1,
++		"disable_ipv6":     0,
++		"forwarding":       0,
++	},
++}
++
++// Linux's default net.ipv4.ping_group_range is "1 0", no group. gVisor lets
++// every group create ping sockets, so it reports every group, Linux's largest
++// range: 0 to GID_T_MAX.
++const (
++	defaultPingGroupLow  = 0
++	defaultPingGroupHigh = 1<<32 - 2
++)
++
++var _ inet.NetSysctlStack = (*Stack)(nil)
++
++func interfaceConfKey(family uint8, name string) string {
++	return fmt.Sprintf("%d/%s", family, name)
++}
++
++func familyProtocol(family uint8) tcpip.NetworkProtocolNumber {
++	if family == linux.AF_INET6 {
++		return ipv6.ProtocolNumber
++	}
++	return ipv4.ProtocolNumber
++}
++
++// InterfaceConf implements inet.NetSysctlStack.InterfaceConf.
++func (s *Stack) InterfaceConf(idx int32, family uint8, name string) (int32, error) {
++	def, ok := interfaceConfDefaults[family][name]
++	if !ok {
++		return 0, linuxerr.ENOENT
++	}
++	id := tcpip.NICID(idx)
++	if !s.Stack.HasNIC(id) {
++		return 0, linuxerr.ENODEV
++	}
++	if name == "forwarding" {
++		on, err := s.Stack.NICForwarding(id, familyProtocol(family))
++		if err != nil {
++			return 0, syserr.TranslateNetstackError(err).ToError()
++		}
++		if on {
++			return 1, nil
++		}
++		return 0, nil
++	}
++	s.sysctlMu.Lock()
++	defer s.sysctlMu.Unlock()
++	if v, ok := s.interfaceConf[id][interfaceConfKey(family, name)]; ok {
++		return v, nil
++	}
++	return def, nil
++}
++
++// SetInterfaceConf implements inet.NetSysctlStack.SetInterfaceConf.
++func (s *Stack) SetInterfaceConf(idx int32, family uint8, name string, v int32) error {
++	if _, ok := interfaceConfDefaults[family][name]; !ok {
++		return linuxerr.ENOENT
++	}
++	id := tcpip.NICID(idx)
++	if !s.Stack.HasNIC(id) {
++		return linuxerr.ENODEV
++	}
++	if name == "forwarding" {
++		// As Linux's devinet_sysctl_forward and addrconf_sysctl_forward for
++		// one device: any value but 0 turns forwarding on.
++		if _, err := s.Stack.SetNICForwarding(id, familyProtocol(family), v != 0); err != nil {
++			return syserr.TranslateNetstackError(err).ToError()
++		}
++		return nil
++	}
++	s.sysctlMu.Lock()
++	defer s.sysctlMu.Unlock()
++	if s.interfaceConf == nil {
++		s.interfaceConf = make(map[tcpip.NICID]map[string]int32)
++	}
++	conf, ok := s.interfaceConf[id]
++	if !ok {
++		conf = make(map[string]int32)
++		s.interfaceConf[id] = conf
++	}
++	conf[interfaceConfKey(family, name)] = v
++	return nil
++}
++
++// InterfaceConfNames implements inet.NetSysctlStack.InterfaceConfNames.
++func (s *Stack) InterfaceConfNames(family uint8) []string {
++	return slices.Sorted(maps.Keys(interfaceConfDefaults[family]))
++}
++
++// forgetInterfaceConf drops the settings of interface id, which left this
++// stack, as Linux drops a device's configuration when it leaves a network
++// namespace.
++func (s *Stack) forgetInterfaceConf(id tcpip.NICID) {
++	s.sysctlMu.Lock()
++	defer s.sysctlMu.Unlock()
++	delete(s.interfaceConf, id)
++}
++
++// PingGroupRange implements inet.NetSysctlStack.PingGroupRange.
++func (s *Stack) PingGroupRange() (uint32, uint32) {
++	s.sysctlMu.Lock()
++	defer s.sysctlMu.Unlock()
++	if !s.pingGroupRangeSet {
++		return defaultPingGroupLow, defaultPingGroupHigh
++	}
++	return s.pingGroupRange[0], s.pingGroupRange[1]
++}
++
++// SetPingGroupRange implements inet.NetSysctlStack.SetPingGroupRange.
++func (s *Stack) SetPingGroupRange(low, high uint32) {
++	s.sysctlMu.Lock()
++	defer s.sysctlMu.Unlock()
++	s.pingGroupRange = [2]uint32{low, high}
++	s.pingGroupRangeSet = true
+ }
+ 
+ // NewStack creates a new netstack.Stack which wraps the given tcpip.Stack.
+@@ -231,6 +394,7 @@ func (s *Stack) RemoveInterface(ctx context.Context, idx int32) error {
+ 	if err := syserr.TranslateNetstackError(s.Stack.RemoveNIC(nic)); err != nil {
+ 		return err.ToError()
+ 	}
++	s.forgetInterfaceConf(nic)
+ 	s.sendDeleteEvent(ctx, nic, nicInfo)
+ 	return nil
+ 
+@@ -466,6 +630,7 @@ func (s *Stack) setLinkLocked(ctx context.Context, id tcpip.NICID, linkAttrs map
+ 			return syserr.TranslateNetstackError(err)
+ 		}
+ 
++		src.forgetInterfaceConf(oldID)
+ 		src.sendDeleteEvent(ctx, oldID, nicInfo) // inform about exit from old ns
+ 		changed = true                           // inform about entry into new ns
+ 
+diff --git a/test/syscalls/linux/BUILD b/test/syscalls/linux/BUILD
+index c7bec48..099bbe3 100644
+--- a/test/syscalls/linux/BUILD
++++ b/test/syscalls/linux/BUILD
+@@ -2487,6 +2487,7 @@ cc_binary(
+         "//test/util:file_descriptor",
+         "//test/util:fs_util",
+         "//test/util:logging",
++        "//test/util:multiprocess_util",
+         "//test/util:posix_error",
+         "//test/util:save_util",
+         "//test/util:socket_util",
+diff --git a/test/syscalls/linux/proc_net.cc b/test/syscalls/linux/proc_net.cc
+index 269a841..d4ae048 100644
+--- a/test/syscalls/linux/proc_net.cc
++++ b/test/syscalls/linux/proc_net.cc
+@@ -15,6 +15,7 @@
+ #include <arpa/inet.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <grp.h>
+ #include <linux/capability.h>
+ #include <netinet/in.h>
+ #include <poll.h>
+@@ -43,6 +44,7 @@
+ #include "absl/strings/str_cat.h"
+ #include "absl/strings/str_format.h"
+ #include "absl/strings/str_split.h"
++#include "absl/strings/ascii.h"
+ #include "absl/strings/string_view.h"
+ #include "absl/time/clock.h"
+ #include "absl/time/time.h"
+@@ -51,6 +53,7 @@
+ #include "test/util/fs_util.h"
+ #include "test/util/linux_capability_util.h"
+ #include "test/util/logging.h"
++#include "test/util/multiprocess_util.h"
+ #include "test/util/posix_error.h"
+ #include "test/util/save_util.h"
+ #include "test/util/socket_util.h"
+@@ -787,6 +790,182 @@ TEST(ProcSysNetPortRange, CanReadAndWrite) {
+   EXPECT_EQ(min + kSize, max);
+ }
+ 
++
++// EnterNewNetns moves the calling thread into a new network namespace and
++// returns a Cleanup that moves it back.
++PosixErrorOr<Cleanup> EnterNewNetns() {
++  ASSIGN_OR_RETURN_ERRNO(FileDescriptor netns,
++                         Open("/proc/thread-self/ns/net", O_RDONLY));
++  RETURN_ERROR_IF_SYSCALL_FAIL(unshare(CLONE_NEWNET));
++  const int fd = netns.release();
++  return Cleanup([fd] {
++    TEST_CHECK_SUCCESS(setns(fd, CLONE_NEWNET));
++    close(fd);
++  });
++}
++
++// /proc/sys/net/ipv4/conf and /proc/sys/net/ipv6/conf have a directory of
++// settings for each interface of the opener's network namespace, as Linux
++// registers one for each device in its namespace. Container engines and
++// network plugins, such as netavark, write some of them.
++TEST(ProcSysNet, InterfaceConf) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++
++  {
++    Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++    for (const char* conf : {"/proc/sys/net/ipv4/conf", "/proc/sys/net/ipv6/conf"}) {
++      // A new namespace has only lo.
++      EXPECT_THAT(ASSERT_NO_ERRNO_AND_VALUE(ListDir(conf, true)),
++                  ::testing::UnorderedElementsAre("all", "default", "lo"))
++          << conf;
++    }
++    for (const char* setting :
++         {"/proc/sys/net/ipv4/conf/lo/rp_filter",
++          "/proc/sys/net/ipv4/conf/lo/route_localnet",
++          "/proc/sys/net/ipv4/conf/lo/arp_notify",
++          "/proc/sys/net/ipv6/conf/lo/accept_dad",
++          "/proc/sys/net/ipv6/conf/lo/autoconf"}) {
++      int initial;
++      ASSERT_TRUE(absl::SimpleAtoi(
++          absl::StripTrailingAsciiWhitespace(
++              ASSERT_NO_ERRNO_AND_VALUE(GetContents(setting))),
++          &initial))
++          << setting;
++      const int want = initial == 2 ? 1 : 2;
++      ASSERT_NO_ERRNO(SetContents(setting, absl::StrCat(want, "\n")));
++      EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(setting)),
++                absl::StrCat(want, "\n"))
++          << setting;
++    }
++    // Forwarding is the interface's own.
++    for (const char* v : {"1\n", "0\n"}) {
++      ASSERT_NO_ERRNO(SetContents("/proc/sys/net/ipv4/conf/lo/forwarding", v));
++      EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(
++                    GetContents("/proc/sys/net/ipv4/conf/lo/forwarding")),
++                v);
++    }
++    EXPECT_THAT(Open("/proc/sys/net/ipv4/conf/nosuchdev0/rp_filter", O_RDONLY),
++                PosixErrorIs(ENOENT, ::testing::_));
++  }
++
++  // Another new namespace has its own lo, with the defaults.
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(
++                GetContents("/proc/sys/net/ipv4/conf/lo/arp_notify")),
++            "0\n");
++}
++
++// net.ipv4.ping_group_range belongs to the opener's network namespace and is
++// written as Linux's ipv4_ping_group_range() takes it.
++TEST(ProcSysNet, PingGroupRange) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++  constexpr char kPath[] = "/proc/sys/net/ipv4/ping_group_range";
++
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++  // Linux's default is no group; gVisor lets every group create ping sockets
++  // and says so.
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)),
++            IsRunningOnGvisor() ? "0\t4294967294\n" : "1\t0\n");
++
++  ASSERT_NO_ERRNO(SetContents(kPath, "0 0"));
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)), "0\t0\n");
++  // An empty range is kept as "1 0".
++  ASSERT_NO_ERRNO(SetContents(kPath, "5 2"));
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)), "1\t0\n");
++  ASSERT_NO_ERRNO(SetContents(kPath, "100 2147483648"));
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)),
++            "100\t2147483648\n");
++  // Only the first value given: the second is kept.
++  ASSERT_NO_ERRNO(SetContents(kPath, "200"));
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)),
++            "200\t2147483648\n");
++  // GID_T_MAX is the largest group.
++  EXPECT_THAT(SetContents(kPath, "0 4294967295"),
++              PosixErrorIs(EINVAL, ::testing::_));
++  EXPECT_THAT(SetContents(kPath, "-1 0"), PosixErrorIs(EINVAL, ::testing::_));
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)),
++            "200\t2147483648\n");
++
++  // Another namespace keeps its own.
++  Cleanup restore2 = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)),
++            IsRunningOnGvisor() ? "0\t4294967294\n" : "1\t0\n");
++}
++
++// A setting of /proc/sys/net/ipv4/conf/<interface> reached through a file
++// descriptor of its directory, kept across a change of network namespace, is
++// that directory's namespace's, as Linux's proc_sys_lookup() finds a
++// directory's entries in the directory's own sysctl header.
++TEST(ProcSysNet, InterfaceConfThroughDirectoryFD) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++  constexpr char kPath[] = "/proc/sys/net/ipv4/conf/lo/forwarding";
++
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++  // Keep this namespace alive once the thread leaves it: Linux unregisters
++  // a namespace's sysctls, and gVisor drops its interfaces, when it ends.
++  const FileDescriptor netns =
++      ASSERT_NO_ERRNO_AND_VALUE(Open("/proc/thread-self/ns/net", O_RDONLY));
++  const FileDescriptor dir = ASSERT_NO_ERRNO_AND_VALUE(
++      Open("/proc/sys/net/ipv4/conf/lo", O_RDONLY | O_DIRECTORY));
++  ASSERT_NO_ERRNO(SetContents(kPath, "1\n"));
++  {
++    Cleanup restore_other = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++    // Linux's new namespaces may inherit the initial one's value.
++    ASSERT_NO_ERRNO(SetContents(kPath, "0\n"));
++    const FileDescriptor fd =
++        ASSERT_NO_ERRNO_AND_VALUE(OpenAt(dir.get(), "forwarding", O_RDWR));
++    EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContentsFD(fd.get())), "1\n");
++    ASSERT_THAT(pwrite(fd.get(), "0\n", 2, 0), SyscallSucceedsWithValue(2));
++    ASSERT_NO_ERRNO(SetContents(kPath, "1\n"));
++    const FileDescriptor again =
++        ASSERT_NO_ERRNO_AND_VALUE(OpenAt(dir.get(), "forwarding", O_RDONLY));
++    EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContentsFD(again.get())), "0\n");
++    EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)), "1\n");
++  }
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(kPath)), "0\n");
++}
++
++// A process that may not write a /proc/sys/net setting cannot write it
++// through a file descriptor that a privileged one opened, as Linux's
++// proc_sys_call_handler() checks sysctl_perm() at every read and write.
++TEST(ProcSysNet, WriteChecksPermissionsAgain) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SETUID)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SETGID)));
++  SKIP_IF(IsRunningWithHostinet());
++
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++  for (const auto& [path, value] :
++       std::vector<std::pair<std::string, std::string>>{
++           {"/proc/sys/net/ipv4/conf/lo/forwarding", "1\n"},
++           {"/proc/sys/net/ipv4/ping_group_range", "0 0\n"}}) {
++    const std::string before = ASSERT_NO_ERRNO_AND_VALUE(GetContents(path));
++    const FileDescriptor fd = ASSERT_NO_ERRNO_AND_VALUE(Open(path, O_RDWR));
++    EXPECT_THAT(InForkedProcess([&] {
++                  TEST_PCHECK(setgroups(0, nullptr) == 0);
++                  TEST_PCHECK(setgid(65534) == 0);
++                  TEST_PCHECK(setuid(65534) == 0);
++                  TEST_CHECK(pwrite(fd.get(), value.data(), value.size(), 0) ==
++                             -1);
++                  TEST_CHECK(errno == EPERM);
++                }),
++                IsPosixErrorOkAndHolds(0))
++        << path;
++    EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(GetContents(path)), before) << path;
++    // The opener may still write through it.
++    ASSERT_THAT(pwrite(fd.get(), value.data(), value.size(), 0),
++                SyscallSucceedsWithValue(value.size()))
++        << path;
++  }
++}
++
+ }  // namespace
+ }  // namespace testing
+ }  // namespace gvisor

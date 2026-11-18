@@ -695,7 +695,7 @@ Sandbox runs under `runsc` unless it asks for `raw_sockets` or `nested_container
 entirely under `runsc-net-raw` or `runsc-nested`; no profile gives both, so a Sandbox that
 asks for both is refused before anything starts. Besides finding each name the Run's
 Sandboxes run under, registered with exactly those arguments, the preflight checks that
-`runsc --version` reports the build this engine runs (`+ale.0.1.2`, `VERSION` in its
+`runsc --version` reports the build this engine runs (`+ale.0.1.3`, `VERSION` in its
 `build.sh`; a stock `runsc` lacks the rootless and out-of-memory fixes) and, whenever GPUs
 may be attached, a Sandbox needing them or a Node whose profiles offer the Host's, that
 `runsc nvproxy list-supported-drivers` lists the Host's NVIDIA driver, and, whenever a
@@ -731,10 +731,11 @@ and `docker:29-dind`'s entrypoint each ran containers that reached the Internet,
 port to the sandbox, resolved each other on a network of their own, built an image and
 deleted files of their image, and `docker exec`, `stop` and `start` worked. Ubuntu's
 `docker.io` ships no init script, so `service docker start` fails for it under runc too.
-Podman 4.9.3 runs containers on the host network only: on a network of its own it fails as
-it binds the container's network namespace recursively (`mount --rbind /proc/<pid>/ns/net`,
-`EINVAL`, which Linux allows), and past that its bridge plugin sets hairpin mode (`operation
-not supported`) and netavark 1.4 makes a netlink request that fails with `EINVAL`.
+Rootful Podman runs on networks of its own too: Ubuntu 24.04's Podman 4.9.3 on its CNI
+backend and on netavark 1.4, Debian 13's 5.4.2 and Fedora 43's 5.8.9 on netavark's nftables
+driver each did all of that but `podman exec`, which crun, Podman's default OCI runtime,
+fails for want of cgroup v1's freezer; under `podman --runtime runc` it works too
+([gVisor runtime](../../../../../../images/runtimes/gvisor/README.md#container-engines-in-a-sandbox)).
 
 The filters and chains confine IPv4. The Provider creates a sandbox's network without IPv6;
 on a daemon that enables IPv6 on every new network, the Host's IPv6 address is outside the

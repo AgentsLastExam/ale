@@ -1,0 +1,242 @@
+netlink: take RTM_SETLINK as Linux's rtnl_setlink() does
+
+What: RTM_SETLINK changes an existing interface and nothing else: it ignores
+NLM_F_CREATE, NLM_F_EXCL and NLM_F_REPLACE, which only RTM_NEWLINK takes, as
+net/core/rtnetlink.c:rtnl_setlink() does. A request that names neither an
+index nor an interface name fails with EINVAL and one whose name no
+interface has with ENODEV, as in Linux; before, the first failed with EINVAL
+whenever NLM_F_CREATE was set, and with EEXIST on an existing interface when
+NLM_F_EXCL was. Under hostinet, whose RTM_SETLINK changes nothing, these flags
+no longer fail either.
+
+Why: netavark brings each link up with RTM_SETLINK and the flags
+NLM_F_ACK|NLM_F_EXCL|NLM_F_CREATE (src/network/netlink.rs, set_up(), in
+1.4.0, 1.14.0 and 1.17.2). Every Podman container on a netavark network
+failed at its first request, the loopback interface of its namespace:
+"netavark: Netlink error: Invalid argument (os error 22)".
+
+Upstream: none found (gVisor master of 2026-11-17 still fails such a request
+with EINVAL); drop this patch when upstream takes these flags as Linux does.
+
+Verified:
+- The new syscall test NetlinkRouteTest.SetLinkIgnoresNewLinkFlags, built in
+  gVisor's builder container and run as root with CAP_NET_ADMIN, CAP_NET_RAW
+  and CAP_SYS_ADMIN, passes on Linux 7.0 under runc and on runsc with this
+  patch, under the runtime arguments of runsc and of runsc-nested, and fails
+  on ALE's 0.1.2. The whole socket_netlink_route_test passes on runsc (126
+  tests with patches 0011 to 0014), as do
+  //pkg/sentry/socket/netlink/route:route_test and
+  //pkg/sentry/socket/netstack:netstack_test.
+- netavark 1.4.0 (Podman 4.9.3, Ubuntu 24.04), 1.14.0 (Podman 5.4.2, Debian
+  13) and 1.17.2 (Podman 5.8.9, Fedora 43) in sandboxes under runsc-nested
+  brought the container's loopback interface up; the next failure was
+  netavark's lookup of the host end of the veth (patch 0013).
+
+diff --git a/pkg/sentry/socket/hostinet/stack.go b/pkg/sentry/socket/hostinet/stack.go
+index 1e31fa2..ad937f1 100644
+--- a/pkg/sentry/socket/hostinet/stack.go
++++ b/pkg/sentry/socket/hostinet/stack.go
+@@ -288,8 +288,9 @@ func (s *Stack) SetInterface(ctx context.Context, msg *nlmsg.Message) *syserr.Er
+ 		return syserr.ErrNoDevice
+ 	}
+ 
+-	flags := msg.Header().Flags
+-	if flags&(linux.NLM_F_EXCL|linux.NLM_F_REPLACE) != 0 {
++	// Linux's rtnl_setlink ignores NLM_F_EXCL and NLM_F_REPLACE, which only
++	// RTM_NEWLINK takes.
++	if hdr := msg.Header(); hdr.Type != linux.RTM_SETLINK && hdr.Flags&(linux.NLM_F_EXCL|linux.NLM_F_REPLACE) != 0 {
+ 		return syserr.ErrExists
+ 	}
+ 
+diff --git a/pkg/sentry/socket/netlink/route/protocol.go b/pkg/sentry/socket/netlink/route/protocol.go
+index f89c5f8..6119e4b 100644
+--- a/pkg/sentry/socket/netlink/route/protocol.go
++++ b/pkg/sentry/socket/netlink/route/protocol.go
+@@ -193,10 +193,6 @@ func (p *Protocol) setLink(ctx context.Context, s *netlink.Socket, msg *nlmsg.Me
+ 		return p.setBridgePort(ctx, stack, ifi.Index, attrs)
+ 	}
+ 
+-	if msg.Header().Flags&linux.NLM_F_CREATE == linux.NLM_F_CREATE {
+-		return syserr.ErrInvalidArgument
+-	}
+-
+ 	return stack.SetInterface(ctx, msg)
+ }
+ 
+diff --git a/pkg/sentry/socket/netstack/stack.go b/pkg/sentry/socket/netstack/stack.go
+index b429974..cb56ada 100644
+--- a/pkg/sentry/socket/netstack/stack.go
++++ b/pkg/sentry/socket/netstack/stack.go
+@@ -235,16 +235,29 @@ func (s *Stack) SetInterface(ctx context.Context, msg *nlmsg.Message) *syserr.Er
+ 			return syserr.ErrNotSupported
+ 		}
+ 	}
+-	flags := msg.Header().Flags
+-	if ifinfomsg.Index == 0 {
+-		if flags&linux.NLM_F_CREATE != 0 {
+-			return s.newInterface(ctx, msg, attrs)
++	hdr := msg.Header()
++	if hdr.Type == linux.RTM_SETLINK {
++		// Linux's rtnl_setlink only changes an existing interface: it ignores
++		// NLM_F_CREATE, NLM_F_EXCL and NLM_F_REPLACE, which only RTM_NEWLINK
++		// takes, and fails with EINVAL when the request names no interface.
++		if ifinfomsg.Index == 0 {
++			if _, ok := attrs[linux.IFLA_IFNAME]; !ok {
++				return syserr.ErrInvalidArgument
++			}
++			return syserr.ErrNoDevice
++		}
++	} else {
++		flags := hdr.Flags
++		if ifinfomsg.Index == 0 {
++			if flags&linux.NLM_F_CREATE != 0 {
++				return s.newInterface(ctx, msg, attrs)
++			}
++			return syserr.ErrNoDevice
+ 		}
+-		return syserr.ErrNoDevice
+-	}
+ 
+-	if flags&(linux.NLM_F_EXCL|linux.NLM_F_REPLACE) != 0 {
+-		return syserr.ErrExists
++		if flags&(linux.NLM_F_EXCL|linux.NLM_F_REPLACE) != 0 {
++			return syserr.ErrExists
++		}
+ 	}
+ 
+ 	dstNs, err := s.lockSrcAndDst(ctx, attrs)
+diff --git a/test/syscalls/linux/socket_netlink_route.cc b/test/syscalls/linux/socket_netlink_route.cc
+index a920ce0..b267dc6 100644
+--- a/test/syscalls/linux/socket_netlink_route.cc
++++ b/test/syscalls/linux/socket_netlink_route.cc
+@@ -6154,6 +6154,130 @@ TEST(NetlinkRouteTest, NonGetRequestsRequireCapNetAdmin) {
+   EXPECT_TRUE(got_eperm) << "Did not get an EPERM from the kernel.";
+ }
+ 
++// EnterNewNetns moves the calling thread into a new network namespace and
++// returns a Cleanup that moves it back.
++PosixErrorOr<Cleanup> EnterNewNetns() {
++  ASSIGN_OR_RETURN_ERRNO(FileDescriptor netns,
++                         Open("/proc/thread-self/ns/net", O_RDONLY));
++  RETURN_ERROR_IF_SYSCALL_FAIL(unshare(CLONE_NEWNET));
++  const int fd = netns.release();
++  return Cleanup([fd] {
++    TEST_CHECK_SUCCESS(setns(fd, CLONE_NEWNET));
++    close(fd);
++  });
++}
++
++// LinkAttrs are the attributes of one link in an RTM_NEWLINK message.
++struct LinkAttrs {
++  int index = 0;
++  std::string name;
++  uint32_t link = 0;
++  uint32_t master = 0;
++  uint16_t nlmsg_flags = 0;
++};
++
++LinkAttrs ParseLinkAttrs(const struct nlmsghdr* hdr) {
++  LinkAttrs attrs;
++  attrs.nlmsg_flags = hdr->nlmsg_flags;
++  const struct ifinfomsg* ifi =
++      reinterpret_cast<const struct ifinfomsg*>(NLMSG_DATA(hdr));
++  attrs.index = ifi->ifi_index;
++  int len = IFLA_PAYLOAD(hdr);
++  for (const struct rtattr* rta = IFLA_RTA(ifi); RTA_OK(rta, len);
++       rta = RTA_NEXT(rta, len)) {
++    switch (rta->rta_type) {
++      case IFLA_IFNAME:
++        attrs.name = reinterpret_cast<const char*>(RTA_DATA(rta));
++        break;
++      case IFLA_LINK:
++        attrs.link = *reinterpret_cast<const uint32_t*>(RTA_DATA(rta));
++        break;
++      case IFLA_MASTER:
++        attrs.master = *reinterpret_cast<const uint32_t*>(RTA_DATA(rta));
++        break;
++    }
++  }
++  return attrs;
++}
++
++// DumpLinkAttrs dumps the links with request req, of length len, and returns
++// them by name.
++PosixErrorOr<std::map<std::string, LinkAttrs>> DumpLinkAttrs(
++    const FileDescriptor& fd, void* req, size_t len) {
++  std::map<std::string, LinkAttrs> links;
++  RETURN_IF_ERRNO(NetlinkRequestResponse(
++      fd, req, len,
++      [&](const struct nlmsghdr* hdr) {
++        if (hdr->nlmsg_type != RTM_NEWLINK) {
++          return;
++        }
++        LinkAttrs attrs = ParseLinkAttrs(hdr);
++        links[attrs.name] = attrs;
++      },
++      false));
++  return links;
++}
++
++PosixErrorOr<std::map<std::string, LinkAttrs>> DumpLinkAttrs(
++    const FileDescriptor& fd) {
++  struct {
++    struct nlmsghdr hdr;
++    struct ifinfomsg ifm;
++  } req = {};
++  req.hdr.nlmsg_len = sizeof(req);
++  req.hdr.nlmsg_type = RTM_GETLINK;
++  req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
++  req.hdr.nlmsg_seq = kSeq;
++  req.ifm.ifi_family = AF_UNSPEC;
++  return DumpLinkAttrs(fd, &req, sizeof(req));
++}
++
++// RTM_SETLINK changes an existing link only. Like Linux's rtnl_setlink(), it
++// ignores NLM_F_CREATE, NLM_F_EXCL and NLM_F_REPLACE, which netavark sets when
++// it brings a link up.
++TEST(NetlinkRouteTest, SetLinkIgnoresNewLinkFlags) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++
++  FileDescriptor fd =
++      ASSERT_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  const Link lo = ASSERT_NO_ERRNO_AND_VALUE(LoopbackLink());
++
++  struct {
++    struct nlmsghdr hdr;
++    struct ifinfomsg ifm;
++    char buf[64];
++  } req = {};
++  req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++  req.hdr.nlmsg_type = RTM_SETLINK;
++  req.hdr.nlmsg_flags =
++      NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE | NLM_F_REPLACE;
++  req.hdr.nlmsg_seq = kSeq;
++  req.ifm.ifi_family = AF_UNSPEC;
++  req.ifm.ifi_index = lo.index;
++  req.ifm.ifi_flags = IFF_UP;
++  req.ifm.ifi_change = IFF_UP;
++  EXPECT_NO_ERRNO(NetlinkRequestAckOrError(fd, kSeq, &req, req.hdr.nlmsg_len));
++  EXPECT_NE(ASSERT_NO_ERRNO_AND_VALUE(LoopbackLink()).flags & IFF_UP, 0);
++
++  // A name that no link has: ENODEV, and no link is created.
++  req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++  req.ifm.ifi_index = 0;
++  addattr(&req.hdr, sizeof(req), IFLA_IFNAME, "nosuchlink0",
++          strlen("nosuchlink0"));
++  EXPECT_THAT(NetlinkRequestAckOrError(fd, kSeq, &req, req.hdr.nlmsg_len),
++              PosixErrorIs(ENODEV, ::testing::_));
++  EXPECT_EQ(ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd)).count("nosuchlink0"),
++            0);
++
++  // Neither an index nor a name: EINVAL.
++  req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++  EXPECT_THAT(NetlinkRequestAckOrError(fd, kSeq, &req, req.hdr.nlmsg_len),
++              PosixErrorIs(EINVAL, ::testing::_));
++}
++
+ }  // namespace
+ 
+ }  // namespace testing

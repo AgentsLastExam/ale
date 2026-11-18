@@ -1,0 +1,453 @@
+nftables: meta mark set, sets of keys and anonymous sets
+
+What:
+- "meta mark set" sets a packet's mark from a register, as
+  net/netfilter/nft_meta.c:nft_meta_set_eval() does, instead of failing with
+  EOPNOTSUPP.
+- A set without data (no NFT_SET_MAP), whose elements are single keys, is
+  created, on the same hash backend as maps, as Linux's nft_set_hash; sets of
+  intervals, with timeouts or updated by rules are still refused with
+  EOPNOTSUPP.
+- A set named with one %d, as nft names its anonymous sets ("__set%d"), gets
+  the lowest number no set of its table has, as
+  net/netfilter/nf_tables_api.c:nf_tables_set_alloc_name() does; a name with
+  another conversion, or too long for NFT_SET_MAX_ANONLEN, is EINVAL. Before,
+  the name was kept as it is, so a second anonymous set in a table failed as
+  existing.
+- A lookup and a set element list find a set created in the same batch by
+  its transaction ID (NFTA_LOOKUP_SET_ID, NFTA_SET_ELEM_LIST_SET_ID), as
+  nft_set_lookup_global() does, instead of taking the ID for the set's handle.
+- An anonymous set that no rule is bound to at the end of a batch, once the
+  rule bound to it is deleted, is removed, as Linux removes it with its rule
+  (nf_tables_deactivate_set()).
+
+Why: netavark 1.14 and 1.17, whose nftables driver Debian 13's and Fedora
+43's Podman use, write "meta mark set meta mark | 0x2000" to mark connections
+for masquerading and "meta l4proto { udp, tcp }" for DNS. The first failed,
+and an anonymous set failed to be created: "Could not process rule:
+Operation not supported" ("only map sets are supported yet"); once it could
+be, the second container's batch failed, because the anonymous set of the
+first container's rule outlived the rule and kept the name.
+
+Not done: Linux refuses a batch that leaves a new anonymous set unbound
+(EINVAL); gVisor removes the set at the end of the batch instead.
+
+Upstream: none found (master still has only map sets, b/505409691); drop
+this patch when upstream has these.
+
+Verified:
+- The new unit tests TestEvaluateMetaSetMark, TestNewSetOfKeys and
+  TestAnonymousSets (names, transaction IDs, the end of a batch, a deleted
+  rule, invalid names) pass with the rest of
+  //pkg/tcpip/nftables:nftables_test in gVisor's builder container.
+  socket_netlink_netfilter_test passes on runsc with --TESTONLY-nftables
+  --net-raw (268 tests), as on ALE's 0.1.2.
+- netavark 1.14.0 (Podman 5.4.2, Debian 13) and 1.17.2 (Podman 5.8.9,
+  Fedora 43) in sandboxes under runsc-nested set up and tore down their rules
+  for container after container, and published ports.
+
+diff --git a/pkg/tcpip/nftables/nft_lookup.go b/pkg/tcpip/nftables/nft_lookup.go
+index 3274d7f..26dd545 100644
+--- a/pkg/tcpip/nftables/nft_lookup.go
++++ b/pkg/tcpip/nftables/nft_lookup.go
+@@ -167,16 +167,9 @@ func initLookup(tab *Table, exprInfo ExprInfo) (*lookupOp, *syserr.AnnotatedErro
+ 	}
+ 
+ 	setName := setAttr.String()
+-	set, ok := tab.sets[setName]
++	set, ok := tab.getSet(setName, lookupAttrs, linux.NFTA_LOOKUP_SET_ID)
+ 	if !ok {
+-		setID, ok := AttrNetToHost[uint32](linux.NFTA_LOOKUP_SET_ID, lookupAttrs)
+-		if !ok {
+-			return nil, syserr.NewAnnotatedError(syserr.ErrNoFileOrDir, "NFTA_LOOKUP_SET_ID attribute not found")
+-		}
+-		set, ok = tab.setHandles[uint64(setID)]
+-		if !ok {
+-			return nil, syserr.NewAnnotatedError(syserr.ErrNoFileOrDir, fmt.Sprintf("set with id %d not found", setID))
+-		}
++		return nil, syserr.NewAnnotatedError(syserr.ErrNoFileOrDir, fmt.Sprintf("set %q not found", setName))
+ 	}
+ 
+ 	sregIdx, err := regNumToIdx(uint8(sreg), int(set.keyLen))
+diff --git a/pkg/tcpip/nftables/nft_metaset.go b/pkg/tcpip/nftables/nft_metaset.go
+index a645cb1..b3b1016 100644
+--- a/pkg/tcpip/nftables/nft_metaset.go
++++ b/pkg/tcpip/nftables/nft_metaset.go
+@@ -15,6 +15,7 @@
+ package nftables
+ 
+ import (
++	"encoding/binary"
+ 	"fmt"
+ 
+ 	"gvisor.dev/gvisor/pkg/abi/linux"
+@@ -36,11 +37,10 @@ type metaSet struct {
+ func checkMetaKeySetCompatible(key metaKey) *syserr.AnnotatedError {
+ 	switch key {
+ 	// Supported meta keys.
+-	case linux.NFT_META_PKTTYPE:
++	case linux.NFT_META_PKTTYPE, linux.NFT_META_MARK:
+ 		return nil
+ 	// Should be supported but not yet implemented.
+-	case linux.NFT_META_MARK, linux.NFT_META_PRIORITY,
+-		linux.NFT_META_NFTRACE, linux.NFT_META_SECMARK:
++	case linux.NFT_META_PRIORITY, linux.NFT_META_NFTRACE, linux.NFT_META_SECMARK:
+ 
+ 		return syserr.NewAnnotatedError(syserr.ErrNotSupported, fmt.Sprintf("meta key %v is not supported", key))
+ 	// All other keys cannot be used with meta set (strictly for loading).
+@@ -66,11 +66,14 @@ func (op metaSet) evaluate(regs *registerSet, evalCtx opEvalCtx) {
+ 	src := regs.data[op.sregIdx : op.sregIdx+metaDataLengths[op.key]]
+ 
+ 	// Sets the meta data of the appropriate field.
++	// Ref: net/netfilter/nft_meta.c:nft_meta_set_eval()
+ 	switch op.key {
+-	// Only Packet Type is supported for now.
+ 	case linux.NFT_META_PKTTYPE:
+ 		evalCtx.pkt.PktType = tcpip.PacketType(src[0])
+ 		return
++	case linux.NFT_META_MARK:
++		evalCtx.pkt.Mark = binary.NativeEndian.Uint32(src)
++		return
+ 	}
+ }
+ 
+diff --git a/pkg/tcpip/nftables/nftables.go b/pkg/tcpip/nftables/nftables.go
+index d19d601..3365e13 100644
+--- a/pkg/tcpip/nftables/nftables.go
++++ b/pkg/tcpip/nftables/nftables.go
+@@ -18,6 +18,8 @@ import (
+ 	"fmt"
+ 	"math"
+ 	"slices"
++	"strconv"
++	"strings"
+ 
+ 	"gvisor.dev/gvisor/pkg/abi/linux"
+ 	"gvisor.dev/gvisor/pkg/atomicbitops"
+@@ -1035,8 +1037,67 @@ func (t *Table) pruneUnused() {
+ 	}
+ 	// Clear temporary transaction chain IDs.
+ 	t.ClearChainIDs()
++	// As Linux, an anonymous set lives as long as the rule bound to it: it
++	// is removed with that rule (net/netfilter/nf_tables_api.c:
++	// nf_tables_deactivate_set()), or at the end of the batch that created it
++	// if no rule was bound to it.
++	for _, s := range t.sets {
++		if s.flags&linux.NFT_SET_ANONYMOUS != 0 && len(s.bindings) == 0 {
++			t.deleteSet(s)
++		}
++	}
++	// Clear temporary transaction set IDs.
++	t.setIDs = nil
++}
++
++// getSet returns the set of t named name or, if there is none, the set created
++// in the current batch with the transaction ID in attrs[idAttr], as Linux's
++// net/netfilter/nf_tables_api.c:nft_set_lookup_global() does.
++func (t *Table) getSet(name string, attrs map[uint16]nlmsg.BytesView, idAttr uint16) (*nftSet, bool) {
++	if s, ok := t.sets[name]; ok {
++		return s, true
++	}
++	id, ok := AttrNetToHost[uint32](idAttr, attrs)
++	if !ok {
++		return nil, false
++	}
++	s, ok := t.setIDs[id]
++	return s, ok
+ }
+ 
++// allocSetName returns the name of a new set of t asked for as name. A name
++// with one %d, as nft gives an anonymous set, takes the lowest number that no
++// set of t has, as Linux's net/netfilter/nf_tables_api.c:
++// nf_tables_set_alloc_name() does.
++func (t *Table) allocSetName(name string) (string, *syserr.AnnotatedError) {
++	i := strings.IndexByte(name, '%')
++	if i < 0 {
++		return name, nil
++	}
++	if !strings.HasPrefix(name[i:], "%d") || strings.ContainsRune(name[i+2:], '%') || len(name) >= nftSetMaxAnonLen {
++		return "", syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("invalid set name %q", name))
++	}
++	prefix, suffix := name[:i], name[i+2:]
++	inUse := make(map[int]bool)
++	for existing := range t.sets {
++		if len(existing) <= len(prefix)+len(suffix) || !strings.HasPrefix(existing, prefix) || !strings.HasSuffix(existing, suffix) {
++			continue
++		}
++		if n, err := strconv.Atoi(existing[len(prefix) : len(existing)-len(suffix)]); err == nil && n >= 0 {
++			inUse[n] = true
++		}
++	}
++	n := 0
++	for inUse[n] {
++		n++
++	}
++	return fmt.Sprintf("%s%d%s", prefix, n, suffix), nil
++}
++
++// nftSetMaxAnonLen is Linux's NFT_SET_MAX_ANONLEN, the size of the buffer an
++// anonymous set's name is formatted in.
++const nftSetMaxAnonLen = 16
++
+ // GetChains returns a map of all chains for the table.
+ func (t *Table) GetChains() map[string]*Chain {
+ 	return t.chains
+diff --git a/pkg/tcpip/nftables/nftables_set.go b/pkg/tcpip/nftables/nftables_set.go
+index 9114085..819c9d7 100644
+--- a/pkg/tcpip/nftables/nftables_set.go
++++ b/pkg/tcpip/nftables/nftables_set.go
+@@ -424,6 +424,7 @@ func (nf *NFTables) NewSet(attrs map[uint16]nlmsg.BytesView, family stack.Addres
+ 	}
+ 
+ 	setName := setNameBytes.String()
++	setID, _ := AttrNetToHost[uint32](linux.NFTA_SET_ID, attrs)
+ 	newSet := &nftSet{
+ 		name:       setName,
+ 		keyType:    keyType,
+@@ -463,13 +464,29 @@ func (nf *NFTables) NewSet(attrs map[uint16]nlmsg.BytesView, family stack.Addres
+ 		return syserr.NewAnnotatedError(syserr.ErrNotSupported, "NLM_F_CREATE is required for set creation")
+ 	}
+ 
+-	// TODO: b/505409691 - Support non-map sets.
+-	if setFlags&linux.NFT_SET_MAP == 0 {
+-		return syserr.NewAnnotatedError(syserr.ErrNotSupported, "only map sets are supported yet")
++	// TODO: b/505409691 - Support the other non-map sets. A set of single
++	// keys without data is the map backend without data, a hash as Linux's
++	// nft_set_hash; sets of intervals, sets with timeouts and sets that rules
++	// update are not supported yet.
++	if setFlags&linux.NFT_SET_MAP == 0 &&
++		setFlags&(linux.NFT_SET_INTERVAL|linux.NFT_SET_TIMEOUT|linux.NFT_SET_EVAL|linux.NFT_SET_OBJECT) != 0 {
++		return syserr.NewAnnotatedError(syserr.ErrNotSupported, "only map sets and sets of single keys are supported yet")
+ 	}
+ 
++	name, err := tab.allocSetName(setName)
++	if err != nil {
++		return err
++	}
++	newSet.name = name
+ 	newSet.backend = nf.newSetMapBackend(int(keyLen), int(dataLen))
+-	return nf.addSetToTable(tab, newSet)
++	if err := nf.addSetToTable(tab, newSet); err != nil {
++		return err
++	}
++	if tab.setIDs == nil {
++		tab.setIDs = make(map[uint32]*nftSet)
++	}
++	tab.setIDs[setID] = newSet
++	return nil
+ }
+ 
+ // nftSetExprPolicy is the policy for parsing the set expression attributes.
+@@ -1007,7 +1024,7 @@ func (nf *NFTables) NewSetElements(atr nlmsg.AttrsView, family stack.AddressFami
+ 	}
+ 	setName := setNameBytes.String()
+ 	var set *nftSet
+-	if set, ok = tab.sets[setName]; !ok {
++	if set, ok = tab.getSet(setName, attrs, linux.NFTA_SET_ELEM_LIST_SET_ID); !ok {
+ 		return syserr.NewAnnotatedError(syserr.ErrInvalidArgument, "set does not exist")
+ 	}
+ 
+diff --git a/pkg/tcpip/nftables/nftables_test.go b/pkg/tcpip/nftables/nftables_test.go
+index d70400c..c033092 100644
+--- a/pkg/tcpip/nftables/nftables_test.go
++++ b/pkg/tcpip/nftables/nftables_test.go
+@@ -6880,3 +6880,184 @@ func TestCompatMultiportMatch(t *testing.T) {
+ 		t.Errorf("lookupMultiportRevision(0) = %v, want EPROTONOSUPPORT", err)
+ 	}
+ }
++
++// TestEvaluateMetaSetMark tests meta mark set, as
++// net/netfilter/nft_meta.c:nft_meta_set_eval() sets a packet's mark.
++func TestEvaluateMetaSetMark(t *testing.T) {
++	nf := newNFTablesStd()
++	tab, err := nf.AddTable(arbitraryFamily, "test", false)
++	if err != nil {
++		t.Fatalf("unexpected error for AddTable: %v", err)
++	}
++	bc, err := nf.AddChainToTable(tab, "base_chain", arbitraryInfoPolicyAccept, "test chain", false, 0, nil, linux.NF_ACCEPT)
++	if err != nil {
++		t.Fatalf("unexpected error for AddChain: %v", err)
++	}
++	mark := make([]byte, 4)
++	binary.NativeEndian.PutUint32(mark, 0x2000)
++	rule := &Rule{}
++	rule.addOperation(mustCreateImmediate(t, linux.NFT_REG32_01, mark, Verdict{}))
++	rule.addOperation(mustCreateMetaSet(t, linux.NFT_META_MARK, linux.NFT_REG32_01))
++	if err := bc.RegisterRule(rule, -1); err != nil {
++		t.Fatalf("unexpected error for RegisterRule: %v", err)
++	}
++	pkt := makeIPv4Packet(header.IPv4MinimumSize, arbitraryIPv4Fields())
++	defer pkt.DecRef()
++	pkt.Mark = 0x1
++	if _, err := nf.EvaluateHook(getAddrFamilyOrDefault(pkt, arbitraryFamily), arbitraryHook, pkt, nil /* route */); err != nil {
++		t.Fatalf("unexpected error for EvaluateHook: %v", err)
++	}
++	if pkt.Mark != 0x2000 {
++		t.Errorf("mark = %#x, want 0x2000", pkt.Mark)
++	}
++}
++
++// newSetTestTable returns an NFTables with one inet table for set tests.
++func newSetTestTable(tabName string) (*NFTables, *Table) {
++	nf := &NFTables{}
++	nf.filters[stack.Inet] = &addressFamilyFilter{
++		family: stack.Inet,
++		tables: make(map[string]*Table),
++	}
++	tab := &Table{
++		name:       tabName,
++		sets:       make(map[string]*nftSet),
++		setHandles: make(map[uint64]*nftSet),
++		afFilter:   nf.filters[stack.Inet],
++	}
++	nf.filters[stack.Inet].tables[tabName] = tab
++	return nf, tab
++}
++
++func be32(v uint32) nlmsg.BytesView {
++	return nlmsg.BytesView(binary.BigEndian.AppendUint32(nil, v))
++}
++
++// TestNewSetOfKeys tests sets without data, which netavark's anonymous sets,
++// such as "meta l4proto { udp, tcp }", are.
++func TestNewSetOfKeys(t *testing.T) {
++	for _, tc := range []struct {
++		name  string
++		flags uint16
++		want  *syserr.Error
++	}{
++		{name: "named", flags: 0},
++		{name: "anonymous constant", flags: linux.NFT_SET_ANONYMOUS | linux.NFT_SET_CONSTANT},
++		{name: "concatenation", flags: linux.NFT_SET_CONCAT, want: syserr.ErrInvalidArgument},
++		{name: "intervals", flags: linux.NFT_SET_INTERVAL, want: syserr.ErrNotSupported},
++		{name: "timeouts", flags: linux.NFT_SET_TIMEOUT, want: syserr.ErrNotSupported},
++		{name: "updated by rules", flags: linux.NFT_SET_EVAL, want: syserr.ErrNotSupported},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			nf, tab := newSetTestTable("t")
++			attrs := map[uint16]nlmsg.BytesView{
++				linux.NFTA_SET_TABLE:   nlmsg.BytesView("t"),
++				linux.NFTA_SET_NAME:    nlmsg.BytesView("s"),
++				linux.NFTA_SET_ID:      be32(1),
++				linux.NFTA_SET_KEY_LEN: be32(4),
++				linux.NFTA_SET_FLAGS:   be32(uint32(tc.flags)),
++			}
++			err := nf.NewSet(attrs, stack.Inet, linux.NLM_F_CREATE, &nlmsg.MessageSet{PortID: 100})
++			if tc.want != nil {
++				if err == nil || err.GetError() != tc.want {
++					t.Fatalf("NewSet = %v, want %v", err, tc.want)
++				}
++				return
++			}
++			if err != nil {
++				t.Fatalf("NewSet: %v", err)
++			}
++			s, ok := tab.sets["s"]
++			if !ok {
++				t.Fatalf("set s not created")
++			}
++			key := []byte{17, 0, 0, 0}
++			if _, err := s.backend.Add(&nftSetElem{startKey: key}, 0); err != nil {
++				t.Fatalf("Add: %v", err)
++			}
++			if got := s.backend.Find(key); got != 0 {
++				t.Errorf("Find(key) = %d, want 0", got)
++			}
++			if got := s.backend.Find([]byte{6, 0, 0, 0}); got != -1 {
++				t.Errorf("Find(other key) = %d, want -1", got)
++			}
++		})
++	}
++}
++
++// TestAnonymousSets tests the names, the transaction IDs and the lifetime of
++// anonymous sets, as nft creates them: named "__set%d", referred to by ID in
++// the batch that creates them, and bound to one rule.
++func TestAnonymousSets(t *testing.T) {
++	nf, tab := newSetTestTable("t")
++	newSet := func(name string, id uint32) *syserr.AnnotatedError {
++		return nf.NewSet(map[uint16]nlmsg.BytesView{
++			linux.NFTA_SET_TABLE:   nlmsg.BytesView("t"),
++			linux.NFTA_SET_NAME:    nlmsg.BytesView(name),
++			linux.NFTA_SET_ID:      be32(id),
++			linux.NFTA_SET_KEY_LEN: be32(4),
++			linux.NFTA_SET_FLAGS:   be32(uint32(linux.NFT_SET_ANONYMOUS | linux.NFT_SET_CONSTANT)),
++		}, stack.Inet, linux.NLM_F_CREATE, &nlmsg.MessageSet{PortID: 100})
++	}
++	byID := func(id uint32) map[uint16]nlmsg.BytesView {
++		return map[uint16]nlmsg.BytesView{linux.NFTA_LOOKUP_SET_ID: be32(id)}
++	}
++
++	// Two anonymous sets in one batch get the lowest free numbers.
++	for _, id := range []uint32{7, 8} {
++		if err := newSet("__set%d", id); err != nil {
++			t.Fatalf("NewSet(__set%%d, %d): %v", id, err)
++		}
++	}
++	for id, want := range map[uint32]string{7: "__set0", 8: "__set1"} {
++		s, ok := tab.getSet("__set%d", byID(id), linux.NFTA_LOOKUP_SET_ID)
++		if !ok || s.name != want {
++			t.Fatalf("set of ID %d = %v, %v; want %s", id, s, ok, want)
++		}
++	}
++	if _, ok := tab.getSet("__set%d", byID(9), linux.NFTA_LOOKUP_SET_ID); ok {
++		t.Errorf("found a set of unknown ID 9")
++	}
++	if s, ok := tab.getSet("__set1", nil, linux.NFTA_LOOKUP_SET_ID); !ok || s.name != "__set1" {
++		t.Errorf("getSet(__set1) = %v, %v; want __set1", s, ok)
++	}
++
++	// Bind __set1 to a rule's lookup; the batch ends.
++	bound := tab.sets["__set1"]
++	lookup := &lookupOp{set: bound}
++	bound.bindings = append(bound.bindings, lookup)
++	nf.PruneUnused()
++	if _, ok := tab.sets["__set0"]; ok {
++		t.Errorf("unbound anonymous set __set0 kept at the end of the batch")
++	}
++	if _, ok := tab.sets["__set1"]; !ok {
++		t.Fatalf("bound anonymous set __set1 removed at the end of the batch")
++	}
++	if _, ok := tab.getSet("__set%d", byID(8), linux.NFTA_LOOKUP_SET_ID); ok {
++		t.Errorf("transaction ID 8 still names a set after its batch")
++	}
++
++	// A later batch reuses the free number; the rule's deletion removes its
++	// set.
++	if err := newSet("__set%d", 7); err != nil {
++		t.Fatalf("NewSet: %v", err)
++	}
++	if s, ok := tab.getSet("__set%d", byID(7), linux.NFTA_LOOKUP_SET_ID); !ok || s.name != "__set0" {
++		t.Fatalf("set of ID 7 = %v, %v; want __set0", s, ok)
++	}
++	tab.sets["__set0"].bindings = append(tab.sets["__set0"].bindings, &lookupOp{set: tab.sets["__set0"]})
++	lookup.destroy()
++	nf.PruneUnused()
++	if _, ok := tab.sets["__set1"]; ok {
++		t.Errorf("anonymous set __set1 kept after the rule bound to it was deleted")
++	}
++	if _, ok := tab.sets["__set0"]; !ok {
++		t.Errorf("bound anonymous set __set0 removed")
++	}
++
++	for _, name := range []string{"__set%s", "__set%d%d", "a%d%%", "__longer_name_%d"} {
++		if err := newSet(name, 1); err == nil || err.GetError() != syserr.ErrInvalidArgument {
++			t.Errorf("NewSet(%q) = %v, want EINVAL", name, err)
++		}
++	}
++}
+diff --git a/pkg/tcpip/nftables/nftables_types.go b/pkg/tcpip/nftables/nftables_types.go
+index 1ba75f0..b9b2411 100644
+--- a/pkg/tcpip/nftables/nftables_types.go
++++ b/pkg/tcpip/nftables/nftables_types.go
+@@ -316,6 +316,10 @@ type Table struct {
+ 	sets       map[string]*nftSet
+ 	setHandles map[uint64]*nftSet
+ 
++	// setIDs is a map of temporary transaction set IDs (NFTA_SET_ID) to the
++	// sets created in the current batch.
++	setIDs map[uint32]*nftSet
++
+ 	// handleCounter is the counter for chain and rule handles.
+ 	handleCounter atomicbitops.Uint64
+ 

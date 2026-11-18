@@ -1,0 +1,780 @@
+netlink: NETLINK_GET_STRICT_CHK and the filters of dumps
+
+What:
+- NETLINK_GET_STRICT_CHK is a flag of a netlink socket that setsockopt(2)
+  sets and getsockopt(2) reads, as net/netlink/af_netlink.c keeps
+  NETLINK_F_STRICT_CHK (a value shorter than an int clears it; reading it
+  into less than an int is EINVAL), instead of ENOPROTOOPT.
+- With it, an address dump has only the addresses of the interface that
+  ifa_index names, and a route dump only the routes of RTM_F_CLONED (none:
+  netstack has no route cache), the table (rtm_table or RTA_TABLE), the
+  protocol, the type and the output interface (RTA_OIF) it names, as
+  net/ipv4/devinet.c:inet_dump_ifaddr(), net/ipv6/addrconf.c:inet6_dump_addr()
+  and net/ipv4/fib_frontend.c:ip_valid_fib_dump_req() take them; an
+  interface that does not exist ends the dump with ENODEV.
+- With or without it, a link dump has only the links whose master IFLA_MASTER
+  names (-1 for none) and whose kind IFLA_LINKINFO's IFLA_INFO_KIND names (of
+  the kinds gVisor creates, bridge and veth), as
+  net/core/rtnetlink.c:rtnl_dump_ifinfo() does.
+- NLM_F_DUMP_FILTERED marks, as in Linux, the messages of a link dump with a
+  filter (not its NLMSG_DONE), the messages and NLMSG_DONE of an address
+  dump filtered by ifa_index (cb->answer_flags), and, under strict checking,
+  every message of a route dump, as Linux dumps no route exceptions then,
+  and NLMSG_DONE when the request has a filter (ip_valid_fib_dump_req()). A
+  dump that fails ends with its error in the payload of NLMSG_DONE, as
+  Linux's netlink_dump() sends dump_done_errno, instead of always 0.
+
+Why: netavark 1.17 sets NETLINK_GET_STRICT_CHK on every netlink socket and
+fails without it (src/network/netlink.rs: "Needs to be enabled for dump
+filtering to work"): "netavark: host netlink socket: IO error: Protocol not
+available (os error 92)". netavark of every version finds out whether a
+bridge has ports left, when a container leaves it, with a link dump filtered
+by IFLA_MASTER, and removes the bridge when there is none; gVisor returned
+every link, so no bridge was ever removed. netavark 1.17 also reads a
+bridge's addresses with a dump filtered by ifa_index.
+
+Not done: Linux rejects, under strict checking, a dump request whose header
+has values it does not filter on or whose attributes it does not know
+(EINVAL); gVisor takes them as before. A table that does not exist is an
+empty dump rather than ENOENT.
+
+Upstream: none found for these (upstream PRs 15949 and 16090, in
+release-20261109.0, made dumps honor the requested family); drop this patch
+when upstream has them.
+
+Verified:
+- The new syscall tests NetlinkRouteTest.GetStrictCheck, .GetLinkDumpFilters,
+  .GetAddrDumpFilteredByIndexWithStrictCheck and
+  .GetRouteDumpFilteredByOifWithStrictCheck (the dumped entries and the
+  NLM_F_DUMP_FILTERED of messages and NLMSG_DONE) pass on Linux 7.0 under runc
+  and on runsc with this patch, under the runtime arguments of runsc and of
+  runsc-nested, and fail on ALE's 0.1.2. The whole socket_netlink_route_test
+  passes on runsc (126 tests), as does
+  //pkg/sentry/socket/netlink/route:route_test.
+- netavark 1.17.2 (Podman 5.8.9, Fedora 43) in a sandbox under runsc-nested
+  opened its sockets and set up its bridge; it and netavark 1.4.0 (Podman
+  4.9.3, Ubuntu 24.04) removed their bridge when its last container stopped,
+  as on Linux.
+
+diff --git a/pkg/abi/linux/netlink.go b/pkg/abi/linux/netlink.go
+index b3061ca..073ffa9 100644
+--- a/pkg/abi/linux/netlink.go
++++ b/pkg/abi/linux/netlink.go
+@@ -79,6 +79,9 @@ const (
+ 	NLM_F_ACK       = 0x4
+ 	NLM_F_ECHO      = 0x8
+ 	NLM_F_DUMP_INTR = 0x10
++
++	// NLM_F_DUMP_FILTERED marks a dump that the request's filters applied to.
++	NLM_F_DUMP_FILTERED = 0x20
+ )
+ 
+ // Netlink message header flags for GET requests, from uapi/linux/netlink.h.
+diff --git a/pkg/sentry/socket/netlink/nlmsg/message.go b/pkg/sentry/socket/netlink/nlmsg/message.go
+index 43b6263..f9a89a1 100644
+--- a/pkg/sentry/socket/netlink/nlmsg/message.go
++++ b/pkg/sentry/socket/netlink/nlmsg/message.go
+@@ -258,6 +258,15 @@ type MessageSet struct {
+ 
+ 	// ContainsError indicates that the message set contains at least one error.
+ 	ContainsError bool
++
++	// DoneErrno is the result of a multi-part message: the negated errno
++	// with which a dump ended, or 0. It is the payload of NLMSG_DONE, as
++	// Linux's netlink_dump() sends dump_done_errno.
++	DoneErrno int32
++
++	// DoneFlags are flags that NLMSG_DONE carries besides NLM_F_MULTI, as
++	// Linux's netlink_dump_done() adds the dump's cb->answer_flags.
++	DoneFlags uint16
+ }
+ 
+ // NewMessageSet creates a new MessageSet.
+diff --git a/pkg/sentry/socket/netlink/route/protocol.go b/pkg/sentry/socket/netlink/route/protocol.go
+index 72c39db..62b061c 100644
+--- a/pkg/sentry/socket/netlink/route/protocol.go
++++ b/pkg/sentry/socket/netlink/route/protocol.go
+@@ -100,14 +100,84 @@ func (p *Protocol) dumpLinks(ctx context.Context, s *netlink.Socket, msg *nlmsg.
+ 		return nil
+ 	}
+ 
++	master, kind, filtered := linkDumpFilter(msg)
+ 	ifaces := stack.Interfaces()
+ 	for _, idx := range stack.InterfaceIDs() {
+-		p.AddNewLinkMessage(ms, idx, ifaces[idx])
++		i := ifaces[idx]
++		if linkDumpFiltered(i, master, kind) {
++			continue
++		}
++		var flags uint16
++		if filtered {
++			flags = linux.NLM_F_DUMP_FILTERED
++		}
++		m := ms.AddMessage(linux.NetlinkMessageHeader{
++			Type:  linux.RTM_NEWLINK,
++			Flags: flags,
++		})
++		writeLinkInfo(m, idx, i)
+ 	}
+ 
+ 	return nil
+ }
+ 
++// linkDumpFilter returns the filters of an RTM_GETLINK dump request, as Linux's
++// rtnl_dump_ifinfo reads them: the index of the master that the dumped links
++// must have (IFLA_MASTER; -1 for none, 0 for any) and the kind they must be
++// (IFLA_INFO_KIND in IFLA_LINKINFO), which filters only for a kind of link that
++// can be created. A request shorter than an ifinfomsg, the rtgenmsg of
++// iproute2 before 3.9 and of glibc, has no filters.
++func linkDumpFilter(msg *nlmsg.Message) (master int32, kind string, filtered bool) {
++	var ifi linux.InterfaceInfoMessage
++	attrs, ok := msg.GetData(&ifi)
++	if !ok {
++		return 0, "", false
++	}
++	for !attrs.Empty() {
++		hdr, value, rest, ok := attrs.ParseFirst()
++		if !ok {
++			break
++		}
++		attrs = rest
++		switch hdr.Type &^ linux.NLA_F_NESTED {
++		case linux.IFLA_MASTER:
++			v := nlmsg.BytesView(value)
++			if m, ok := v.Uint32(); ok {
++				master = int32(m)
++			}
++		case linux.IFLA_LINKINFO:
++			info := nlmsg.AttrsView(value)
++			for !info.Empty() {
++				ihdr, ivalue, irest, ok := info.ParseFirst()
++				if !ok {
++					break
++				}
++				info = irest
++				if ihdr.Type == linux.IFLA_INFO_KIND {
++					v := nlmsg.BytesView(ivalue)
++					switch k := v.String(); k {
++					case "bridge", "veth":
++						kind = k
++					}
++				}
++			}
++		}
++	}
++	return master, kind, master != 0 || kind != ""
++}
++
++// linkDumpFiltered returns whether a link dump with the given filters leaves
++// out interface i, as Linux's link_dump_filtered does.
++func linkDumpFiltered(i inet.Interface, master int32, kind string) bool {
++	switch {
++	case master == -1 && i.Master != 0:
++		return true
++	case master > 0 && i.Master != uint32(master):
++		return true
++	}
++	return kind != "" && i.Kind != kind
++}
++
+ // getLinks handles RTM_GETLINK requests.
+ func (p *Protocol) getLink(ctx context.Context, s *netlink.Socket, msg *nlmsg.Message, ms *nlmsg.MessageSet) *syserr.Error {
+ 	stack := s.Stack()
+@@ -422,13 +492,37 @@ func (p *Protocol) dumpAddrs(ctx context.Context, s *netlink.Socket, msg *nlmsg.
+ 
+ 	ifAddrs := stack.InterfaceAddrs()
+ 	interfaces := stack.Interfaces()
++	// With NETLINK_GET_STRICT_CHK, Linux's inet_dump_ifaddr() and
++	// inet6_dump_addr() dump only the addresses of the interface ifa_index
++	// names, if any, and end the dump with ENODEV if there is none.
++	var index int32
++	if s.StrictCheck() {
++		var ifa linux.InterfaceAddrMessage
++		if _, ok := msg.GetData(&ifa); ok && ifa.Index != 0 {
++			index = int32(ifa.Index)
++			if _, ok := interfaces[index]; !ok {
++				ms.DoneErrno = int32(-syserr.ErrNoDevice.ToLinux())
++				return nil
++			}
++		}
++	}
++	// Linux marks the messages of a filtered address dump, and its
++	// NLMSG_DONE (cb->answer_flags), with NLM_F_DUMP_FILTERED.
++	var nlFlags uint16
++	if index != 0 {
++		nlFlags = linux.NLM_F_DUMP_FILTERED
++		ms.DoneFlags = linux.NLM_F_DUMP_FILTERED
++	}
+ 	for _, id := range stack.InterfaceIDs() {
++		if index != 0 && id != index {
++			continue
++		}
+ 		iface := interfaces[id]
+ 		for _, a := range ifAddrs[id] {
+ 			if family != linux.AF_UNSPEC && a.Family != family {
+ 				continue
+ 			}
+-			p.AddAddrMessage(ms, linux.RTM_NEWADDR, id, iface, a)
++			p.addAddrMessage(ms, linux.RTM_NEWADDR, nlFlags, id, iface, a)
+ 		}
+ 	}
+ 
+@@ -440,12 +534,18 @@ func (p *Protocol) dumpAddrs(ctx context.Context, s *netlink.Socket, msg *nlmsg.
+ // as the RTM_GETADDR dump.
+ // AddAddrMessage implements netlink.RouteProtocol.AddAddrMessage.
+ func (p *Protocol) AddAddrMessage(ms *nlmsg.MessageSet, typ uint16, idx int32, i inet.Interface, a inet.InterfaceAddr) {
++	p.addAddrMessage(ms, typ, 0, idx, i, a)
++}
++
++// addAddrMessage is AddAddrMessage with the message's flags.
++func (p *Protocol) addAddrMessage(ms *nlmsg.MessageSet, typ uint16, nlFlags uint16, idx int32, i inet.Interface, a inet.InterfaceAddr) {
+ 	scope := linux.RT_SCOPE_UNIVERSE
+ 	if (i.Flags & linux.IFF_LOOPBACK) != 0 {
+ 		scope = linux.RT_SCOPE_HOST
+ 	}
+ 	m := ms.AddMessage(linux.NetlinkMessageHeader{
+-		Type: typ,
++		Type:  typ,
++		Flags: nlFlags,
+ 	})
+ 
+ 	m.Put(&linux.InterfaceAddrMessage{
+@@ -613,18 +713,39 @@ func (p *Protocol) dumpRoutes(ctx context.Context, s *netlink.Socket, msg *nlmsg
+ 	hdr := msg.Header()
+ 	routeTables := stack.RouteTable()
+ 
++	var nlFlags uint16
+ 	if hdr.Flags&(linux.NLM_F_DUMP|linux.NLM_F_ROOT) != 0 {
+ 		// We always send back an NLMSG_DONE.
+ 		ms.Multi = true
+-		if family := dumpFamily(msg); family != linux.AF_UNSPEC {
+-			var familyRoutes []inet.Route
+-			for _, rt := range routeTables {
+-				if rt.Family == family {
+-					familyRoutes = append(familyRoutes, rt)
+-				}
++		family := dumpFamily(msg)
++		filter, err := routeDumpFilter(s, stack, msg)
++		if err != nil {
++			// As Linux's netlink_dump(), a dump that fails ends with the
++			// error in NLMSG_DONE.
++			ms.DoneErrno = int32(-err.ToLinux())
++			return nil
++		}
++		// Under strict checking Linux dumps no route exceptions (or, with
++		// RTM_F_CLONED, only them), so it marks every route with
++		// NLM_F_DUMP_FILTERED, and NLMSG_DONE (cb->answer_flags) when the
++		// request has a filter (ip_valid_fib_dump_req()).
++		if s.StrictCheck() {
++			nlFlags = linux.NLM_F_DUMP_FILTERED
++		}
++		if filter.set {
++			ms.DoneFlags = linux.NLM_F_DUMP_FILTERED
++		}
++		var dumped []inet.Route
++		for _, rt := range routeTables {
++			if family != linux.AF_UNSPEC && rt.Family != family {
++				continue
+ 			}
+-			routeTables = familyRoutes
++			if filter.filtered(rt) {
++				continue
++			}
++			dumped = append(dumped, rt)
+ 		}
++		routeTables = dumped
+ 	} else if hdr.Flags&linux.NLM_F_REQUEST != 0 {
+ 		family, dst, err := parseForDestination(msg)
+ 		if err != nil {
+@@ -650,12 +771,83 @@ func (p *Protocol) dumpRoutes(ctx context.Context, s *netlink.Socket, msg *nlmsg
+ 				}
+ 			}
+ 		}
+-		p.AddRouteMessage(ms, linux.RTM_NEWROUTE, 0, rt, prefSrc)
++		p.AddRouteMessage(ms, linux.RTM_NEWROUTE, nlFlags, rt, prefSrc)
+ 	}
+ 
+ 	return nil
+ }
+ 
++// routeFilter holds the filters of an RTM_GETROUTE dump request.
++type routeFilter struct {
++	set      bool
++	cloned   bool
++	table    uint32
++	protocol uint8
++	typ      uint8
++	oif      int32
++}
++
++// routeDumpFilter returns the filters of an RTM_GETROUTE dump request from a
++// socket with NETLINK_GET_STRICT_CHK, as Linux's ip_valid_fib_dump_req() takes
++// them for inet_dump_fib() and inet6_dump_fib(): RTM_F_CLONED, the table, the
++// protocol and the type of the header, and the table (RTA_TABLE) and output
++// interface (RTA_OIF) attributes.
++func routeDumpFilter(s *netlink.Socket, stack inet.Stack, msg *nlmsg.Message) (routeFilter, *syserr.Error) {
++	var f routeFilter
++	if !s.StrictCheck() {
++		return f, nil
++	}
++	var rtm linux.RouteMessage
++	attrs, ok := msg.GetData(&rtm)
++	if !ok {
++		return f, nil
++	}
++	f.cloned = rtm.Flags&linux.RTM_F_CLONED != 0
++	f.table, f.protocol, f.typ = uint32(rtm.Table), rtm.Protocol, rtm.Type
++	for !attrs.Empty() {
++		hdr, value, rest, ok := attrs.ParseFirst()
++		if !ok {
++			break
++		}
++		attrs = rest
++		v := nlmsg.BytesView(value)
++		switch hdr.Type {
++		case linux.RTA_TABLE:
++			if table, ok := v.Uint32(); ok {
++				f.table = table
++			}
++		case linux.RTA_OIF:
++			if oif, ok := v.Uint32(); ok {
++				if _, ok := stack.Interfaces()[int32(oif)]; !ok {
++					return f, syserr.ErrNoDevice
++				}
++				f.oif = int32(oif)
++			}
++		}
++	}
++	f.set = f.cloned || f.table != 0 || f.protocol != 0 || f.typ != 0 || f.oif != 0
++	return f, nil
++}
++
++// filtered returns whether a route dump with filter f leaves out rt, as
++// Linux's fib dump functions (fn_trie_dump_leaf(), fib6_dump_node()) do.
++// Netstack has no route cache, so a dump of cloned routes is empty.
++func (f *routeFilter) filtered(rt inet.Route) bool {
++	switch {
++	case f.cloned:
++		return true
++	case f.table != 0 && uint32(rt.Table) != f.table:
++		return true
++	case f.protocol != 0 && rt.Protocol != f.protocol:
++		return true
++	case f.typ != 0 && rt.Type != f.typ:
++		return true
++	case f.oif != 0 && rt.OutputInterface != f.oif:
++		return true
++	}
++	return false
++}
++
+ // AddRouteMessage appends an RTM_NEWROUTE or RTM_DELROUTE (typ) message for rt
+ // into the message set. It produces the same layout as the
+ // RTM_GETROUTE dump. RTA_PREFSRC is added if prefSrc is non-empty.
+diff --git a/pkg/sentry/socket/netlink/socket.go b/pkg/sentry/socket/netlink/socket.go
+index 7ff9288..a0d7f1a 100644
+--- a/pkg/sentry/socket/netlink/socket.go
++++ b/pkg/sentry/socket/netlink/socket.go
+@@ -108,6 +108,11 @@ type Socket struct {
+ 	// A netlink socket is immutably bound to a network namespace.
+ 	netns *inet.Namespace
+ 
++	// strictCheck is set by NETLINK_GET_STRICT_CHK: as Linux's
++	// NETLINK_F_STRICT_CHK, it asks the protocol to apply the filters of a
++	// dump request.
++	strictCheck atomicbitops.Bool
++
+ 	// groups is a bitmap of the set of multicast groups this socket is bound to.
+ 	// Writing to it requires the per-netns table lock to be held, reading it does not.
+ 	groups atomicbitops.Uint64
+@@ -283,6 +288,11 @@ func (s *Socket) EventUnregister(e *waiter.Entry) {
+ 	s.ep.EventUnregister(e)
+ }
+ 
++// StrictCheck returns whether NETLINK_GET_STRICT_CHK is set on s.
++func (s *Socket) StrictCheck() bool {
++	return s.strictCheck.Load()
++}
++
+ // Passcred implements transport.Credentialer.Passcred.
+ func (s *Socket) Passcred() bool {
+ 	return s.ep.SocketOptions().GetPassCred()
+@@ -559,7 +569,7 @@ func (s *Socket) Shutdown(t *kernel.Task, how int) *syserr.Error {
+ }
+ 
+ // GetSockOpt implements socket.Socket.GetSockOpt.
+-func (s *Socket) GetSockOpt(t *kernel.Task, level int, name int, outPtr hostarch.Addr, _ int) (marshal.Marshallable, *syserr.Error) {
++func (s *Socket) GetSockOpt(t *kernel.Task, level int, name int, outPtr hostarch.Addr, outLen int) (marshal.Marshallable, *syserr.Error) {
+ 	switch level {
+ 	case linux.SOL_SOCKET:
+ 		switch name {
+@@ -592,9 +602,19 @@ func (s *Socket) GetSockOpt(t *kernel.Task, level int, name int, outPtr hostarch
+ 		case linux.NETLINK_LIST_MEMBERSHIPS:
+ 			return &memberships{Uint64: primitive.Uint64(s.groups.Load())}, nil
+ 
++		case linux.NETLINK_DUMP_STRICT_CHK:
++			// As Linux's netlink_getsockopt.
++			if outLen < sizeOfInt32 {
++				return nil, syserr.ErrInvalidArgument
++			}
++			var v primitive.Int32
++			if s.strictCheck.Load() {
++				v = 1
++			}
++			return &v, nil
++
+ 		case linux.NETLINK_BROADCAST_ERROR,
+ 			linux.NETLINK_CAP_ACK,
+-			linux.NETLINK_DUMP_STRICT_CHK,
+ 			linux.NETLINK_EXT_ACK,
+ 			linux.NETLINK_NO_ENOBUFS,
+ 			linux.NETLINK_PKTINFO:
+@@ -741,9 +761,18 @@ func (s *Socket) SetSockOpt(t *kernel.Task, level int, name int, opt []byte) *sy
+ 			})
+ 			return err
+ 
++		case linux.NETLINK_DUMP_STRICT_CHK:
++			// As Linux's netlink_setsockopt, which takes a shorter value
++			// as 0.
++			var v uint32
++			if len(opt) >= sizeOfInt32 {
++				v = hostarch.ByteOrder.Uint32(opt)
++			}
++			s.strictCheck.Store(v != 0)
++			return nil
++
+ 		case linux.NETLINK_BROADCAST_ERROR,
+ 			linux.NETLINK_CAP_ACK,
+-			linux.NETLINK_DUMP_STRICT_CHK,
+ 			linux.NETLINK_EXT_ACK,
+ 			linux.NETLINK_LISTEN_ALL_NSID,
+ 			linux.NETLINK_NO_ENOBUFS,
+@@ -924,13 +953,13 @@ func (s *Socket) SendResponse(ctx context.Context, ms *nlmsg.MessageSet) *syserr
+ 	if ms.Multi {
+ 		m := nlmsg.NewMessage(linux.NetlinkMessageHeader{
+ 			Type:   linux.NLMSG_DONE,
+-			Flags:  linux.NLM_F_MULTI,
++			Flags:  linux.NLM_F_MULTI | ms.DoneFlags,
+ 			Seq:    ms.Seq,
+ 			PortID: uint32(ms.PortID),
+ 		})
+ 
+ 		// Add the dump_done_errno payload.
+-		m.Put(primitive.AllocateInt32(0))
++		m.Put(primitive.AllocateInt32(ms.DoneErrno))
+ 
+ 		if err := s.sendBufs(ctx, [][]byte{m.Finalize()}, cms, 0 /* srcPort */); err != nil {
+ 			return err
+diff --git a/test/syscalls/linux/socket_netlink_route.cc b/test/syscalls/linux/socket_netlink_route.cc
+index f4f8b0f..e2a62a2 100644
+--- a/test/syscalls/linux/socket_netlink_route.cc
++++ b/test/syscalls/linux/socket_netlink_route.cc
+@@ -6379,6 +6379,308 @@ TEST(NetlinkRouteTest, VethLink) {
+   EXPECT_EQ(links_b["vlink6"].link, links_a["vlink5"].index);
+ }
+ 
++// NETLINK_GET_STRICT_CHK is a flag of the socket, as Linux's
++// netlink_setsockopt() and netlink_getsockopt() keep it.
++TEST(NetlinkRouteTest, GetStrictCheck) {
++  FileDescriptor fd =
++      ASSERT_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  int val = -1;
++  socklen_t len = sizeof(val);
++  ASSERT_THAT(getsockopt(fd.get(), SOL_NETLINK, NETLINK_GET_STRICT_CHK, &val,
++                         &len),
++              SyscallSucceeds());
++  EXPECT_EQ(len, sizeof(val));
++  EXPECT_EQ(val, 0);
++
++  val = 1;
++  ASSERT_THAT(setsockopt(fd.get(), SOL_NETLINK, NETLINK_GET_STRICT_CHK, &val,
++                         sizeof(val)),
++              SyscallSucceeds());
++  val = -1;
++  ASSERT_THAT(getsockopt(fd.get(), SOL_NETLINK, NETLINK_GET_STRICT_CHK, &val,
++                         &len),
++              SyscallSucceeds());
++  EXPECT_EQ(val, 1);
++
++  // A value shorter than an int is taken as 0.
++  char c = 1;
++  ASSERT_THAT(
++      setsockopt(fd.get(), SOL_NETLINK, NETLINK_GET_STRICT_CHK, &c, sizeof(c)),
++      SyscallSucceeds());
++  ASSERT_THAT(getsockopt(fd.get(), SOL_NETLINK, NETLINK_GET_STRICT_CHK, &val,
++                         &len),
++              SyscallSucceeds());
++  EXPECT_EQ(val, 0);
++
++  len = sizeof(c);
++  EXPECT_THAT(
++      getsockopt(fd.get(), SOL_NETLINK, NETLINK_GET_STRICT_CHK, &c, &len),
++      SyscallFailsWithErrno(EINVAL));
++}
++
++// A link dump takes the master (IFLA_MASTER) and the kind (IFLA_INFO_KIND) the
++// links must have, as Linux's rtnl_dump_ifinfo() does with or without strict
++// checking, and marks its messages, though not NLMSG_DONE, with
++// NLM_F_DUMP_FILTERED. netavark removes a bridge when such a dump finds no port
++// of it.
++TEST(NetlinkRouteTest, GetLinkDumpFilters) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++
++  FileDescriptor fd =
++      ASSERT_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  VethRequest veth = GetVethRequest(kSeq, "fltv1", "fltv2");
++  ASSERT_NO_ERRNO(
++      NetlinkRequestAckOrError(fd, kSeq, &veth, veth.hdr.nlmsg_len));
++  BridgeRequest bridge = GetBridgeRequest(kSeq, "fltbr");
++  ASSERT_NO_ERRNO(
++      NetlinkRequestAckOrError(fd, kSeq, &bridge, bridge.hdr.nlmsg_len));
++  auto links = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd));
++  const int br = links["fltbr"].index;
++
++  struct {
++    struct nlmsghdr hdr;
++    struct ifinfomsg ifm;
++    char buf[64];
++  } req = {};
++  auto request = [&] {
++    req = {};
++    req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++    req.hdr.nlmsg_type = RTM_GETLINK;
++    req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
++    req.hdr.nlmsg_seq = kSeq;
++    req.ifm.ifi_family = AF_UNSPEC;
++  };
++  auto names = [](const std::map<std::string, LinkAttrs>& links) {
++    std::vector<std::string> names;
++    for (const auto& [name, attrs] : links) {
++      names.push_back(name);
++      EXPECT_NE(attrs.nlmsg_flags & NLM_F_DUMP_FILTERED, 0) << name;
++    }
++    return names;
++  };
++
++  // No port yet.
++  request();
++  uint32_t master = br;
++  addattr(&req.hdr, sizeof(req), IFLA_MASTER, &master, sizeof(master));
++  EXPECT_THAT(names(ASSERT_NO_ERRNO_AND_VALUE(
++                  DumpLinkAttrs(fd, &req, req.hdr.nlmsg_len))),
++              ::testing::IsEmpty());
++
++  ASSERT_NO_ERRNO(SetLinkMaster(fd, links["fltv1"].index, br));
++  EXPECT_THAT(names(ASSERT_NO_ERRNO_AND_VALUE(
++                  DumpLinkAttrs(fd, &req, req.hdr.nlmsg_len))),
++              ::testing::ElementsAre("fltv1"));
++  uint16_t done_flags = NLM_F_DUMP_FILTERED;
++  ASSERT_NO_ERRNO(NetlinkRequestResponse(
++      fd, &req, req.hdr.nlmsg_len,
++      [&](const struct nlmsghdr* hdr) {
++        if (hdr->nlmsg_type == NLMSG_DONE) {
++          done_flags = hdr->nlmsg_flags;
++        }
++      },
++      false));
++  EXPECT_EQ(done_flags & NLM_F_DUMP_FILTERED, 0);
++
++  for (const auto& [kind, want] :
++       std::vector<std::pair<std::string, std::vector<std::string>>>{
++           {"bridge", {"fltbr"}}, {"veth", {"fltv1", "fltv2"}}}) {
++    request();
++    struct rtattr* linkinfo = NLMSG_TAIL(&req.hdr);
++    addattr(&req.hdr, sizeof(req), IFLA_LINKINFO, nullptr, 0);
++    addattr(&req.hdr, sizeof(req), IFLA_INFO_KIND, kind.data(), kind.size());
++    linkinfo->rta_len = (uint64_t)NLMSG_TAIL(&req.hdr) - (uint64_t)linkinfo;
++    EXPECT_THAT(names(ASSERT_NO_ERRNO_AND_VALUE(
++                    DumpLinkAttrs(fd, &req, req.hdr.nlmsg_len))),
++                ::testing::ElementsAreArray(want))
++        << kind;
++  }
++}
++
++// With NETLINK_GET_STRICT_CHK, an address dump takes the interface
++// (ifa_index) the addresses must be of, as Linux's inet_dump_ifaddr() and
++// inet6_dump_addr() do, and marks its messages and NLMSG_DONE with
++// NLM_F_DUMP_FILTERED.
++TEST(NetlinkRouteTest, GetAddrDumpFilteredByIndexWithStrictCheck) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++
++  FileDescriptor fd =
++      ASSERT_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  const Link lo = ASSERT_NO_ERRNO_AND_VALUE(LoopbackLink());
++  ASSERT_NO_ERRNO(LinkChangeFlags(lo.index, IFF_UP, IFF_UP));
++  VethRequest veth = GetVethRequest(kSeq, "addrv1", "addrv2");
++  ASSERT_NO_ERRNO(
++      NetlinkRequestAckOrError(fd, kSeq, &veth, veth.hdr.nlmsg_len));
++  const int v1 = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd))["addrv1"].index;
++  struct in_addr addr;
++  ASSERT_EQ(inet_pton(AF_INET, "192.0.2.1", &addr), 1);
++  ASSERT_NO_ERRNO(LinkAddLocalAddr(fd, v1, AF_INET, 24, &addr, sizeof(addr)));
++
++  // The flags of the last dump's messages: whether each and any had
++  // NLM_F_DUMP_FILTERED, and those of NLMSG_DONE.
++  bool all_filtered = false;
++  bool any_filtered = false;
++  uint16_t done_flags = 0;
++  auto dump = [&](int index) -> PosixErrorOr<std::vector<int>> {
++    struct {
++      struct nlmsghdr hdr;
++      struct ifaddrmsg ifa;
++    } req = {};
++    all_filtered = true;
++    any_filtered = false;
++    done_flags = 0;
++    req.hdr.nlmsg_len = sizeof(req);
++    req.hdr.nlmsg_type = RTM_GETADDR;
++    req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
++    req.hdr.nlmsg_seq = kSeq;
++    req.ifa.ifa_family = AF_INET;
++    req.ifa.ifa_index = index;
++    std::vector<int> indexes;
++    int done_errno = 0;
++    RETURN_IF_ERRNO(NetlinkRequestResponse(
++        fd, &req, sizeof(req),
++        [&](const struct nlmsghdr* hdr) {
++          if (hdr->nlmsg_type == RTM_NEWADDR) {
++            indexes.push_back(
++                reinterpret_cast<const struct ifaddrmsg*>(NLMSG_DATA(hdr))
++                    ->ifa_index);
++            bool filtered = hdr->nlmsg_flags & NLM_F_DUMP_FILTERED;
++            all_filtered = all_filtered && filtered;
++            any_filtered = any_filtered || filtered;
++          }
++          if (hdr->nlmsg_type == NLMSG_DONE) {
++            done_errno = *reinterpret_cast<const int*>(NLMSG_DATA(hdr));
++            done_flags = hdr->nlmsg_flags;
++          }
++        },
++        false));
++    // A dump that fails ends with the error in NLMSG_DONE.
++    if (done_errno != 0) {
++      return PosixError(-done_errno);
++    }
++    return indexes;
++  };
++
++  // Without strict checking, ifa_index is ignored.
++  EXPECT_THAT(ASSERT_NO_ERRNO_AND_VALUE(dump(lo.index)),
++              ::testing::UnorderedElementsAre(lo.index, v1));
++  EXPECT_FALSE(any_filtered);
++  EXPECT_EQ(done_flags & NLM_F_DUMP_FILTERED, 0);
++
++  int on = 1;
++  ASSERT_THAT(setsockopt(fd.get(), SOL_NETLINK, NETLINK_GET_STRICT_CHK, &on,
++                         sizeof(on)),
++              SyscallSucceeds());
++  EXPECT_THAT(ASSERT_NO_ERRNO_AND_VALUE(dump(lo.index)),
++              ::testing::ElementsAre(lo.index));
++  EXPECT_TRUE(all_filtered);
++  EXPECT_NE(done_flags & NLM_F_DUMP_FILTERED, 0);
++  EXPECT_THAT(ASSERT_NO_ERRNO_AND_VALUE(dump(v1)), ::testing::ElementsAre(v1));
++  EXPECT_THAT(ASSERT_NO_ERRNO_AND_VALUE(dump(0)),
++              ::testing::UnorderedElementsAre(lo.index, v1));
++  EXPECT_FALSE(any_filtered);
++  EXPECT_EQ(done_flags & NLM_F_DUMP_FILTERED, 0);
++  EXPECT_THAT(dump(v1 + 100), PosixErrorIs(ENODEV, ::testing::_));
++}
++
++// With NETLINK_GET_STRICT_CHK, a route dump takes the output interface
++// (RTA_OIF) the routes must have, as Linux's ip_valid_fib_dump_req() does. As
++// Linux then dumps no route exceptions, every route has NLM_F_DUMP_FILTERED,
++// and NLMSG_DONE has it when the request has a filter.
++TEST(NetlinkRouteTest, GetRouteDumpFilteredByOifWithStrictCheck) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++  Cleanup restore = ASSERT_NO_ERRNO_AND_VALUE(EnterNewNetns());
++
++  FileDescriptor fd =
++      ASSERT_NO_ERRNO_AND_VALUE(NetlinkBoundSocket(NETLINK_ROUTE));
++  const Link lo = ASSERT_NO_ERRNO_AND_VALUE(LoopbackLink());
++  ASSERT_NO_ERRNO(LinkChangeFlags(lo.index, IFF_UP, IFF_UP));
++  VethRequest veth = GetVethRequest(kSeq, "rtv1", "rtv2");
++  ASSERT_NO_ERRNO(
++      NetlinkRequestAckOrError(fd, kSeq, &veth, veth.hdr.nlmsg_len));
++  const int v1 = ASSERT_NO_ERRNO_AND_VALUE(DumpLinkAttrs(fd))["rtv1"].index;
++  ASSERT_NO_ERRNO(LinkChangeFlags(v1, IFF_UP, IFF_UP));
++  struct in_addr addr;
++  ASSERT_EQ(inet_pton(AF_INET, "192.0.2.1", &addr), 1);
++  ASSERT_NO_ERRNO(LinkAddLocalAddr(fd, v1, AF_INET, 24, &addr, sizeof(addr)));
++
++  bool all_filtered = false;
++  uint16_t done_flags = 0;
++  auto dump = [&](int oif) -> PosixErrorOr<std::vector<int>> {
++    struct {
++      struct nlmsghdr hdr;
++      struct rtmsg rtm;
++      char buf[16];
++    } req = {};
++    all_filtered = true;
++    done_flags = 0;
++    req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
++    req.hdr.nlmsg_type = RTM_GETROUTE;
++    req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
++    req.hdr.nlmsg_seq = kSeq;
++    req.rtm.rtm_family = AF_INET;
++    if (oif != 0) {
++      uint32_t o = oif;
++      addattr(&req.hdr, sizeof(req), RTA_OIF, &o, sizeof(o));
++    }
++    std::vector<int> oifs;
++    int done_errno = 0;
++    RETURN_IF_ERRNO(NetlinkRequestResponse(
++        fd, &req, req.hdr.nlmsg_len,
++        [&](const struct nlmsghdr* hdr) {
++          if (hdr->nlmsg_type == NLMSG_DONE) {
++            done_errno = *reinterpret_cast<const int*>(NLMSG_DATA(hdr));
++            done_flags = hdr->nlmsg_flags;
++          }
++          if (hdr->nlmsg_type != RTM_NEWROUTE) {
++            return;
++          }
++          all_filtered =
++              all_filtered && (hdr->nlmsg_flags & NLM_F_DUMP_FILTERED);
++          const struct rtmsg* rtm =
++              reinterpret_cast<const struct rtmsg*>(NLMSG_DATA(hdr));
++          int len = RTM_PAYLOAD(hdr);
++          int route_oif = 0;
++          for (const struct rtattr* rta = RTM_RTA(rtm); RTA_OK(rta, len);
++               rta = RTA_NEXT(rta, len)) {
++            if (rta->rta_type == RTA_OIF) {
++              route_oif = *reinterpret_cast<const uint32_t*>(RTA_DATA(rta));
++            }
++          }
++          oifs.push_back(route_oif);
++        },
++        false));
++    // A dump that fails ends with the error in NLMSG_DONE.
++    if (done_errno != 0) {
++      return PosixError(-done_errno);
++    }
++    return oifs;
++  };
++
++  int on = 1;
++  ASSERT_THAT(setsockopt(fd.get(), SOL_NETLINK, NETLINK_GET_STRICT_CHK, &on,
++                         sizeof(on)),
++              SyscallSucceeds());
++  EXPECT_THAT(ASSERT_NO_ERRNO_AND_VALUE(dump(0)), ::testing::Contains(v1));
++  EXPECT_THAT(ASSERT_NO_ERRNO_AND_VALUE(dump(0)), ::testing::Contains(lo.index));
++  EXPECT_TRUE(all_filtered);
++  EXPECT_EQ(done_flags & NLM_F_DUMP_FILTERED, 0);
++  auto oifs = ASSERT_NO_ERRNO_AND_VALUE(dump(v1));
++  EXPECT_THAT(oifs, ::testing::Not(::testing::IsEmpty()));
++  EXPECT_THAT(oifs, ::testing::Each(v1));
++  EXPECT_TRUE(all_filtered);
++  EXPECT_NE(done_flags & NLM_F_DUMP_FILTERED, 0);
++  EXPECT_THAT(dump(v1 + 100), PosixErrorIs(ENODEV, ::testing::_));
++}
++
+ }  // namespace
+ 
+ }  // namespace testing

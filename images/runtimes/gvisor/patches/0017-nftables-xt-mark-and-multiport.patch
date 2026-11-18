@@ -1,0 +1,829 @@
+nftables: the xtables MARK target and mark and multiport matches
+
+What: rules that iptables-nft writes through nft_compat with the MARK target
+(revision 2, xt_mark_tginfo2: mark = (mark & ~mask) ^ value) and the mark
+(revision 1, xt_mark_mtinfo1: (mark & mask) == value, possibly inverted) and
+multiport (revision 1, xt_multiport_v1: up to 15 source, destination or either
+ports and ranges, possibly inverted) matches are taken and evaluated as
+net/netfilter/xt_mark.c and net/netfilter/xt_multiport.c do, instead of
+failing. Like Linux, MARK and mark take any family and table, multiport IPv4
+and IPv6; their info is taken when it is at least the struct's size and the
+same once aligned (XT_ALIGN), multiport's flags and count are checked as in
+multiport_mt_check(), an unknown revision is EPROTONOSUPPORT as in
+xt_find_revision(), ranges are checked as in multiport_valid_ranges() (a port
+flagged as a range's start must be followed by its end, not flagged and not
+below it; else EINVAL), and a multiport match never takes a packet that is not
+TCP or UDP or a fragment other than the first, reads the ports of an IPv4
+datagram's first fragment where its transport header begins, as
+skb_header_pointer() does, and drops a packet too short to hold its ports
+(hotdrop).
+
+Why: the CNI portmap plugin publishes a port with "-m multiport -p tcp
+--destination-ports <port>" and marks connections from the host for
+masquerading with "-j MARK --set-xmark 0x2000/0x2000" and "-m mark --mark
+0x2000/0x2000"; netavark's iptables driver uses the same marks. Every port
+Podman's CNI backend published failed: "Warning: Extension MARK revision 0
+not supported, missing kernel module?", then "Extension multiport revision 0
+not supported".
+
+Not done: Linux's multiport_mt_check() also refuses a rule that does not
+match one of these protocols first; gVisor's nft_compat does not know a
+rule's protocol, so the check is at the packet.
+
+Upstream: none found; drop this patch when upstream has these extensions.
+
+Verified:
+- The new unit tests TestCompatMarkTargetEvaluation (--set-xmark,
+  --set-mark, --or-mark, --and-mark, --xor-mark), TestCompatMarkParse,
+  TestCompatMarkMatchEvaluation and TestCompatMultiportMatch (ports, ranges,
+  source, destination, either, inversion, another protocol, the first and a
+  later fragment of a datagram, malformed info, an unterminated, a reversed
+  and a doubly flagged range)
+  pass with the rest of //pkg/tcpip/nftables:nftables_test in gVisor's builder
+  container. socket_netlink_netfilter_test passes on runsc with
+  --TESTONLY-nftables --net-raw (268 tests).
+- Podman 4.9.3's CNI backend in an Ubuntu 24.04 sandbox under runsc-nested
+  published a port that answered on the sandbox's loopback and its own
+  address.
+
+diff --git a/pkg/tcpip/nftables/BUILD b/pkg/tcpip/nftables/BUILD
+index 2d9f3ff..7c29060 100644
+--- a/pkg/tcpip/nftables/BUILD
++++ b/pkg/tcpip/nftables/BUILD
+@@ -29,8 +29,10 @@ go_library(
+         "nft_route.go",
+         "nft_xt_addrtype.go",
+         "nft_xt_conntrack.go",
++        "nft_xt_mark.go",
+         "nft_xt_masq.go",
+         "nft_xt_match.go",
++        "nft_xt_multiport.go",
+         "nft_xt_nat.go",
+         "nft_xt_target.go",
+         "nftables.go",
+diff --git a/pkg/tcpip/nftables/nft_xt_mark.go b/pkg/tcpip/nftables/nft_xt_mark.go
+new file mode 100644
+index 0000000..0b4b386
+--- /dev/null
++++ b/pkg/tcpip/nftables/nft_xt_mark.go
+@@ -0,0 +1,200 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//	http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// This file implements the "MARK" XTables compatibility target and the "mark"
++// XTables compatibility match.
++// Ref: net/netfilter/xt_mark.c
++
++package nftables
++
++import (
++	"encoding/binary"
++	"fmt"
++
++	"gvisor.dev/gvisor/pkg/abi/linux"
++	"gvisor.dev/gvisor/pkg/marshal/primitive"
++	"gvisor.dev/gvisor/pkg/sentry/socket/netlink/nlmsg"
++	"gvisor.dev/gvisor/pkg/syserr"
++)
++
++const (
++	// markTargetRevision is the only revision of the MARK target that Linux
++	// registers (mark_tg_reg).
++	markTargetRevision = 2
++	// markMatchRevision is the only revision of the mark match that Linux
++	// registers (mark_mt_reg).
++	markMatchRevision = 1
++
++	// sizeOfXTMarkTgInfo2 is the size of struct xt_mark_tginfo2: __u32 mark,
++	// mask.
++	sizeOfXTMarkTgInfo2 = 8
++	// sizeOfXTMarkMtInfo1 is the size of struct xt_mark_mtinfo1: __u32 mark,
++	// mask; __u8 invert, padded to the struct's alignment.
++	sizeOfXTMarkMtInfo1 = 12
++)
++
++// lookupMarkRevision validates a revision of the MARK target or the mark match,
++// which Linux registers for NFPROTO_UNSPEC, so for every family, and returns
++// the best revision. As Linux's xt_find_revision, a revision it does not have
++// is EPROTONOSUPPORT.
++func lookupMarkRevision(name string, rev, have uint32) (uint32, *syserr.AnnotatedError) {
++	if rev != have {
++		return 0, syserr.NewAnnotatedError(syserr.ErrProtocolNotSupported, fmt.Sprintf("%s revision %d not supported", name, rev))
++	}
++	return have, nil
++}
++
++// compatMarkTarget implements the xtables MARK target.
++type compatMarkTarget struct {
++	// infoData is the raw netlink attribute payload; saved for dump.
++	infoData []byte
++	// mark and mask are the target's xt_mark_tginfo2.
++	mark, mask uint32
++}
++
++// parseMarkTarget decodes a MARK target's info.
++// Ref: net/netfilter/nft_compat.c:nft_target_init(),
++// net/netfilter/x_tables.c:xt_check_target()
++func parseMarkTarget(rev uint32, infoData []byte) (*compatMarkTarget, *syserr.AnnotatedError) {
++	if rev != markTargetRevision {
++		return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("MARK revision %d not supported", rev))
++	}
++	if !xtInfoFits(len(infoData), sizeOfXTMarkTgInfo2) {
++		return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("MARK info size %d, want %d", len(infoData), sizeOfXTMarkTgInfo2))
++	}
++	return &compatMarkTarget{
++		infoData: infoData,
++		mark:     binary.NativeEndian.Uint32(infoData[0:4]),
++		mask:     binary.NativeEndian.Uint32(infoData[4:8]),
++	}, nil
++}
++
++// evaluate implements operation.evaluate.
++// Ref: net/netfilter/xt_mark.c:mark_tg()
++func (op *compatMarkTarget) evaluate(regs *registerSet, evalCtx opEvalCtx) {
++	pkt := evalCtx.pkt
++	pkt.Mark = (pkt.Mark &^ op.mask) ^ op.mark
++	// XT_CONTINUE (net/netfilter/nft_compat.c:nft_target_eval_xt()).
++	regs.verdict = Verdict{Code: VC(linux.NFT_CONTINUE)}
++}
++
++// checkCompatibility implements operation.checkCompatibility. MARK is valid in
++// every table and hook.
++func (op *compatMarkTarget) checkCompatibility(*opCompatCtx) *syserr.AnnotatedError {
++	return nil
++}
++
++// deepCopy implements operation.deepCopy.
++func (op *compatMarkTarget) deepCopy() operation {
++	opCopy := *op
++	opCopy.infoData = append([]byte(nil), op.infoData...)
++	return &opCopy
++}
++
++// updateReferences implements operation.updateReferences.
++func (op *compatMarkTarget) updateReferences(*Table, *Table, operation) {}
++
++// destroy implements operation.destroy.
++func (op *compatMarkTarget) destroy() {}
++
++// GetExprName implements operation.GetExprName.
++func (op *compatMarkTarget) GetExprName() string {
++	return OpTypeTarget.String()
++}
++
++// Dump implements operation.Dump.
++// Ref: net/netfilter/nft_compat.c:nft_target_dump()
++func (op *compatMarkTarget) Dump() ([]byte, *syserr.AnnotatedError) {
++	m := &nlmsg.Message{}
++	m.PutAttrString(linux.NFTA_TARGET_NAME, TargetMARK)
++	m.PutAttr(linux.NFTA_TARGET_REV, nlmsg.PutU32(markTargetRevision))
++	m.PutAttr(linux.NFTA_TARGET_INFO, primitive.AsByteSlice(op.infoData))
++	return m.Buffer(), nil
++}
++
++// compatMarkMatch implements the xtables mark match.
++type compatMarkMatch struct {
++	// infoData is the raw netlink attribute payload; saved for dump.
++	infoData []byte
++	// mark, mask and invert are the match's xt_mark_mtinfo1.
++	mark, mask uint32
++	invert     bool
++}
++
++// parseMarkMatch decodes a mark match's info.
++// Ref: net/netfilter/nft_compat.c:nft_match_init(),
++// net/netfilter/x_tables.c:xt_check_match()
++func parseMarkMatch(rev uint32, infoData []byte) (*compatMarkMatch, *syserr.AnnotatedError) {
++	if rev != markMatchRevision {
++		return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("mark revision %d not supported", rev))
++	}
++	if !xtInfoFits(len(infoData), sizeOfXTMarkMtInfo1) {
++		return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("mark info size %d, want %d", len(infoData), sizeOfXTMarkMtInfo1))
++	}
++	return &compatMarkMatch{
++		infoData: infoData,
++		mark:     binary.NativeEndian.Uint32(infoData[0:4]),
++		mask:     binary.NativeEndian.Uint32(infoData[4:8]),
++		invert:   infoData[8] != 0,
++	}, nil
++}
++
++// evaluate implements operation.evaluate.
++// Ref: net/netfilter/xt_mark.c:mark_mt(), net/netfilter/nft_compat.c:nft_match_eval()
++func (op *compatMarkMatch) evaluate(regs *registerSet, evalCtx opEvalCtx) {
++	if (evalCtx.pkt.Mark&op.mask == op.mark) != op.invert {
++		regs.verdict = Verdict{Code: VC(linux.NFT_CONTINUE)}
++		return
++	}
++	regs.verdict = Verdict{Code: VC(linux.NFT_BREAK)}
++}
++
++// checkCompatibility implements operation.checkCompatibility. mark is valid in
++// every table and hook.
++func (op *compatMarkMatch) checkCompatibility(*opCompatCtx) *syserr.AnnotatedError {
++	return nil
++}
++
++// deepCopy implements operation.deepCopy.
++func (op *compatMarkMatch) deepCopy() operation {
++	opCopy := *op
++	opCopy.infoData = append([]byte(nil), op.infoData...)
++	return &opCopy
++}
++
++// updateReferences implements operation.updateReferences.
++func (op *compatMarkMatch) updateReferences(*Table, *Table, operation) {}
++
++// destroy implements operation.destroy.
++func (op *compatMarkMatch) destroy() {}
++
++// GetExprName implements operation.GetExprName.
++func (op *compatMarkMatch) GetExprName() string {
++	return OpTypeMatch.String()
++}
++
++// Dump implements operation.Dump.
++// Ref: net/netfilter/nft_compat.c:__nft_match_dump()
++func (op *compatMarkMatch) Dump() ([]byte, *syserr.AnnotatedError) {
++	m := &nlmsg.Message{}
++	m.PutAttrString(linux.NFTA_MATCH_NAME, MatchMark)
++	m.PutAttr(linux.NFTA_MATCH_REV, nlmsg.PutU32(markMatchRevision))
++	m.PutAttr(linux.NFTA_MATCH_INFO, primitive.AsByteSlice(op.infoData))
++	return m.Buffer(), nil
++}
++
++var (
++	_ operation = (*compatMarkTarget)(nil)
++	_ operation = (*compatMarkMatch)(nil)
++)
+diff --git a/pkg/tcpip/nftables/nft_xt_match.go b/pkg/tcpip/nftables/nft_xt_match.go
+index b8c5f01..c34c827 100644
+--- a/pkg/tcpip/nftables/nft_xt_match.go
++++ b/pkg/tcpip/nftables/nft_xt_match.go
+@@ -63,6 +63,10 @@ func lookupCompatMatchRevision(name string, rev uint32, family stack.AddressFami
+ 		return lookupConntrackRevision(rev, family)
+ 	case MatchTCP, MatchUDP:
+ 		return lookupTCPUDPRevision(name, rev, family)
++	case MatchMark:
++		return lookupMarkRevision(name, rev, markMatchRevision)
++	case MatchMultiport:
++		return lookupMultiportRevision(rev, family)
+ 	default:
+ 		return 0, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("match extension %s not supported", name))
+ 	}
+@@ -184,6 +188,10 @@ func initMatch(tab *Table, exprInfo ExprInfo) (operation, *syserr.AnnotatedError
+ 			return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("%s revision %d not supported", name, rev))
+ 		}
+ 		return parseTCPUDPMatch(name, rev, infoData)
++	case MatchMark:
++		return parseMarkMatch(rev, infoData)
++	case MatchMultiport:
++		return parseMultiportMatch(tab, rev, infoData)
+ 	default:
+ 		return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("match extension %s not supported", name))
+ 	}
+diff --git a/pkg/tcpip/nftables/nft_xt_multiport.go b/pkg/tcpip/nftables/nft_xt_multiport.go
+new file mode 100644
+index 0000000..040936f
+--- /dev/null
++++ b/pkg/tcpip/nftables/nft_xt_multiport.go
+@@ -0,0 +1,229 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//	http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// This file implements the "multiport" XTables compatibility match.
++// Ref: net/netfilter/xt_multiport.c
++
++package nftables
++
++import (
++	"encoding/binary"
++	"fmt"
++
++	"gvisor.dev/gvisor/pkg/abi/linux"
++	"gvisor.dev/gvisor/pkg/marshal/primitive"
++	"gvisor.dev/gvisor/pkg/sentry/socket/netlink/nlmsg"
++	"gvisor.dev/gvisor/pkg/syserr"
++	"gvisor.dev/gvisor/pkg/tcpip"
++	"gvisor.dev/gvisor/pkg/tcpip/header"
++	"gvisor.dev/gvisor/pkg/tcpip/stack"
++)
++
++const (
++	// multiportRevision is the only revision of the multiport match that
++	// Linux registers (multiport_mt_reg), for IPv4 and IPv6.
++	multiportRevision = 1
++
++	// xtMultiPorts is XT_MULTI_PORTS, the most ports a match holds.
++	xtMultiPorts = 15
++
++	// sizeOfXTMultiportV1 is the size of struct xt_multiport_v1: __u8 flags,
++	// count; __u16 ports[15]; __u8 pflags[15], invert.
++	sizeOfXTMultiportV1 = 48
++
++	// The flags of struct xt_multiport_v1.
++	xtMultiportSource      = 0
++	xtMultiportDestination = 1
++	xtMultiportEither      = 2
++)
++
++// lookupMultiportRevision validates a revision of the multiport match and
++// returns the best revision.
++func lookupMultiportRevision(rev uint32, family stack.AddressFamily) (uint32, *syserr.AnnotatedError) {
++	if family != stack.IP && family != stack.IP6 {
++		return 0, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("multiport match not supported for family %v", family))
++	}
++	return lookupMarkRevision(MatchMultiport, rev, multiportRevision)
++}
++
++// compatMultiportMatch implements the xtables multiport match.
++type compatMultiportMatch struct {
++	// infoData is the raw netlink attribute payload; saved for dump.
++	infoData []byte
++	// flags, ports, pflags and invert are the match's xt_multiport_v1, with
++	// ports cut to its count.
++	flags  uint8
++	ports  []uint16
++	pflags []uint8
++	invert bool
++}
++
++// parseMultiportMatch decodes a multiport match's info.
++// Ref: net/netfilter/xt_multiport.c:multiport_mt_check(),
++// net/netfilter/nft_compat.c:nft_match_init()
++func parseMultiportMatch(tab *Table, rev uint32, infoData []byte) (*compatMultiportMatch, *syserr.AnnotatedError) {
++	if family := tab.GetAddressFamily(); family != stack.IP && family != stack.IP6 {
++		return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("multiport match not supported for address family: %v", family))
++	}
++	if rev != multiportRevision {
++		return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("multiport revision %d not supported", rev))
++	}
++	if !xtInfoFits(len(infoData), sizeOfXTMultiportV1) {
++		return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("multiport info size %d, want %d", len(infoData), sizeOfXTMultiportV1))
++	}
++	flags, count := infoData[0], int(infoData[1])
++	if flags != xtMultiportSource && flags != xtMultiportDestination && flags != xtMultiportEither {
++		return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("multiport flags %d unknown", flags))
++	}
++	if count > xtMultiPorts {
++		return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, fmt.Sprintf("multiport count %d above %d", count, xtMultiPorts))
++	}
++	op := &compatMultiportMatch{
++		infoData: infoData,
++		flags:    flags,
++		ports:    make([]uint16, count),
++		pflags:   make([]uint8, count),
++		invert:   infoData[2+2*xtMultiPorts+xtMultiPorts] != 0,
++	}
++	for i := range count {
++		op.ports[i] = binary.NativeEndian.Uint16(infoData[2+2*i:])
++		op.pflags[i] = infoData[2+2*xtMultiPorts+i]
++	}
++	if !op.validRanges() {
++		return nil, syserr.NewAnnotatedError(syserr.ErrInvalidArgument, "multiport range invalid")
++	}
++	return op, nil
++}
++
++// validRanges reports whether each port flagged as the start of a range is
++// followed by its end: a port not so flagged and not below it.
++// Ref: net/netfilter/xt_multiport.c:multiport_valid_ranges()
++func (op *compatMultiportMatch) validRanges() bool {
++	for i := 0; i < len(op.ports); i++ {
++		if op.pflags[i] == 0 {
++			continue
++		}
++		i++
++		if i >= len(op.ports) || op.pflags[i] != 0 || op.ports[i-1] > op.ports[i] {
++			return false
++		}
++	}
++	return true
++}
++
++// matchPorts reports whether the ports of a packet match.
++// Ref: net/netfilter/xt_multiport.c:ports_match_v1()
++func (op *compatMultiportMatch) matchPorts(src, dst uint16) bool {
++	for i := 0; i < len(op.ports); i++ {
++		start, end := op.ports[i], op.ports[i]
++		if op.pflags[i] != 0 {
++			// A range: this port and the next, as validRanges ensures.
++			i++
++			end = op.ports[i]
++		}
++		switch op.flags {
++		case xtMultiportSource:
++			if src >= start && src <= end {
++				return !op.invert
++			}
++		case xtMultiportDestination:
++			if dst >= start && dst <= end {
++				return !op.invert
++			}
++		case xtMultiportEither:
++			if (src >= start && src <= end) || (dst >= start && dst <= end) {
++				return !op.invert
++			}
++		}
++	}
++	return op.invert
++}
++
++// evaluate implements operation.evaluate.
++// Ref: net/netfilter/xt_multiport.c:multiport_mt(),
++// net/netfilter/nft_compat.c:nft_match_eval()
++func (op *compatMultiportMatch) evaluate(regs *registerSet, evalCtx opEvalCtx) {
++	pkt := evalCtx.pkt
++	// Linux requires the rule to match TCP, UDP, UDP-Lite, SCTP or DCCP
++	// first; of these, netstack has TCP and UDP. A packet of another protocol
++	// never matches here, nor a fragment other than the first.
++	switch pkt.NetworkProtocolNumber {
++	case header.IPv4ProtocolNumber:
++		net := header.IPv4(pkt.NetworkHeader().Slice())
++		if len(net) < header.IPv4MinimumSize || !isTCPOrUDP(net.TransportProtocol()) || net.FragmentOffset() != 0 {
++			regs.verdict = Verdict{Code: VC(linux.NFT_BREAK)}
++			return
++		}
++	case header.IPv6ProtocolNumber:
++		if !isTCPOrUDP(pkt.TransportProtocolNumber) {
++			regs.verdict = Verdict{Code: VC(linux.NFT_BREAK)}
++			return
++		}
++	default:
++		regs.verdict = Verdict{Code: VC(linux.NFT_BREAK)}
++		return
++	}
++	transport, ok := transportHeader(pkt, 4)
++	if !ok {
++		// Linux's hotdrop for a header too short to hold the ports.
++		regs.verdict = Verdict{Code: VC(linux.NF_DROP)}
++		return
++	}
++	if op.matchPorts(binary.BigEndian.Uint16(transport[0:2]), binary.BigEndian.Uint16(transport[2:4])) {
++		regs.verdict = Verdict{Code: VC(linux.NFT_CONTINUE)}
++		return
++	}
++	regs.verdict = Verdict{Code: VC(linux.NFT_BREAK)}
++}
++
++func isTCPOrUDP(protocol tcpip.TransportProtocolNumber) bool {
++	return protocol == header.TCPProtocolNumber || protocol == header.UDPProtocolNumber
++}
++
++// checkCompatibility implements operation.checkCompatibility.
++func (op *compatMultiportMatch) checkCompatibility(*opCompatCtx) *syserr.AnnotatedError {
++	return nil
++}
++
++// deepCopy implements operation.deepCopy.
++func (op *compatMultiportMatch) deepCopy() operation {
++	opCopy := *op
++	opCopy.infoData = append([]byte(nil), op.infoData...)
++	opCopy.ports = append([]uint16(nil), op.ports...)
++	opCopy.pflags = append([]uint8(nil), op.pflags...)
++	return &opCopy
++}
++
++// updateReferences implements operation.updateReferences.
++func (op *compatMultiportMatch) updateReferences(*Table, *Table, operation) {}
++
++// destroy implements operation.destroy.
++func (op *compatMultiportMatch) destroy() {}
++
++// GetExprName implements operation.GetExprName.
++func (op *compatMultiportMatch) GetExprName() string {
++	return OpTypeMatch.String()
++}
++
++// Dump implements operation.Dump.
++// Ref: net/netfilter/nft_compat.c:__nft_match_dump()
++func (op *compatMultiportMatch) Dump() ([]byte, *syserr.AnnotatedError) {
++	m := &nlmsg.Message{}
++	m.PutAttrString(linux.NFTA_MATCH_NAME, MatchMultiport)
++	m.PutAttr(linux.NFTA_MATCH_REV, nlmsg.PutU32(multiportRevision))
++	m.PutAttr(linux.NFTA_MATCH_INFO, primitive.AsByteSlice(op.infoData))
++	return m.Buffer(), nil
++}
++
++var _ operation = (*compatMultiportMatch)(nil)
+diff --git a/pkg/tcpip/nftables/nft_xt_target.go b/pkg/tcpip/nftables/nft_xt_target.go
+index bf18372..3957d6e 100644
+--- a/pkg/tcpip/nftables/nft_xt_target.go
++++ b/pkg/tcpip/nftables/nft_xt_target.go
+@@ -36,6 +36,8 @@ func lookupCompatTargetRevision(name string, rev uint32, family stack.AddressFam
+ 		return lookupMasqRevision(rev, family)
+ 	case TargetSNAT, TargetDNAT:
+ 		return lookupNATRevision(name, rev, family)
++	case TargetMARK:
++		return lookupMarkRevision(name, rev, markTargetRevision)
+ 	default:
+ 		return 0, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("target extension %s not supported", name))
+ 	}
+@@ -90,6 +92,8 @@ func initTarget(tab *Table, exprInfo ExprInfo) (operation, *syserr.AnnotatedErro
+ 			return nil, err
+ 		}
+ 		return &compatNATTarget{name: name, revision: rev, infoData: infoData, info: *info}, nil
++	case TargetMARK:
++		return parseMarkTarget(rev, infoData)
+ 	default:
+ 		return nil, syserr.NewAnnotatedError(syserr.ErrNoSuchFile, fmt.Sprintf("target extension %s not supported", name))
+ 	}
+diff --git a/pkg/tcpip/nftables/nftables_compat.go b/pkg/tcpip/nftables/nftables_compat.go
+index 564496f..a8fc656 100644
+--- a/pkg/tcpip/nftables/nftables_compat.go
++++ b/pkg/tcpip/nftables/nftables_compat.go
+@@ -40,6 +40,8 @@ const (
+ 	TargetSNAT = "SNAT"
+ 	// TargetDNAT is the DNAT xtables target.
+ 	TargetDNAT = "DNAT"
++	// TargetMARK is the MARK xtables target.
++	TargetMARK = "MARK"
+ 
+ 	// MatchComment is the comment xtables match.
+ 	MatchComment = "comment"
+@@ -51,6 +53,10 @@ const (
+ 	MatchTCP = "tcp"
+ 	// MatchUDP is the udp xtables match.
+ 	MatchUDP = "udp"
++	// MatchMark is the mark xtables match.
++	MatchMark = "mark"
++	// MatchMultiport is the multiport xtables match.
++	MatchMultiport = "multiport"
+ )
+ 
+ // ProcessCompatMessage handles netfilter compatibility messages (NFNL_SUBSYS_NFT_COMPAT).
+diff --git a/pkg/tcpip/nftables/nftables_test.go b/pkg/tcpip/nftables/nftables_test.go
+index 54f533c..d70400c 100644
+--- a/pkg/tcpip/nftables/nftables_test.go
++++ b/pkg/tcpip/nftables/nftables_test.go
+@@ -6635,3 +6635,248 @@ func TestCompatTCPUDPMatchParse(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// TestCompatMarkTargetEvaluation tests the MARK target, as
++// net/netfilter/xt_mark.c:mark_tg() sets a packet's mark.
++func TestCompatMarkTargetEvaluation(t *testing.T) {
++	info := func(mark, mask uint32) []byte {
++		b := make([]byte, sizeOfXTMarkTgInfo2)
++		binary.NativeEndian.PutUint32(b[0:], mark)
++		binary.NativeEndian.PutUint32(b[4:], mask)
++		return b
++	}
++	for _, tc := range []struct {
++		name       string
++		mark, mask uint32
++		before     uint32
++		want       uint32
++	}{
++		// iptables -j MARK --set-xmark 0x2000/0x2000, as the CNI portmap
++		// plugin and netavark write.
++		{name: "set-xmark sets the bit", mark: 0x2000, mask: 0x2000, before: 0x1, want: 0x2001},
++		{name: "set-xmark keeps the bit", mark: 0x2000, mask: 0x2000, before: 0x2001, want: 0x2001},
++		// --set-mark 0x5 is --set-xmark 0x5/0xffffffff.
++		{name: "set-mark", mark: 0x5, mask: 0xffffffff, before: 0x2001, want: 0x5},
++		// --or-mark 0x10 is --set-xmark 0x10/0x10.
++		{name: "or-mark", mark: 0x10, mask: 0x10, before: 0x3, want: 0x13},
++		// --and-mark 0x1 is --set-xmark 0x0/0xfffffffe.
++		{name: "and-mark", mark: 0, mask: 0xfffffffe, before: 0x3, want: 0x1},
++		// --xor-mark 0x3 is --set-xmark 0x3/0x0.
++		{name: "xor-mark", mark: 0x3, mask: 0, before: 0x1, want: 0x2},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			op, err := parseMarkTarget(markTargetRevision, info(tc.mark, tc.mask))
++			if err != nil {
++				t.Fatalf("parseMarkTarget: %v", err)
++			}
++			pkt := makeUDPv4Packet(tcpip.AddrFrom4([4]byte{10, 0, 0, 1}), tcpip.AddrFrom4([4]byte{10, 0, 0, 2}), 1000, 53)
++			defer pkt.DecRef()
++			pkt.Mark = tc.before
++			regs := newRegisterSet()
++			op.evaluate(&regs, opEvalCtx{pkt: pkt})
++			if got := regs.verdict.Code; got != VC(linux.NFT_CONTINUE) {
++				t.Errorf("verdict = %v, want NFT_CONTINUE", got)
++			}
++			if pkt.Mark != tc.want {
++				t.Errorf("mark = %#x, want %#x", pkt.Mark, tc.want)
++			}
++		})
++	}
++}
++
++func TestCompatMarkParse(t *testing.T) {
++	if rev, err := lookupCompatTargetRevision(TargetMARK, markTargetRevision, stack.IP); err != nil || rev != markTargetRevision {
++		t.Errorf("lookupCompatTargetRevision(MARK, 2) = %d, %v; want 2, nil", rev, err)
++	}
++	for _, rev := range []uint32{0, 1, 3} {
++		if _, err := lookupCompatTargetRevision(TargetMARK, rev, stack.IP6); err == nil || err.GetError() != syserr.ErrProtocolNotSupported {
++			t.Errorf("lookupCompatTargetRevision(MARK, %d) = %v, want EPROTONOSUPPORT", rev, err)
++		}
++	}
++	if rev, err := lookupCompatMatchRevision(MatchMark, markMatchRevision, stack.Inet); err != nil || rev != markMatchRevision {
++		t.Errorf("lookupCompatMatchRevision(mark, 1) = %d, %v; want 1, nil", rev, err)
++	}
++	if _, err := lookupCompatMatchRevision(MatchMark, 0, stack.IP); err == nil || err.GetError() != syserr.ErrProtocolNotSupported {
++		t.Errorf("lookupCompatMatchRevision(mark, 0) = %v, want EPROTONOSUPPORT", err)
++	}
++	for _, size := range []int{0, 4, 7, 16} {
++		if _, err := parseMarkTarget(markTargetRevision, make([]byte, size)); err == nil || err.GetError() != syserr.ErrInvalidArgument {
++			t.Errorf("parseMarkTarget with %d bytes of info = %v, want EINVAL", size, err)
++		}
++	}
++	if _, err := parseMarkTarget(markTargetRevision, make([]byte, sizeOfXTMarkTgInfo2)); err != nil {
++		t.Errorf("parseMarkTarget with %d bytes of info: %v", sizeOfXTMarkTgInfo2, err)
++	}
++	// An xt_mark_mtinfo1 is 12 bytes; Linux takes it padded to 16.
++	for _, size := range []int{sizeOfXTMarkMtInfo1, 16} {
++		if _, err := parseMarkMatch(markMatchRevision, make([]byte, size)); err != nil {
++			t.Errorf("parseMarkMatch with %d bytes of info: %v", size, err)
++		}
++	}
++	for _, size := range []int{8, 11, 24} {
++		if _, err := parseMarkMatch(markMatchRevision, make([]byte, size)); err == nil || err.GetError() != syserr.ErrInvalidArgument {
++			t.Errorf("parseMarkMatch with %d bytes of info = %v, want EINVAL", size, err)
++		}
++	}
++}
++
++// TestCompatMarkMatchEvaluation tests the mark match, as
++// net/netfilter/xt_mark.c:mark_mt() compares a packet's mark.
++func TestCompatMarkMatchEvaluation(t *testing.T) {
++	info := func(mark, mask uint32, invert bool) []byte {
++		b := make([]byte, sizeOfXTMarkMtInfo1)
++		binary.NativeEndian.PutUint32(b[0:], mark)
++		binary.NativeEndian.PutUint32(b[4:], mask)
++		if invert {
++			b[8] = 1
++		}
++		return b
++	}
++	for _, tc := range []struct {
++		name string
++		info []byte
++		mark uint32
++		want uint32
++	}{
++		{name: "masked bit set", info: info(0x2000, 0x2000, false), mark: 0x2001, want: VC(linux.NFT_CONTINUE)},
++		{name: "masked bit clear", info: info(0x2000, 0x2000, false), mark: 0x1, want: VC(linux.NFT_BREAK)},
++		{name: "inverted, masked bit set", info: info(0x2000, 0x2000, true), mark: 0x2001, want: VC(linux.NFT_BREAK)},
++		{name: "inverted, masked bit clear", info: info(0x2000, 0x2000, true), mark: 0x1, want: VC(linux.NFT_CONTINUE)},
++		{name: "whole mark", info: info(0x5, 0xffffffff, false), mark: 0x5, want: VC(linux.NFT_CONTINUE)},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			op, err := parseMarkMatch(markMatchRevision, tc.info)
++			if err != nil {
++				t.Fatalf("parseMarkMatch: %v", err)
++			}
++			pkt := makeUDPv4Packet(tcpip.AddrFrom4([4]byte{10, 0, 0, 1}), tcpip.AddrFrom4([4]byte{10, 0, 0, 2}), 1000, 53)
++			defer pkt.DecRef()
++			pkt.Mark = tc.mark
++			regs := newRegisterSet()
++			op.evaluate(&regs, opEvalCtx{pkt: pkt})
++			if got := regs.verdict.Code; got != tc.want {
++				t.Errorf("verdict = %v, want %v", got, tc.want)
++			}
++		})
++	}
++}
++
++// TestCompatMultiportMatch tests the multiport match, as
++// net/netfilter/xt_multiport.c checks and evaluates it.
++func TestCompatMultiportMatch(t *testing.T) {
++	src := tcpip.AddrFrom4([4]byte{10, 0, 0, 1})
++	dst := tcpip.AddrFrom4([4]byte{10, 0, 0, 2})
++	// info builds an xt_multiport_v1; a port given as [2]uint16 is a range.
++	info := func(flags uint8, invert bool, ports ...any) []byte {
++		b := make([]byte, sizeOfXTMultiportV1)
++		b[0] = flags
++		n := 0
++		for _, p := range ports {
++			switch p := p.(type) {
++			case int:
++				binary.NativeEndian.PutUint16(b[2+2*n:], uint16(p))
++				n++
++			case [2]uint16:
++				binary.NativeEndian.PutUint16(b[2+2*n:], p[0])
++				b[2+2*xtMultiPorts+n] = 1
++				n++
++				binary.NativeEndian.PutUint16(b[2+2*n:], p[1])
++				n++
++			}
++		}
++		b[1] = uint8(n)
++		if invert {
++			b[2+3*xtMultiPorts] = 1
++		}
++		return b
++	}
++	tcpPacket := func(srcPort, dstPort uint16) func() *stack.PacketBuffer {
++		return func() *stack.PacketBuffer {
++			return makeIPv4TCPPacket(header.IPv4MinimumSize+header.TCPMinimumSize, &header.IPv4Fields{
++				TotalLength: header.IPv4MinimumSize + header.TCPMinimumSize,
++				TTL:         64,
++				Protocol:    uint8(header.TCPProtocolNumber),
++				SrcAddr:     src,
++				DstAddr:     dst,
++			}, &header.TCPFields{SrcPort: srcPort, DstPort: dstPort, DataOffset: header.TCPMinimumSize, Flags: header.TCPFlagSyn})
++		}
++	}
++	udpPacket := func(srcPort, dstPort uint16) func() *stack.PacketBuffer {
++		return func() *stack.PacketBuffer { return makeUDPv4Packet(src, dst, srcPort, dstPort) }
++	}
++	for _, tc := range []struct {
++		name string
++		info []byte
++		pkt  func() *stack.PacketBuffer
++		want uint32
++	}{
++		// iptables -p tcp -m multiport --destination-ports 18080, as the CNI
++		// portmap plugin writes.
++		{name: "destination port", info: info(xtMultiportDestination, false, 18080), pkt: tcpPacket(40000, 18080), want: VC(linux.NFT_CONTINUE)},
++		{name: "destination port mismatch", info: info(xtMultiportDestination, false, 18080), pkt: tcpPacket(18080, 80), want: VC(linux.NFT_BREAK)},
++		{name: "one of several", info: info(xtMultiportDestination, false, 80, 443, 8080), pkt: tcpPacket(40000, 443), want: VC(linux.NFT_CONTINUE)},
++		{name: "source port", info: info(xtMultiportSource, false, 53), pkt: udpPacket(53, 40000), want: VC(linux.NFT_CONTINUE)},
++		{name: "source port mismatch", info: info(xtMultiportSource, false, 53), pkt: udpPacket(40000, 53), want: VC(linux.NFT_BREAK)},
++		{name: "either port", info: info(xtMultiportEither, false, 53), pkt: udpPacket(40000, 53), want: VC(linux.NFT_CONTINUE)},
++		{name: "range", info: info(xtMultiportDestination, false, [2]uint16{1000, 2000}), pkt: tcpPacket(40000, 1500), want: VC(linux.NFT_CONTINUE)},
++		{name: "range end", info: info(xtMultiportDestination, false, [2]uint16{1000, 2000}), pkt: tcpPacket(40000, 2000), want: VC(linux.NFT_CONTINUE)},
++		{name: "outside range", info: info(xtMultiportDestination, false, [2]uint16{1000, 2000}), pkt: tcpPacket(40000, 2001), want: VC(linux.NFT_BREAK)},
++		{name: "port after a range", info: info(xtMultiportDestination, false, [2]uint16{1000, 2000}, 22), pkt: tcpPacket(40000, 22), want: VC(linux.NFT_CONTINUE)},
++		{name: "inverted", info: info(xtMultiportDestination, true, 80), pkt: tcpPacket(40000, 80), want: VC(linux.NFT_BREAK)},
++		{name: "inverted mismatch", info: info(xtMultiportDestination, true, 80), pkt: tcpPacket(40000, 81), want: VC(linux.NFT_CONTINUE)},
++		// Linux reads the ports of a first fragment where its transport
++		// header begins, and never matches a later one.
++		{name: "first fragment", info: info(xtMultiportDestination, false, 80), pkt: func() *stack.PacketBuffer { return makeUDPv4Fragment(src, dst, 40000, 80, 0) }, want: VC(linux.NFT_CONTINUE)},
++		{name: "first fragment mismatch", info: info(xtMultiportDestination, false, 99), pkt: func() *stack.PacketBuffer { return makeUDPv4Fragment(src, dst, 40000, 80, 0) }, want: VC(linux.NFT_BREAK)},
++		{name: "later fragment", info: info(xtMultiportDestination, false, 80), pkt: func() *stack.PacketBuffer { return makeUDPv4Fragment(src, dst, 40000, 80, 8) }, want: VC(linux.NFT_BREAK)},
++		{name: "another protocol", info: info(xtMultiportDestination, true, 80), pkt: func() *stack.PacketBuffer {
++			return makeIPv4Packet(header.IPv4MinimumSize, &header.IPv4Fields{TotalLength: header.IPv4MinimumSize, TTL: 64, Protocol: uint8(header.ICMPv4ProtocolNumber), SrcAddr: src, DstAddr: dst})
++		}, want: VC(linux.NFT_BREAK)},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			tab := &Table{afFilter: &addressFamilyFilter{family: stack.IP}}
++			op, err := parseMultiportMatch(tab, multiportRevision, tc.info)
++			if err != nil {
++				t.Fatalf("parseMultiportMatch: %v", err)
++			}
++			pkt := tc.pkt()
++			defer pkt.DecRef()
++			regs := newRegisterSet()
++			op.evaluate(&regs, opEvalCtx{pkt: pkt})
++			if got := regs.verdict.Code; got != tc.want {
++				t.Errorf("verdict = %v, want %v", got, tc.want)
++			}
++		})
++	}
++
++	ipTable := &Table{afFilter: &addressFamilyFilter{family: stack.IP}}
++	bad := info(xtMultiportDestination, false, 80)
++	for _, tc := range []struct {
++		name string
++		tab  *Table
++		info []byte
++	}{
++		{name: "unknown flags", tab: ipTable, info: func() []byte { b := slices.Clone(bad); b[0] = 3; return b }()},
++		{name: "too many ports", tab: ipTable, info: func() []byte { b := slices.Clone(bad); b[1] = xtMultiPorts + 1; return b }()},
++		{name: "short info", tab: ipTable, info: bad[:sizeOfXTMultiportV1-1]},
++		{name: "long info", tab: ipTable, info: append(slices.Clone(bad), make([]byte, 8)...)},
++		// Ranges that Linux's multiport_valid_ranges() refuses.
++		{name: "unterminated range", tab: ipTable, info: func() []byte { b := slices.Clone(bad); b[2+2*xtMultiPorts] = 1; return b }()},
++		{name: "reversed range", tab: ipTable, info: info(xtMultiportDestination, false, [2]uint16{2000, 1000})},
++		{name: "range end flagged", tab: ipTable, info: func() []byte {
++			b := info(xtMultiportDestination, false, [2]uint16{1000, 2000}, 22)
++			b[2+2*xtMultiPorts+1] = 1
++			return b
++		}()},
++	} {
++		if _, err := parseMultiportMatch(tc.tab, multiportRevision, tc.info); err == nil || err.GetError() != syserr.ErrInvalidArgument {
++			t.Errorf("parseMultiportMatch with %s = %v, want EINVAL", tc.name, err)
++		}
++	}
++	if _, err := parseMultiportMatch(&Table{afFilter: &addressFamilyFilter{family: stack.Arp}}, multiportRevision, bad); err == nil {
++		t.Errorf("parseMultiportMatch in an arp table succeeded, want an error")
++	}
++	if _, err := lookupMultiportRevision(0, stack.IP); err == nil || err.GetError() != syserr.ErrProtocolNotSupported {
++		t.Errorf("lookupMultiportRevision(0) = %v, want EPROTONOSUPPORT", err)
++	}
++}

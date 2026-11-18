@@ -1,0 +1,332 @@
+netstack: SIOCSIFFLAGS
+
+What: ioctl(SIOCSIFFLAGS) sets an interface's flags as Linux's dev_ifsioc()
+does through dev_change_flags(): it needs CAP_NET_ADMIN in the user namespace
+of the socket's network namespace, checked before the device is looked up
+there (EPERM, then ENODEV), takes ifr_flags as the complete set, brings the
+interface up or down as RTM_SETLINK already does, ignores the flags that
+userspace cannot change, such as IFF_RUNNING, fails with EOPNOTSUPP for a
+change of one that netstack does not model, such as IFF_PROMISC, and does not
+copy the ifreq back. Before, it failed with ENOTTY. Like it, the interface
+ioctls that read (SIOCGIFFLAGS, SIOCGIFINDEX and the others) and SIOCGIFCONF
+act in the socket's network namespace, not the caller's, as Linux's
+sock_ioctl() passes sock_net() to dev_ioctl().
+
+Why: crun brings the loopback interface of a network namespace it creates up
+with SIOCGIFFLAGS and SIOCSIFFLAGS (src/libcrun/linux.c). Buildah's RUN steps
+in `podman build` run in such a namespace, so every RUN of a build on Podman's
+own network failed: "ioctl(SIOCSIFFLAGS): Inappropriate ioctl for device".
+slirp4netns, rootless Podman 4's default network, configures its TAP device
+with it too.
+
+Upstream: upstream PR 15559 ("netstack: honor IFF_UP in SIOCSIFFLAGS and
+RTM_SETLINK", head b1bde0f1feaa, open and conflicting with master on
+2026-11-17) adds the same ioctl; its RTM_SETLINK half is already in
+release-20261109.0, on which this patch builds. Drop this patch when upstream
+has SIOCSIFFLAGS.
+
+Verified:
+- The new syscall test NetdeviceTest.SetInterfaceFlags (lo of a new network
+  namespace up, down and up again, also through it from another namespace,
+  whose lo stays down; ENODEV; EPERM without CAP_NET_ADMIN)
+  passes on Linux 7.0 under runc and on runsc with this patch, under the
+  runtime arguments of runsc and of runsc-nested, and fails on ALE's 0.1.2;
+  the whole socket_netdevice_test passes (8 tests).
+- `podman build` of a Dockerfile with RUN steps on Podman's default network,
+  with crun, built in sandboxes under runsc-nested (Podman 4.9.3 on CNI and
+  netavark, 5.4.2 and 5.8.9).
+
+diff --git a/pkg/abi/linux/ioctl.go b/pkg/abi/linux/ioctl.go
+index c34e40d..f628bc6 100644
+--- a/pkg/abi/linux/ioctl.go
++++ b/pkg/abi/linux/ioctl.go
+@@ -76,6 +76,7 @@ const (
+ 	SIOCGIFNAME    = 0x8910
+ 	SIOCGIFCONF    = 0x8912
+ 	SIOCGIFFLAGS   = 0x8913
++	SIOCSIFFLAGS   = 0x8914
+ 	SIOCGIFADDR    = 0x8915
+ 	SIOCGIFDSTADDR = 0x8917
+ 	SIOCGIFBRDADDR = 0x8919
+diff --git a/pkg/sentry/socket/netstack/netstack.go b/pkg/sentry/socket/netstack/netstack.go
+index 2e45744..dae88fa 100644
+--- a/pkg/sentry/socket/netstack/netstack.go
++++ b/pkg/sentry/socket/netstack/netstack.go
+@@ -3489,15 +3489,22 @@ func (s *sock) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, args ar
+ 		return 0, err
+ 	}
+ 
+-	return Ioctl(ctx, s.Endpoint, uio, sysno, args)
++	return Ioctl(ctx, s.Endpoint, s.namespace, uio, sysno, args)
+ }
+ 
+ // Ioctl performs a socket ioctl.
+-func Ioctl(ctx context.Context, ep commonEndpoint, io usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
++//
++// netns is the network namespace of the socket.
++func Ioctl(ctx context.Context, ep commonEndpoint, netns *inet.Namespace, io usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
+ 	t := kernel.TaskFromContext(ctx)
+ 	if t == nil {
+ 		panic("ioctl(2) may only be called from a task goroutine")
+ 	}
++	// Like Linux's sock_ioctl() => dev_ioctl(), the interface ioctls act in
++	// the socket's network namespace, not the caller's.
++	if netns == nil {
++		netns = t.NetworkNamespace()
++	}
+ 
+ 	switch arg := int(args[1].Int()); arg {
+ 	case linux.SIOCGIFFLAGS,
+@@ -3518,12 +3525,28 @@ func Ioctl(ctx context.Context, ep commonEndpoint, io usermem.IO, sysno uintptr,
+ 		if _, err := ifr.CopyIn(t, args[2].Pointer()); err != nil {
+ 			return 0, err
+ 		}
+-		if err := interfaceIoctl(ctx, io, arg, &ifr); err != nil {
++		if err := interfaceIoctl(ctx, netns.Stack(), io, arg, &ifr); err != nil {
+ 			return 0, err.ToError()
+ 		}
+ 		_, err := ifr.CopyOut(t, args[2].Pointer())
+ 		return 0, err
+ 
++	case linux.SIOCSIFFLAGS:
++		var ifr linux.IFReq
++		if _, err := ifr.CopyIn(t, args[2].Pointer()); err != nil {
++			return 0, err
++		}
++		// Like Linux's dev_ioctl(), check CAP_NET_ADMIN in the socket's
++		// network namespace before looking up the device, and do not copy the
++		// ifreq back.
++		if !t.HasCapabilityIn(linux.CAP_NET_ADMIN, netns.UserNamespace()) {
++			return 0, linuxerr.EPERM
++		}
++		if err := interfaceIoctl(ctx, netns.Stack(), io, arg, &ifr); err != nil {
++			return 0, err.ToError()
++		}
++		return 0, nil
++
+ 	case linux.SIOCGIFCONF:
+ 		// Return a list of interface addresses or the buffer size
+ 		// necessary to hold the list.
+@@ -3532,7 +3555,7 @@ func Ioctl(ctx context.Context, ep commonEndpoint, io usermem.IO, sysno uintptr,
+ 			return 0, err
+ 		}
+ 
+-		if err := ifconfIoctl(ctx, t, io, &ifc); err != nil {
++		if err := ifconfIoctl(ctx, t, netns.Stack(), io, &ifc); err != nil {
+ 			return 0, err
+ 		}
+ 
+@@ -3576,15 +3599,14 @@ func Ioctl(ctx context.Context, ep commonEndpoint, io usermem.IO, sysno uintptr,
+ }
+ 
+ // interfaceIoctl implements interface requests.
+-func interfaceIoctl(ctx context.Context, _ usermem.IO, arg int, ifr *linux.IFReq) *syserr.Error {
++func interfaceIoctl(ctx context.Context, stk inet.Stack, _ usermem.IO, arg int, ifr *linux.IFReq) *syserr.Error {
+ 	var (
+ 		iface inet.Interface
+ 		index int32
+ 		found bool
+ 	)
+ 
+-	// Find the relevant device.
+-	stk := inet.StackFromContext(ctx)
++	// Find the relevant device in stk.
+ 	if stk == nil {
+ 		return syserr.ErrNoDevice
+ 	}
+@@ -3635,6 +3657,15 @@ func interfaceIoctl(ctx context.Context, _ usermem.IO, arg int, ifr *linux.IFReq
+ 			ifr.Data[i] = 0 // Clear padding.
+ 		}
+ 
++	case linux.SIOCSIFFLAGS:
++		epstack, ok := stk.(*Stack)
++		if !ok {
++			return errStackType
++		}
++		// ifr_flags is a short; Linux's dev_change_flags takes it as the
++		// interface's complete flags.
++		return epstack.SetInterfaceFlags(ctx, tcpip.NICID(index), uint32(hostarch.ByteOrder.Uint16(ifr.Data[:2])))
++
+ 	case linux.SIOCGIFFLAGS:
+ 		f, err := interfaceStatusFlags(stk, iface.Name)
+ 		if err != nil {
+@@ -3714,11 +3745,10 @@ func interfaceIoctl(ctx context.Context, _ usermem.IO, arg int, ifr *linux.IFReq
+ }
+ 
+ // ifconfIoctl populates a struct ifconf for the SIOCGIFCONF ioctl.
+-func ifconfIoctl(ctx context.Context, t *kernel.Task, _ usermem.IO, ifc *linux.IFConf) error {
++func ifconfIoctl(ctx context.Context, t *kernel.Task, stk inet.Stack, _ usermem.IO, ifc *linux.IFConf) error {
+ 	// If Ptr is NULL, return the necessary buffer size via Len.
+ 	// Otherwise, write up to Len bytes starting at Ptr containing ifreq
+ 	// structs.
+-	stk := inet.StackFromContext(ctx)
+ 	if stk == nil {
+ 		return syserr.ErrNoDevice.ToError()
+ 	}
+diff --git a/pkg/sentry/socket/netstack/stack.go b/pkg/sentry/socket/netstack/stack.go
+index 0c46102..669d8cd 100644
+--- a/pkg/sentry/socket/netstack/stack.go
++++ b/pkg/sentry/socket/netstack/stack.go
+@@ -308,6 +308,30 @@ func (s *Stack) SetInterface(ctx context.Context, msg *nlmsg.Message) *syserr.Er
+ 	return s.setLinkLocked(ctx, tcpip.NICID(ifinfomsg.Index), attrs, ifinfomsg.Flags, ifinfomsg.Change, dstNs)
+ }
+ 
++// SetInterfaceFlags sets the flags of interface id to flags, as SIOCSIFFLAGS
++// does through Linux's dev_change_flags: flags is the complete set, and the
++// flags that userspace cannot change, such as IFF_RUNNING, are ignored.
++func (s *Stack) SetInterfaceFlags(ctx context.Context, id tcpip.NICID, flags uint32) *syserr.Error {
++	s.linkMu.Lock()
++	defer s.linkMu.Unlock()
++	nicInfo, ok := s.Stack.SingleNICInfo(id)
++	if !ok {
++		return syserr.ErrUnknownNICID
++	}
++	want, err := combineLinkFlags(nicInfo.Flags, flags, 0)
++	if err != nil {
++		ctx.Warningf("Unsupported interface flag change: ifr_flags %#x", flags)
++		return err
++	}
++	if up := want&linux.IFF_UP != 0; up != nicInfo.Flags.Up {
++		if err := s.setUpLocked(ctx, id, up); err != nil {
++			return err
++		}
++		s.sendChangeEvent(ctx, id)
++	}
++	return nil
++}
++
+ // SetBridgePort implements inet.Stack.SetBridgePort.
+ func (s *Stack) SetBridgePort(ctx context.Context, idx int32, cfg inet.BridgePortConfig) *syserr.Error {
+ 	s.linkMu.Lock()
+diff --git a/pkg/sentry/socket/unix/unix.go b/pkg/sentry/socket/unix/unix.go
+index 6c96eed..54dbe5e 100644
+--- a/pkg/sentry/socket/unix/unix.go
++++ b/pkg/sentry/socket/unix/unix.go
+@@ -287,7 +287,7 @@ func (s *Socket) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
+ 
+ // Ioctl implements vfs.FileDescriptionImpl.
+ func (s *Socket) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
+-	return netstack.Ioctl(ctx, s.ep, uio, sysno, args)
++	return netstack.Ioctl(ctx, s.ep, s.namespace, uio, sysno, args)
+ }
+ 
+ // PRead implements vfs.FileDescriptionImpl.
+diff --git a/test/syscalls/linux/BUILD b/test/syscalls/linux/BUILD
+index c37fa1f..c7bec48 100644
+--- a/test/syscalls/linux/BUILD
++++ b/test/syscalls/linux/BUILD
+@@ -4665,6 +4665,8 @@ cc_binary(
+     malloc = "//test/util:errno_safe_allocator",
+     deps = select_gtest() + [
+         ":socket_netlink_util",
++        "//test/util:capability_util",
++        "//test/util:cleanup",
+         "//test/util:file_descriptor",
+         "//test/util:posix_error",
+         "//test/util:socket_util",
+diff --git a/test/syscalls/linux/socket_netdevice.cc b/test/syscalls/linux/socket_netdevice.cc
+index 35fb878..ec5ba4a 100644
+--- a/test/syscalls/linux/socket_netdevice.cc
++++ b/test/syscalls/linux/socket_netdevice.cc
+@@ -13,6 +13,8 @@
+ // limitations under the License.
+ 
+ #include <arpa/inet.h>
++#include <fcntl.h>
++#include <linux/capability.h>
+ #include <linux/ethtool.h>
+ #include <linux/if.h>
+ #include <linux/if_addr.h>
+@@ -21,6 +23,7 @@
+ #include <linux/rtnetlink.h>
+ #include <linux/sockios.h>
+ #include <netinet/in.h>
++#include <sched.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+ 
+@@ -32,7 +35,9 @@
+ #include "gmock/gmock.h"
+ #include "gtest/gtest.h"
+ #include "test/syscalls/linux/socket_netlink_util.h"
++#include "test/util/cleanup.h"
+ #include "test/util/file_descriptor.h"
++#include "test/util/linux_capability_util.h"
+ #include "test/util/posix_error.h"
+ #include "test/util/socket_util.h"
+ #include "test/util/test_util.h"
+@@ -230,6 +235,74 @@ TEST(NetdeviceTest, EthtoolGetTSInfo) {
+   ASSERT_THAT(ioctl(sock.get(), SIOCETHTOOL, &ifr), SyscallSucceeds());
+ }
+ 
++
++// SIOCSIFFLAGS sets an interface's flags, as Linux's dev_ifsioc() does through
++// dev_change_flags(), in the socket's network namespace. crun brings up the
++// loopback interface of a new network namespace so.
++TEST(NetdeviceTest, SetInterfaceFlags) {
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
++  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
++  SKIP_IF(IsRunningWithHostinet());
++
++  const FileDescriptor netns =
++      ASSERT_NO_ERRNO_AND_VALUE(Open("/proc/thread-self/ns/net", O_RDONLY));
++  auto restore = Cleanup(
++      [&] { EXPECT_THAT(setns(netns.get(), CLONE_NEWNET), SyscallSucceeds()); });
++  ASSERT_THAT(unshare(CLONE_NEWNET), SyscallSucceeds());
++
++  FileDescriptor sock =
++      ASSERT_NO_ERRNO_AND_VALUE(Socket(AF_INET, SOCK_DGRAM, 0));
++  struct ifreq ifr = {};
++  snprintf(ifr.ifr_name, IFNAMSIZ, "lo");
++
++  for (const bool up : {true, false, true}) {
++    ASSERT_THAT(ioctl(sock.get(), SIOCGIFFLAGS, &ifr), SyscallSucceeds());
++    if (up) {
++      ifr.ifr_flags |= IFF_UP;
++    } else {
++      ifr.ifr_flags &= ~IFF_UP;
++    }
++    ASSERT_THAT(ioctl(sock.get(), SIOCSIFFLAGS, &ifr), SyscallSucceeds());
++    ASSERT_THAT(ioctl(sock.get(), SIOCGIFFLAGS, &ifr), SyscallSucceeds());
++    EXPECT_EQ(ifr.ifr_flags & IFF_UP, up ? IFF_UP : 0);
++    EXPECT_NE(ifr.ifr_flags & IFF_LOOPBACK, 0);
++  }
++
++  struct ifreq unknown = ifr;
++  snprintf(unknown.ifr_name, IFNAMSIZ, "nosuchdev0");
++  EXPECT_THAT(ioctl(sock.get(), SIOCSIFFLAGS, &unknown),
++              SyscallFailsWithErrno(ENODEV));
++
++  // The ioctls act in the socket's network namespace, not the caller's, as
++  // Linux's sock_ioctl() passes sock_net() to dev_ioctl().
++  ASSERT_THAT(unshare(CLONE_NEWNET), SyscallSucceeds());
++  FileDescriptor other =
++      ASSERT_NO_ERRNO_AND_VALUE(Socket(AF_INET, SOCK_DGRAM, 0));
++  struct ifreq other_lo = {};
++  snprintf(other_lo.ifr_name, IFNAMSIZ, "lo");
++  for (const bool up : {false, true}) {
++    ASSERT_THAT(ioctl(sock.get(), SIOCGIFFLAGS, &ifr), SyscallSucceeds());
++    if (up) {
++      ifr.ifr_flags |= IFF_UP;
++    } else {
++      ifr.ifr_flags &= ~IFF_UP;
++    }
++    ASSERT_THAT(ioctl(sock.get(), SIOCSIFFLAGS, &ifr), SyscallSucceeds());
++    ASSERT_THAT(ioctl(sock.get(), SIOCGIFFLAGS, &ifr), SyscallSucceeds());
++    EXPECT_EQ(ifr.ifr_flags & IFF_UP, up ? IFF_UP : 0);
++    ASSERT_THAT(ioctl(other.get(), SIOCGIFFLAGS, &other_lo),
++                SyscallSucceeds());
++    EXPECT_EQ(other_lo.ifr_flags & IFF_UP, 0);
++  }
++
++  // Without CAP_NET_ADMIN, before the device is looked up.
++  AutoCapability cap(CAP_NET_ADMIN, false);
++  EXPECT_THAT(ioctl(sock.get(), SIOCSIFFLAGS, &ifr),
++              SyscallFailsWithErrno(EPERM));
++  EXPECT_THAT(ioctl(sock.get(), SIOCSIFFLAGS, &unknown),
++              SyscallFailsWithErrno(EPERM));
++}
++
+ }  // namespace
+ 
+ }  // namespace testing
