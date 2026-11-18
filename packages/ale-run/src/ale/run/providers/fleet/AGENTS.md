@@ -42,3 +42,28 @@ deletes a snapshot whose save finishes after its Sandbox's lease ended.
   reaching the Node is kept, recorded as its Node's, and listed by `ale sandbox list` for an
   operator to destroy. Closing it would need the control plane to tell such a snapshot from
   one a crashed Run's retention kept, which it keeps on purpose.
+
+## A snapshot verifier's solver could land where its verifier cannot boot
+
+**Problem.** A snapshot verifier boots on the Node and leaf that saved its solver's
+snapshot. Placing the solver by its own needs could choose a leaf that does not serve the
+verifier, such as one without GPUs for a verifier that retrains on them, or a Node too small
+for it, and the verifier then failed after the agent's whole run.
+
+**Context.** The Run's selection, whose needs nest the verifier's, shows only that some leaf
+the Nodes lend serves both. Placement then chose the solver's Node and leaf by its demand,
+which carried no word of the Sandbox that would later boot from its snapshot.
+
+**Solution.** The solver's request names its verifier's resources
+(`SandboxRequest.snapshot_verifier`), which its demand carries (`SandboxDemand.verifier`)
+and its needs nest (`SandboxNeeds.verifier`). One profile must serve both, by the same rule
+(`unmet`) in the Run's selection, in placement and in the node agent's admission, and
+placement takes for the solver only a Node whose whole capacity holds the verifier as well.
+
+**Decisions.**
+- One profile, not one leaf with two profiles, serves both: every leaf's profiles today are
+  supersets where a solver and its verifier differ, and one rule keeps the Run's selection,
+  a leaf's own admission and the Fleet's placement in agreement.
+- Selection compares profiles, which carry no GPU counts, so a verifier asking for more GPUs
+  than any one Node has is refused when its solver is placed, before the agent runs, rather
+  than when the Run starts.

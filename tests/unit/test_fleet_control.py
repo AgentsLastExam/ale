@@ -1115,7 +1115,8 @@ class TestRetention:
         self, control: ControlPlane
     ) -> None:
         """A boot from a snapshot has one Node to go to, so one that Node could never hold,
-        by its CPUs or by its GPUs, fails as it is asked for rather than waiting."""
+        by its CPUs or by its GPUs, or whose snapshot verifier it could never hold, fails as
+        it is asked for rather than waiting."""
         gpus = NodeResources(
             cpus=16, memory_mb=65536, disk_gb=1000, gpus=(GpuPool(model=H100, count=1),)
         )
@@ -1142,6 +1143,57 @@ class TestRetention:
         refused = ask(control, 3, eight)
         assert refused.status is SandboxStatus.FAILED
         assert refused.reason.endswith("box has fewer than 8 GPUs of an accepted model in all")
+        # A continuation that a snapshot verifier will boot from on the same Node, which could
+        # never hold that verifier, fails at once too.
+        verified = container(snapshot=source.sandbox_id).model_copy(
+            update={"verifier": Resources(cpus=8, memory_mb=16384, gpus=4)}
+        )
+        refused = ask(control, 4, verified)
+        assert (refused.status, refused.reason) == (
+            SandboxStatus.FAILED,
+            f"snapshot {source.sandbox_id} is on box, which cannot hold its snapshot "
+            "verifier: box has fewer than 4 GPUs of an accepted model in all",
+        )
+
+    def test_a_snapshot_verifier_s_solver_goes_to_a_leaf_that_serves_both(
+        self, control: ControlPlane
+    ) -> None:
+        """Its verifier boots on the leaf, and the Node, that saves the solver's snapshot, so
+        the solver goes where one leaf serves both and the Node holds the verifier."""
+        gpus = NodeResources(
+            cpus=16, memory_mb=65536, disk_gb=1000, gpus=(GpuPool(model=H100, count=2),)
+        )
+        kata = DOCKER.model_copy(update={"provider": "docker:kata", "snapshot": True})
+        runc = DOCKER.model_copy(
+            update={"snapshot": True, "gpus": True, "gpu_models": (GpuModel(name=H100),)}
+        )
+        control.register(
+            linux("box").model_copy(update={"resources": gpus, "profiles": (kata, runc)})
+        )
+        alone = ask(control, 1, container(retention="snapshot"))
+        assert control.sandboxes[alone.sandbox_id].provider == "docker:kata"
+        verified = container().model_copy(
+            update={"verifier": Resources(cpus=8, memory_mb=16384, gpus=2)}
+        )
+        both = ask(control, 2, verified)
+        assert both.node == "box"
+        assert control.sandboxes[both.sandbox_id].provider == "docker:runc"
+        # Neither leaf, nor the Node, could boot one of four GPUs.
+        four = verified.model_copy(update={"verifier": Resources(cpus=8, memory_mb=16384, gpus=4)})
+        refused = ask(control, 3, four)
+        assert refused.status is SandboxStatus.FAILED
+        assert "room for its snapshot verifier's 8 CPUs, 16384 MB and 4 accepted GPUs" in (
+            refused.reason
+        )
+
+    def test_a_snapshot_verifier_s_solver_needs_a_leaf_that_saves_snapshots(
+        self, control: ControlPlane
+    ) -> None:
+        control.register(linux("plain"))
+        verified = container().model_copy(update={"verifier": Resources(cpus=1, memory_mb=1024)})
+        placement = ask(control, 1, verified)
+        assert placement.status is SandboxStatus.FAILED
+        assert "saves and boots no snapshots" in placement.reason
 
     def test_a_node_that_saves_no_snapshots_takes_none(self, control: ControlPlane) -> None:
         control.register(linux("plain"))

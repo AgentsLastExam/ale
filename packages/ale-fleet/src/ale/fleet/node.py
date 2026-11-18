@@ -389,6 +389,8 @@ def _mismatch(demand: SandboxDemand, request: SandboxRequest) -> str | None:
         return "resources"
     if request.snapshot != demand.snapshot:
         return "snapshot"
+    if request.snapshot_verifier != demand.verifier:
+        return "snapshot verifier"
     return None
 
 

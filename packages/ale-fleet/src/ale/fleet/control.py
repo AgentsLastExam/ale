@@ -721,6 +721,14 @@ class ControlPlane:
         profile = next(p for p in leaf if not unmet(p, demand.needs))
         if why := short_in_all(node.declaration, demand.resources, profile):
             return f"snapshot {demand.snapshot} is on {snapshot.node}, which cannot hold it: {why}"
+        # A snapshot verifier boots from what this Sandbox saves, on the same Node.
+        if demand.verifier is not None and (
+            why := short_in_all(node.declaration, demand.verifier, profile)
+        ):
+            return (
+                f"snapshot {demand.snapshot} is on {snapshot.node}, which cannot hold its "
+                f"snapshot verifier: {why}"
+            )
         return None
 
     def retain(self, sandbox_id: str, retention: Retention) -> None:

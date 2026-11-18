@@ -294,6 +294,12 @@ def choose(
         profile = _profile(node.declaration, demand, leaf=leaf)
         if profile is None:
             continue
+        if demand.verifier is not None and (
+            why := short_in_all(node.declaration, demand.verifier, profile)
+        ):
+            # Its snapshot verifier boots there too, once it is saved.
+            reasons.append(f"its snapshot verifier would not fit: {why}")
+            continue
         image = demand.image
         holder = node.will_hold(image) or node.name in assigned
         startup = node.startup_sec.get(profile.provider, weights.startup_sec)
@@ -371,12 +377,23 @@ def unservable(demand: SandboxDemand, nodes: Iterable[NodeView]) -> str | None:
         # In the words a Run's own selection uses for it.
         return f"no Node serves this {sandbox}: " + "; ".join(closest(offered, demand.needs))
     for node, profile in matching:
-        if short_in_all(node.declaration, resources, profile) is None:
+        if short_in_all(node.declaration, resources, profile) is None and (
+            demand.verifier is None
+            or short_in_all(node.declaration, demand.verifier, profile) is None
+        ):
             return None
+    verifier = demand.verifier
     return (
         f"no Node that offers a {sandbox} has {resources.cpus} CPUs, {resources.memory_mb} MB"
         + (f" and {resources.gpus} accepted GPUs" if resources.gpus else "")
         + " in all"
+        + (
+            ""
+            if verifier is None
+            else f", and room for its snapshot verifier's {verifier.cpus} CPUs, "
+            f"{verifier.memory_mb} MB"
+            + (f" and {verifier.gpus} accepted GPUs" if verifier.gpus else "")
+        )
     )
 
 

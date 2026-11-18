@@ -1466,6 +1466,12 @@ async def _plan_on_fleet(
                 task.spec.network,
                 task.spec.resources,
                 settings.episodes,
+                verifier=(
+                    task.spec.verify.resources.as_resources()
+                    if task.spec.verify.environment_mode is VerificationMode.SNAPSHOT
+                    and task.spec.verify.resources is not None
+                    else None
+                ),
             )
         )
     fleet = providers.fleet

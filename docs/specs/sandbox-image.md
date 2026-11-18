@@ -555,12 +555,13 @@ The Run's `sandbox.providers` lists provider ids in order of preference. Each Sa
 Task's solver and a separate verifier by its own needs, goes to the first Provider with a
 profile that serves it and no rule of its own against it. A snapshot verifier and its solver
 go together to the first with one profile that serves both, since only the leaf that saved
-a snapshot boots from it: the solver's needs carry its verifier's, which a leaf's own
-admission checks too. The choice is by capability alone, never by load, so one
-configuration always chooses the same way. Every Task is selected once the kinds of its
-images are decided and before any image is prepared or Sandbox started. A Run with a
-Sandbox that no listed Provider serves is refused whole, naming each such Task and role and
-why each Provider does not serve it, rather than failing its episodes one by one.
+a snapshot boots from it: the solver's needs carry its verifier's, and every check of them,
+a leaf's own and the [Fleet](fleet.md)'s placement included, holds one leaf to both. The
+choice is by capability alone, never by load, so one configuration always chooses the same
+way. Every Task is selected once the kinds of its images are decided and before any image
+is prepared or Sandbox started. A Run with a Sandbox that no listed Provider serves is
+refused whole, naming each such Task and role and why each Provider does not serve it,
+rather than failing its episodes one by one.
 
 Before any episode starts, the Run has each selected leaf run its preflight with the needs
 of the Sandboxes selected for it, which finds what the leaf runs those with, such as its

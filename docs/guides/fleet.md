@@ -166,9 +166,10 @@ control plane as episodes start and end.
 its resources reserved there. A snapshot stays on the Node that saved it, and Sandboxes that
 boot from it run there, on the leaf that saved it
 ([Placement](../specs/fleet.md#placement)). So a snapshot verifier runs on its solver's
-Node and leaf, and waits there for room while the Node is full, which counts against its
-`[verifier].timeout_sec`. `--continue-from` continues either one, as long as the Run
-selects the Fleet for its Task. To list or destroy them, name the control plane:
+Node and leaf, and must fit there: its solver goes only where one does. It waits there
+for room while the Node is full, which counts against its `[verifier].timeout_sec`.
+`--continue-from` continues either one, as long as the Run selects the Fleet for its
+Task. To list or destroy them, name the control plane:
 
 ```bash
 ALE_FLEET_URL=http://CONTROL:7470 uv run ale sandbox list
