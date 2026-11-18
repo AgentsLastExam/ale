@@ -108,7 +108,7 @@ key.
      left, from their measured lifetimes; one that has outlived all of them, a retained one,
      or one with none measured is not expected to end. One not yet ready first has the rest
      of its image's preparation and its create time to go. Solvers and verifiers are
-     measured apart, as a separate verifier that reuses the solver's image ends far sooner.
+     measured apart, as a verifier that reuses the solver's image ends far sooner.
      The requests already waiting for that Node take its room first. A full Node that lacks
      the image is never waited for.
 

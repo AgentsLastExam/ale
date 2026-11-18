@@ -298,8 +298,9 @@ async def prepare_verifier_image(task: Task, provider: Provider) -> PreparedTask
 async def prepare_verifier_image_result(
     task: Task, provider: Provider
 ) -> ImagePreparationResult | None:
-    """A separate verifier's image, prepared for ``provider``; none for shared
-    verification."""
+    """The image of a verifier of its own, prepared for ``provider``: a separate verifier's,
+    or the solver's for a snapshot verifier, which boots from the solver's snapshot; none for
+    shared verification."""
     verify = task.spec.verify
     if verify.environment_mode is VerificationMode.SHARED:
         return None

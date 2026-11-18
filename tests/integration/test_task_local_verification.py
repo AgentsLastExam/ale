@@ -1,25 +1,38 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from ale.core.sandbox import ImageRef, PreparedTaskImage
-from ale.core.taskspec import ImageKind, ImageSpec, VerifySpec
+from ale.core.config import SandboxRetentionConfig
+from ale.core.sandbox import ImageRef, PreparedTaskImage, SandboxRequest
+from ale.core.taskspec import ImageKind, ImageSpec, NetworkMode, NetworkPolicy, VerifySpec
 from ale.core.verdict import Status
 from ale.run.episode import run_episode
 from ale.run.harnesses.builtin import OracleHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
+from ale.run.providers.firecracker import FirecrackerProvider
+from ale.run.providers.qemu import QemuProvider
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import (
     _OciBuild,
     prepare_verifier_image_result,
 )
 from ale.run.tasksets.manifest import load_tasks
-from tests.support import CONTAINER_BASE, edit_task_config, provider_registry
+from tests.support import (
+    CONTAINER_BASE,
+    VM_BASE,
+    VM_RESOURCES,
+    edit_task_config,
+    provider_registry,
+    skip_without_gvisor,
+    skip_without_kata,
+    write_task,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -428,3 +441,282 @@ async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
     assert not any(
         entry["source"].endswith(("game.sgf", "broken.sgf", "/loop")) for entry in entries
     )
+
+
+#: What a snapshot verifier checks of the Sandbox it boots in: the agent's file outside any
+#: declared artifact, the solver's account and no stage of the solver's; under runc, from
+#: its cgroups, and in a microVM, from its kernel, its own CPUs and memory (MiB, the second
+#: argument) rather than its solver's. It leaves a file of its own, which must not reach
+#: the solver.
+_SNAPSHOT_VERIFY = """\
+import os
+import pwd
+import sys
+from pathlib import Path
+from ale_verify import write
+
+def cgroup(name):
+    return Path('/sys/fs/cgroup', name).read_text().split()
+
+runtime, memory = sys.argv[1], int(sys.argv[2])
+v = {}
+v['checkpoint'] = float(Path('/home/user/checkpoints/step-1000.bin').read_text() == 'weights')
+v['setup'] = float(not any(Path('/opt/ale/setup').glob('*')))
+v['account'] = float(pwd.getpwnam('user').pw_dir == '/home/user')
+if runtime == 'runc':
+    v['cpus'] = float(cgroup('cpu.max') == ['200000', '100000'])
+    v['memory'] = float(int(cgroup('memory.max')[0]) == memory << 20)
+if runtime == 'firecracker':
+    v['cpus'] = float(os.cpu_count() == 2)
+    total = next(line for line in open('/proc/meminfo') if line.startswith('MemTotal:'))
+    v['memory'] = float(memory - 512 < int(total.split()[1]) >> 10 <= memory)
+Path('/home/user/verifier-was-here').write_text('verifier')
+v['reward'] = sum(v.values()) / len(v.values())
+write(v)
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime", "retention"),
+    [
+        ("runc", "destroy"),
+        ("runc", "snapshot"),
+        ("kata", "destroy"),
+        ("gvisor", "destroy"),
+        pytest.param("firecracker", "destroy", marks=pytest.mark.needs_kvm),
+    ],
+)
+async def test_a_snapshot_verifier_sees_the_solvers_disk_with_its_own_resources(
+    tmp_path: Path, runtime: str, retention: str
+) -> None:
+    if runtime == "kata":
+        skip_without_kata()
+    elif runtime == "gvisor":
+        skip_without_gvisor()
+    provider: DockerProvider | FirecrackerProvider = (
+        FirecrackerProvider() if runtime == "firecracker" else DockerProvider(runtime=runtime)
+    )
+    # A microVM's memory also holds its kernel, and the base starts a GNOME session.
+    memory = 2048 if runtime == "firecracker" else 512
+    task = scaffold_task(tmp_path / f"snapshot-{runtime}-{retention}")
+    edit_task_config(
+        task,
+        {
+            "artifacts": [],
+            "environment": {"cpus": 1, "memory_mb": memory},
+            "verifier": {
+                "environment_mode": "snapshot",
+                "environment": {"cpus": 2, "memory_mb": 2 * memory},
+            },
+        },
+    )
+    (task / "instruction.md").write_text("Train, and leave your checkpoint.\n")
+    setup = task / "environment/setup/setup.sh"
+    setup.parent.mkdir()
+    setup.write_text("#!/bin/sh\nset -eu\ntrue\n")
+    (task / "calibration/solution/solve.sh").write_text(
+        "#!/bin/sh\nset -eu\nmkdir -p /home/user/checkpoints\n"
+        "printf weights > /home/user/checkpoints/step-1000.bin\n"
+    )
+    (task / "tests/test.sh").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        f'exec "$ALE_VERIFY_PYTHON" verify.py {runtime} {2 * memory}\n'
+    )
+    (task / "tests/verify.py").write_text(_SNAPSHOT_VERIFY)
+
+    result = await run_episode(
+        load_tasks(task)[0],
+        EpisodeProtocol(OracleHarness()),
+        provider_registry(provider),
+        run_dir=tmp_path / "runs",
+        sandbox_retention=SandboxRetentionConfig(solver=retention),  # type: ignore[arg-type]
+    )
+
+    kept = [outcome.handle for outcome in result.record.sandboxes if outcome.handle]
+    try:
+        assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+        verification = json.loads((result.run_dir / "verification.json").read_text())
+        assert verification["reward"] == 1.0, verification
+        trace = [
+            json.loads(line)
+            for line in (result.run_dir / "trace.execution.jsonl").read_text().splitlines()
+        ]
+        # Saved for the solver, then destroyed or kept: the trace names it by its handle.
+        (handle,) = {
+            record["data"]["handle"]
+            for record in trace
+            if "handle" in (record.get("data") or {}) and record["phase"] == "agent"
+        }
+        image = handle.replace("docker:snapshot:", "ale-snapshot:")
+        by_role = {outcome.roles: outcome for outcome in result.record.sandboxes}
+        assert by_role[("verifier",)].outcome == "destroyed"
+        listed = {str(item["handle"]) for item in await provider.list_retained()}
+        if retention == "destroy":
+            assert by_role[("solver",)].outcome == "destroyed"
+            assert handle not in listed
+            if runtime != "firecracker":
+                gone = subprocess.run(["docker", "image", "inspect", image], capture_output=True)
+                assert gone.returncode != 0
+        else:
+            assert kept == [handle] and handle in listed
+            assert by_role[("solver",)].outcome == "snapshotted"
+            # The kept snapshot is the solver's disk as it was before the verifier ran.
+            probe = subprocess.run(
+                ["docker", "run", "--rm", "--entrypoint", "sh", image, "-c",
+                 "test -s /home/user/checkpoints/step-1000.bin "
+                 "&& test ! -e /home/user/verifier-was-here && test ! -e /logs/verifier"],
+                capture_output=True,
+            )  # fmt: skip
+            assert probe.returncode == 0, probe.stderr
+    finally:
+        for handle in kept:
+            await provider.destroy_retained(handle)
+
+
+#: A VM verifier's own CPUs and memory are its guest's, so it reads them directly.
+_VM_SNAPSHOT_VERIFY = """\
+import os
+from pathlib import Path
+from ale_verify import write
+
+def memory_mb():
+    if os.name == 'nt':
+        import ctypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [('length', ctypes.c_ulong), ('load', ctypes.c_ulong)] + [
+                (name, ctypes.c_ulonglong)
+                for name in ('total', 'free', 'page', 'page_free', 'virtual', 'virtual_free', 'x')
+            ]
+
+        status = Status()
+        status.length = ctypes.sizeof(Status)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+        return status.total >> 20
+    line = next(line for line in open('/proc/meminfo') if line.startswith('MemTotal:'))
+    return int(line.split()[1]) >> 10
+
+v = {}
+v['checkpoint'] = float(Path(HOME, 'checkpoints', 'step-1000.bin').read_text() == 'weights')
+v['cpus'] = float(os.cpu_count() == 4)
+# The guest's kernel and firmware keep some of what the VM is given.
+v['memory'] = float(5120 < memory_mb() <= 6144)
+Path(HOME, 'verifier-was-here').write_text('verifier')
+v['reward'] = sum(v.values()) / len(v.values())
+write(v)
+"""
+
+
+@pytest.mark.needs_kvm
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guest", ["linux", "windows"])
+async def test_a_snapshot_verifier_boots_a_vm_of_its_own_size_on_the_solvers_disk(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    guest: str,
+) -> None:
+    request.getfixturevalue("docker_buildx")
+    request.getfixturevalue("kvm_host")
+    root = tmp_path / "snapshot-vm"
+    verifier = {"environment_mode": "snapshot", "environment": {"cpus": 4, "memory_mb": 6144}}
+    if guest == "windows":
+        image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+        if not image.is_file():
+            pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+        monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
+        provider = QemuProvider(
+            image=image, overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots"
+        )
+        home = "C:/Users/user"
+        write_task(
+            root,
+            name="agentslastexam/snapshot-vm",
+            config={
+                "artifacts": [],
+                "environment": {
+                    "os": "windows",
+                    "image": "local/windows-base",
+                    "cpus": 2,
+                    "memory_mb": 4096,
+                },
+                "agent": {"timeout_sec": 600},
+                "verifier": {**verifier, "timeout_sec": 600},
+            },
+            dockerfile=None,
+            test=None,
+            solve=None,
+        )
+        for directory in ("environment", "tests", "calibration/solution"):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+        # Built on the base, so the image gets the Windows framework.
+        (root / "environment/build.ps1").write_text("exit 0\n")
+        (root / "calibration/solution/solve.ps1").write_text(
+            "New-Item -ItemType Directory -Force C:\\Users\\user\\checkpoints | Out-Null\n"
+            "Set-Content -NoNewline -Value weights C:\\Users\\user\\checkpoints\\step-1000.bin\n"
+        )
+        (root / "tests/test.ps1").write_text(
+            "& $env:ALE_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
+        )
+    else:
+        provider = QemuProvider(overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots")
+        home = "/home/user"
+        scaffold_task(root)
+        edit_task_config(
+            root,
+            {
+                "artifacts": [],
+                "environment": {"image": VM_BASE, **VM_RESOURCES},
+                "verifier": verifier,
+            },
+        )
+        (root / "environment/Dockerfile").unlink()
+        (root / "environment/build.sh").write_text("true\n")
+        (root / "calibration/solution/solve.sh").write_text(
+            "#!/bin/sh\nset -eu\nmkdir -p /home/user/checkpoints\n"
+            "printf weights > /home/user/checkpoints/step-1000.bin\n"
+        )
+    (root / "tests/verify.py").write_text(f"HOME = {home!r}\n" + _VM_SNAPSHOT_VERIFY)
+    task = load_tasks(root)[0]
+
+    result = await run_episode(
+        task,
+        EpisodeProtocol(OracleHarness()),
+        provider_registry(provider),
+        run_dir=tmp_path / "runs",
+        sandbox_retention=SandboxRetentionConfig(solver="snapshot"),
+    )
+
+    kept = [outcome.handle for outcome in result.record.sandboxes if outcome.handle]
+    try:
+        assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+        verification = json.loads((result.run_dir / "verification.json").read_text())
+        assert verification["reward"] == 1.0, verification
+        by_role = {outcome.roles: outcome for outcome in result.record.sandboxes}
+        assert by_role[("verifier",)].outcome == "destroyed"
+        assert by_role[("solver",)].outcome == "snapshotted"
+        assert kept == [by_role[("solver",)].handle]
+        assert {str(item["handle"]) for item in await provider.list_retained()} == set(kept)
+        # The kept snapshot is the solver's disk as it was: the verifier wrote nothing to it.
+        assert task.prepared_image is not None
+        probe = await provider.create(
+            SandboxRequest(
+                episode_id="probe",
+                os=task.spec.os,
+                prepared_image=task.prepared_image,
+                snapshot=kept[0],
+                resources=task.spec.resources,
+                network=NetworkPolicy(mode=NetworkMode.BLOCK),
+                user=task.spec.image.user,
+            )
+        )
+        try:
+            assert await probe.read_file(f"{home}/checkpoints/step-1000.bin") == b"weights"
+            assert not await probe.list_files(f"{home}/verifier-was-here")
+        finally:
+            await probe.destroy()
+    finally:
+        for handle in kept:
+            await provider.destroy_retained(handle)
+    assert not list((tmp_path / "snapshots").iterdir())

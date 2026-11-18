@@ -113,12 +113,12 @@ sudo = false                                # ALE; sudo works exactly when true 
 
 [verifier]
 timeout_sec = 600                           # positive seconds; default 600
-environment_mode = "separate"               # shared | separate
+environment_mode = "separate"               # shared | separate | snapshot (ALE)
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 
-[verifier.environment]                      # a separate verifier's own sandbox
-# image = "registry.example/verifier:tag"   # ALE; used directly instead of tests/Dockerfile
-build_timeout_sec = 3600                    # default 3600
+[verifier.environment]                      # a separate or snapshot verifier's own sandbox
+# image = "registry.example/verifier:tag"   # ALE; separate only; not with tests/Dockerfile
+build_timeout_sec = 3600                    # separate only; default 3600
 cpus = 1                                    # default [environment].cpus
 memory_mb = 4096                            # default [environment].memory_mb
 storage_mb = 8192                           # default the Provider's
@@ -164,6 +164,8 @@ These values differ from Harbor's:
   and an empty value counts as unset; see [Variables](#variables).
 - A `skills_dir` that does not exist fails the Episode.
 - `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
+- `environment_mode` also takes `snapshot`, ALE's: a verifier booted from a snapshot of the
+  solver; see [Verification topology](#verification-topology).
 - The reference solution is `calibration/solution/`, one [calibration case](#calibration)
   among the others, where Harbor's is `solution/`, so a Harbor conversion moves it; a Task
   still holding `solution/` fails as it loads.
@@ -193,21 +195,45 @@ Copying uses the framework's privileged identity on every supported OS; see
 [Permissions](sandbox-image.md#permissions).
 
 Separate verification always transfers the declared artifacts to its verifier through the
-Host, as in Harbor. Run-level `artifacts.collect` decides only whether the episode keeps a
-copy: the default `"none"` keeps none, and `"host"` keeps them in either mode. `run`,
-`calibrate`, and `reverify` use the same policy. Separate-verifier images must not contain
-prepopulated candidate answers; tasks that grade original links or live state should use
-shared verification.
+Host, as in Harbor; a snapshot verifier needs none, as it has the solver's disk. Run-level
+`artifacts.collect` decides only whether the episode keeps a copy: the default `"none"`
+keeps none, and `"host"` keeps them in any mode. `run`, `calibrate`, and `reverify` use the
+same policy. Separate-verifier images must not contain prepopulated candidate answers. Tasks
+that grade original links should use shared or snapshot verification, and those that grade
+live state, such as a running service, shared verification.
 
 ### Verification topology
 
-Verification is shared unless `environment_mode = "separate"` or `[verifier.environment]`
-says otherwise, as in Harbor. Separate verification runs in an independent sandbox with the
-`[verifier.environment]` resources, or the solver's without sudo when that table is absent.
-Its image is `[verifier.environment].image`, a Linux container built from
-`tests/Dockerfile`, or else the solver's, as
-[Verifier images](sandbox-image.md#verifier-images) says. The Verification APIs and records
-are defined only in [Verification](verification.md).
+`[verifier].environment_mode` says where the verifier runs:
+
+- `shared`: in the solver's Sandbox, with its resources. It sees the solver's whole machine,
+  processes included, and what it does changes the solver.
+- `snapshot`, ALE's: in a new Sandbox booted from a snapshot of the solver, with resources
+  of its own. It sees the solver's whole disk but none of its processes, and nothing it does
+  reaches the solver.
+- `separate`: in a new Sandbox of the verifier's image, with resources of its own. It sees
+  only the declared artifacts.
+
+Verification is shared unless `environment_mode` or `[verifier.environment]` says otherwise,
+as in Harbor: the table alone means `separate`, so `snapshot` is always written out. A
+verifier of its own, separate or snapshot, has the `[verifier.environment]` resources, or
+the solver's when that table is absent. A separate verifier's image is
+`[verifier.environment].image`, a Linux container built from `tests/Dockerfile`, or else the
+solver's, as [Verifier images](sandbox-image.md#verifier-images) says.
+
+A snapshot verifier suits verification that needs all the solver left, such as tens of GB of
+checkpoints, and more than the solver had, such as more GPUs to train with: a shared one
+cannot have other resources and can change the solver, and a separate one gets only the
+declared artifacts, copied through the Host. How the solver is saved and the verifier
+booted, and which retention cannot hold, is in the
+[Episode protocol](episode-protocol.md#verify). Its `[verifier.environment]` may set only
+the Sandbox's size and capabilities (`cpus`, `memory_mb`, `storage_mb`, `gpus`, `gpu_types`,
+`gpu_memory_mb`, `container_features`) and `env`. `image` and `build_timeout_sec` fail, as
+its image is the solver's snapshot, and so does `tests/Dockerfile`. A verifier on the
+agent's disk, shared or snapshot, runs as root among programs the agent could change
+([Security](security.md#what-is-not-defended-against)).
+
+The Verification APIs and records are defined only in [Verification](verification.md).
 
 ### Resources and network
 
@@ -297,8 +323,9 @@ A Task names what it needs and never a Provider or runtime. A Run gives each San
 Provider that gives every feature it names, and refuses to start when none it may use does
 ([Provider selection](sandbox-image.md#provider-selection)). A Provider widens a Sandbox
 only for the features it names, so a Task that names none runs as isolated as its Provider
-runs any container. A separate verifier names its own in `[verifier.environment]`, and
-takes the solver's when that table is absent, as it takes its size.
+runs any container. A separate or snapshot verifier names its own in
+`[verifier.environment]`, and takes the solver's when that table is absent, as it takes its
+size.
 
 A VM has a kernel of its own, so a VM image takes none: naming one fails as the Task loads
 when its folder makes it a VM, and before anything is prepared when its registry does. Which
@@ -313,14 +340,15 @@ Harbor's `env` tables set environment variables for the Task's commands:
 |---|---|
 | `[environment].env` | setup, the agent and the oracle, and a shared verifier |
 | `[verifier].env` | the verifier |
-| `[verifier.environment].env` | a separate verifier, in place of `[environment].env` |
+| `[verifier.environment].env` | a verifier of its own, instead of `[environment].env` |
 | `[solution].env` | the oracle |
 | `[[environment.mcp_servers]].headers` | the agent's MCP client |
 
-A separate verifier without `[verifier.environment]` receives `[environment].env`, because
-Harbor copies `[environment]` for it. `[verifier].env` and `[solution].env` win over the table
-beneath them, and a variable the framework or the Harness sets for a command wins over every
-table. Names beginning with `ALE_` are the framework's.
+A separate or snapshot verifier without `[verifier.environment]` receives
+`[environment].env`, because Harbor copies `[environment]` for it. `[verifier].env` and
+`[solution].env` win over the table beneath them, and a variable the framework or the
+Harness sets for a command wins over every table. Names beginning with `ALE_` are the
+framework's.
 
 A value is a literal or a whole-value reference, `${NAME}` or `${NAME:-default}`. References
 resolve from the checkout's `.env` (`ALE_ENV_FILE` overrides) and nothing else: a variable

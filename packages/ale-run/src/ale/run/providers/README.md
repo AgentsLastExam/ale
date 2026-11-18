@@ -376,8 +376,10 @@ lacks it, and grants nothing. Every Linux and macOS Provider calls
 `privileges.set_elevation` through the root guestd, then `privileges.verify_identities`,
 before any Task code runs: Docker once `docker exec` has started guestd, QEMU and
 Firecracker once the booted guest answers, Daytona before it starts the image's own
-command, Orchard once guestd answers in an agent's VM. The script runs on the framework's
-Python:
+command, Orchard once guestd answers. A verifier runs no agent, and verification runs as
+root, so in a verifier's Sandbox none sets or checks the account's elevation, which stays as
+the disk has it; the Linux Providers still prove the framework root there, and QEMU a
+Windows framework's Administrator token. The script runs on the framework's Python:
 
 - It replaces the last two lines of `/etc/sudoers`, a marker comment and one rule:
   `<user> ALL=(ALL:ALL) NOPASSWD: ALL` to grant, `<user> ALL=(ALL:ALL) !ALL` to revoke.
@@ -977,8 +979,8 @@ grants name) and waits until it captures. guestd sends desktop pointer actions w
 over a background app's window. Elevation for `[agent].sudo` is set at every boot, as on
 Linux ([Agent elevation](#agent-elevation-on-linux-and-macos)). `admin` keeps passwordless
 sudo for ALE, which runs as root through it, so a Task running as `admin` must declare
-`sudo = true`. A separate verifier VM runs no agent, so it gets neither the desktop nor the
-elevation and its checks, and a `build.sh` VM is kept exactly as the build left it.
+`sudo = true`. A verifier VM runs no agent, so it gets neither the desktop nor the elevation
+and its checks, and a `build.sh` VM is kept exactly as the build left it.
 
 Preparing an OCI reference resolves its tag through registry manifest metadata without
 downloading VM disks or checking the worker cache, and checks the installed framer, the

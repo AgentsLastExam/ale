@@ -13,9 +13,10 @@ from pathlib import Path
 import pytest
 
 from ale.core.errors import ProviderCapabilityError, TaskDefinitionError
-from ale.core.taskspec import OperatingSystem
+from ale.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
+from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
 from ale.run import guestd
-from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.privileges import set_and_prove_elevation, set_elevation, verify_identities
 
 pytestmark = pytest.mark.unit
 
@@ -103,6 +104,45 @@ async def test_a_requested_grant_that_cannot_work_says_why() -> None:
     with pytest.raises(ProviderCapabilityError, match="has no sudo"):
         await verify_identities(Probed(), "user", sudo=True)  # type: ignore[arg-type]
     await verify_identities(Probed(), "user", sudo=False)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [SandboxRole.SOLVER, SandboxRole.VERIFIER])
+async def test_a_verifier_leaves_the_agent_account_as_its_disk_has_it(role: SandboxRole) -> None:
+    """Verification runs as root and runs no agent, so a verifier proves the framework root
+    and neither sets nor checks the account's elevation, which the disk it boots from may
+    have changed."""
+    calls: list[tuple[str, str | None]] = []
+
+    class Probed:
+        async def exec(self, argv, *, run_as=None, timeout_sec=None):  # type: ignore[no-untyped-def]
+            calls.append((argv[0], run_as))
+            if argv[0] == "sh":
+                # The framework is root, and the agent account can elevate.
+                return 0, "0 yes" if run_as is None else "1000 yes", "", False
+            return 0, "", "", False
+
+    request = SandboxRequest(
+        episode_id="e1",
+        role=role,
+        prepared_image=PreparedTaskImage(
+            kind="container",
+            source="external-ref",
+            input_identity="sha256:" + "0" * 64,
+            runtime_ref="image",
+            prepared_identity="sha256:" + "0" * 64,
+            resolved_reference="image",
+        ),
+        resources=Resources(cpus=1, memory_mb=512),
+        network=NetworkPolicy(),
+    )
+    if role is SandboxRole.VERIFIER:
+        await set_and_prove_elevation(Probed(), request, "user")  # type: ignore[arg-type]
+        assert calls == [("sh", None)]
+    else:
+        with pytest.raises(ProviderCapabilityError, match="can still use sudo"):
+            await set_and_prove_elevation(Probed(), request, "user")  # type: ignore[arg-type]
+        assert calls == [(guestd.PYTHON["linux"], None), ("sh", None), ("sh", "user")]
 
 
 #: Run first: the script sees macOS, and Directory Services answers from a log.

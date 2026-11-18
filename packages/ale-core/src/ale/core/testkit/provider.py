@@ -37,6 +37,7 @@ from ale.core.sandbox import (
     Provider,
     Sandbox,
     SandboxRequest,
+    SandboxRole,
 )
 from ale.core.taskspec import (
     ContainerFeature,
@@ -708,32 +709,49 @@ class ProviderConformance:
     async def test_a_snapshot_boots_new_sandboxes_with_its_files(self) -> None:
         """A snapshot keeps the disk, and every Sandbox booted from it starts from that disk.
 
-        Each gets the elevation and desktop resolution its own request asks for, whatever
-        the snapshot's had.
+        Each gets the role, size, network and desktop resolution its own request asks for,
+        whatever the snapshot's had, and an agent's also its elevation: an agent's Sandbox
+        with and without sudo, and a verifier's, larger and open, as one booted from its
+        solver's is.
         """
         if not any(profile.snapshot for profile in await self.provider.profiles()):
             with pytest.raises(ProviderCapabilityError):
                 await self.provider.create(await self.request(retention="snapshot"))
             return
-        sandbox = await self.provider.create(await self.request(retention="snapshot", sudo=True))
+        original = await self.request(retention="snapshot", sudo=True)
+        sandbox = await self.provider.create(original)
         kept = str(PurePosixPath(sandbox.agent_home) / "kept.txt")
         try:
             await sandbox.write_file(kept, b"kept", identity=Identity.AGENT)
             retained = await sandbox.snapshot(roles=("solver",), reason="conformance")
         finally:
             await sandbox.destroy()
+        larger = original.resources.model_copy(
+            update={
+                "cpus": original.resources.cpus + 1,
+                "memory_mb": original.resources.memory_mb + 1024,
+            }
+        )
         try:
             assert retained.handle.startswith(f"{self.provider.name}:")
             listed = {record["handle"] for record in await self.provider.list_retained()}
             assert retained.handle in listed
             requests = [
                 await self.request(
-                    snapshot=retained.handle, sudo=sudo, desktop_resolution=resolution
-                )
-                for sudo, resolution in (
-                    (True, DesktopResolution()),
-                    (False, DesktopResolution(width=1366, height=768)),
-                )
+                    snapshot=retained.handle, sudo=True, desktop_resolution=DesktopResolution()
+                ),
+                await self.request(
+                    snapshot=retained.handle,
+                    sudo=False,
+                    desktop_resolution=DesktopResolution(width=1366, height=768),
+                ),
+                await self.request(
+                    snapshot=retained.handle,
+                    role=SandboxRole.VERIFIER,
+                    resources=larger,
+                    network=NetworkPolicy(mode=NetworkMode.OPEN),
+                    desktop_resolution=DesktopResolution(width=1366, height=768),
+                ),
             ]
             booted = await asyncio.gather(
                 *(self.provider.create(item) for item in requests), return_exceptions=True
@@ -744,8 +762,17 @@ class ProviderConformance:
                     if isinstance(fork, BaseException):
                         raise fork
                     assert await fork.read_file(kept) == b"kept"
-                    assert await _elevates(fork) is request.sudo
+                    if request.role is not SandboxRole.VERIFIER:
+                        # Verification runs as root; nothing is promised of a verifier's
+                        # agent account.
+                        assert await _elevates(fork) is request.sudo
                     assert fork.allocation.desktop_resolution in (None, request.desktop_resolution)
+                    assert fork.request.role is request.role
+                    assert (fork.allocation.cpus, fork.allocation.memory_mb) == (
+                        request.resources.cpus,
+                        request.resources.memory_mb,
+                    )
+                    assert fork.allocation.network_mode is request.network.mode
             finally:
                 for fork in forks:
                     await fork.destroy()

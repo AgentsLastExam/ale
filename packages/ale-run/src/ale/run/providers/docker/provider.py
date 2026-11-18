@@ -85,7 +85,7 @@ from ale.run.process import run
 from ale.run.providers import machine_arch, memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, storage, subnets, tc
-from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.privileges import set_and_prove_elevation
 from ale.run.transport import GuestClient, StdioTransport
 
 __all__ = [
@@ -1181,6 +1181,9 @@ class DockerSandbox(Sandbox):
         #: What measures what it writes while it names ``storage_mb`` and this process drives
         #: it.
         self._storage: storage.Watch | None = None
+        #: Set while it is committed as a snapshot: a commit cut short may have finished in
+        #: the daemon, and destroying the Sandbox then removes the image it left.
+        self._committing = False
         #: The Host's ports of its Provider, of which it holds its own until it ends here.
         self._host_ports = host_ports
         #: The context of the phase that last ran a command in it, in which what the watchdog
@@ -1458,6 +1461,14 @@ class DockerSandbox(Sandbox):
             if code != 0:
                 # Its container keeps its disk until removed: say so where the operator looks.
                 _log.warning("could not remove %s: %s", self.container, stderr.strip())
+            if self._committing:
+                # A snapshot that was never handed back is no one's: it goes with its Sandbox.
+                # Its container went first, which fails a commit of it still in the daemon, so
+                # only an image the daemon finished can be left (see AGENTS.md).
+                reference = f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}"
+                code, _, stderr = await _docker("rmi", reference, timeout=120)
+                if code != 0 and "no such image" not in stderr.lower():
+                    _log.warning("could not remove %s: %s", reference, stderr.strip())
         finally:
             # Even when the container's removal failed or timed out: the network is the
             # sandbox's alone, and one Docker still finds attached is logged by name.
@@ -1497,6 +1508,7 @@ class DockerSandbox(Sandbox):
         code, _, stderr = await _docker("stop", "--time", "30", self.container, timeout=120)
         if code != 0:
             raise ProviderStartError(f"could not stop {self.container}: {stderr.strip()}")
+        self._committing = True
         code, _, stderr = await _docker(
             "commit",
             "--change", f"LABEL {RETENTION_LABEL}=snapshot",
@@ -1509,6 +1521,7 @@ class DockerSandbox(Sandbox):
         )  # fmt: skip
         if code != 0:
             raise ProviderStartError(f"could not commit {self.container}: {stderr.strip()}")
+        self._committing = False
         handle = f"{SNAPSHOT_PREFIX}{self.sandbox_id}"
         return RetainedSandbox(
             provider="docker",
@@ -1868,10 +1881,7 @@ class DockerProvider(Provider):
             if isolated:
                 await confinement.seal_guest(client)
             agent_home, has_desktop = await self._guest_contract(client)
-            await set_elevation(
-                client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
-            )
-            await verify_identities(client, agent_user, sudo=request.sudo)
+            await set_and_prove_elevation(client, request, agent_user)
             observed_gpu: tuple[GpuDevice, ...] = ()
             if admitted:
                 observed_gpu = _verify_docker_gpu(admitted, await self._container_gpus(client))

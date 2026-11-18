@@ -653,6 +653,35 @@ def test_an_episode_that_cannot_be_continued_here_is_refused(
         continuation(episode, [task], RunConfig(), other)
 
 
+def test_a_kept_solver_is_not_continued_under_snapshot_verification(tmp_path: Path) -> None:
+    """Its verifier would boot from a snapshot of it, whose save stops the kept solver, so the
+    Run is refused before anything is selected; a snapshot of it continues instead."""
+    kept = SandboxOutcome(
+        roles=("solver",),
+        requested="keep",
+        outcome="retained",
+        provider="docker",
+        handle="docker:kept",
+    )
+    episode, task = _source(tmp_path, record={"sandboxes": (kept,)})
+    edit_task_config(task.folder.root, {"verifier": {"environment_mode": "snapshot"}})
+    (task,) = load_tasks(task.folder.root)
+    with pytest.raises(TaskDefinitionError, match="continue from a snapshot of it instead"):
+        _continued(episode, [task], RunConfig())
+    snapshot = kept.model_copy(
+        update={
+            "requested": "snapshot",
+            "outcome": "snapshotted",
+            "handle": "docker:snapshot:kept",
+        }
+    )
+    record = ResultRecord.model_validate_json((episode / "result.json").read_text())
+    (episode / "result.json").write_text(
+        record.model_copy(update={"sandboxes": (snapshot,)}).model_dump_json()
+    )
+    assert _continued(episode, [task], RunConfig()).retained == snapshot
+
+
 def test_the_fleet_checks_a_continued_sandboxs_image_by_its_key(tmp_path: Path) -> None:
     """A Fleet Run knows an image by its key until a Node prepares it; the control plane
     checks that key as it hands the kept Sandbox over, so the Node's prepared identity is

@@ -23,6 +23,7 @@ from ale.core.verdict import Status, Verdict
 from ale.run.cli.tasks import _retained_source_episodes
 from ale.run.episode import EpisodeResult, _Lease, run_episode, run_episode_with_retries
 from ale.run.ledger import Ledger
+from ale.run.protocol.episode_protocol import SolverSnapshot
 from ale.run.providers import ProviderRegistry
 from ale.run.recording import atomic_write_json
 from ale.run.scaffold import scaffold_task
@@ -365,11 +366,11 @@ def test_reverification_source_discovery_accepts_three_levels_without_archived_r
         found = _retained_source_episodes(source)
         assert len(found) == 1
         assert found[0][0] == episode_dir
-        assert found[0][3] == "docker:source"
+        assert found[0][3].handle == "docker:source"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["shared", "separate"])
+@pytest.mark.parametrize("mode", ["shared", "separate", "snapshot"])
 async def test_reverification_retries_only_with_fresh_verifiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_checks: AsyncMock, mode: str
 ) -> None:
@@ -382,12 +383,21 @@ async def test_reverification_retries_only_with_fresh_verifiers(
         return await select(self, tasks, **options)
 
     monkeypatch.setattr(ProviderRegistry, "select", selecting)
+    chosen: list[tuple[str | None, str | None]] = []
     task_path = scaffold_task(tmp_path / "task")
-    if mode == "separate":
+    if mode != "shared":
         config = task_path / "task.toml"
-        config.write_text(config.read_text() + 'environment_mode = "separate"\n')
+        config.write_text(config.read_text() + f'environment_mode = "{mode}"\n')
     task = load_tasks(task_path)[0]
     source = write_result(tmp_path / "source", Status.COMPLETED, 1)
+    snapshot = mode == "snapshot"
+    kept = SandboxOutcome(
+        roles=("solver",),
+        requested="snapshot" if snapshot else "keep",
+        outcome="snapshotted" if snapshot else "retained",
+        provider="docker",
+        handle="docker:snapshot:source" if snapshot else "docker:source",
+    )
     original = (source.run_dir / "result.json").read_bytes()
     lock = make_lock()
     lock = lock.model_copy(
@@ -417,6 +427,12 @@ async def test_reverification_retries_only_with_fresh_verifiers(
         nonlocal calls
         calls += 1
         assert protocol.source_run_dir == source.run_dir
+        # A snapshot verifier boots from the source's snapshot, and nothing is attached.
+        assert isinstance(protocol.solver, SolverSnapshot) is snapshot
+        if snapshot:
+            assert protocol.solver.handle == "docker:snapshot:source"
+            assert protocol.solver.episode_id == source.record.episode_id
+        chosen.append((_task.provider, _task.verifier_provider))
         assert kwargs["destroy_failed_sandboxes"]
         assert str(kwargs["desktop_resolution"]) == "1366x768"
         return write_result(
@@ -436,7 +452,7 @@ async def test_reverification_retries_only_with_fresh_verifiers(
     monkeypatch.setattr(
         task_cli,
         "_retained_source_episodes",
-        lambda _: ((source.run_dir, source.record, lock, "docker:source"),),
+        lambda _: ((source.run_dir, source.record, lock, kept),),
     )
     monkeypatch.setattr(task_cli, "run_episode", execute)
     code = await task_cli._reverify(
@@ -445,12 +461,16 @@ async def test_reverification_retries_only_with_fresh_verifiers(
         RunConfig(episode_retries=1, desktop_resolution="1366x768"),  # type: ignore[arg-type]
         tmp_path / "runs",
     )
-    assert calls == (2 if mode == "separate" else 1)
-    assert code == (0 if mode == "separate" else 2)
-    assert attach.await_count == calls
-    # Each solver is the one its source kept: only verifiers are selected, and checked once
-    # before any episode.
-    assert selections == [{"solvers": False}]
+    assert calls == (1 if mode == "shared" else 2)
+    assert code == (2 if mode == "shared" else 0)
+    assert attach.await_count == (0 if snapshot else calls)
+    # Each solver is the one its source kept: only verifiers are selected, a snapshot
+    # verifier with its source, and checked once before any episode.
+    # Each solver is the one its source kept, on the Provider that kept it; a separate
+    # verifier is chosen by its own needs, and a snapshot verifier boots where its snapshot is.
+    assert all(options == {"solvers": False} for options in selections)
+    verifier = {"shared": None, "separate": "docker:runc", "snapshot": "docker:runc"}[mode]
+    assert chosen == [("docker:runc", verifier)] * calls
     ((checked,), options) = host_checks.await_args
     assert ([task.spec.name for task in checked], options) == ([task.spec.name], {"solvers": False})
     assert host_checks.await_count == 1

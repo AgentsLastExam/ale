@@ -32,6 +32,7 @@ from ale.core.errors import (
     GuestUnreachableError,
     PhaseTimeoutError,
     ProviderCapabilityError,
+    ProviderStartError,
     TaskError,
     TrajectoryConversionError,
     VerificationInfrastructureError,
@@ -50,6 +51,8 @@ from ale.core.sandbox import (
     ExecOutputSink,
     ExecResult,
     Identity,
+    ResolvedImage,
+    ResourceAllocation,
     Sandbox,
     SandboxRequest,
     SandboxRole,
@@ -99,7 +102,13 @@ from ale.run.recording import (
 from ale.run.verification import installed_ale_verify, verifier_judge_config
 from ale_verify import JudgeInvocation, read_result
 
-__all__ = ["SETUP_TIMEOUT_SEC", "EpisodeProtocol", "Resume", "ReverificationProtocol"]
+__all__ = [
+    "SETUP_TIMEOUT_SEC",
+    "EpisodeProtocol",
+    "Resume",
+    "ReverificationProtocol",
+    "SolverSnapshot",
+]
 
 #: How long past the agent deadline the Host waits. The guest enforces that deadline
 #: itself and stops the agent's process tree before it replies, so evidence capture begins
@@ -111,6 +120,10 @@ _AGENT_STOPS = (PhaseTimeoutError, BudgetExceededError, AgentError)
 
 #: Upper bound on the setup phase: a guard against a hung setup, not a scored budget.
 SETUP_TIMEOUT_SEC = 1800.0
+
+#: Upper bound on sanitizing a solver and saving it as the snapshot its verifier boots from:
+#: a guard against a hung save, outside the verifier's budget.
+SNAPSHOT_TIMEOUT_SEC = 1800.0
 
 
 #: Where the framework's own machinery goes. Under a root-owned, root-only directory,
@@ -303,10 +316,14 @@ class EpisodeProtocol:
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
+        mode = spec.verify.environment_mode
         if self.agent_enabled:
             self.harness.validate_os(spec.os)
             self.harness.validate_resources(ctx.agent_resources)
         sandbox = await self._timed(ctx, Phase.PROVISION, self._provision(ctx))
+        # Set once the solver is being saved as the snapshot its verifier boots from: saving
+        # stops it, and the lease then holds the snapshot in its place.
+        snapshotted = False
         logs = (
             LogMirror(
                 sandbox,
@@ -324,22 +341,30 @@ class EpisodeProtocol:
             )
             if self.agent_enabled:
                 await self._agent(task, ctx, sandbox, logs=logs)
+            handle: str | None = None
             try:
                 await self._capture_solver_evidence(ctx, sandbox, logs=logs)
+                if mode is VerificationMode.SNAPSHOT:
+                    snapshotted = True
+                    handle = await self._save_solver(ctx, sandbox)
             except BaseException as error:
+                # The solver's own: what the agent left is what fails to be copied or saved.
                 ctx.failure_phase = Phase.AGENT
                 if ctx.agent_stop is not None and isinstance(error, Exception):
                     raise ctx.agent_stop from error
                 raise
 
             async def verify() -> dict[str, float]:
-                if spec.verify.environment_mode is VerificationMode.SHARED:
+                if mode is VerificationMode.SHARED:
                     return await self._verify(task, ctx, sandbox)
-                await self._sanitize_for_retention(ctx, sandbox)
-                await ctx.sandboxes.release(sandbox)
-                verifier = await self._provision_verifier(ctx)
+                if handle is None:
+                    await self._sanitize_for_retention(ctx, sandbox)
+                    await ctx.sandboxes.release(sandbox)
+                # A snapshot verifier has the agent's whole disk already: nothing is restored.
+                verifier = await self._provision_verifier(ctx, snapshot=handle)
                 try:
-                    await ctx.artifacts.restore(verifier)
+                    if handle is None:
+                        await ctx.artifacts.restore(verifier)
                     return await self._verify(task, ctx, verifier)
                 finally:
                     await self._sanitize_for_retention(ctx, verifier)
@@ -362,7 +387,11 @@ class EpisodeProtocol:
         finally:
             # Teardown runs on every path, including cancellation.
             await asyncio.shield(
-                self._timed(ctx, Phase.TEARDOWN, self._teardown(ctx, sandbox, logs=logs))
+                self._timed(
+                    ctx,
+                    Phase.TEARDOWN,
+                    self._teardown(ctx, sandbox, logs=logs, snapshotted=snapshotted),
+                )
             )
 
         ctx.verified_rewards = rewards
@@ -391,6 +420,12 @@ class EpisodeProtocol:
                 else SandboxRole.SOLVER
             ),
             prepared_image=ctx.prepared_image,
+            snapshot_verifier=(
+                spec.verify.resources.as_resources()
+                if spec.verify.environment_mode is VerificationMode.SNAPSHOT
+                and spec.verify.resources is not None
+                else None
+            ),
             resources=spec.resources,
             network=network,
             gateway_url=ctx.session.gateway_url or None,
@@ -407,13 +442,9 @@ class EpisodeProtocol:
             sandbox = await ctx.sandboxes.acquire(
                 request.model_copy(update={"snapshot": resume.source.handle})
             )
-            holder = await _agent_episode(sandbox, spec.os)
-            if holder != resume.source.episode_id:
-                raise ProviderCapabilityError(
-                    f"snapshot {resume.source.handle} holds "
-                    + (f"episode {holder}'s" if holder else "no recorded episode's")
-                    + f" agent state, not {resume.source.episode_id}'s"
-                )
+            await _require_snapshot_episode(
+                sandbox, spec.os, resume.source.handle, resume.source.episode_id
+            )
         else:
             attach_retained = resume.attach
 
@@ -440,15 +471,20 @@ class EpisodeProtocol:
         ctx.sandbox_identity = SandboxProvenance(user=sandbox.agent_user, sudo=spec.resources.sudo)
         return sandbox
 
-    async def _provision_verifier(self, ctx: EpisodeContext) -> Sandbox:
+    async def _provision_verifier(
+        self, ctx: EpisodeContext, *, snapshot: str | None = None
+    ) -> Sandbox:
+        """A verifier of its own: of its image, or booted from the solver's ``snapshot``, in
+        which case its image is the solver's."""
         resources = ctx.spec.verify.resources
         if resources is None or ctx.prepared_verifier_image is None:
-            raise TaskError("separate verification image/resources were not prepared")
+            raise TaskError("the verifier's image and resources were not prepared")
         request = SandboxRequest(
             episode_id=ctx.episode_id,
             os=ctx.spec.os,
             role=SandboxRole.VERIFIER,
             prepared_image=ctx.prepared_verifier_image,
+            snapshot=snapshot,
             resources=resources.as_resources(),
             network=NetworkPolicy(mode=NetworkMode.OPEN),
             gateway_url=ctx.session.gateway_url or None,
@@ -461,6 +497,35 @@ class EpisodeProtocol:
         ctx.verifier_resolved_image = sandbox.resolved_image
         ctx.verifier_resource_allocation = sandbox.allocation
         return sandbox
+
+    async def _save_solver(self, ctx: EpisodeContext, sandbox: Sandbox) -> str:
+        """Sanitize the solver and save its disk as the snapshot its verifier boots from,
+        which stops it, and return the snapshot's handle.
+
+        It runs under a framework bound of its own, as setup does, so that the verifier's
+        budget covers only booting the verifier and its tests; the trace attributes it to
+        the solver.
+        """
+        assert ctx.execution is not None
+        with execution_logging(
+            ctx.execution,
+            episode_id=ctx.episode_id,
+            phase=Phase.AGENT.value,
+            component=self.component,
+            secrets=ctx.secrets,
+        ):
+            bound = asyncio.timeout(SNAPSHOT_TIMEOUT_SEC)
+            try:
+                async with bound:
+                    await self._sanitize_for_retention(ctx, sandbox, for_snapshot=True)
+                    return await ctx.sandboxes.snapshot(sandbox)
+            except TimeoutError as exc:
+                if not bound.expired():
+                    # A timeout of the save's own, which says what timed out.
+                    raise
+                raise ProviderStartError(
+                    f"saving the solver's snapshot took more than {SNAPSHOT_TIMEOUT_SEC:.0f} s"
+                ) from exc
 
     async def _setup(self, task: Task, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Stage what the task declared, then run its own preparation.
@@ -962,7 +1027,11 @@ class EpisodeProtocol:
         sandbox: Sandbox,
         *,
         logs: LogMirror | None = None,
+        snapshotted: bool = False,
     ) -> None:
+        """Capture what an interrupted agent left, then release the solver: sanitized first,
+        unless it was ``snapshotted`` for its verifier, which stopped it, and whose snapshot
+        the lease releases in its place."""
         # Best-effort interrupted evidence does not replace the primary failure.
         if ctx.agent_started and not ctx.solver_evidence_captured:
             try:
@@ -972,12 +1041,17 @@ class EpisodeProtocol:
                     "interrupted solver evidence capture failed",
                     extra={"ale_data": {"error": str(exc)}},
                 )
-        await self._sanitize_for_retention(ctx, sandbox)
+        if not snapshotted:
+            await self._sanitize_for_retention(ctx, sandbox)
         await ctx.sandboxes.release(sandbox)
         logging.getLogger("ale.execution").info("sandbox released")
 
-    async def _sanitize_for_retention(self, ctx: EpisodeContext, sandbox: Sandbox) -> bool:
-        if sandbox.request.retention == "destroy":
+    async def _sanitize_for_retention(
+        self, ctx: EpisodeContext, sandbox: Sandbox, *, for_snapshot: bool = False
+    ) -> bool:
+        """Leave only the agent's own state in a Sandbox that outlives its episode, or whose
+        disk is saved ``for_snapshot`` verification, whatever its retention."""
+        if sandbox.request.retention == "destroy" and not for_snapshot:
             ctx.sandboxes.mark_sanitized(sandbox, succeeded=True)
             return True
         # A retained solver may be handed to another agent, so no stage or result of this
@@ -1412,12 +1486,26 @@ class EpisodeProtocol:
             ctx.phase_deadline = previous_deadline
 
 
+@dataclass(frozen=True)
+class SolverSnapshot:
+    """A source episode's solver as the snapshot it was kept as: the handle a verifier boots
+    from, the episode whose agent state it holds, and the image and allocation its solver
+    had, as recorded."""
+
+    handle: str
+    episode_id: str
+    resolved_image: ResolvedImage
+    allocation: ResourceAllocation
+
+
 class ReverificationProtocol(EpisodeProtocol):
-    """Run current verification against a retained episode without rerunning its agent."""
+    """Run current verification against a retained episode without rerunning its agent: in
+    or beside its kept solver, or, for a snapshot verifier, in a new Sandbox booted from its
+    solver's snapshot, which is left as it was."""
 
     def __init__(
         self,
-        solver: Sandbox,
+        solver: Sandbox | SolverSnapshot,
         source_run_dir: Path,
         sandbox_identity: SandboxProvenance | None,
         *,
@@ -1433,6 +1521,8 @@ class ReverificationProtocol(EpisodeProtocol):
         self.timeouts = timeouts or RunTimeouts()
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
+        if isinstance(self.solver, SolverSnapshot):
+            return await self._from_snapshot(task, ctx, self.solver)
         await _require_agent_episode(self.solver, ctx.spec.os, self.solver.request.episode_id)
         ctx.resolved_image = self.solver.resolved_image
         ctx.resource_allocation = self.solver.allocation
@@ -1487,6 +1577,33 @@ class ReverificationProtocol(EpisodeProtocol):
         ctx.verified_rewards = rewards
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
 
+    async def _from_snapshot(
+        self, task: Task, ctx: EpisodeContext, source: SolverSnapshot
+    ) -> Verdict:
+        ctx.resolved_image = source.resolved_image
+        ctx.resource_allocation = source.allocation
+        ctx.sandbox_identity = self.sandbox_identity
+        copy_trajectory(self.source_run_dir, ctx.run_dir)
+
+        async def verify() -> dict[str, float]:
+            verifier = await self._provision_verifier(ctx, snapshot=source.handle)
+            try:
+                await _require_snapshot_episode(
+                    verifier, ctx.spec.os, source.handle, source.episode_id
+                )
+                ctx.home = verifier.agent_home
+                # The agent's output as the snapshot holds it, before tests/ arrive.
+                await self._capture_solver_evidence(ctx, verifier)
+                return await self._verify(task, ctx, verifier)
+            finally:
+                await self._sanitize_for_retention(ctx, verifier)
+                await ctx.sandboxes.release(verifier)
+
+        ctx.verified_rewards = await self._with_deadline(
+            ctx, Phase.VERIFY, self._verify_timeout(ctx), verify()
+        )
+        return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
+
 
 def _agent_episode_path(operating_system: OperatingSystem) -> str:
     """Names the episode whose agent last ran in a solver Sandbox."""
@@ -1523,6 +1640,20 @@ async def _require_agent_episode(
         + (f"episode {holder}'s" if holder else "no recorded episode's")
         + f" agent state, not {episode_id}'s"
     )
+
+
+async def _require_snapshot_episode(
+    sandbox: Sandbox, operating_system: OperatingSystem, handle: str, episode_id: str
+) -> None:
+    """A Sandbox booted from a snapshot serves only the episode whose agent state the
+    snapshot holds; the lease destroys a refused one."""
+    holder = await _agent_episode(sandbox, operating_system)
+    if holder != episode_id:
+        raise ProviderCapabilityError(
+            f"snapshot {handle} holds "
+            + (f"episode {holder}'s" if holder else "no recorded episode's")
+            + f" agent state, not {episode_id}'s"
+        )
 
 
 def _continued_segment(trajectory: AtifTrajectory, resume: Resume) -> AtifTrajectory:

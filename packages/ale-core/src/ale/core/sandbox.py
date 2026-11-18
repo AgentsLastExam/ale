@@ -40,6 +40,7 @@ __all__ = [
     "SandboxRequest",
     "SandboxRole",
     "SandboxState",
+    "snapshot_verifier_needs",
 ]
 
 #: The port at which every Sandbox reaches its Gateway, whatever port the Host serves it on.
@@ -214,6 +215,9 @@ class SandboxRequest(BaseModel):
     prepared_image: PreparedTaskImage
     snapshot: str | None = None
     """A snapshot handle to boot from instead of the prepared image's own disk."""
+    snapshot_verifier: Resources | None = None
+    """The resources of the snapshot verifier that boots from this solver's snapshot: the
+    solver is saved as a snapshot whatever its retention, on a leaf that serves both."""
     resources: Resources
     network: NetworkPolicy
     gateway_url: str | None = Field(
@@ -248,8 +252,28 @@ class SandboxRequest(BaseModel):
             # The elevation it gets, which an image builder's request grants beyond its
             # size.
             resources=self.resources.model_copy(update={"sudo": self.sudo}),
-            snapshot=self.retention == "snapshot" or self.snapshot is not None,
+            snapshot=self.retention == "snapshot"
+            or self.snapshot is not None
+            or self.snapshot_verifier is not None,
+            verifier=None
+            if self.snapshot_verifier is None
+            else snapshot_verifier_needs(self.image_kind, self.os, self.snapshot_verifier),
         )
+
+
+def snapshot_verifier_needs(
+    kind: ImageKind, operating_system: OperatingSystem, resources: Resources
+) -> SandboxNeeds:
+    """What a snapshot verifier of ``resources`` needs: its solver's image, open network,
+    and a snapshot to boot from."""
+    return SandboxNeeds(
+        kind=kind,
+        os=operating_system,
+        arch=Arch.of(operating_system),
+        network_mode=NetworkMode.OPEN,
+        resources=resources,
+        snapshot=True,
+    )
 
 
 class ResolvedImage(BaseModel):
@@ -543,6 +567,19 @@ class Provider(ABC):
         """
         return ()
 
+    def refusals_with_verifier(
+        self, needs: SandboxNeeds, *, user: str, role: SandboxRole
+    ) -> tuple[str, ...]:
+        """Its :meth:`refusals` of a Sandbox and, since the leaf that saves a solver's
+        snapshot boots its snapshot verifier too, of that verifier, as the same account."""
+        reasons = self.refusals(needs, user=user, role=role)
+        if needs.verifier is None:
+            return reasons
+        return reasons + tuple(
+            f"its snapshot verifier: {why}"
+            for why in self.refusals(needs.verifier, user=user, role=SandboxRole.VERIFIER)
+        )
+
     async def unserved(
         self, needs: SandboxNeeds, *, user: str, role: SandboxRole
     ) -> tuple[str, ...]:
@@ -552,7 +589,9 @@ class Provider(ABC):
         Run selects its Providers this way before anything starts, and :meth:`accepts` asks
         it as a leaf creates a Sandbox, so a request refused then is refused up front.
         """
-        return closest(await self.profiles(), needs) + self.refusals(needs, user=user, role=role)
+        return closest(await self.profiles(), needs) + self.refusals_with_verifier(
+            needs, user=user, role=role
+        )
 
     async def accepts(self, request: SandboxRequest) -> None:
         """Raise unless it can serve ``request``."""

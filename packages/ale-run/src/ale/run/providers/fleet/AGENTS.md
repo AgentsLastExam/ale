@@ -24,3 +24,21 @@ and from `SnapshotHolding.provider` in the node agent's admission, and `choose` 
 that leaf's profiles for a boot from it. The control plane decides such a boot by that leaf
 and that Node's whole capacity alone, and fails one they cannot serve or hold at once, with
 the reason, rather than leaving it queued.
+
+## A save its Run gave up on could leave a snapshot on its Node
+
+**Problem.** The node agent's handler goes on when the Run's request is cut short, as the
+bound on a snapshot verifier's save or the Run's cancellation cuts it: aiohttp's server, as
+the agent runs it, cancels no handler whose client is gone. A save that finished then was
+kept on the Node, which reports it at its heartbeat, and the control plane recorded it as
+its Node's: a snapshot no result names (November 2026, found reviewing snapshot
+verification).
+
+**Solution.** The Run releases the Sandbox as it gives the save up, and the node agent
+deletes a snapshot whose save finishes after its Sandbox's lease ended.
+
+**Decisions.**
+- What remains open: a save that finishes between the Run's giving it up and its release
+  reaching the Node is kept, recorded as its Node's, and listed by `ale sandbox list` for an
+  operator to destroy. Closing it would need the control plane to tell such a snapshot from
+  one a crashed Run's retention kept, which it keeps on purpose.

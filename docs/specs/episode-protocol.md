@@ -26,7 +26,7 @@ stops at that boundary and creates no sandbox.
 
 ```text
 provision -> setup -> agent/oracle -> final evidence capture
-          -> shared or separate verify -> teardown/retention -> result
+          -> shared, snapshot or separate verify -> teardown/retention -> result
 ```
 
 Every phase is timed and attributed independently. Agent and verify default to the Task's
@@ -50,9 +50,10 @@ continues on the Provider that kept its solver. The Provider admits the requeste
 resources, creates the sandbox, and returns the image and resource allocation it actually
 started. Those observations, rather than the request alone, enter RunLock.
 
-Shared verification provisions one physical sandbox with role `shared`. Separate
-verification provisions a `solver` sandbox first and a `verifier` sandbox only after
-solver evidence capture.
+Shared verification provisions one physical sandbox with role `shared`. Separate and
+snapshot verification provision a `solver` sandbox first and a `verifier` sandbox only after
+solver evidence capture; a snapshot verifier boots from a snapshot of the solver, on the
+leaf that saved it.
 
 The image declares the agent account and home. ALE does not add a Task path prefix or
 pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and macOS
@@ -99,12 +100,12 @@ verification, the status is `memory_exhausted` or `storage_exhausted`, the agent
 [final](trace.md#result-and-run-status) result: what the agent leaves in its Sandbox,
 processes, files in memory such as a tmpfs and files on its disk, still holds memory and
 storage after it stops, so a Task's shared verifier must fit beside it. In setup, and in a
-separate verifier, which hold the Task's code and the agent's files alone, the same loss is
-the Task's: `task_error`. Either way the failure is that error with the phase it ended, and
-its message says what showed the loss. A process the kernel ends for memory while the
-Sandbox goes on is no loss, and neither is a write that fails as on a full disk: the Episode
-goes on. Which evidence counts, and where a Provider has none, is in the [Provider
-contract](sandbox-image.md#provider-contract).
+separate or snapshot verifier, which hold the Task's code and the agent's files alone, the
+same loss is the Task's: `task_error`. Either way the failure is that error with the phase
+it ended, and its message says what showed the loss. A process the kernel ends for memory
+while the Sandbox goes on is no loss, and neither is a write that fails as on a full disk:
+the Episode goes on. Which evidence counts, and where a Provider has none, is in the
+[Provider contract](sandbox-image.md#provider-contract).
 
 ### Evidence capture
 
@@ -132,8 +133,15 @@ links and skips links, missing and uncopyable entries, with bounded traversal; s
 [Artifact copying](task-authoring.md#artifact-copying). The verifier owns scoring.
 
 A separate verifier receives solver output only through the Host. With the default
-`artifacts.collect = "none"`, ALE discards that copy with the episode, and with shared
-verification it inspects no artifact path and copies nothing.
+`artifacts.collect = "none"`, ALE discards that copy with the episode, and with shared or
+snapshot verification it inspects no artifact path and copies nothing.
+
+Under snapshot verification ALE then saves the solver, still the agent's: it sanitizes it as
+for retention and saves its disk as a snapshot, which stops it, within a framework bound of
+1800 s, as setup's, so that the verifier's budget covers only booting the verifier, any wait
+for room on the leaf that keeps the snapshot included, and its tests. A failure here, the
+Sandbox's loss to memory or storage included, is the solver's, as one of evidence capture
+is.
 
 ### Verify
 
@@ -142,30 +150,42 @@ verification first releases or retains the solver according to run policy, provi
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
 and uploads the same `tests/`. It never reruns setup or copies the solver filesystem.
 
+Snapshot verification boots a fresh verifier Sandbox from the solver's snapshot, on the leaf
+that saved it, with the verifier's resources and the solver's account, and uploads the same
+`tests/`. Nothing is restored: the solver's whole disk is there, so verification that needs
+all of it, and more resources than the solver had, neither copies it through the Host nor
+changes the solver. The snapshot outlasts every Sandbox booted from it; once the verifier is
+released per its retention, it is destroyed, unless the solver's retention keeps it.
+
 Verification runs as framework-controlled Task code with open egress and elevated privileges
-(root on Linux and macOS, Administrator on Windows), in both shared and separate modes. Task
-code may explicitly drop privileges when executing a submitted program. ALE stages
-`ale_verify`, the instruction, optional solver trajectory, and run-level Judge
-configuration, then executes the OS entry from the verification staging directory. Linux and
-macOS use `/opt/ale/tests/test.sh`; Windows uses `C:\ProgramData\ALE\tests\test.ps1`. ALE
-selects Python 3.12+ (`python3`, then `python3.12` on Linux and macOS; `python.exe` on
-Windows; then the framework's own) and provides its command as `ALE_VERIFY_PYTHON`. Both
-placements leave the same [result](verification.md#result) in `/logs/verifier`
+(root on Linux and macOS, Administrator on Windows), in every mode. Task code may explicitly
+drop privileges when executing a submitted program. ALE stages `ale_verify`, the
+instruction, optional solver trajectory, and run-level Judge configuration, then executes
+the OS entry from the verification staging directory. Linux and macOS use
+`/opt/ale/tests/test.sh`; Windows uses `C:\ProgramData\ALE\tests\test.ps1`. ALE selects
+Python 3.12+ (`python3`, then `python3.12` on Linux and macOS; `python.exe` on Windows; then
+the framework's own) and provides its command as `ALE_VERIFY_PYTHON`. Every placement
+leaves the same [result](verification.md#result) in `/logs/verifier`
 (`C:\logs\verifier`, macOS `/opt/ale/logs/verifier`), which ALE empties and gives to the
 framework alone before every attempt. The solver interpreter is unchanged.
 
 ### Teardown and retention
 
-Solver and verifier retention are independent run policies and default to `destroy`.
-`keep` leaves the Sandbox running. The solver may instead request `snapshot`: once the
-episode is scored its disk is saved and the Sandbox destroyed, and any number of later
-Sandboxes boot from the snapshot. A snapshot holds no processes, memory or desktop session,
-so follow-ups that need them keep the Sandbox. A solver to be snapshotted needs a Provider
-that saves snapshots, so selection gives it none that cannot, before anything is
-provisioned.
+Solver and verifier retention are run policies and default to `destroy`, each independent
+of the other except under snapshot verification. `keep` leaves the Sandbox running. The
+solver may instead request `snapshot`: once the episode is scored its disk is saved and the
+Sandbox destroyed, and any number of later Sandboxes boot from the snapshot. A snapshot
+holds no processes, memory or desktop session, so follow-ups that need them keep the
+Sandbox. A solver to be snapshotted needs a Provider that saves snapshots, so selection
+gives it none that cannot, before anything is provisioned.
 Before either, ALE removes every stage of the Task (setup, tests with their Judge state,
 the oracle's calibration case), the verifier directory and known credentials, so a kept
 solver or a snapshot holds only the agent's own state.
+Under snapshot verification the solver is saved whatever its retention, on a leaf that
+saves snapshots and serves its verifier too, which selection chooses for both, and the
+snapshot it keeps is the one its verifier booted from. It cannot be kept, since saving the
+snapshot stops it, and a kept verifier needs the snapshot kept, since it runs on it; a Run
+asking otherwise is refused before anything is prepared.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
 credential cleanup step. Failure of other required sanitation still forces destruction.
 Result and RunLock record the requested policy, actual Provider outcome, retained handle,
@@ -173,15 +193,21 @@ cleanup command and any reason.
 
 ## Reverification
 
-`ale reverify TASK SOURCE_RUN` is an internal authoring optimization. Each source episode must
-have a running retained solver or shared Sandbox, a complete RunLock, and the same prepared
-solver-image identity as the current Task.
+`ale reverify TASK SOURCE_RUN` is an internal authoring optimization. Each source episode
+must have a complete RunLock, the same prepared solver-image identity as the current Task,
+and its solver kept as the current verification needs: running, for shared and separate
+verification, or as a snapshot, for snapshot verification. A source of the other kind is
+refused, and so is a kept shared Sandbox for separate or snapshot verification, since its
+disk holds what its shared verifier changed.
 
 For shared verification, ALE reconnects to the retained shared Sandbox and runs the current
 `tests/` there. For separate verification, ALE captures the declared artifacts from the
 retained solver, detaches without destroying it, provisions a fresh verifier Sandbox, restores the
-artifacts, and runs the current `tests/` there. Before either path uploads `tests/`, ALE
-removes the previously staged verifier files so deleted files cannot survive a revision.
+artifacts, and runs the current `tests/` there. For snapshot verification, ALE boots a fresh
+verifier Sandbox from the source's snapshot, on the Provider that keeps it, captures the
+declared artifacts there when run policy collects them, and runs the current `tests/`,
+leaving the snapshot as it was. Before any path uploads `tests/`, ALE removes the previously
+staged verifier files so deleted files cannot survive a revision.
 
 The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory,
 with the blobs it references, for verifier and review use and records its own verification, result,
@@ -190,17 +216,18 @@ execution trace, and RunLock.
 ## Continuation
 
 `ale run TASK --continue-from EPISODE_DIR` gives the Task's instruction to the agent of an
-earlier episode whose solver was kept or snapshotted, in that Sandbox or one booted from
-the snapshot, and in that native session, for follow-up turns on one workspace. The
-earlier episode must have retained its solver and recorded a `continuation`. The run uses
-the same Harness at the same CLI version, and the Task the same prepared solver image. A
-kept solver also needs the same resources, verification mode and desktop resolution,
-because a running Sandbox keeps its allocation, role and desktop; one booted from a
-snapshot takes the Task's and the Run's. The model, settings, instruction and verification
-may differ; the RunLock records this episode's own and names the earlier one in
-`resumed_from`. The agent finds this run's
-Gateway at the address it was given, since every Sandbox reaches its Gateway at the same
-one.
+earlier episode whose solver was kept or snapshotted, in that Sandbox or one booted from the
+snapshot, and in that native session, for follow-up turns on one workspace. The earlier
+episode must have retained its solver and recorded a `continuation`. The run uses the same
+Harness at the same CLI version, and the Task the same prepared solver image. A kept solver
+also needs the same resources, role (shared, or a solver beside a verifier of its own) and
+desktop resolution, because a running Sandbox keeps its allocation, role and desktop; one
+booted from a snapshot takes the Task's and the Run's. Under snapshot verification a kept
+solver is not continued, since saving it for its verifier would stop it: the Run is refused
+before anything is provisioned, and a snapshot of it is continued instead. The model,
+settings, instruction and verification may differ; the RunLock records this episode's own
+and names the earlier one in `resumed_from`. The agent finds this run's Gateway at the
+address it was given, since every Sandbox reaches its Gateway at the same one.
 
 A kept solver is adopted, so the episode's own retention decides its fate, and keeping it
 again lets a further episode continue. A snapshot is left as it was, so it can be
@@ -210,10 +237,12 @@ Harness resumes the native session with the instruction instead of launching.
 Verification and recording are unchanged. A continuation of a kept solver is not retried,
 since its attempt already changed the solver; one from a snapshot is retried like any
 episode. With shared verification the next agent starts from the state verification left;
-separate verification releases the solver first, so it holds only the agent's work.
+separate and snapshot verification leave the solver first, so it holds only the agent's
+work.
 
 `ale reverify --episode-retries N` (or `--set episode_retries=N`) retries incomplete
-separate verification with a new verifier Sandbox each time, preserving the source solver.
+separate or snapshot verification with a new verifier Sandbox each time, preserving the
+source solver or snapshot.
 Shared reverification remains a single attempt because verification may modify that same
 source Sandbox; a clean retry requires a new full `ale run`. The original shared attempt
 is still allowed when the retry configuration is nonzero.

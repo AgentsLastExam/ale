@@ -53,8 +53,9 @@ def test_verification_failures_remain_distinct_terminal_failures(
 def test_a_sandbox_that_exhausts_a_resource_is_the_agents_result_or_a_task_defect(
     error: Exception, status: Status
 ) -> None:
-    """The agent's where its code ran, the Task's in setup or a separate verifier; never an
-    environment error, which a retry would answer with fresh memory or storage."""
+    """The agent's where its code ran, the Task's in setup or a verifier of its own,
+    separate or snapshot; never an environment error, which a retry would answer with fresh
+    memory or storage."""
     assert status_for(error) is status
     assert status_for(error, agents=False) is Status.TASK_ERROR
 

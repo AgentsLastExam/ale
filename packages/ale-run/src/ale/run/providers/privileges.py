@@ -3,12 +3,14 @@
 Elevation is not part of a prepared image, so one image serves a Task with and without
 ``[agent].sudo``, its solver and its verifier, and a Sandbox continued from a snapshot of
 either. guestd runs as root, so the Provider sets the agent's elevation through it before
-any Task code runs, then proves both identities.
+any Task code runs, then proves both identities. A verifier runs no agent, and verification
+runs as root, so in one only the framework is proven root.
 """
 
 from __future__ import annotations
 
 from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
+from ale.core.sandbox import SandboxRequest, SandboxRole
 from ale.core.taskspec import OperatingSystem
 from ale.run import guestd
 from ale.run.transport import GuestClient
@@ -112,6 +114,35 @@ async def set_elevation(
         )
 
 
+async def set_and_prove_elevation(
+    client: GuestClient, request: SandboxRequest, agent_user: str
+) -> None:
+    """Set and prove the agent's elevation in a Linux Sandbox an agent runs in; in a
+    verifier, only prove the framework root.
+
+    A verifier runs no agent, and verification runs as root, so its account is left as its
+    disk has it: a verifier booted from an agent's disk does not fail over what that agent
+    did to its own account.
+    """
+    if request.role is SandboxRole.VERIFIER:
+        await verify_framework(client)
+        return
+    await set_elevation(
+        client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
+    )
+    await verify_identities(client, agent_user, sudo=request.sudo)
+
+
+async def verify_framework(client: GuestClient) -> None:
+    """Prove the framework is root, so that framework and agent work can be told apart."""
+    framework_uid, _ = await _probe(client, None)
+    if framework_uid != "0":
+        raise ProviderCapabilityError(
+            f"the guest service runs as uid {framework_uid}, not root, so framework and "
+            "agent work cannot be told apart"
+        )
+
+
 async def verify_identities(client: GuestClient, agent_user: str, *, sudo: bool) -> None:
     """Prove the framework is root and the agent can elevate exactly when asked to.
 
@@ -121,12 +152,7 @@ async def verify_identities(client: GuestClient, agent_user: str, *, sudo: bool)
     conditions of its own measurement while provenance records ``sudo: false``. A Provider
     whose platform adds another way up checks that one itself.
     """
-    framework_uid, _ = await _probe(client, None)
-    if framework_uid != "0":
-        raise ProviderCapabilityError(
-            f"the guest service runs as uid {framework_uid}, not root, so framework and "
-            "agent work cannot be told apart"
-        )
+    await verify_framework(client)
     agent_uid, elevates = await _probe(client, agent_user)
     if sudo and elevates != "yes":
         why = (

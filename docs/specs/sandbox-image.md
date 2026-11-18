@@ -346,7 +346,8 @@ Runtime never downloads it.
 
 ## Verifier images
 
-Shared verification uses the solver image. Separate verification uses one of:
+Shared verification uses the solver image, and a snapshot verifier boots from a snapshot of
+the solver, so it has the solver's image too. Separate verification uses one of:
 
 1. `[verifier.environment].image`, used directly and resolved through the verifier's
    Provider; its kind follows the [solver's rules](#source-selection-and-identity) under
@@ -486,8 +487,8 @@ How each leaf does it is in
 ## Permissions
 
 Setup, artifact collection/restoration, and verification use the framework's elevated
-identity: root on Linux and macOS, Administrator on Windows. This applies to shared and
-separate verification independently of the agent's `[agent].sudo` setting.
+identity: root on Linux and macOS, Administrator on Windows. This applies in every
+verification mode, independently of the agent's `[agent].sudo` setting.
 
 Directory uploads ignore Host permissions: POSIX files use `0644`, directories `0755`,
 owned by the selected framework or agent identity. Windows resets ACLs to grant
@@ -552,12 +553,14 @@ refuse is thus refused before the Run starts.
 
 The Run's `sandbox.providers` lists provider ids in order of preference. Each Sandbox, a
 Task's solver and a separate verifier by its own needs, goes to the first Provider with a
-profile that serves it and no rule of its own against it. The choice is by capability alone,
-never by load, so one configuration always chooses the same way. Every Task is selected once
-the kinds of its images are decided and before any image is prepared or Sandbox started. A
-Run with a Sandbox that no listed Provider serves is refused whole, naming each such Task
-and role and why each Provider does not serve it, rather than failing its episodes one by
-one.
+profile that serves it and no rule of its own against it. A snapshot verifier and its solver
+go together to the first with one profile that serves both, since only the leaf that saved
+a snapshot boots from it: the solver's needs carry its verifier's, which a leaf's own
+admission checks too. The choice is by capability alone, never by load, so one
+configuration always chooses the same way. Every Task is selected once the kinds of its
+images are decided and before any image is prepared or Sandbox started. A Run with a
+Sandbox that no listed Provider serves is refused whole, naming each such Task and role and
+why each Provider does not serve it, rather than failing its episodes one by one.
 
 Before any episode starts, the Run has each selected leaf run its preflight with the needs
 of the Sandboxes selected for it, which finds what the leaf runs those with, such as its
@@ -576,8 +579,8 @@ A prepared image belongs to the Provider selected for it, so one image is prepar
 each Provider that runs it. A Sandbox kept or snapshotted is reached only through the
 Provider that kept it, so a continuation's solver needs what booting it from a snapshot
 needs, and is refused before any image is prepared unless the Run selects that Provider
-for it. The RunLock records, for the solver and a separate verifier, the Provider selected
-and the leaf that started the Sandbox
+for it. The RunLock records, for the solver and a separate or snapshot verifier, the
+Provider selected and the leaf that started the Sandbox
 ([Security](security.md#7-a-result-carries-what-produced-it)).
 
 ## Provider contract
@@ -594,7 +597,7 @@ Task content (the engine).
 |---|---|---|
 | It declares its capability profiles, and refuses, before creating anything, a request that they or its own rules do not serve, by the check the Run's selection made | Provider: `profiles` and `refusals`; a leaf's `accepts` in `create`, the Fleet's placement | `test_declares_profiles`, `test_refuses_up_front_a_container_feature_none_of_its_profiles_gives`, `test_rejects_a_request_it_cannot_serve` |
 | Every sandbox runs the framework of the engine driving it, whatever image or disk it was handed | Provider in `create` | `test_a_sandbox_carries_the_engines_framework` |
-| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
+| Agent work runs as `[agent].user`, framework work as root or Administrator; the agent elevates exactly when `[agent].sudo` asks, whatever image or snapshot it starts from | Provider in `create`: set at every start of a Sandbox an agent runs in, then checked both directions | `test_the_agent_and_the_framework_are_different_accounts`, `test_storage_and_sudo_are_enforced_or_rejected`, `test_one_image_serves_an_agent_with_and_without_elevation`, `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
 | Replies of any size arrive whatever Python variables the image sets | the Provider starting guestd isolated; guestd writing each reply whole | `test_large_replies_arrive_whatever_python_the_image_configures` |
@@ -606,7 +609,7 @@ Task content (the engine).
 | A Sandbox that names `storage_mb` is held to it, or refused: by writable storage of its own, at least that size, where a write past it fails as on a full disk and the Sandbox goes on; or by measuring from outside the Sandbox, never by asking it, all that has been written over its image, and ending it once that passes `storage_mb`, after which its calls raise `StorageExhaustedError` ([how each Provider does](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)) | Provider, outside the agent's reach | `test_a_sandbox_is_held_to_its_storage` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
 | A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/ale-run/src/ale/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
-| A snapshot holds the disk, any number of Sandboxes boot from it, and it is listed and destroyed through its Provider; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
+| A snapshot holds the disk, any number of Sandboxes boot from it, each with its own request's role and resources, and it is listed and destroyed through its Provider, never under a Sandbox booted from it; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |
 | A desktop has the Run's resolution, whatever the image would use, and the RunLock records it | Provider in `create`: set at every start, then checked | `test_a_declared_desktop_can_actually_be_used`, `test_a_desktop_takes_the_runs_resolution` |
 | No platform service inside the sandbox gives the agent more than its account | Provider check in `create` | `test_the_agent_cannot_reach_the_platform_daemon` |

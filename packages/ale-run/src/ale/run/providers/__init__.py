@@ -19,7 +19,14 @@ from typing import TYPE_CHECKING
 from ale.core.capability import Arch, GpuHold, SandboxNeeds, unmet
 from ale.core.config import DockerProviderConfig, RunConfig
 from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import Provider, Sandbox, SandboxCheck, SandboxRequest, SandboxRole
+from ale.core.sandbox import (
+    Provider,
+    Sandbox,
+    SandboxCheck,
+    SandboxRequest,
+    SandboxRole,
+    snapshot_verifier_needs,
+)
 from ale.core.task import Task
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, VerificationMode
 from ale.run import capprobe, guestd
@@ -117,12 +124,20 @@ def _sandboxes(
     task: Task, *, snapshot: bool, solver: bool
 ) -> Iterator[tuple[SandboxRole, str, SandboxNeeds]]:
     """Each Sandbox an episode of ``task`` starts, as the episode protocol requests it: its
-    role, the agent's account in it, and what it needs."""
+    role, the agent's account in it, and what it needs. A snapshot verifier boots from a
+    snapshot its solver saves, so the solver needs snapshots and what its verifier needs of
+    the same leaf too."""
     spec = task.spec
-    separate = spec.verify.environment_mode is VerificationMode.SEPARATE
+    mode = spec.verify.environment_mode
+    verifier: SandboxNeeds | None = None
+    if mode is VerificationMode.SNAPSHOT:
+        assert spec.verify.resources is not None
+        verifier = snapshot_verifier_needs(
+            spec.image.kind, spec.os, spec.verify.resources.as_resources()
+        )
     if solver:
         yield (
-            SandboxRole.SOLVER if separate else SandboxRole.SHARED,
+            SandboxRole.SHARED if mode is VerificationMode.SHARED else SandboxRole.SOLVER,
             spec.image.user,
             SandboxNeeds(
                 kind=spec.image.kind,
@@ -130,10 +145,13 @@ def _sandboxes(
                 arch=Arch.of(spec.os),
                 network_mode=spec.network.mode,
                 resources=spec.resources,
-                snapshot=snapshot,
+                snapshot=snapshot or verifier is not None,
+                verifier=verifier,
             ),
         )
-    if separate:
+    if verifier is not None:
+        yield SandboxRole.VERIFIER, spec.image.user, verifier
+    elif mode is VerificationMode.SEPARATE:
         image = spec.verify.image or spec.image
         assert spec.verify.resources is not None
         yield (
@@ -201,14 +219,16 @@ class ProviderRegistry:
     async def select(
         self, tasks: Sequence[Task], *, solvers: bool = True, snapshots: bool = False
     ) -> tuple[str, ...]:
-        """Choose, for each Task's solver and separate verifier, the first Provider in
+        """Choose, for each Task's solver and verifier of its own, the first Provider in
         ``sandbox.providers`` that serves its Sandbox, before anything is prepared or
-        started.
+        started. A snapshot verifier boots on the leaf that saved its solver's snapshot, so
+        its solver and it take the first Provider one of whose leaves serves both.
 
         A Sandbox none serves refuses the whole selection, naming every such Task and role
         and why each Provider does not serve it. ``solvers=False`` leaves the solvers to
-        their Tasks, for a Run that reuses solvers kept earlier; ``snapshots`` says the
-        solvers save snapshots or boot from them.
+        their Tasks, for a Run that reuses solvers kept earlier; a snapshot verifier then
+        boots on the Provider its Task names, which keeps the snapshot, or is refused.
+        ``snapshots`` says the solvers save snapshots or boot from them.
 
         Returns what the Run says of its selection once at its start: for each leaf that may
         start Sandboxes sharing a GPU and only watches their ``gpu_memory_mb``, how many.
@@ -217,20 +237,39 @@ class ProviderRegistry:
         refused: list[str] = []
         watched: Counter[str] = Counter()
         for task in tasks:
-            for role, user, needs in _sandboxes(task, snapshot=snapshots, solver=solvers):
+            sandboxes = list(_sandboxes(task, snapshot=snapshots, solver=solvers))
+            groups: list[tuple[list[tuple[SandboxRole, str, SandboxNeeds]], Sequence[str]]]
+            snapshot = task.spec.verify.environment_mode is VerificationMode.SNAPSHOT
+            if snapshot and not solvers:
+                # Its solver's snapshot is kept by the Provider that saved it, and only there.
+                assert task.provider is not None, "a reused solver names its Provider"
+                ((role, user, needs),) = sandboxes
+                if why := await self.get(task.provider).unserved(needs, user=user, role=role):
+                    raise ProviderCapabilityError(
+                        f"{task.spec.name}: its verifier boots from the snapshot "
+                        f"{task.provider} keeps, which does not serve it: {'; '.join(why)}"
+                    )
+                task.verifier_provider = task.provider
+                continue
+            if snapshot:
+                # One choice for both: only the leaf that saved the snapshot boots from it.
+                groups = [(sandboxes, order)]
+            else:
+                groups = [([sandbox], order) for sandbox in sandboxes]
+            for group, candidates in groups:
                 reasons: list[str] = []
-                verifier = role is SandboxRole.VERIFIER
-                label = "verifier" if verifier else "solver"
-                for provider_id in order:
+                label = " and ".join(_ROLE[role] for role, _, _ in group)
+                for provider_id in candidates:
                     provider = self.get(provider_id)
-                    why = await provider.unserved(needs, user=user, role=role)
+                    why = await _unserved(provider, group)
                     if not why:
-                        if verifier:
-                            task.verifier_provider = provider_id
-                        else:
-                            task.provider = provider_id
-                        if needs.resources.gpus and needs.resources.gpu_memory_mb is not None:
-                            watched.update(await _watching(provider, needs))
+                        for role, _, needs in group:
+                            if role is SandboxRole.VERIFIER:
+                                task.verifier_provider = provider_id
+                            else:
+                                task.provider = provider_id
+                            if needs.resources.gpus and needs.resources.gpu_memory_mb is not None:
+                                watched.update(await _watching(provider, needs))
                         break
                     reasons.append(f"    {provider_id}: {'; '.join(why)}")
                 else:
@@ -335,6 +374,38 @@ class ProviderRegistry:
         # the check it returns, to run again when the registry is used again.
         for provider_id, fresh in preflighted.items():
             self._checked[provider_id].update(fresh)
+
+
+#: How a selection names each role.
+_ROLE = {
+    SandboxRole.SHARED: "solver",
+    SandboxRole.SOLVER: "solver",
+    SandboxRole.VERIFIER: "verifier",
+}
+
+
+async def _unserved(
+    provider: Provider, group: Sequence[tuple[SandboxRole, str, SandboxNeeds]]
+) -> list[str]:
+    """Why ``provider`` does not serve every Sandbox of ``group``, each reason prefixed with
+    its role when there are several; and, when it serves each, why none of its leaves
+    serves a solver and its snapshot verifier together."""
+    if len(group) == 1:
+        ((role, user, needs),) = group
+        return list(await provider.unserved(needs, user=user, role=role))
+    why = [
+        f"{_ROLE[role]}: {reason}"
+        for role, user, needs in group
+        for reason in await provider.unserved(
+            needs.model_copy(update={"verifier": None}), user=user, role=role
+        )
+    ]
+    if why:
+        return why
+    for role, user, needs in group:
+        if needs.verifier is not None and await provider.unserved(needs, user=user, role=role):
+            return ["no one of its leaves serves both the solver and its snapshot verifier"]
+    return []
 
 
 async def _watching(provider: Provider, needs: SandboxNeeds) -> list[str]:

@@ -94,8 +94,9 @@ ALE_TEST_DAYTONA_GPU=1 uv run pytest -m needs_daytona tests/conformance/test_pro
   schedule, and ALE pushes again when one is gone.
 
 Nothing else is created: no snapshots, so Daytona's snapshot quota is not used. Under
-`sandbox_retention.solver = "snapshot"` no solver goes to Daytona, and a Run whose list
-names no other Provider for it is refused before a sandbox is made.
+`sandbox_retention.solver = "snapshot"` no solver goes to Daytona, nor a Task's solver or
+verifier under snapshot verification, and a Run whose list names no other Provider for them
+is refused before a sandbox is made.
 
 ## Limits to know
 

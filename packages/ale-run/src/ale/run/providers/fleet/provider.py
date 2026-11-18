@@ -676,7 +676,7 @@ class FleetProvider(Provider):
             return reasons
         return min(
             (
-                leaf(profile.provider).refusals(needs, user=user, role=role)
+                leaf(profile.provider).refusals_with_verifier(needs, user=user, role=role)
                 for profile in profiles
                 if not unmet(profile, needs)
             ),

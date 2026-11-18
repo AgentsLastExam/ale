@@ -70,7 +70,7 @@ from ale.run.images import acquire_lock, resolve_container_image, resolve_prepar
 from ale.run.process import run
 from ale.run.providers import relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.privileges import set_elevation, verify_identities
+from ale.run.providers.privileges import set_and_prove_elevation
 from ale.run.providers.runner import (
     HOST_IP,
     Console,
@@ -697,10 +697,7 @@ class FirecrackerProvider(Provider):
                 desktop = await require_resolution(
                     client, request.desktop_resolution, container=True
                 )
-            await set_elevation(
-                client, agent_user, sudo=request.sudo, operating_system=OperatingSystem.LINUX
-            )
-            await verify_identities(client, agent_user, sudo=request.sudo)
+            await set_and_prove_elevation(client, request, agent_user)
             file_client = await _connect(host_port, token, console)
             clients.append(file_client)
         except BaseException:

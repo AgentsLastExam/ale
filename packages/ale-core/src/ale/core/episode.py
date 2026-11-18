@@ -59,7 +59,9 @@ class SandboxLease(Protocol):
     """Leases sandboxes on behalf of the episode protocol.
 
     An episode may lease several (a solver and a separate verifier, say); all of them
-    are reaped when the episode ends, whatever the outcome.
+    are reaped when the episode ends, whatever the outcome. A solver saved as the snapshot
+    its verifier boots from is held as that snapshot, which is reaped after every Sandbox
+    booted from it.
     """
 
     async def acquire(self, request: SandboxRequest) -> Sandbox: ...
@@ -71,6 +73,12 @@ class SandboxLease(Protocol):
         ...
 
     async def release(self, sandbox: Sandbox) -> None: ...
+
+    async def snapshot(self, sandbox: Sandbox) -> str:
+        """Save a sanitized Sandbox's disk as a snapshot a verifier boots from, which stops
+        and destroys the Sandbox, and return the snapshot's handle. Releasing the Sandbox
+        then destroys the snapshot, unless its retention keeps it."""
+        ...
 
     def mark_sanitized(
         self, sandbox: Sandbox, *, succeeded: bool, reason: str | None = None

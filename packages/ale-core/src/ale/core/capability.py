@@ -122,6 +122,9 @@ class SandboxNeeds(BaseModel):
     resources: Resources
     snapshot: bool = False
     """Whether it saves a snapshot at its end or boots from one."""
+    verifier: SandboxNeeds | None = None
+    """What the snapshot verifier that boots from its snapshot needs. Only the leaf that saved
+    a snapshot boots from it, so one profile serves both."""
 
 
 #: Harbor's names whose words are not the model's, by the model they stand for: GKE
@@ -214,6 +217,8 @@ def unmet(profile: CapabilityProfile, needs: SandboxNeeds) -> tuple[str, ...]:
         )
     if needs.snapshot and not profile.snapshot:
         reasons.append("saves and boots no snapshots")
+    if needs.verifier is not None:
+        reasons.extend(f"its snapshot verifier: {why}" for why in unmet(profile, needs.verifier))
     return tuple(reasons)
 
 

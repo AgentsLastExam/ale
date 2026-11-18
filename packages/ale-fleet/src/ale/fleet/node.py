@@ -907,11 +907,23 @@ class NodeAgent:
         return retained
 
     async def snapshot(self, sandbox_id: str, retention: Retention) -> RetainedSandbox:
-        """Save a Sandbox's snapshot, which this Node keeps until the control plane says."""
+        """Save a Sandbox's snapshot, which this Node keeps until the control plane says.
+
+        One its Run let go of while it was saved, as when the save's bound or the Run's
+        cancellation cut its request short, is deleted again: no record will name it.
+        """
         sandbox = self.ready(sandbox_id)
         held = self.held[sandbox_id]
         assert held.entry is not None
         retained = await sandbox.snapshot(roles=retention.roles, reason=retention.reason)
+        if held.state != "ready" or self.held.get(sandbox_id) is not held:
+            try:
+                await held.provider.destroy_retained(retained.handle)
+            except AleError as error:
+                _log.warning(
+                    "could not delete %s, saved after its lease ended: %s", retained.handle, error
+                )
+            raise web.HTTPConflict(text=f"{sandbox_id} was released while it was saved")
         snapshot = _Snapshot(
             holding=SnapshotHolding(
                 snapshot_id=sandbox_id,

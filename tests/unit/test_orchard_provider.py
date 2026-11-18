@@ -28,6 +28,7 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.run.providers import privileges
+from ale.run.providers.fleet import FleetProvider
 from ale.run.providers.orchard import client as orchard_client
 from ale.run.providers.orchard import framing as orchard_framing
 from ale.run.providers.orchard import provider as orchard
@@ -992,6 +993,33 @@ async def test_restricted_modes_are_declared_only_where_softnet_is_the_workers(m
     monkeypatch.setattr(orchard, "check_softnet", lambda: None)
     (profile,) = await provider.profiles()
     assert profile.network_modes == set(NetworkMode)
+
+
+async def test_a_solver_is_refused_by_its_snapshot_verifiers_own_rules(monkeypatch) -> None:
+    """The leaf that saves a solver's snapshot boots its snapshot verifier too, so the
+    solver is refused by the rules that would refuse the verifier, as the Fleet refuses it
+    by its leaves': here a verifier's storage in no whole GiB."""
+    monkeypatch.setattr(orchard, "check_softnet", lambda: None)
+    provider = orchard.OrchardProvider(SimpleNamespace())  # type: ignore[arg-type]
+    macos = {"kind": ImageKind.VM, "os": OperatingSystem.MACOS, "arch": Arch.ARM64}
+    verifier = SandboxNeeds(
+        **macos,
+        network_mode=NetworkMode.OPEN,
+        resources=Resources(storage_mb=1536),
+        snapshot=True,
+    )
+    needs = SandboxNeeds(
+        **macos,
+        network_mode=NetworkMode.OPEN,
+        resources=Resources(storage_mb=4096),
+        snapshot=True,
+        verifier=verifier,
+    )
+    refused = ("its snapshot verifier: Orchard storage_mb must be a whole GiB",)
+    assert await provider.unserved(needs, user="user", role=SandboxRole.SOLVER) == refused
+    fleet = FleetProvider(SimpleNamespace())  # type: ignore[arg-type]
+    fleet._profiles = await provider.profiles()
+    assert await fleet.unserved(needs, user="user", role=SandboxRole.SOLVER) == refused
 
 
 BLOCK = NetworkPolicy(mode=NetworkMode.BLOCK)

@@ -690,3 +690,28 @@ storage is on volumes, declares no `storage_limit`. What measuring leaves to the
     xfs mounted with `pquota`, rootful, which a Host would have to switch to.
   - Firecracker, which gives each Sandbox a disk of its size: it attaches no GPU and needs
     `/dev/kvm`.
+
+## A commit cut short could leave a snapshot no record names
+
+**Problem.** A `docker commit` cancelled with its episode, as a Run's cancellation or the
+bound on a snapshot verifier's save cancels it, is killed with its CLI. Had the daemon
+written the image by then, an `ale-snapshot:<sandbox id>` image would be left that no result
+or RunLock names (November 2026, found reviewing snapshot verification, which saves a solver
+mid-episode).
+
+**Context.** Measured on Docker 29.1.3 with the containerd image store, committing a stopped
+container that wrote 1 GiB, 54 s in all: a CLI killed 85, 95 or 99% of the way through left
+no image in the minute after, nor did one killed 1.5 s into a commit of 3 GiB, so the daemon
+gives up a commit whose client is gone. Five commits of a container removed meanwhile all
+failed.
+
+**Solution.** The Sandbox remembers that it was committing until the commit returns.
+Destroying it then removes the container first, which fails any commit of it still in the
+daemon, and then `ale-snapshot:<sandbox id>`, if the daemon had finished it; a snapshot that
+was handed back is left to its owner.
+
+**Decisions.**
+- Removed when the Sandbox is destroyed, which every exit path does, rather than at the
+  cancellation itself.
+- No wait for the daemon's commit: once the container is gone, only an image the daemon
+  finished can remain, and the removal that follows takes it.

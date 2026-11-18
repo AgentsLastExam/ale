@@ -29,6 +29,7 @@ from ale.core.errors import (
     AgentError,
     AgentRefusalError,
     BudgetExceededError,
+    ConfigError,
     EnvironmentError_,
     MemoryExhaustedError,
     PhaseTimeoutError,
@@ -54,7 +55,13 @@ from ale.core.sandbox import (
     SandboxRole,
 )
 from ale.core.task import ResolvedVariables, Task
-from ale.core.taskspec import NetworkMode, OperatingSystem, Resources, VerificationMode
+from ale.core.taskspec import (
+    NetworkMode,
+    OperatingSystem,
+    Resources,
+    TaskSpec,
+    VerificationMode,
+)
 from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from ale.core.verdict import FINAL_STATUSES, Status, Verdict
 from ale.run import artifact_files
@@ -74,7 +81,7 @@ from ale.run.task_images import (
 from ale.run.verification import judge_endpoints, open_judge_sessions
 from ale_verify import JudgeInvocation
 
-__all__ = ["EpisodeResult", "run_episode", "run_episode_with_retries"]
+__all__ = ["EpisodeResult", "check_retention", "run_episode", "run_episode_with_retries"]
 
 #: Which status an error class implies. Order matters: the first match wins, so
 #: subclasses must precede their bases.
@@ -166,6 +173,11 @@ class _LeaseEntry:
     requested: Literal["destroy", "keep", "snapshot"]
     sanitation: Literal["not-run", "succeeded", "failed"] = "not-run"
     sanitation_reason: str | None = None
+    saved: RetainedSandbox | None = None
+    """The snapshot of its disk a verifier boots from, once saved; its Sandbox is gone then,
+    and this is what remains of it."""
+    booted_from: _LeaseEntry | None = None
+    """The saved solver whose snapshot this Sandbox booted from, which outlasts it."""
 
 
 class _Lease:
@@ -173,7 +185,9 @@ class _Lease:
 
     An episode may lease several — a solver and a separate verifier, say — so the lease
     tracks them rather than assuming one. Each comes from the Provider the Run selected for
-    its role: ``solver`` by provider id, and ``verifier`` for a separate verifier.
+    its role: ``solver`` by provider id, and ``verifier`` for a verifier of its own. A
+    solver saved for a snapshot verifier is held as its snapshot, which outlasts the
+    Sandboxes booted from it.
     """
 
     def __init__(
@@ -201,7 +215,15 @@ class _Lease:
             raise ProviderCapabilityError(f"no Provider was selected for a {request.role} Sandbox")
         provider = self.providers.get(selected)
         sandbox = await provider.create(self._configured(request, policy))
-        self.live.append(_LeaseEntry(sandbox, provider, roles, policy))
+        origin = next(
+            (
+                entry
+                for entry in self.live
+                if entry.saved is not None and entry.saved.handle == request.snapshot
+            ),
+            None,
+        )
+        self.live.append(_LeaseEntry(sandbox, provider, roles, policy, booted_from=origin))
         return sandbox
 
     async def adopt(
@@ -242,12 +264,59 @@ class _Lease:
         entry = self._find(sandbox)
         if entry is None:
             return
+        if entry.saved is not None:
+            # Its snapshot is what remains, kept only as the snapshot its retention asks for,
+            # and kept while a Sandbox booted from it lives, which finalize then reaps first.
+            if entry.requested != "snapshot" and not self._booted_from(entry):
+                await self._destroy_saved(entry)
+            return
         if entry.requested != "destroy":
             if entry.sanitation == "succeeded":
                 return
             await self._destroy(entry, outcome="retention-failed")
             return
         await self._destroy(entry, outcome="destroyed")
+
+    async def snapshot(self, sandbox: Sandbox) -> str:
+        """Save a sanitized solver's disk as the snapshot its verifier boots from, destroy
+        the solver, and return the snapshot's handle."""
+        entry = self._find(sandbox)
+        assert entry is not None, "only a leased Sandbox is saved"
+        if entry.sanitation != "succeeded":
+            raise RetentionFinalizationError(
+                "could not sanitize the solver for the snapshot its verifier boots from: "
+                f"{entry.sanitation_reason or 'sanitation did not run'}"
+            )
+        try:
+            entry.saved = await sandbox.snapshot(
+                roles=entry.roles,
+                reason="requested by sandbox_retention run configuration"
+                if entry.requested == "snapshot"
+                else "saved for the verifier that boots from it",
+            )
+        except BaseException as exc:
+            # Never tried again, as the episode ends: the solver goes as a retention that
+            # failed, with why.
+            entry.sanitation = "failed"
+            entry.sanitation_reason = str(exc) or "the save was cut short"
+            raise
+        logging.getLogger("ale.execution").info(
+            "the solver was saved as a snapshot for its verifier",
+            extra={"ale_data": {"handle": entry.saved.handle}},
+        )
+        # The snapshot stopped the Sandbox; only the snapshot is left. A Sandbox that
+        # cannot be destroyed now is destroyed again as the episode ends, whether its
+        # snapshot goes then or is kept.
+        try:
+            await sandbox.destroy()
+        except Exception as exc:
+            entry.sanitation_reason = str(exc)
+            raise RetentionFinalizationError(
+                f"could not destroy sandbox {sandbox.sandbox_id}: {exc}"
+            ) from exc
+        finally:
+            sandbox.release_resources()
+        return entry.saved.handle
 
     def mark_sanitized(
         self, sandbox: Sandbox, *, succeeded: bool, reason: str | None = None
@@ -258,8 +327,14 @@ class _Lease:
             entry.sanitation_reason = reason
 
     async def finalize(self, *, allow_retention: bool = True) -> None:
-        for entry in list(self.live):
-            if (
+        for entry in self._in_order():
+            if entry.saved is not None:
+                if not (allow_retention and entry.requested == "snapshot"):
+                    await self._destroy_saved(entry)
+                    continue
+                # Saved for its verifier already: that snapshot is the one kept.
+                retained = entry.saved
+            elif (
                 not allow_retention
                 or entry.requested == "destroy"
                 or entry.sanitation != "succeeded"
@@ -271,21 +346,23 @@ class _Lease:
                 )
                 await self._destroy(entry, outcome=outcome)
                 continue
-            reason = "requested by sandbox_retention run configuration"
-            try:
-                if entry.requested == "snapshot":
-                    retained = await entry.sandbox.snapshot(roles=entry.roles, reason=reason)
-                else:
-                    retained = await entry.sandbox.retain(roles=entry.roles, reason=reason)
-            except Exception as exc:
-                entry.sanitation_reason = str(exc)
-                await self._destroy(entry, outcome="retention-failed")
-                continue
+            else:
+                reason = "requested by sandbox_retention run configuration"
+                try:
+                    if entry.requested == "snapshot":
+                        retained = await entry.sandbox.snapshot(roles=entry.roles, reason=reason)
+                    else:
+                        retained = await entry.sandbox.retain(roles=entry.roles, reason=reason)
+                except Exception as exc:
+                    entry.sanitation_reason = str(exc)
+                    await self._destroy(entry, outcome="retention-failed")
+                    continue
             outcome = _retained_outcome(entry, retained)
             self.outcomes.append(outcome)
             self.retained.append((entry, outcome))
             if entry.requested == "snapshot":
-                # The snapshot holds the agent's state now; its Sandbox goes.
+                # The snapshot holds the agent's state now; its Sandbox goes, again if its
+                # save for its verifier could not destroy it.
                 await self._destroy(entry, outcome=None)
             else:
                 entry.sandbox.release_resources()
@@ -325,6 +402,60 @@ class _Lease:
                 )
             )
 
+    async def _destroy_saved(self, entry: _LeaseEntry, *, last: bool = False) -> None:
+        """Destroy the snapshot a solver was saved as, its Sandbox again first, idempotently.
+
+        Only once that succeeds does the entry go, recorded destroyed, so a later call tries
+        again; the ``last`` call records a snapshot it cannot destroy as the snapshot it is,
+        with why, so that it is found and removed by hand rather than lost.
+        """
+        saved = entry.saved
+        assert saved is not None
+        try:
+            try:
+                await entry.sandbox.destroy()
+            except Exception as exc:
+                raise RetentionFinalizationError(
+                    f"could not destroy sandbox {entry.sandbox.sandbox_id}: {exc}"
+                ) from exc
+            try:
+                await entry.provider.destroy_retained(saved.handle)
+            except Exception as exc:
+                raise RetentionFinalizationError(
+                    f"could not destroy snapshot {saved.handle}: {exc}"
+                ) from exc
+        except RetentionFinalizationError as exc:
+            entry.sanitation_reason = str(exc)
+            if last:
+                self.live.remove(entry)
+                kept = _retained_outcome(entry, saved).model_copy(
+                    update={"outcome": "snapshotted", "reason": entry.sanitation_reason}
+                )
+                self.outcomes.append(kept)
+            raise
+        self.live.remove(entry)
+        self.outcomes.append(
+            SandboxOutcome(
+                roles=entry.roles,
+                requested=entry.requested,
+                outcome="destroyed",
+                provider=entry.provider.name,
+            )
+        )
+        logging.getLogger("ale.execution").info(
+            "the solver's snapshot was destroyed", extra={"ale_data": {"handle": saved.handle}}
+        )
+
+    def _booted_from(self, entry: _LeaseEntry) -> bool:
+        """Whether a live Sandbox booted from ``entry``'s snapshot, which no Provider destroys
+        under it."""
+        return any(other.booted_from is entry for other in self.live)
+
+    def _in_order(self) -> list[_LeaseEntry]:
+        """The live entries, a saved solver last: the Sandboxes booted from its snapshot go
+        first, since no Provider destroys a snapshot one still runs on."""
+        return sorted(self.live, key=lambda entry: entry.saved is not None)
+
     async def _destroy(
         self,
         entry: _LeaseEntry,
@@ -359,9 +490,12 @@ class _Lease:
 
     async def release_all(self) -> None:
         failure: RetentionFinalizationError | None = None
-        for entry in list(self.live):
+        for entry in self._in_order():
             try:
-                await self._destroy(entry, outcome="destroyed")
+                if entry.saved is not None:
+                    await self._destroy_saved(entry, last=True)
+                else:
+                    await self._destroy(entry, outcome="destroyed")
             except RetentionFinalizationError as exc:
                 failure = failure or exc
         if failure is not None:
@@ -572,6 +706,29 @@ class _Artifacts(ArtifactSink):
         temporary.replace(target)
 
 
+def check_retention(spec: TaskSpec, retention: SandboxRetentionConfig) -> None:
+    """Refuse, before anything is prepared, a retention that cannot hold for ``spec``.
+
+    A snapshot verifier boots from a snapshot of the solver, and saving the snapshot stops
+    the solver, so it cannot be kept; a kept verifier still runs on the snapshot, which no
+    Provider destroys under it, so the snapshot must be kept too.
+    """
+    if spec.verify.environment_mode is not VerificationMode.SNAPSHOT:
+        return
+    if retention.solver == "keep":
+        raise ConfigError(
+            f"{spec.name} is verified in a Sandbox booted from a snapshot of its solver, and "
+            "saving the snapshot stops the solver: sandbox_retention.solver cannot be 'keep'; "
+            "'snapshot' keeps its disk"
+        )
+    if retention.verifier == "keep" and retention.solver != "snapshot":
+        raise ConfigError(
+            f"{spec.name} is verified in a Sandbox booted from a snapshot of its solver, which "
+            "a kept verifier still runs on: sandbox_retention.verifier = 'keep' needs "
+            "sandbox_retention.solver = 'snapshot'"
+        )
+
+
 async def run_episode(
     task: Task,
     protocol: EpisodeProtocol,
@@ -617,9 +774,11 @@ async def run_episode(
     task.asset_observation = observe_task_assets(task)
     await resolve_image_kinds([task])
     sandbox_retention = sandbox_retention or SandboxRetentionConfig()
-    # A caller that selected Providers for its Tasks has also checked them on this Host.
+    # A caller that selected Providers for its Tasks has also checked them on this Host, and
+    # their retention.
     alone = task.provider is None
     if alone:
+        check_retention(task.spec, sandbox_retention)
         await providers.select([task], snapshots=sandbox_retention.solver == "snapshot")
     assert task.provider is not None
     if task.prepared_image is None:
@@ -984,9 +1143,10 @@ def _exhausted(status: Status, resources: Resources) -> tuple[str, int] | None:
 def _agents_sandbox(task: Task, ctx: EpisodeContext, phase: str | None) -> bool:
     """Whether a Sandbox lost in ``phase`` holds the agent's work: the one it ran in, from
     its phase on, installing its Harness included, holds what it left there, processes and
-    files in memory too. Setup and a separate verifier run the Task's code alone."""
-    separate = task.spec.verify.environment_mode is VerificationMode.SEPARATE
-    return ctx.agent_started and not (separate and phase == Phase.VERIFY.value)
+    files in memory too. Setup and a verifier of its own run the Task's code alone, beside
+    the agent's files at most."""
+    own = task.spec.verify.environment_mode is not VerificationMode.SHARED
+    return ctx.agent_started and not (own and phase == Phase.VERIFY.value)
 
 
 def _phase_of(error: BaseException, recorded_phase: object = None) -> str | None:

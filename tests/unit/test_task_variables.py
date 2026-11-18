@@ -68,12 +68,15 @@ def test_env_tables_reach_the_commands_harbor_gives_them(tmp_path: Path) -> None
     assert variables.oracle() == {"SHARED": "environment", "ONLY": "solution"}
     shared = {"SHARED": "verifier", "ONLY": "environment"}
     assert variables.verification(VerificationMode.SHARED) == shared
-    # A separate verifier gets a copy of [environment], so its env too, as in Harbor.
+    # A verifier of its own gets a copy of [environment], so its env too, as in Harbor.
     assert variables.verification(VerificationMode.SEPARATE) == shared
+    assert variables.verification(VerificationMode.SNAPSHOT) == shared
 
     config["verifier"]["environment"] = {"cpus": 1, "memory_mb": 512, "env": {"OWN": "own"}}
     variables = load_task_folder(_task(tmp_path / "b", config)).spec.variables
     assert variables.verification(VerificationMode.SEPARATE) == {"OWN": "own", "SHARED": "verifier"}
+    # A snapshot verifier's table replaces [environment].env as a separate verifier's does.
+    assert variables.verification(VerificationMode.SNAPSHOT) == {"OWN": "own", "SHARED": "verifier"}
 
 
 @pytest.mark.parametrize(

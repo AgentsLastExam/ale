@@ -435,10 +435,10 @@ class ControlPlane:
     def _lifetimes(self) -> dict[tuple[str, str], list[float]]:
         """How long recent Sandboxes lived, from ready to gone, by image key and role.
 
-        A separate verifier that reuses the solver's image lives far shorter than the solver,
-        so each role is measured apart. A Sandbox still kept when it ended is left out: how
-        long one is kept says nothing about episodes. One a later Run continued in counts
-        from when it was ready for that Run, as continuing starts its time ready again.
+        A verifier that reuses the solver's image lives far shorter than the solver, so each
+        role is measured apart. A Sandbox still kept when it ended is left out: how long one
+        is kept says nothing about episodes. One a later Run continued in counts from when it
+        was ready for that Run, as continuing starts its time ready again.
         """
         lifetimes: dict[tuple[str, str], list[float]] = {}
         ended = sorted(

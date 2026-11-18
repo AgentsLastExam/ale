@@ -12,9 +12,9 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
-from aiohttp import ClientSession, WSMsgType
+from aiohttp import ClientSession, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer, unused_port
-from tests.support import MemoryProvider
+from tests.support import MemoryProvider, MemorySandbox
 
 from ale.core.capability import GpuHold, GpuModel, SandboxNeeds
 from ale.core.config import DockerProviderConfig
@@ -27,6 +27,7 @@ from ale.core.fleet import (
     GpuPool,
     Grant,
     ImageInputs,
+    Retention,
     SandboxDemand,
     SandboxStatus,
     SnapshotHolding,
@@ -649,6 +650,36 @@ class TestLeases:
         clock.now += 30
         assert agent.renew(RUN, 60) == 2
         assert {held.lease_expires_at for held in agent.held.values()} == {clock.now + 60}
+
+    async def test_a_snapshot_saved_after_its_lease_ended_is_deleted(
+        self,
+        client: TestClient,
+        agent: NodeAgent,
+        provider: MemoryProvider,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Run that gives a save up, at its bound or as it is cancelled, releases the
+        Sandbox; a save that finishes after that is deleted, as no record will name it."""
+        assert (await create(client, agent)).status == 200
+        saving, finish = asyncio.Event(), asyncio.Event()
+        save = MemorySandbox.snapshot
+
+        async def slow(self: MemorySandbox, **options: object) -> object:
+            saving.set()
+            await finish.wait()
+            return await save(self, **options)
+
+        monkeypatch.setattr(MemorySandbox, "snapshot", slow)
+        retention = Retention(roles=("solver",), reason="saved for the verifier")
+        saved = asyncio.ensure_future(agent.snapshot("sandbox-0001", retention))
+        await saving.wait()
+        released = await client.delete("/v1/sandboxes/sandbox-0001", headers=HEADERS)
+        assert released.status == 204
+        finish.set()
+        with pytest.raises(web.HTTPConflict) as refused:
+            await saved
+        assert refused.value.text == "sandbox-0001 was released while it was saved"
+        assert agent.snapshots == {} and provider.snapshots == {}
 
 
 class TestTunnel:

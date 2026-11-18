@@ -86,14 +86,17 @@ def sibling_checkout(name: str) -> Path:
     )
 
 
-def provider_registry(provider: Provider | None = None) -> ProviderRegistry:
-    """A Run's registry, with ``provider`` standing for the Provider its id names, first in
-    ``sandbox.providers``."""
-    if provider is None:
+def provider_registry(*providers: Provider, only: bool = False) -> ProviderRegistry:
+    """A Run's registry, with ``providers`` standing for the Providers their ids name, first
+    in ``sandbox.providers`` and in that order, then the default list's others unless
+    ``only``."""
+    if not providers:
         return ProviderRegistry(RunConfig())
-    order = [provider.id, *(name for name in SandboxConfig().providers if name != provider.id)]
+    ids = [provider.id for provider in providers]
+    order = ids + ([] if only else [name for name in SandboxConfig().providers if name not in ids])
     registry = ProviderRegistry(RunConfig.model_validate({"sandbox": {"providers": order}}))
-    registry._instances[provider.id] = provider
+    for provider in providers:
+        registry._instances[provider.id] = provider
     return registry
 
 
@@ -468,7 +471,9 @@ class MemorySandbox(Sandbox):
         root = Path(source)
         self.uploads[target] = {
             str(entry.relative_to(root)): (
-                f"-> {os.readlink(entry)}" if entry.is_symlink() else entry.read_text()
+                f"-> {os.readlink(entry)}"
+                if entry.is_symlink()
+                else entry.read_bytes().decode(errors="replace")
             )
             for entry in sorted(root.rglob("*"))
             if entry.is_symlink() or entry.is_file()
@@ -566,6 +571,10 @@ class MemoryProvider(Provider):
         from ale.core.errors import ProviderStartError
 
         if handle in self.snapshots:
+            # As every Provider's: never under a Sandbox booted from it.
+            booted = [item for item in self.sandboxes if item.request.snapshot == handle]
+            if any(not item.destroyed for item in booted):
+                raise ProviderStartError(f"could not destroy {handle}: a Sandbox runs on it")
             del self.snapshots[handle]
         elif handle in self.kept:
             await self.kept.pop(handle).destroy()

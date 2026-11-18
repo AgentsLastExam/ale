@@ -15,6 +15,7 @@ from ipaddress import IPv4Network
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, get_args
+from unittest.mock import AsyncMock
 
 import pytest
 from tests.support import TraceSink
@@ -345,6 +346,7 @@ def _sandbox() -> DockerSandbox:
     sandbox._context = contextvars.copy_context()
     sandbox.container_id = "f" * 64
     sandbox._relay = None
+    sandbox._committing = False
     return sandbox
 
 
@@ -399,6 +401,41 @@ async def test_a_snapshot_commits_the_stopped_container_without_its_gpus(
     ]
     assert retained.handle == "docker:snapshot:e1-abcdef"
     assert retained.gpu_devices == ()
+
+
+@pytest.mark.asyncio
+async def test_a_commit_cut_short_leaves_no_snapshot_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit may have finished in the daemon as ALE gave up on it: destroying the Sandbox
+    removes its container, which fails a commit still under way, then the image it named,
+    and only one never handed back."""
+    calls = _scripted(monkeypatch)
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[0] == "commit":
+            raise asyncio.CancelledError
+        return _scripted_reply(argv)
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    sandbox = _sandbox()
+    sandbox.confinement = SimpleNamespace(remove=AsyncMock())  # type: ignore[assignment]
+    sandbox.state = SandboxState.READY
+    with pytest.raises(asyncio.CancelledError):
+        await sandbox.snapshot(roles=("solver",), reason="kept")
+    await sandbox.destroy()
+    removed = [call[:2] for call in calls if call[0] in {"rm", "rmi"}]
+    assert removed == [("rm", "-f"), ("rmi", "ale-snapshot:e1-abcdef")]
+
+    kept = _sandbox()
+    kept.confinement = SimpleNamespace(remove=AsyncMock())  # type: ignore[assignment]
+    kept.state = SandboxState.READY
+    calls = _scripted(monkeypatch)
+    await kept.snapshot(roles=("solver",), reason="kept")
+    await kept.destroy()
+    assert calls[-1][:2] == ("rm", "-f")
+    assert not any(call[0] == "rmi" for call in calls)
 
 
 def _snapshot_inspect(labels: dict[str, str]) -> str:
