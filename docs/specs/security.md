@@ -122,10 +122,19 @@ provider:
   refuses the rest in the provider's error format, so an unchecked method cannot slip
   through.
 - **Provider-side network tools follow the Task's network policy.** These are tools the
-  provider runs on its own side that reach the web, such as hosted web search or search
-  grounding. They act outside the Sandbox's network policy, so unless the Task's network
-  is `open` each Harness turns them off in its program's own configuration, and a request
-  that asks for one is not forwarded.
+  provider runs on its own side that reach the network, such as hosted web search, URL
+  fetch or a remote MCP server. They act outside the Sandbox's network policy, so they
+  are used only in a Task whose network is `open`, and two layers keep them off in every
+  other Task:
+  - each Harness turns them off in its program's own configuration, so the program never
+    offers the model a search it cannot have; its README names them and the switch;
+  - each dialect refuses a request that asks for one, whoever wrote it, such as an agent
+    using its episode token directly.
+
+  The Gateway refuses such a request rather than forwarding it without the tool. A
+  configured Harness never sends one, so a request that does comes from a changed CLI
+  default or from the agent itself, and a refusal makes that visible in the trace where
+  a quiet rewrite would hide it.
 
 A policy refusal is recorded as a `refused` call naming the policy and, unlike a limit,
 does not end the episode. Each dialect's routes, authentication and policies are in the
@@ -407,6 +416,11 @@ to its registry.
 **Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
 succeeds the tunnel is opaque by design — the point is to reach a declared host, not to
 inspect the conversation. An allowlisted host is a trusted host.
+
+**A provider-side network tool the Gateway does not name.** Each dialect refuses the
+tools and fields its README lists. A provider feature that reaches the network and is
+added after that list is forwarded until it is listed, though a Harness that does not
+offer it still never sends it.
 
 **Exfiltration through the model service.** An agent can put anything it likes in a
 prompt. The Gateway records API-key and subscription calls but does not police their

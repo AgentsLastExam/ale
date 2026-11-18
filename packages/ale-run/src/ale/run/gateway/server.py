@@ -206,6 +206,8 @@ class Gateway:
         started = asyncio.get_running_loop().time()
         body = await request.read()
         payload = self._authoritative(json.loads(body or b"{}"), session)
+        if (refused := self._refused_web_tools(session, payload)) is not None:
+            return refused
         return await self._call(
             request, session, payload, started=started, streaming=bool(payload.get("stream"))
         )
@@ -237,13 +239,7 @@ class Gateway:
         payload = self._authoritative(payload, session)
 
         target = request.match_info["target"]
-        refusal = gemini.policy_refusal(
-            request.method,
-            target,
-            request.query.get("alt"),
-            payload,
-            web_tools=session.provider_web_tools,
-        )
+        refusal = gemini.policy_refusal(request.method, target, request.query.get("alt"))
         if refusal is not None:
             self._record(
                 session,
@@ -256,6 +252,8 @@ class Gateway:
         streaming = gemini.METHODS[method]
         # The run's model replaces whichever one the client named, helper models included.
         path = f"/v1beta/models/{session.model}:{method}" + ("?alt=sse" if streaming else "")
+        if (refused := self._refused_web_tools(session, payload, path)) is not None:
+            return refused
         return await self._call(
             request, session, payload, started=started, streaming=streaming, path=path
         )
@@ -502,6 +500,38 @@ class Gateway:
         )
 
     # --- policy and accounting ---
+
+    def _refused_web_tools(
+        self, session: GatewaySession, payload: dict[str, Any], path: str | None = None
+    ) -> web.Response | None:
+        """Refuse a request for provider-side network tools unless the Task's network is open.
+
+        The tools reach the network from the provider's side, outside the Sandbox's network
+        policy. The request is refused rather than forwarded without them: the Harness
+        turns them off, so one only arrives when a CLI changed its defaults or an agent
+        wrote it, and either should show in the trace rather than be quietly rewritten.
+        """
+        if session.provider_web_tools:
+            return None
+        named = self._dialect(session).web_tools(payload)
+        if not named:
+            return None
+        self._record(
+            session,
+            call_id=f"call_{uuid.uuid4().hex}",
+            request_digest=_request_digest(payload, path),
+            refused="web_tools",
+        )
+        message = (
+            "provider-side network tools need a Task with open network; the ALE Gateway "
+            f"refuses {', '.join(named)}"
+        )
+        return web.json_response(
+            self._dialect(session).policy_body("web_tools", message),
+            status=400,
+            # A policy does not lift by waiting; SDKs that honor this stop retrying.
+            headers={"x-should-retry": "false"},
+        )
 
     def _authenticate(self, request: web.Request) -> GatewaySession:
         header = request.headers.get("authorization", "")

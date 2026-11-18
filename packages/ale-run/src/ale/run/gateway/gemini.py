@@ -19,20 +19,22 @@ __all__ = [
     "PolicyRefusal",
     "error_body",
     "extract_usage",
+    "policy_body",
     "policy_refusal",
     "refusal_body",
     "stream_completed",
     "usage_from_stream",
+    "web_tools",
 ]
 
 #: The methods the Gateway forwards, each mapped to whether it streams. Each runs on the
 #: run's model and leaves nothing stored with Google; any other method is refused.
 METHODS = {"generateContent": False, "streamGenerateContent": True, "countTokens": False}
 
-#: Tools Google runs on its own side. They reach the web outside the Task's network
-#: policy and are billed apart from tokens. The API accepts both JSON spellings of a
-#: field, so both are matched.
-_GROUNDING_TOOLS = frozenset(
+#: Tools Google runs on its own side that reach the network: grounding, which is also
+#: billed apart from tokens, and remote MCP servers. The API accepts both JSON spellings
+#: of a field, so both are matched.
+_WEB_TOOLS = frozenset(
     {
         "googleSearch",
         "google_search",
@@ -42,6 +44,8 @@ _GROUNDING_TOOLS = frozenset(
         "url_context",
         "googleMaps",
         "google_maps",
+        "mcpServers",
+        "mcp_servers",
     }
 )
 
@@ -65,14 +69,7 @@ class PolicyRefusal:
         return error_body(self.code, self.status, self.message, f"ALE_{self.policy.upper()}")
 
 
-def policy_refusal(
-    http_method: str,
-    target: str,
-    alt: str | None,
-    payload: dict[str, Any],
-    *,
-    web_tools: bool = False,
-) -> PolicyRefusal | None:
+def policy_refusal(http_method: str, target: str, alt: str | None) -> PolicyRefusal | None:
     """Why the request for ``v1beta/{target}`` must not be forwarded, if it must not."""
     resource, _, method = target.rpartition(":")
     model = resource.removeprefix("models/")
@@ -92,18 +89,38 @@ def policy_refusal(
             "INVALID_ARGUMENT",
             "the ALE Gateway streams only server-sent events; send alt=sse",
         )
+    return None
+
+
+def web_tools(payload: dict[str, Any]) -> list[str]:
+    """What a request asks Google to reach on the network: a grounding or remote MCP tool,
+    or a file given by URL, which Google downloads."""
     tools = payload.get("tools")
     entries = tools if isinstance(tools, list) else [tools]
-    named = {name for tool in entries if isinstance(tool, dict) for name in tool}
-    if not web_tools and (grounding := sorted(named & _GROUNDING_TOOLS)):
-        return PolicyRefusal(
-            "web_tools",
-            REFUSAL_STATUS,
-            "FAILED_PRECONDITION",
-            f"grounding needs a Task with open network; the ALE Gateway refuses "
-            f"{', '.join(grounding)}",
-        )
-    return None
+    named = {name for tool in entries if isinstance(tool, dict) for name in tool} & _WEB_TOOLS
+    for content in _dicts(payload.get("contents")):
+        for part in _dicts(content.get("parts")):
+            response = part.get("functionResponse") or part.get("function_response")
+            inner = _dicts(response.get("parts")) if isinstance(response, dict) else []
+            for each in (part, *inner):
+                data = each.get("fileData") or each.get("file_data")
+                uri = (
+                    (data.get("fileUri") or data.get("file_uri"))
+                    if isinstance(data, dict)
+                    else None
+                )
+                if isinstance(uri, str) and uri.lower().startswith(("http://", "https://")):
+                    named.add("fileData url")
+    return sorted(named)
+
+
+def _dicts(value: object) -> list[dict[str, Any]]:
+    return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+
+def policy_body(policy: str, message: str) -> dict[str, Any]:
+    """A request policy's refusal, as the Google error a Gemini client reports at once."""
+    return error_body(REFUSAL_STATUS, "FAILED_PRECONDITION", message, f"ALE_{policy.upper()}")
 
 
 def _call_usage(metadata: object) -> CallUsage:

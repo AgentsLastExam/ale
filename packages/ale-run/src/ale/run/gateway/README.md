@@ -48,6 +48,34 @@ Request changes beyond the model:
   the ceiling is enforced after the response.
 - Gemini's `generationConfig.maxOutputTokens` is forwarded as sent.
 
+### Provider-side network tools
+
+Each dialect names what makes a provider ALE ships reach the network on the agent's
+behalf, as that provider documents it. Unless the Task's network is `open`, a request that
+asks for any of it is refused as `web_tools` before it reaches the provider, with status
+400 and `x-should-retry: false`, in the dialect's own error format:
+`invalid_request_error` for Anthropic and OpenAI, `FAILED_PRECONDITION` for Gemini. The
+error names what was refused. In an `open` Task the request is forwarded unchanged.
+
+| Dialect | Refused |
+|---|---|
+| `anthropic` | a tool whose `type` starts with `web_search` or `web_fetch`, every dated version included; `mcp_toolset` and a non-empty `mcp_servers` (the MCP connector); an image or document whose `source` is a `url`, in a message or a `tool_result` |
+| `openai-responses` | a tool whose `type` starts with `web_search` (OpenAI's, Meta's, xAI's and Qwen's search, previews and dated versions included); `mcp`, remote servers and connectors; xAI's `x_search`; Qwen's `web_extractor` and `image_search`; a hosted `shell` or `code_interpreter` whose `network_policy` is not `disabled`; any of these in an input item's `tools`, such as a `tool_search_output`; an `input_image` with an `http(s)` URL and an `input_file` with a `file_url` |
+| `openai-chat-completions` | `web_search_options` (OpenAI); `enable_search` when true (DashScope); `search_parameters` unless its `mode` is `off` (xAI Live Search); a `web_search` tool (Z.ai) and a `builtin_function` such as `$web_search` (Moonshot); an `image_url` or `video_url` part with an `http(s)` URL |
+| `gemini` | `googleSearch`, `googleSearchRetrieval`, `urlContext`, `googleMaps` and `mcpServers`, in either JSON spelling; a `fileData` whose URI is `http(s)` |
+
+What passes: client tools, whatever their name; provider tools documented to have no
+network, such as Anthropic's and Google's code execution, OpenAI's `code_interpreter` and
+hosted `shell` with networking disabled, `file_search`, tool search and image generation;
+and data given inline, such as a base64 image. OpenAI's `web_search` with
+`external_web_access: false` answers from OpenAI's cache of web pages and is refused too.
+A run whose model searches by itself, such as `gpt-5-search-api`, is the operator's choice
+of model; the Gateway imposes that model and does not judge it.
+
+A Harness never sends these when the Task's network is not `open`, so a refusal means a
+CLI changed its defaults or the agent wrote the request itself. It is refused rather than
+forwarded without the tool so that the trace shows it.
+
 ### Gemini
 
 - **Routes.** The route matches at the Gateway root or below any path prefix the client
@@ -61,9 +89,6 @@ Request changes beyond the model:
   - `cachedContents` and files would store state with Google;
   - `embedContent` would run a model other than the run's;
   - the `models` listing would name models the run cannot use.
-- **Grounding.** `googleSearch`, `googleSearchRetrieval`, `urlContext` and `googleMaps`, in
-  either JSON spelling, reach the web from Google's side. A request whose `tools` include
-  one is refused as `web_tools` unless the Task's network is `open`.
 - **Refusal status.** Refusals are 400 `FAILED_PRECONDITION`, with an `ErrorInfo` detail,
   not 429. Antigravity CLI 1.4.7 retried a 429 eight times over about 2.5 minutes but
   fails a 400 at once, and a Gateway refusal does not lift by waiting.
