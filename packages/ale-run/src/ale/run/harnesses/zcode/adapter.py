@@ -274,23 +274,24 @@ class ZCodeHarness(CliHarness):
                 "personalModelIds": [session.model],
             },
         }
-        rules: list[dict[str, Any]] = []
+        # WebSearch runs the provider's web_search server tool, which ZCode encodes only for
+        # Anthropic Messages and offers only to models whose rule says so.
+        properties: dict[str, Any] = {
+            "supportsNativeWebSearch": session.provider_web_tools and api == "anthropic-messages"
+        }
         if isinstance(self.settings.input_format, InputFormat):
-            # A partial rule, which ZCode lays over what its catalog says of the model.
-            properties = {"inputFormat": self.settings.input_format.native}
-            rules.append(
-                {
-                    "providerId": "ale",
-                    "modelId": session.model,
-                    "config": {"properties": properties},
-                }
-            )
+            properties["inputFormat"] = self.settings.input_format.native
+        # A partial rule, which ZCode lays over what its catalog says of the model.
+        rule = {"providerId": "ale", "modelId": session.model, "config": {"properties": properties}}
         personal = {
             "schemaVersion": 1,
             "config": {
                 "providerOrder": ["ale"],
                 "providerConfigRules": {"providerRules": [provider]},
-                "modelConfigRules": {"providerModelRules": rules, "manualProviderModelRules": []},
+                "modelConfigRules": {
+                    "providerModelRules": [rule],
+                    "manualProviderModelRules": [],
+                },
                 "defaultModelSelection": {"providerId": "ale", "modelId": session.model},
             },
         }

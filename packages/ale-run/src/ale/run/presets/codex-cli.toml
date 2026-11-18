@@ -8,7 +8,7 @@ mcp_servers = []
 
 [agent.settings]
 reasoning_effort = "default"
-web_search = false
+web_search = true
 
 [gateway]
 provider = "openai"

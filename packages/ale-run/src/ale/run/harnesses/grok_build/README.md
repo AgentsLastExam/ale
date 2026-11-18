@@ -10,3 +10,9 @@ images out only from an output over its MCP output limit, which it first truncat
 the whole output to the session's `mcp/<call id>.txt`; the truncated image fails Grok's
 own check and is dropped. So the model never sees an MCP screenshot, such as
 `cua-desktop`'s. Grok takes every model to accept images and has no setting for it.
+
+Grok's `web_search` is a request of its own carrying xAI's hosted `web_search` tool, sent
+to the model `[models] web_search` names, `grok-4.5` unless set. The generated config names
+the run's model, so the request goes through the Gateway. Unless the Task's network is
+`open`, ALE passes `--disable-web-search`, which removes it and `web_fetch`. `web_fetch`
+is off in Grok by default and fetches from inside the Sandbox when on.

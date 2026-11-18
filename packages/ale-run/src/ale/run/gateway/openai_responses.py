@@ -9,10 +9,21 @@ from ale.run.gateway.session import CallUsage
 
 __all__ = [
     "extract_usage",
+    "policy_body",
     "refusal_body",
     "stream_completed",
     "usage_from_stream",
+    "web_tools",
 ]
+
+#: Hosted tool types that reach the network from the provider's side: web search in every
+#: version and preview spelling, which all start with ``web_search``; remote MCP servers
+#: and connectors; xAI's X search; and Qwen's page extractor and image search.
+_WEB_TOOL_PREFIX = "web_search"
+_WEB_TOOL_TYPES = frozenset({"mcp", "x_search", "web_extractor", "image_search"})
+#: Hosted tools that run code in a provider container, which reaches the network only
+#: under a ``network_policy`` that allows it.
+_CONTAINER_TOOLS = {"shell": "environment", "code_interpreter": "container"}
 
 
 def _call_usage(usage: object) -> CallUsage:
@@ -66,6 +77,56 @@ def stream_completed(events: list[bytes]) -> bool:
             return False
         terminal = terminal or event.get("type") in {"response.completed", "response.incomplete"}
     return terminal
+
+
+def web_tools(payload: dict[str, Any]) -> list[str]:
+    """What a request asks the provider to reach on the network: a hosted tool that does,
+    in the request's tools or in tools an input item adds, or an image or file given by
+    URL, which the provider downloads."""
+    items = _dicts(payload.get("input"))
+    tools = [
+        *_dicts(payload.get("tools")),
+        *(t for item in items for t in _dicts(item.get("tools"))),
+    ]
+    named: set[str] = set()
+    for tool in tools:
+        kind = tool.get("type")
+        if not isinstance(kind, str):
+            continue
+        if kind.startswith(_WEB_TOOL_PREFIX) or kind in _WEB_TOOL_TYPES:
+            named.add(kind)
+        elif kind in _CONTAINER_TOOLS:
+            place = tool.get(_CONTAINER_TOOLS[kind])
+            policy = place.get("network_policy") if isinstance(place, dict) else None
+            if isinstance(policy, dict) and policy.get("type") not in (None, "disabled"):
+                named.add(f"{kind} network_policy {policy.get('type')}")
+    for item in items:
+        for part in (item, *_dicts(item.get("content")), *_dicts(item.get("output"))):
+            if part.get("type") == "input_image" and _remote(part.get("image_url")):
+                named.add("input_image url")
+            elif part.get("type") == "input_file" and part.get("file_url"):
+                named.add("input_file url")
+    return sorted(named)
+
+
+def _remote(url: object) -> bool:
+    return isinstance(url, str) and url.lower().startswith(("http://", "https://"))
+
+
+def _dicts(value: object) -> list[dict[str, Any]]:
+    return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+
+def policy_body(policy: str, message: str) -> dict[str, Any]:
+    """A request policy's refusal, as the invalid request it is to an OpenAI client."""
+    return {
+        "error": {
+            "type": "invalid_request_error",
+            "code": f"ale_{policy}",
+            "message": message,
+            "ale": {"layer": "gateway", "policy": policy},
+        }
+    }
 
 
 def refusal_body(

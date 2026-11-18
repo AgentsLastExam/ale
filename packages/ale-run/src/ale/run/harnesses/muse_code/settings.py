@@ -19,4 +19,5 @@ class MuseCodeSettings(BaseModel):
     max_model_steps: PositiveInt | Literal["default", "unlimited"] = "unlimited"
     #: Muse's reminder agents, which make model calls of their own beside the main loop.
     reminders: StrictBool = True
+    #: Muse's web tools; ALE turns them off unless the Task's network is open.
     web_tools: StrictBool = True

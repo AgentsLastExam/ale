@@ -22,5 +22,10 @@ makes to take a `cua-desktop` screenshot through it; `just test` fails without t
 `just test-harnesses` then checks, in every Gateway dialect the CLI accepts, that the
 screenshot reaches the model and that the trajectory records it.
 
+Every CLI Harness also names, in `SEARCHES` in `tests/integration/cli_web_tools.py`, how a
+model attempts a search its provider runs on its own side, or that it has none; `just test`
+fails without it. `just test-harnesses` then checks that the CLI asks for no such tool
+when the Task's network is closed and, if it has one, asks for it when the network is open.
+
 Run the Harness unit tests, conformance tests and the matching real Sandbox integration.
 Any CLI-version or model-discovery behavior also requires its marked live acceptance.

@@ -105,6 +105,58 @@ async def test_configuration_is_episode_local_and_selects_api_key_mode(tmp_path:
     assert all(b"token" not in data for data in sandbox.files.values())
 
 
+@pytest.mark.parametrize(
+    ("system", "home", "python"),
+    [
+        (OperatingSystem.LINUX, "/home/agent", "python3"),
+        (OperatingSystem.WINDOWS, "C:/Users/Agent User", "python"),
+        (OperatingSystem.MACOS, "/Users/admin", MACOS_PYTHON),
+    ],
+)
+async def test_a_hook_denies_search_web_unless_the_task_network_is_open(
+    tmp_path: Path, system: OperatingSystem, home: str, python: str
+) -> None:
+    """search_web runs Google Search on Google's side, and no agy setting removes it."""
+    effective = resources(tmp_path)
+    sandbox = FakeSandbox()
+    await AntigravityCliHarness().install_resources(
+        sandbox,  # type: ignore[arg-type]
+        session(model=MODEL, home=home, os=system),
+        effective,
+    )
+    config = home + "/.gemini/config"
+    assert json.loads(sandbox.files[config + "/hooks.json"]) == {
+        "ale-provider-web-tools": {
+            "PreToolUse": [
+                {
+                    "matcher": "search_web",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f'{python} -I "{config}/deny-search-web.py"',
+                            "timeout": 10,
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    script = tmp_path / "deny-search-web.py"
+    script.write_bytes(sandbox.files[config + "/deny-search-web.py"])
+    printed = subprocess.run(
+        [sys.executable, "-I", str(script)], capture_output=True, text=True, check=True
+    ).stdout
+    assert json.loads(printed)["decision"] == "deny"
+
+    opened = FakeSandbox()
+    await AntigravityCliHarness().install_resources(
+        opened,  # type: ignore[arg-type]
+        session(model=MODEL, home=home, os=system, provider_web_tools=True),
+        effective,
+    )
+    assert config + "/hooks.json" not in opened.files
+
+
 async def test_http_mcp_servers_use_the_native_url_form() -> None:
     sandbox = FakeSandbox()
     remote = ResolvedMcpServer(

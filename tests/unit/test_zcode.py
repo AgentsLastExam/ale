@@ -123,9 +123,15 @@ async def test_configuration_routes_the_model_through_the_gateway(
     assert rule["config"]["access"] == {"type": "api-key", "apiKey": "token"}
     assert rule["config"]["personalModelIds"] == ["test-model"]
     assert provider["defaultModelSelection"] == {"providerId": "ale", "modelId": "test-model"}
-    # What the model takes is left to ZCode's catalog.
+    # What the model takes is left to ZCode's catalog; only native web search is decided.
     assert provider["modelConfigRules"] == {
-        "providerModelRules": [],
+        "providerModelRules": [
+            {
+                "providerId": "ale",
+                "modelId": "test-model",
+                "config": {"properties": {"supportsNativeWebSearch": False}},
+            }
+        ],
         "manualProviderModelRules": [],
     }
     assert ["chmod", "600", PROVIDER] in sandbox.commands
@@ -161,12 +167,43 @@ async def test_input_format_is_laid_over_the_catalogs_for_the_model() -> None:
                 "providerId": "ale",
                 "modelId": "test-model",
                 "config": {
-                    "properties": {"inputFormat": {"supportsImage": True, "supportsPdf": False}}
+                    "properties": {
+                        "supportsNativeWebSearch": False,
+                        "inputFormat": {"supportsImage": True, "supportsPdf": False},
+                    }
                 },
             }
         ],
         "manualProviderModelRules": [],
     }
+
+
+@pytest.mark.parametrize(
+    ("dialect", "open_network", "native"),
+    [
+        ("anthropic", True, True),
+        ("anthropic", False, False),
+        ("openai-responses", True, False),
+    ],
+)
+async def test_native_web_search_follows_the_task_network(
+    dialect: str, open_network: bool, native: bool
+) -> None:
+    """ZCode grants WebSearch by vendor URL, so the run's model rule decides it."""
+    sandbox = FakeSandbox()
+    await ZCodeHarness(gateway_dialect=dialect).install_resources(
+        sandbox,  # type: ignore[arg-type]
+        session(provider_web_tools=open_network),
+        EffectiveAgentResources(),
+    )
+    rules = json.loads(sandbox.files[PROVIDER])["config"]["modelConfigRules"]
+    assert rules["providerModelRules"] == [
+        {
+            "providerId": "ale",
+            "modelId": "test-model",
+            "config": {"properties": {"supportsNativeWebSearch": native}},
+        }
+    ]
 
 
 async def test_without_mcp_servers_the_run_configuration_keeps_native_defaults() -> None:

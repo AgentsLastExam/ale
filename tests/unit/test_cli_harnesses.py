@@ -582,6 +582,41 @@ async def test_grok_subscription_launch_uses_gateway_and_requested_model() -> No
     assert prepared.env["GROK_WORKSPACE_DATA_COLLECTION_DISABLED"] == "1"
 
 
+@pytest.mark.parametrize("open_network", [False, True])
+async def test_provider_web_tools_follow_the_task_network(
+    tmp_path: Path, open_network: bool
+) -> None:
+    """Each program's own switch turns off the web tools its provider runs on its side."""
+    current = session(provider_web_tools=open_network)
+    effective = resources(tmp_path)
+
+    for settings, mode in (({"web_search": False}, "disabled"), ({}, "live")):
+        codex = FakeSandbox()
+        await CodexCliHarness(settings=settings).install_resources(codex, current, effective)  # type: ignore[arg-type]
+        expected = mode if open_network else "disabled"
+        assert (
+            f'web_search = "{expected}"'
+            in codex.files["/home/agent/.codex-ale/config.toml"].decode()
+        )
+
+    grok = await GrokBuildHarness().prepare_command(
+        "/home/agent/.ale-harness/prompt.md", FakeSandbox(), current, native_session_id=None
+    )
+    assert ("--disable-web-search" in grok.script) is not open_network
+    grok_home = FakeSandbox()
+    await GrokBuildHarness().install_resources(grok_home, current, effective)  # type: ignore[arg-type]
+    # Search asks the run's model, which the Gateway serves, not Grok's built-in default.
+    assert (
+        'web_search = "test-model"' in grok_home.files["/home/agent/.grok-ale/config.toml"].decode()
+    )
+
+    muse = await MuseCodeHarness().prepare_command(
+        "/home/agent/.ale-harness/prompt.md", FakeSandbox(), current, native_session_id=None
+    )
+    assert ("--disable-web-tools" in muse.script) is not open_network
+    assert (muse.env.get("MUSE_WEB_SEARCH_MODE") == "hosted") is open_network
+
+
 async def test_openclaw_declares_explicit_reasoning_support(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     harness = OpenClawCliHarness(settings={"thinking": "high"})

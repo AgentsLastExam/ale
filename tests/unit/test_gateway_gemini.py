@@ -297,7 +297,8 @@ class TestPolicy:
         reply = await send(gateway, GENERATE, {**BODY, "tools": tools}, token=session.token)
 
         error = google_error(reply, 400, "FAILED_PRECONDITION")
-        assert "grounding needs a Task with open network" in error["message"]
+        assert "need a Task with open network" in error["message"]
+        assert error["details"][0]["reason"] == "ALE_WEB_TOOLS"
         assert upstream.seen == []
         (record,) = records(trace)
         assert (record["disposition"], record["refusal_limit"]) == ("refused", "web_tools")

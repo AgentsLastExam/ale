@@ -14,10 +14,17 @@ from ale.run.gateway.session import CallUsage
 
 __all__ = [
     "extract_usage",
+    "policy_body",
     "refusal_body",
     "stream_completed",
     "usage_from_stream",
+    "web_tools",
 ]
+
+#: Server tool types that reach the network from the provider's side, by family: every
+#: version of web search and web fetch, such as ``web_search_20260209``, starts with its
+#: family's name, and the MCP connector's ``mcp_toolset`` calls a remote server.
+_WEB_TOOL_FAMILIES = ("web_search", "web_fetch", "mcp_toolset")
 
 _USAGE_FIELDS = (
     "input_tokens",
@@ -101,6 +108,44 @@ def stream_completed(events: list[bytes]) -> bool:
             return False
         completed = completed or event.get("type") == "message_stop"
     return completed
+
+
+def web_tools(payload: dict[str, Any]) -> list[str]:
+    """What a request asks the provider to reach on the network: a web search or web fetch
+    server tool, the MCP connector's remote servers, or an image or document given by URL,
+    which the provider downloads."""
+    tools = payload.get("tools")
+    named = {
+        tool["type"]
+        for tool in _dicts(tools)
+        if isinstance(tool.get("type"), str) and tool["type"].startswith(_WEB_TOOL_FAMILIES)
+    }
+    if payload.get("mcp_servers"):
+        named.add("mcp_servers")
+    for message in _dicts(payload.get("messages")):
+        for block in _dicts(message.get("content")):
+            inner = _dicts(block.get("content")) if block.get("type") == "tool_result" else []
+            for part in (block, *inner):
+                source = part.get("source")
+                if isinstance(source, dict) and source.get("type") == "url":
+                    named.add(f"{part.get('type')} source url")
+    return sorted(named)
+
+
+def _dicts(value: object) -> list[dict[str, Any]]:
+    return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+
+def policy_body(policy: str, message: str) -> dict[str, Any]:
+    """A request policy's refusal, as the invalid request it is to an Anthropic client."""
+    return {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": message,
+            "ale": {"layer": "gateway", "policy": policy},
+        },
+    }
 
 
 def refusal_body(
