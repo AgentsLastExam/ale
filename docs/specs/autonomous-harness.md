@@ -210,6 +210,16 @@ agent's files, so it continues in a later episode that adopted the retained solv
 ([Episode protocol](episode-protocol.md#continuation)); model, settings and
 resources may differ there, and that episode's RunLock records its own.
 
+[Validation rounds](episode-protocol.md#validation-rounds) are native resumes too: each turn
+after the first resumes the session in the solver booted from the round's snapshot, with the
+round's prompt, so a Run giving rounds to a Harness without native resume is refused before
+provisioning. The framework's preamble below the instruction and each round's prompt reach
+the program as any prompt does and are recorded with it, and every turn's invocation
+appends to the same evidence logs, so the trajectory is the one native session across all
+turns. Each Harness declares the files in which its program keeps credentials
+(`Harness.credentials`), which ALE removes, every Harness's, before a solver is saved or
+kept ([Security](security.md#5-answers-are-absent-not-hidden)).
+
 An adapter must never use a "latest session" selector, replay the transcript, copy a
 session into another Sandbox, or silently start a new conversation.
 
@@ -376,5 +386,5 @@ scored from its explicit tool lists, not trusted summary counters, and every cla
 must have an observed call and result in the collected evidence.
 
 For native resume, live acceptance directly calls `launch()` and then `resume()` twice
-inside one sandbox. Multi-segment orchestration by the episode protocol or the CLI is not
-part of this contract.
+inside one sandbox. A Harness takes no part in validation rounds beyond resuming: the
+episode protocol orchestrates them from this same contract.

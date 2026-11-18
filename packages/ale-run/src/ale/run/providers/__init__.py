@@ -16,7 +16,14 @@ from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ale.core.capability import Arch, GpuHold, SandboxNeeds, unmet
+from ale.core.capability import (
+    Arch,
+    GpuHold,
+    SandboxNeeds,
+    round_verifier_resources,
+    solver_saves,
+    unmet,
+)
 from ale.core.config import DockerProviderConfig, RunConfig
 from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
@@ -124,17 +131,25 @@ def _sandboxes(
     task: Task, *, snapshot: bool, solver: bool
 ) -> Iterator[tuple[SandboxRole, str, SandboxNeeds]]:
     """Each Sandbox an episode of ``task`` starts, as the episode protocol requests it: its
-    role, the agent's account in it, and what it needs. A snapshot verifier boots from a
-    snapshot its solver saves, so the solver needs snapshots and what its verifier needs of
-    the same leaf too."""
+    role, the agent's account in it, and what it needs. A verifier that boots from a
+    snapshot its solver saves, a snapshot verifier or a shared validation round's, runs on
+    the leaf that saved it, so the solver needs what that verifier needs too, and as many
+    saves in a row as :func:`~ale.core.capability.solver_saves` counts."""
     spec = task.spec
     mode = spec.verify.environment_mode
-    verifier: SandboxNeeds | None = None
-    if mode is VerificationMode.SNAPSHOT:
-        assert spec.verify.resources is not None
-        verifier = snapshot_verifier_needs(
-            spec.image.kind, spec.os, spec.verify.resources.as_resources()
-        )
+    resources = (
+        spec.verify.resources.as_resources()
+        if mode is VerificationMode.SNAPSHOT and spec.verify.resources is not None
+        else round_verifier_resources(spec, task.validations)
+    )
+    verifier = (
+        None if resources is None else snapshot_verifier_needs(spec.image.kind, spec.os, resources)
+    )
+    saves = solver_saves(
+        task.validations,
+        snapshot_verified=mode is VerificationMode.SNAPSHOT,
+        kept_as_snapshot=snapshot,
+    )
     if solver:
         yield (
             SandboxRole.SHARED if mode is VerificationMode.SHARED else SandboxRole.SOLVER,
@@ -145,11 +160,13 @@ def _sandboxes(
                 arch=Arch.of(spec.os),
                 network_mode=spec.network.mode,
                 resources=spec.resources,
-                snapshot=snapshot or verifier is not None,
+                snapshot=saves > 0 or verifier is not None,
+                saves=saves,
                 verifier=verifier,
             ),
         )
-    if verifier is not None:
+    if mode is VerificationMode.SNAPSHOT:
+        assert verifier is not None
         yield SandboxRole.VERIFIER, spec.image.user, verifier
     elif mode is VerificationMode.SEPARATE:
         image = spec.verify.image or spec.image

@@ -74,10 +74,13 @@ class Stage(StrEnum):
 
     SETUP = "setup"
     TESTS = "tests"
+    VALIDATION = "validation"
+    """The verifier whose results the agent receives between its turns; ``tests/``'s
+    contract."""
 
     def entry(self, operating_system: OperatingSystem) -> str:
         """The script a stage runs: ``test.sh``, or ``test.ps1`` on Windows."""
-        name = {Stage.SETUP: "setup", Stage.TESTS: "test"}[self]
+        name = {Stage.SETUP: "setup", Stage.TESTS: "test", Stage.VALIDATION: "test"}[self]
         return f"{name}.ps1" if operating_system is OperatingSystem.WINDOWS else f"{name}.sh"
 
 
@@ -134,10 +137,19 @@ class Task(ABC):
         self.prepared_verifier_image: PreparedTaskImage | None = None
         self.asset_observation: TaskAssetObservation | None = None
         self.variables: ResolvedVariables | None = None
+        self.validations: int = 0
+        """How many times the Run's episodes of it run ``validation/`` before ``tests/``: once
+        for each validation round its agent receives. Each saves the solver as a snapshot, so
+        selection gives it a Provider that saves that many in a row."""
 
     @property
     def id(self) -> str:
         return str(self.spec.name)
+
+    @property
+    def validates(self) -> bool:
+        """Whether the Run's episodes of it run ``validation/``."""
+        return self.validations > 0
 
     async def setup(self, ctx: EpisodeContext) -> None:
         return None

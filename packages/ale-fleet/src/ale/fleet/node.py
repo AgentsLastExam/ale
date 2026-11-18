@@ -391,6 +391,10 @@ def _mismatch(demand: SandboxDemand, request: SandboxRequest) -> str | None:
         return "snapshot"
     if request.snapshot_verifier != demand.verifier:
         return "snapshot verifier"
+    if request.round_verifier != demand.round_verifier:
+        return "validation round's verifier"
+    if request.planned_saves != demand.planned_saves:
+        return "planned saves"
     return None
 
 

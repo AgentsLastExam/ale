@@ -199,6 +199,14 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
         } == {native_id}
         proof = await sandbox.exec(["cat", proof_path], identity=Identity.AGENT)
         assert proof.stdout.strip() == "scripted"
+        # The episode token is in no file of the agent's home but the credential files its
+        # Harness declares, which sanitation removes before a save or retention.
+        search = 'grep -rlF -- "$1" "$2" 2>/dev/null; true'
+        held = await sandbox.exec(
+            ["sh", "-c", search, "sh", session.token, session.home], identity=Identity.AGENT
+        )
+        leaked = {path.removeprefix(f"{session.home}/") for path in held.stdout.split()}
+        assert leaked <= set(harness.credentials), leaked
         trajectory = await mirrored_trajectory(tmp_path, episode, prompts[0], native_id)
 
     assert not (trajectory.extra or {}).get("ale", {}).get("parse_issues")

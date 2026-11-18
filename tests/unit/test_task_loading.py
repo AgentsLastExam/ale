@@ -280,10 +280,12 @@ def test_asset_roots_and_setup_are_excluded_where_they_must_be(tmp_path: Path) -
     edit(task, {"calibration": [{"name": "partial", "expect": {"reward": 0.5}}]})
     (task / "calibration/partial").mkdir(parents=True)
     (task / "calibration/partial/solve.sh").write_text("true\n")
+    (task / "validation").mkdir()
+    (task / "validation/test.sh").write_text("true\n")
     loaded = load_tasks(task)[0]
     roots = asset_roots(task)
     assert roots == (*ASSET_ROOTS, "calibration/partial/assets", "calibration/solution/assets")
-    assert ASSET_ROOTS == ("environment/assets", "tests/assets")
+    assert ASSET_ROOTS == ("environment/assets", "tests/assets", "validation/assets")
     for root in roots:
         asset = task / root / "large.bin"
         asset.parent.mkdir(parents=True, exist_ok=True)

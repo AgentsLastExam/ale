@@ -43,21 +43,20 @@ class JudgeError(VerificationError):
 
 
 def atomic_json(path: str | os.PathLike[str], payload: dict[str, Any]) -> None:
+    text = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    atomic_text(path, text + "\n")
+
+
+def atomic_text(path: str | os.PathLike[str], text: str) -> None:
+    """Replace ``path`` with ``text`` as UTF-8, whole or not at all."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
     )
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(
-                payload,
-                handle,
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            )
-            handle.write("\n")
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)

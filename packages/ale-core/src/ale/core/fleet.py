@@ -18,7 +18,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds
+from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, solver_saves
 from ale.core.sandbox import (
     ExecResult,
     Identity,
@@ -76,7 +76,7 @@ __all__ = [
 ]
 
 #: Peers speaking another version refuse each other instead of guessing.
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 #: A Node name: it appears in URLs, Sandbox records and operator commands.
 NODE_NAME = r"^[a-z0-9][a-z0-9-]{0,62}$"
@@ -293,21 +293,32 @@ class SandboxDemand(BaseModel):
     verifier: Resources | None = None
     """The resources of the snapshot verifier that boots from this solver's snapshot, which
     only the leaf that saves it, on its Node, boots: that leaf must serve both."""
+    round_verifier: Resources | None = None
+    """Under shared verification, the resources of the verifier each validation round boots
+    from this solver's snapshot, on the same leaf."""
+    planned_saves: int = Field(default=0, ge=0)
+    """How many runs of ``validation/`` still to come save this solver, each the one booted
+    from the previous save, whatever its retention."""
 
     @property
     def needs(self) -> SandboxNeeds:
+        saves = solver_saves(
+            self.planned_saves,
+            snapshot_verified=self.verifier is not None,
+            kept_as_snapshot=self.retention == "snapshot",
+        )
+        verifier = self.verifier or self.round_verifier
         return SandboxNeeds(
             kind=self.kind,
             os=self.os,
             arch=self.arch,
             network_mode=self.network_mode,
             resources=self.resources,
-            snapshot=self.retention == "snapshot"
-            or self.snapshot is not None
-            or self.verifier is not None,
+            snapshot=saves > 0 or self.snapshot is not None,
+            saves=saves,
             verifier=None
-            if self.verifier is None
-            else snapshot_verifier_needs(self.kind, self.os, self.verifier),
+            if verifier is None
+            else snapshot_verifier_needs(self.kind, self.os, verifier),
         )
 
 

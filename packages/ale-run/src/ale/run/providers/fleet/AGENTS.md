@@ -67,3 +67,19 @@ placement takes for the solver only a Node whose whole capacity holds the verifi
 - Selection compares profiles, which carry no GPU counts, so a verifier asking for more GPUs
   than any one Node has is refused when its solver is placed, before the agent runs, rather
   than when the Run starts.
+
+## A solver that validation rounds save is placed for every save
+
+**Problem.** Each validation round saves the solver on its leaf and boots the next turn's
+solver from that snapshot, on the same leaf and Node; under separate verification no
+verifier boots from it, so only the count of saves still to come says a solver needs a leaf
+that saves snapshots, and how many in a row.
+
+**Solution.** The solver's request carries that count (`SandboxRequest.planned_saves`),
+which its demand carries too (`SandboxDemand.planned_saves`, protocol 5), and its needs
+count its saves in a row from it as
+[Provider selection](../../../../../../../docs/specs/sandbox-image.md#provider-selection)
+says, so placement and the node agent's admission choose only a leaf that saves that many
+(`CapabilityProfile.max_saves`). Under shared verification each round's verifier boots from
+the snapshot too, so the request names its resources (`SandboxRequest.round_verifier`,
+carried as `SandboxDemand.round_verifier`), and one profile serves both.

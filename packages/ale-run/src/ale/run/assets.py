@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 ASSET_ROOTS: tuple[str, ...] = (
     "environment/assets",
     "tests/assets",
+    "validation/assets",
 )
 DEFAULT_NAMESPACE = "agents-last-exam"
 

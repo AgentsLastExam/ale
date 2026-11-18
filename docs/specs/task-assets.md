@@ -10,15 +10,16 @@ beside the files of the stage that reads them, at these roots of a
 |---|---|
 | `environment/assets/` | the image build, container or VM, through its ordinary context |
 | `tests/assets/` | verification |
+| `validation/assets/` | the verifier of each [validation round](episode-protocol.md#validation-rounds) |
 | `calibration/<case>/assets/` | the oracle of that [case](task-authoring.md#calibration) |
 
 To the runtime they are ordinary files of their stage, uploaded with it and read through
 relative paths such as `assets/reference.json` or `.\assets\seed.json`; `ALE_STAGE_DIR`
 gives a subprocess the stage's absolute path. A stage's assets are therefore as visible as
-the stage: the image build places what the agent sees, and tests and calibration assets
-are absent while the evaluated agent works. Setup has no asset root: large data it
-needs is built into the image, at a root-only location when the agent must not read it
-directly. Running a Task never implicitly downloads assets.
+the stage: the image build places what the agent sees, and tests, validation and
+calibration assets are absent while the evaluated agent works. Setup has no asset root:
+large data it needs is built into the image, at a root-only location when the agent must not
+read it directly. Running a Task never implicitly downloads assets.
 Source digests leave the asset roots out; assets have their own commit identity.
 
 ## Offline software

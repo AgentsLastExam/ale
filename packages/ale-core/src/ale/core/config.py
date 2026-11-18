@@ -369,6 +369,9 @@ class RunConfig(BaseModel):
     gateway: GatewayConfig = GatewayConfig()
     verification: VerificationConfig = VerificationConfig()
     timeouts: RunTimeouts = RunTimeouts()
+    validation_rounds: int | None = Field(default=None, ge=0, strict=True)
+    """How many validation rounds each agent receives instead of each Task's
+    ``[agent].validation_rounds``; ``None`` keeps the Task's."""
     sandbox_retention: SandboxRetentionConfig = SandboxRetentionConfig()
     desktop_resolution: DesktopResolution = Field(
         default=DesktopResolution(),

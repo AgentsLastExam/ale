@@ -1547,6 +1547,11 @@ class DockerSandbox(Sandbox):
         )
 
 
+#: The most layers Docker's layer store chains under any graph driver (moby's
+#: ``maxLayerDepth``): each commit adds one, so a chain of snapshots is capped there.
+MAX_LAYER_DEPTH = 125
+
+
 class DockerProvider(Provider):
     """Supplies container sandboxes."""
 
@@ -1757,6 +1762,28 @@ class DockerProvider(Provider):
                 f"{' '.join(runtime.arguments.get(ran, ()))}? {stderr.strip()}"
             )
 
+    async def _refuse_deep_stacks(self, image: str, saves: int) -> None:
+        """Refuse, before its container starts, a Sandbox whose image and the snapshots its
+        episode saves in a row would stack more layers than Docker's layer store chains, under
+        any graph driver. The containerd image store's snapshotter, which replaces that
+        store, stacks far more than a Run saves."""
+        code, status, _ = await _docker("info", "--format", "{{json .DriverStatus}}", timeout=30)
+        if code != 0 or "io.containerd.snapshotter" in status:
+            return
+        code, raw, stderr = await _docker(
+            "image", "inspect", "--format", "{{len .RootFS.Layers}}", image, timeout=30
+        )
+        if code != 0 or not raw.strip().isdigit():
+            raise ProviderStartError(
+                f"could not count the layers of {image}: {stderr.strip() or raw.strip()!r}"
+            )
+        layers = int(raw.strip())
+        if layers + saves > MAX_LAYER_DEPTH:
+            raise ProviderCapabilityError(
+                f"{image} stacks {layers} layers, and saving it {saves} more times would stack "
+                f"more than the {MAX_LAYER_DEPTH} Docker's layer store chains"
+            )
+
     async def create(self, request: SandboxRequest) -> Sandbox:
         await self.accepts(request)
         runtime = RUNTIMES[self.runtime]
@@ -1778,6 +1805,8 @@ class DockerProvider(Provider):
                     "See docs/specs/sandbox-image.md"
                 )
             resolved_image = await self._framed(resolved_image, request)
+        if request.saves:
+            await self._refuse_deep_stacks(resolved_image.observed_ref, request.saves)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"ale-{sandbox_id}"

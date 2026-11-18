@@ -55,6 +55,8 @@ class GrokBuildHarness(CliHarness):
     settings_type = GrokBuildSettings
     settings: GrokBuildSettings
     logs = (LOG_ROOT, ".grok-ale/sessions")
+    # Its GROK_HOME, where a login keeps its credentials.
+    credentials = (".grok-ale/auth.json",)
 
     def __init__(
         self,

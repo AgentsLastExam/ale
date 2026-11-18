@@ -21,6 +21,7 @@ from ._io import (
     JudgeError,
     VerificationError,
     atomic_json,
+    atomic_text,
     configured_secrets,
     endpoint_identity,
     evidence_text,
@@ -37,6 +38,7 @@ from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation
 
 __version__ = "0.2.0"
 __all__ = [
+    "MAX_FEEDBACK_BYTES",
     "ConfigurationError",
     "EvidenceError",
     "EvidenceReference",
@@ -62,6 +64,8 @@ _VERIFIER_DIR = Path(
     if sys.platform == "darwin"
     else "/logs/verifier"
 )
+#: The largest feedback text a verifier may write, in UTF-8 bytes.
+MAX_FEEDBACK_BYTES = 64 * 1024
 
 
 def judge_route(kind: str, config: Mapping[str, str]) -> tuple[str, str]:
@@ -133,11 +137,14 @@ def read_result(reward: str | bytes, verification: str | bytes | None = None) ->
     return {**result, "reward": rounded}
 
 
-def write(result: dict[str, Any]) -> None:
+def write(result: dict[str, Any], *, feedback: str | None = None) -> None:
     """Atomically save a result. The engine accepts it only after normal exit.
 
     ``verification.json`` receives the complete result and ``reward.json`` its ``reward``,
     both with ``reward`` rounded, in the platform's framework-owned verifier directory.
+    ``feedback``, at most ``MAX_FEEDBACK_BYTES`` of UTF-8, goes to ``feedback.md`` beside
+    them; a validation round shows it to the agent. Without it, a feedback text an earlier
+    call wrote is removed, so the files always hold one call's result.
     """
     # Round-tripping also rejects non-JSON Python objects and non-finite values.
     _json_types(result)
@@ -145,6 +152,15 @@ def write(result: dict[str, Any]) -> None:
         raise ValueError("a result must contain reward")
     complete = json.dumps(result, ensure_ascii=False, allow_nan=False)
     normalized = read_result(json.dumps({"reward": result["reward"]}), complete)
+    path = _VERIFIER_DIR / "feedback.md"
+    if feedback is None:
+        path.unlink(missing_ok=True)
+    else:
+        if not isinstance(feedback, str):
+            raise ValueError("feedback must be text")
+        if len(feedback.encode("utf-8")) > MAX_FEEDBACK_BYTES:
+            raise ValueError(f"feedback exceeds {MAX_FEEDBACK_BYTES} bytes of UTF-8")
+        atomic_text(path, feedback)
     atomic_json(_VERIFIER_DIR / "verification.json", normalized)
     atomic_json(_VERIFIER_DIR / "reward.json", {"reward": normalized["reward"]})
 

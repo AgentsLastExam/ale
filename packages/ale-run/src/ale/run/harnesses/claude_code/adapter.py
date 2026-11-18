@@ -47,6 +47,8 @@ class ClaudeCodeHarness(CliHarness):
     settings_type = ClaudeCodeSettings
     settings: ClaudeCodeSettings
     logs = (LOG_ROOT, ".claude-config/projects")
+    # Its CLAUDE_CONFIG_DIR, where a subscription login keeps its credentials.
+    credentials = (".claude-config/.credentials.json",)
 
     async def install_resources(
         self,

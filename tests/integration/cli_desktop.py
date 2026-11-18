@@ -225,7 +225,9 @@ def cli_harnesses() -> list[type[CliHarness]]:
     while pending:
         harness = pending.pop()
         pending.extend(harness.__subclasses__())
-        if not inspect.isabstract(harness):
+        # Test doubles subclass it too; only the shipped adapters are ALE's.
+        shipped = harness.__module__.startswith(f"{ale.run.harnesses.__name__}.")
+        if shipped and not inspect.isabstract(harness):
             found.add(harness)
     return sorted(found, key=lambda harness: harness.name)
 

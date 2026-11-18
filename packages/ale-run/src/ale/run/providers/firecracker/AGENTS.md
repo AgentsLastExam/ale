@@ -34,8 +34,13 @@ is refused before it boots, as the Task's error.
 fails when it is saved, after the agent's whole run, as a snapshot verifier's solver or a
 solver kept as a snapshot would be.
 
-**Solution.** `create` refuses, before it boots anything, a request that will be saved,
-`retention = "snapshot"` or a snapshot verifier's, whose snapshot already stacks eight.
+**Solution.** A request says how many snapshots in a row its episode may save
+(`SandboxRequest.saves`), counted as
+[Provider selection](../../../../../../../docs/specs/sandbox-image.md#provider-selection)
+says. The profile declares the limit (`max_saves = 8`), so selection passes a Task over, or
+refuses its Run, before anything starts when it plans more; `create` refuses, before it
+boots anything, a request whose snapshot's layers and saves together exceed eight, as one
+booted from a snapshot an earlier episode left may.
 
 **Decisions.**
 - Refused rather than flattened: merging the layers would copy the whole disk, which the

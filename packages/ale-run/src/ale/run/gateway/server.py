@@ -215,6 +215,10 @@ class Gateway:
         started = asyncio.get_running_loop().time()
         token = request.headers.get("x-goog-api-key") or request.query.get("key", "")
         session = self.sessions.resolve(token)
+        if session is None and self._refuse_suspended(token, request):
+            return _google_error(
+                403, "PERMISSION_DENIED", "this ALE session is suspended", "ALE_SESSION_SUSPENDED"
+            )
         if session is None:
             return _google_error(
                 401, "UNAUTHENTICATED", "unknown ALE episode token", "ALE_UNKNOWN_SESSION"
@@ -507,12 +511,31 @@ class Gateway:
         header = request.headers.get("authorization", "")
         token = header.removeprefix("Bearer ").strip() or request.headers.get("x-api-key", "")
         session = self.sessions.resolve(token)
+        if session is None and self._refuse_suspended(token, request):
+            raise web.HTTPForbidden(
+                text=json.dumps({"type": "error", "error": {"type": "ale_session_suspended"}}),
+                content_type="application/json",
+            )
         if session is None:
             raise web.HTTPUnauthorized(
                 text=json.dumps({"type": "error", "error": {"type": "ale_unknown_session"}}),
                 content_type="application/json",
             )
         return session
+
+    def _refuse_suspended(self, token: str, request: web.Request) -> bool:
+        """Whether ``token`` is a known session's, suspended for now, whose refused call its
+        trace then records as refused, for ``session_suspended``."""
+        session = self.sessions.known(token)
+        if session is None:
+            return False
+        self._record(
+            session,
+            call_id=f"call_{uuid.uuid4().hex}",
+            request_digest=_request_digest({}, f"{request.method} {request.path}"),
+            refused="session_suspended",
+        )
+        return True
 
     def _authoritative(self, payload: dict[str, Any], session: GatewaySession) -> dict[str, Any]:
         """Impose the run's model rather than trusting the agent's request."""

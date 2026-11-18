@@ -760,10 +760,17 @@ class FleetProvider(Provider):
         resources: Resources,
         episodes: int,
         verifier: Resources | None = None,
+        round_verifier: Resources | None = None,
+        planned_saves: int = 0,
     ) -> PlanItem:
         """One Task's line of the Run's plan; ``verifier`` the resources of its snapshot
-        verifier, whose Node and leaf are its solver's."""
+        verifier and ``round_verifier`` those of a shared validation round's, whose Node and
+        leaf are its solver's, and ``planned_saves`` how many runs of ``validation/`` save
+        its first solver."""
         demand = self._demand(image, operating_system, network.mode, resources, verifier)
+        demand = demand.model_copy(
+            update={"round_verifier": round_verifier, "planned_saves": planned_saves}
+        )
         return PlanItem(task=task, demand=demand, episodes=episodes)
 
     async def create(self, request: SandboxRequest) -> Sandbox:
@@ -780,7 +787,14 @@ class FleetProvider(Provider):
             request.network.mode,
             request.resources,
             request.snapshot_verifier,
-        ).model_copy(update={"retention": request.retention, "snapshot": request.snapshot})
+        ).model_copy(
+            update={
+                "retention": request.retention,
+                "snapshot": request.snapshot,
+                "round_verifier": request.round_verifier,
+                "planned_saves": request.planned_saves,
+            }
+        )
         sandbox_id = _sandbox_id(request.episode_id)
         asked = time.monotonic()
         placement = await client.acquire(
@@ -816,7 +830,13 @@ class FleetProvider(Provider):
             request.network.mode,
             request.resources,
             request.snapshot_verifier,
-        ).model_copy(update={"retention": request.retention})
+        ).model_copy(
+            update={
+                "retention": request.retention,
+                "round_verifier": request.round_verifier,
+                "planned_saves": request.planned_saves,
+            }
+        )
         placement = await client.adopt(
             AcquireRequest(
                 sandbox_id=sandbox_id,

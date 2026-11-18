@@ -642,6 +642,9 @@ class TaskSpec(BaseModel):
     """``[agent].workdir``: where the evaluated agent starts, below its home when relative;
     ``None`` for its home."""
     timeouts: PhaseTimeouts = PhaseTimeouts()
+    validation_rounds: int = Field(default=0, ge=0)
+    """``[agent].validation_rounds``: how many results of ``validation/`` the evaluated agent
+    receives, each between two of its turns."""
     artifacts: tuple[Artifact, ...] = ()
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
@@ -870,6 +873,9 @@ class AgentTable(BaseModel):
     allowed_hosts: tuple[str, ...] | None = None
     sudo: bool = Field(default=False, strict=True)
     workdir: str | None = Field(default=None, min_length=1)
+    validation_rounds: int = Field(default=0, ge=0, strict=True)
+    """How many results of ``validation/`` the agent receives, each between two of its turns;
+    ``N`` gives it ``N + 1`` turns."""
 
     @property
     def network(self) -> NetworkPolicy:

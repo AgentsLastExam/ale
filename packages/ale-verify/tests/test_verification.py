@@ -66,6 +66,37 @@ def test_plain_nested_result_and_repeated_write(verify_env):
     assert not list(verifier.glob("*.tmp"))
 
 
+def test_feedback_is_written_beside_the_result_and_replaced_by_each_call(verify_env):
+    verifier, _ = verify_env
+    feedback = verifier / "feedback.md"
+    write({"reward": 0.5}, feedback="Two of four cases pass.\n\n- `edge` fails: 多")
+    assert feedback.read_text(encoding="utf-8") == "Two of four cases pass.\n\n- `edge` fails: 多"
+    assert saved(verifier) == {"reward": 0.5}
+    write({"reward": 0.5}, feedback="")
+    assert feedback.read_bytes() == b""
+    # A call without feedback leaves only its own result.
+    write({"reward": 1})
+    assert not feedback.exists()
+    assert not list(verifier.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("feedback", "problem"),
+    [
+        ("x" * (ale_verify.MAX_FEEDBACK_BYTES + 1), "exceeds 65536 bytes"),
+        ("é" * (ale_verify.MAX_FEEDBACK_BYTES // 2 + 1), "exceeds 65536 bytes"),
+        (b"bytes", "must be text"),
+        ("\ud800", "surrogate"),
+    ],
+)
+def test_feedback_is_bounded_text(verify_env, feedback, problem):
+    verifier, _ = verify_env
+    with pytest.raises(ValueError, match=problem):
+        write({"reward": 1}, feedback=feedback)
+    assert not (verifier / "reward.json").exists()
+    write({"reward": 1}, feedback="x" * ale_verify.MAX_FEEDBACK_BYTES)
+
+
 @pytest.mark.parametrize(
     ("raw_score", "expected"),
     [

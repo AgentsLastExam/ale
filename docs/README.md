@@ -12,6 +12,7 @@ This directory is the maintained description of ALE.
 | Build Windows Task images and prepare reusable MSIX assets | [guides/windows-task-images.md](guides/windows-task-images.md) |
 | Task asset versions, local checkpoints, and Hugging Face publication | [specs/task-assets.md](specs/task-assets.md) |
 | Episode protocol: phases of one episode | [specs/episode-protocol.md](specs/episode-protocol.md) |
+| Give an agent validation results between its turns | [specs/task-authoring.md#validation](specs/task-authoring.md#validation) |
 | Start the local Orchard and run macOS Tasks | [guides/macos-orchard.md](guides/macos-orchard.md) |
 | Sandbox and image contract | [specs/sandbox-image.md](specs/sandbox-image.md) |
 | Pool Sandbox capacity across machines | [specs/fleet.md](specs/fleet.md) |

@@ -181,6 +181,7 @@ def test_pull_replaces_a_case_s_assets_only_with_force_and_only_for_its_cases(
     assert dataset.patterns == [
         "tasks/one/environment/assets/**",
         "tasks/one/tests/assets/**",
+        "tasks/one/validation/assets/**",
         "tasks/one/calibration/*/assets/**",
     ]
     assert not local.exists()

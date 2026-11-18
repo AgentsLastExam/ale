@@ -129,13 +129,15 @@ async def test_agent_never_sees_verification_material(
     """The reason answers stay on the host until scoring."""
     task_root = write_repo(tmp_path / "repo")
     (task_root / "tests" / "answer.txt").write_text("hello world")
+    (task_root / "validation").mkdir()
+    (task_root / "validation" / "test.sh").write_text((task_root / "tests" / "test.sh").read_text())
 
     probe = task_root / "environment" / "setup" / "setup.sh"
     probe.parent.mkdir()
     probe.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
         "printf 'world' > /home/user/input/word.txt\n"
-        "for p in /opt/ale/tests /home/user/reference; do\n"
+        "for p in /opt/ale/tests /opt/ale/validation /home/user/reference; do\n"
         '  if [ -e "$p" ]; then echo "LEAK: $p" >&2; exit 17; fi\n'
         "done\n"
     )

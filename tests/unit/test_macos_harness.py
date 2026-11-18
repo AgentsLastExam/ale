@@ -78,9 +78,9 @@ async def test_staged_mcp_command_is_executable_after_upload(tmp_path, operating
     )
     sandbox = SimpleNamespace(upload_dir=upload, exec=execute)
     environment = EpisodeProtocol(NopHarness())
-    ctx.agent_resources = await environment._stage_mcp_files(ctx, sandbox)
-    await environment._validate_stdio_mcp(ctx, sandbox)
-    command = ctx.agent_resources.mcp_servers[0].server.command
+    resources = await environment._stage_mcp_files(ctx, sandbox)
+    await environment._validate_stdio_mcp(ctx, sandbox, resources)
+    command = resources.mcp_servers[0].server.command
     result = await execute([command], identity=Identity.AGENT)
     assert result.ok and result.stdout == "ready"
     assert (Path(command).parent / "data.txt").stat().st_mode & 0o111 == 0

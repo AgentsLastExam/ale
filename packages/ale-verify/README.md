@@ -13,7 +13,8 @@ write({"reward": check["score"], "content": check})
 `write` saves `{"reward": ...}` to Harbor's `/logs/verifier/reward.json`
 (`C:\logs\verifier\reward.json` on Windows, `/opt/ale/logs/verifier/reward.json` on macOS)
 and the complete result to `verification.json` beside it. Only `reward` has framework
-scoring semantics; other fields may be nested JSON.
+scoring semantics; other fields may be nested JSON. `write(result, feedback=text)` also
+saves a feedback text, `feedback.md`, which a validation round shows the agent.
 Task code may write `reward.json` directly without this package. The program must exit
 successfully for ALE to accept it. Judge logs are independent.
 

@@ -689,7 +689,9 @@ async def test_the_solver_of_a_snapshot_verifier_asks_for_a_leaf_that_saves_and_
         await MemoryProvider("docker:runc").accepts(request)
     small = Provider("docker:kata")
     small.max_cpus = 4
-    with pytest.raises(ProviderCapabilityError, match="its snapshot verifier: 8 CPUs exceed"):
+    with pytest.raises(
+        ProviderCapabilityError, match="the verifier booted from its snapshot: 8 CPUs exceed"
+    ):
         await small.accepts(request)
     await Provider("docker:kata").accepts(request)
 
@@ -707,3 +709,57 @@ async def test_a_run_refuses_a_retention_that_cannot_hold_before_anything_is_pre
     settings = RunConfig.model_validate({"sandbox_retention": {"solver": "keep"}})
     with pytest.raises(ConfigError, match="cannot be 'keep'"):
         await task_cli._prepare_images([_task(tmp_path)], ProviderRegistry(settings))
+
+
+@pytest.mark.asyncio
+async def test_undoing_a_kept_snapshot_that_cannot_be_destroyed_records_it_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never recorded destroyed: it is left with its handle and cleanup command."""
+    provider = Provider()
+    lease = _lease(provider, solver="snapshot")
+    solver = await lease.acquire(_solver_request().model_copy(update={"snapshot_verifier": None}))
+    lease.mark_sanitized(solver, succeeded=True)
+    await lease.finalize()
+    (kept,) = lease.outcomes
+    monkeypatch.setattr(
+        provider, "destroy_retained", AsyncMock(side_effect=ProviderStartError("busy"))
+    )
+    with pytest.raises(RetentionFinalizationError):
+        await lease.destroy_retained()
+    (left,) = lease.outcomes
+    assert (left.outcome, left.handle, left.cleanup_command) == (
+        "not-destroyed",
+        kept.handle,
+        kept.cleanup_command,
+    )
+    assert left.reason is not None and "busy" in left.reason
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_stays_while_a_sandbox_that_could_not_be_destroyed_runs_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Sandbox is recorded as left, with its handle; its snapshot is never destroyed
+    under it, and is recorded as left too."""
+    provider = Provider()
+    lease = _lease(provider)
+    solver = await lease.acquire(_solver_request())
+    lease.mark_sanitized(solver, succeeded=True)
+    handle = await lease.snapshot(solver, validation=True)
+    booted = await lease.acquire(
+        _solver_request().model_copy(update={"snapshot": handle, "snapshot_verifier": None})
+    )
+    monkeypatch.setattr(booted, "destroy", AsyncMock(side_effect=ProviderStartError("stuck")))
+    destroy_retained = AsyncMock()
+    monkeypatch.setattr(provider, "destroy_retained", destroy_retained)
+    with pytest.raises(RetentionFinalizationError):
+        await lease.release(booted)
+    await lease.release(solver)
+    with pytest.raises(RetentionFinalizationError, match="still runs on it"):
+        await lease.release_all()
+    destroy_retained.assert_not_called()
+    by_handle = {item.handle: item for item in lease.outcomes}
+    assert by_handle[handle].outcome == "not-destroyed"
+    (stuck,) = [item for item in lease.outcomes if item.handle != handle]
+    assert stuck.outcome == "not-destroyed" and stuck.handle and stuck.cleanup_command

@@ -893,3 +893,63 @@ class TestRetention:
         assert await provider.list_retained() == []
         with pytest.raises(ProviderCapabilityError, match="there is no snapshot"):
             await provider.create(request(image, "episode-4", snapshot=saved.handle))
+
+
+class TestValidationRounds:
+    @pytest.mark.usefixtures("verifiers")
+    async def test_a_validating_solver_and_its_rounds_stay_on_the_leaf_that_saves_them(
+        self,
+        tmp_path: Path,
+        fleet: Fleet,
+        client: FleetClient,
+        provider: FleetProvider,
+        image: PreparedTaskImage,
+    ) -> None:
+        """The first solver's demand says how many rounds save it, so it goes to a leaf that
+        saves snapshots; each round's verifier and the next turn's solver then boot on the
+        Node and leaf that saved the round's snapshot, which the Run removes after them."""
+        from tests.support import TurnsHarness, fleet_registry, rounds_task
+
+        from ale.core.sandbox import SandboxRole
+        from ale.core.verdict import Status
+        from ale.run.episode import run_episode
+        from ale.run.protocol.episode_protocol import EpisodeProtocol
+
+        await fleet.add_node("plain")
+        await fleet.add_node("saving", saves_snapshots=True)
+        task = rounds_task(tmp_path, rounds=2)
+        task.prepared_image = image
+        registry = fleet_registry(provider, client, fleet.url)
+
+        async def beating() -> None:
+            # A Node destroys a snapshot at a heartbeat, which the Run waits for.
+            while True:
+                await fleet.beat()
+                await asyncio.sleep(0.2)
+
+        heart = asyncio.create_task(beating())
+        try:
+            result = await run_episode(
+                task,
+                EpisodeProtocol(TurnsHarness(), validation_rounds=2),
+                registry,
+                run_dir=tmp_path / "runs",
+            )
+        finally:
+            heart.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heart
+        assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+        assert [item.reward for item in result.record.validation_rounds] == [0.33, 0.67]
+        assert fleet.providers["plain"].requests == []
+        leaf = fleet.providers["saving"]
+        solvers = [item for item in leaf.requests if item.role is SandboxRole.SHARED]
+        validators = [item for item in leaf.requests if item.role is SandboxRole.VERIFIER]
+        # A shared solver is never saved at its end: one save for each round to come.
+        assert [item.planned_saves for item in solvers] == [2, 1, 0]
+        assert [item.needs.saves for item in solvers] == [2, 1, 0]
+        # Each round's verifier boots from the snapshot the next turn's solver boots from.
+        assert [item.snapshot for item in validators] == [item.snapshot for item in solvers[1:]]
+        assert all(item.snapshot for item in validators)
+        assert leaf.snapshots == {}
+        assert await provider.list_retained() == []

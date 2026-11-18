@@ -164,6 +164,7 @@ class ZCodeHarness(CliHarness):
     settings_type = ZCodeSettings
     settings: ZCodeSettings
     logs = (LOG_ROOT, trajectory.DB_DIR, trajectory.ARTIFACTS, trajectory.AGENTS)
+    credentials = (f"{trajectory.PRIVATE}/provider.json",)
 
     def __init__(
         self,

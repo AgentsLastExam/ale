@@ -256,6 +256,30 @@ class TestAuthentication:
         ):
             assert response.status == 401
 
+    async def test_a_suspended_sessions_calls_are_refused_and_traced(self, stack) -> None:
+        """Its token is known, so the refusal is no unknown token's: the trace says why."""
+        gateway, upstream, session, trace = stack
+        session.suspended = True
+
+        reply = await send(gateway, STREAM, BODY, token=session.token)
+        async with (
+            ClientSession() as client,
+            client.post(
+                f"{gateway.base_url}/v1/messages",
+                headers={"x-api-key": session.token},
+                json={"messages": []},
+            ) as response,
+        ):
+            assert response.status == 403
+            assert (await response.json())["error"]["type"] == "ale_session_suspended"
+
+        google_error(reply, 403, "PERMISSION_DENIED")
+        assert upstream.seen == []
+        assert [(item["disposition"], item["refusal_limit"]) for item in records(trace)] == [
+            ("refused", "session_suspended"),
+            ("refused", "session_suspended"),
+        ]
+
 
 class TestPolicy:
     @pytest.mark.parametrize(

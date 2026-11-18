@@ -22,6 +22,7 @@ from ale.core.calibration import (
     CaseCalibrationObservation,
     TaskCalibrationObservation,
 )
+from ale.core.capability import round_verifier_resources
 from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.fleet import RunPlan
@@ -74,6 +75,7 @@ from ale.run.protocol.episode_protocol import (
     Resume,
     ReverificationProtocol,
     SolverSnapshot,
+    validation_rounds,
 )
 from ale.run.provenance import (
     ProvenanceInputs,
@@ -266,8 +268,13 @@ async def _run_one(
     try:
         resolved = resolve(reference)
         tasks = load_tasks(resolved.task_dir)
+        rounds: dict[str, int] = {}
         for task in tasks:
             harness.validate_os(task.spec.os)
+            rounds[str(task.spec.name)] = validation_rounds(
+                task, harness, settings.validation_rounds
+            )
+            task.validations = rounds[str(task.spec.name)]
         _resolve_variables(tasks, settings, oracle=settings.agent.name == "oracle")
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         continued = (
@@ -359,6 +366,7 @@ async def _run_one(
                     max_steps=settings.agent.max_steps,
                     timeouts=settings.timeouts,
                     resume=resume,
+                    validation_rounds=inputs.validation_rounds,
                 ),
                 providers,
                 run_dir=run_dir,
@@ -444,6 +452,7 @@ async def _run_one(
                 gateway=gateway_provenance(settings),
                 config_hash=settings.config_hash,
                 timeouts=settings.timeouts,
+                validation_rounds=rounds[str(task.spec.name)],
             )
             if task.prepared_image is None:
                 raise TaskDefinitionError(f"solver image was not prepared for {task.spec.name}")
@@ -689,6 +698,8 @@ async def _reverify(
                 gateway=source_lock.gateway,
                 config_hash=settings.config_hash,
                 timeouts=settings.timeouts,
+                # What the agent whose state it verifies received.
+                validation_rounds=source_lock.validation_rounds,
             )
             episode_id = f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}"
 
@@ -896,15 +907,15 @@ def _continued(episode_dir: Path, tasks: list[ManifestTask], settings: RunConfig
         raise TaskDefinitionError(
             f"episode {result.episode_id} left no retained solver and native session"
         )
-    if (
-        retained.outcome == "retained"
-        and tasks[0].spec.verify.environment_mode is VerificationMode.SNAPSHOT
-    ):
-        # Its verifier would boot from a snapshot of it, whose save stops the kept solver.
+    snapshot = tasks[0].spec.verify.environment_mode is VerificationMode.SNAPSHOT
+    if retained.outcome == "retained" and (snapshot or tasks[0].validations):
+        # Its verifier, or its first validation round, would boot from a snapshot of it,
+        # whose save stops the kept solver.
+        saving = "snapshot verification" if snapshot else "a validation round"
         raise TaskDefinitionError(
-            f"episode {result.episode_id} kept its solver running, which snapshot "
-            "verification would save and destroy; continue from a snapshot of it instead, "
-            "kept with sandbox_retention.solver = 'snapshot'"
+            f"episode {result.episode_id} kept its solver running, which {saving} "
+            "would save and destroy; continue from a snapshot of it instead, kept with "
+            "sandbox_retention.solver = 'snapshot'"
         )
     return _Continued(result, lock, trajectory, retained, retained.handle)
 
@@ -1259,7 +1270,12 @@ def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
-    return [task.folder.root / Stage.TESTS for task in tasks]
+    """The verifier stages the Run runs: ``tests/``, and ``validation/`` where it runs."""
+    return [
+        task.folder.root / stage
+        for task in tasks
+        for stage in ((Stage.TESTS, Stage.VALIDATION) if task.validates else (Stage.TESTS,))
+    ]
 
 
 def _note(notices: tuple[str, ...]) -> None:
@@ -1279,7 +1295,7 @@ async def _prepare_images(
     hold for a Task is refused first.
     """
     for task in tasks:
-        check_retention(task.spec, providers.settings.sandbox_retention)
+        check_retention(task.spec, providers.settings.sandbox_retention, validates=task.validates)
     await resolve_image_kinds(tasks)
     _note(
         await providers.select(
@@ -1472,6 +1488,8 @@ async def _plan_on_fleet(
                     and task.spec.verify.resources is not None
                     else None
                 ),
+                round_verifier=round_verifier_resources(task.spec, task.validations),
+                planned_saves=task.validations,
             )
         )
     fleet = providers.fleet

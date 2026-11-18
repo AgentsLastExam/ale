@@ -682,6 +682,60 @@ def test_a_kept_solver_is_not_continued_under_snapshot_verification(tmp_path: Pa
     assert _continued(episode, [task], RunConfig()).retained == snapshot
 
 
+def test_a_kept_solver_is_not_continued_by_a_run_with_validation_rounds(tmp_path: Path) -> None:
+    """Its first round would save it, which stops it, so the Run is refused before anything
+    is selected; a snapshot of it continues instead."""
+    episode, task = _source(tmp_path)
+    task.validations = 2
+    with pytest.raises(TaskDefinitionError, match="which a validation round would save"):
+        _continued(episode, [task], RunConfig())
+    snapshot = SandboxOutcome(
+        roles=("solver",),
+        requested="snapshot",
+        outcome="snapshotted",
+        provider="docker",
+        handle="docker:snapshot:kept",
+    )
+    record = ResultRecord.model_validate_json((episode / "result.json").read_text())
+    (episode / "result.json").write_text(
+        record.model_copy(update={"sandboxes": (snapshot,)}).model_dump_json()
+    )
+    assert _continued(episode, [task], RunConfig()).retained == snapshot
+
+
+def test_a_validation_rounds_snapshot_that_outlived_its_episode_is_never_continued(
+    tmp_path: Path,
+) -> None:
+    """It holds the agent's state between turns: a Run continues from the final solver's
+    snapshot beside it, and from nothing when it is all that is left."""
+    left = SandboxOutcome(
+        roles=("solver", "verifier"),
+        requested="destroy",
+        outcome="not-destroyed",
+        provider="docker",
+        handle="docker:snapshot:round",
+        reason="could not destroy snapshot docker:snapshot:round: busy",
+        cleanup_command="ale sandbox destroy docker:snapshot:round",
+    )
+    final = left.model_copy(
+        update={
+            "requested": "snapshot",
+            "outcome": "snapshotted",
+            "handle": "docker:snapshot:final",
+            "reason": None,
+            "cleanup_command": None,
+        }
+    )
+    episode, task = _source(tmp_path, record={"sandboxes": (left, final)})
+    assert _continued(episode, [task], RunConfig()).retained == final
+    record = ResultRecord.model_validate_json((episode / "result.json").read_text())
+    (episode / "result.json").write_text(
+        record.model_copy(update={"sandboxes": (left,)}).model_dump_json()
+    )
+    with pytest.raises(TaskDefinitionError, match="left no retained solver"):
+        _continued(episode, [task], RunConfig())
+
+
 def test_the_fleet_checks_a_continued_sandboxs_image_by_its_key(tmp_path: Path) -> None:
     """A Fleet Run knows an image by its key until a Node prepares it; the control plane
     checks that key as it hands the kept Sandbox over, so the Node's prepared identity is

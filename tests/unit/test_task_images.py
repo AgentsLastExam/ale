@@ -23,6 +23,8 @@ from ale.core.taskspec import (
     VerifySpec,
 )
 from ale.run.cli.tasks import _prepare_images
+from ale.run.harnesses.builtin import NopHarness
+from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers import ProviderRegistry
 from ale.run.providers.fleet import FleetProvider
 from ale.run.task_images import (
@@ -1052,7 +1054,7 @@ async def test_an_episode_decides_its_image_kinds_before_preparing_them(
     monkeypatch.setattr("ale.run.episode.observe_task_assets", lambda task: None)
     registry = _Registry()
     with pytest.raises(ProviderStartError, match="stop before"):
-        await run_episode(task, None, registry, run_dir=tmp_path / "runs")  # type: ignore[arg-type]
+        await run_episode(task, EpisodeProtocol(NopHarness()), registry, run_dir=tmp_path / "runs")
     # Selected by its decided kind, then prepared for the Provider selected.
     assert read == ["ghcr.io/acme/vm:1"] and task.provider == "qemu"
     assert prepared == [(ImageKind.VM, registry.providers[ImageKind.VM])]
@@ -1083,7 +1085,7 @@ async def test_an_episode_selects_by_the_retention_it_is_given(
     with pytest.raises(ProviderStartError, match="stop on docker:runc"):
         await run_episode(
             task,
-            None,  # type: ignore[arg-type]
+            EpisodeProtocol(NopHarness()),
             registry,
             run_dir=tmp_path / "runs",
             sandbox_retention=SandboxRetentionConfig(solver="snapshot"),
@@ -1111,7 +1113,7 @@ async def test_an_episode_checks_on_this_host_only_the_leaves_it_selected_itself
     monkeypatch.setattr("ale.run.episode.observe_task_assets", lambda task: None)
     registry = _Registry()
     with pytest.raises(ProviderStartError, match="checked on this Host"):
-        await run_episode(task, None, registry, run_dir=tmp_path / "runs")  # type: ignore[arg-type]
+        await run_episode(task, EpisodeProtocol(NopHarness()), registry, run_dir=tmp_path / "runs")
     assert checked == [[task]] and task.provider == "docker:runc"
     # Selected now, as by a Run: the episode runs (and here fails) without a check of its
     # own.

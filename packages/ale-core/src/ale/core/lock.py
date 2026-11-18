@@ -226,7 +226,8 @@ class JudgeProvenance(BaseModel):
     schema_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     adapter: Literal["codex-cli", "claude-code"] | None = None
     adapter_version: str | None = None
-    placement: Literal["verify"] = "verify"
+    placement: Literal["verify", "validate"] = "verify"
+    """Whether it ran in ``tests/``, or in a validation round's ``validation/``."""
     attempts: int = Field(default=0, ge=0)
 
 
@@ -317,6 +318,9 @@ class RunLock(BaseModel):
     asset: AssetProvenance | None = None
     verification: VerificationProvenance = VerificationProvenance()
     timeouts: RunTimeouts = RunTimeouts()
+    validation_rounds: int = Field(default=0, ge=0)
+    """How many validation rounds the agent was to receive: the Task's, or the Run's override;
+    0 for the oracle, which never receives one."""
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     termination: LimitTermination | None = None
     resumed_from: ResumedFrom | None = None

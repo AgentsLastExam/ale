@@ -254,19 +254,47 @@ cannot write system paths, and cannot elevate unless its task asked; by
 
 ## 5. Answers are absent, not hidden
 
-`tests/` and `calibration/` are copied into a sandbox only for their own phases, and of
-`calibration/` only the case an oracle runs. While the evaluated agent works they are not
-access-controlled — they are not there. In separate mode only the immutable declared
-artifact snapshot is restored; the solver filesystem is not transferred wholesale. A
-snapshot verifier boots from the solver's disk once every stage of the Task has been
+`tests/`, `validation/` and `calibration/` are copied into a sandbox only for their own
+phases, and of `calibration/` only the case an oracle runs. While the evaluated agent works
+they are not access-controlled — they are not there. In separate mode only the immutable
+declared artifact snapshot is restored; the solver filesystem is not transferred wholesale.
+A snapshot verifier boots from the solver's disk once every stage of the Task has been
 removed from it.
 
 This is why there is no "secret" flag on a Task file. A flag is a promise about behaviour
 that some future code path could forget to check; a file that was never uploaded cannot
 be read by anything.
 
+`validation/` runs only in a round's verifier, a Sandbox apart from every solver, between
+two of the agent's turns, and the next turn's solver
+boots from the snapshot saved before it ran, so it is in no solver at any time. Its reward,
+status and feedback text are the only channel from it to the agent, and `tests/` has none:
+its result is recorded and never shown. What the feedback reveals is the Task author's
+decision, so a Task whose test set must stay unseen keeps out of it what `tests/` checks.
+
+The agent's Gateway session is open from its creation through its first turn and then only
+while a later turn runs, so between turns and after the last the Gateway refuses calls with
+the agent's episode token: code run during validation, and a `tests/` that runs the agent's
+program, cannot use the agent's model session outside its time limit, whatever credential
+files a Harness leaves on disk. A Judge's session is open only while a verifier runs, so a
+Judge's token that reaches the agent, in feedback or from a verifier's process, is refused
+in its later turns. Before a solver is saved or kept, between turns included, ALE removes
+the credential files every Harness declares, whichever Harness ran. A refused call is traced
+as refused, `session_suspended`. The round's verifier has verification's open egress and,
+under shared or snapshot verification, runs on the agent's disk, so a `validation/` that
+runs the agent's program runs it with that network, as `tests/` would, and with
+`[agent].sudo` what the agent left there can write the round's feedback and reward; what
+reaches the agent is still only the round's reward, status and feedback.
+
 Verified by `test_agent_never_sees_verification_material`, whose setup probe exits
-non-zero if any scoring path exists during setup.
+non-zero if any scoring path exists during setup, and by
+`test_validation_is_never_in_a_solver_and_tests_never_in_a_validation_verifier`, in every
+verification mode; the Gateway's refusal and the credential removal by
+`test_the_agents_session_is_open_only_while_its_turns_run`,
+`test_the_judges_sessions_are_open_only_while_a_verifier_runs` and
+`test_every_harness_credential_files_go_before_a_rounds_save`, and, with each real CLI, by
+`test_cli_runs_a_scripted_episode_through_the_gateway`, which finds the episode token in no
+file of the agent's home but those its Harness declares.
 
 ## 6. Limits end episodes rather than stalling them
 
@@ -416,14 +444,18 @@ provenance, so a change is *detectable*. Nothing verifies that its base or autho
 build was benign to begin with.
 
 **Processes the agent leaves running.** ALE does not stop processes the agent started,
-because a Task may ask the agent to deploy a service that verification then checks. In
-shared verification such a process keeps running while verification has open egress for
-its Judges, so it can still change the Sandbox before or during scoring. A snapshot verifier
+because a Task may ask the agent to deploy a service that verification then checks, except
+at the end of a turn a validation round follows: saving the solver stops every process in
+it, and the next turn's solver boots without them, setup's included. In shared verification
+a process the last turn left keeps running while verification has open egress for its
+Judges, so it can still change the Sandbox before or during scoring. A snapshot verifier
 boots fresh, so no process the agent left survives into it, but whatever the agent set to
 start at boot starts again: its account's desktop autostart entries, its `HKCU` Run keys and
-Startup folder on Windows, and, with sudo, system services. A Task that needs a strict
-boundary uses separate verification, which restores only the declared artifacts into a
-fresh Sandbox.
+Startup folder on Windows, and, with sudo, system services. So does the next turn's solver a
+validation round boots, which is sealed as soon as it is up, before anything is checked or
+staged in it, so what starts at boot has the agent's own sealed network. A Task that needs a
+strict boundary uses separate verification, which restores only the declared artifacts into
+a fresh Sandbox.
 
 **Programs on the agent's disk.** A shared or snapshot verifier runs as root on the disk the
 agent left. With `[agent].sudo` the agent could change any program there, the image's
@@ -434,10 +466,11 @@ restores only the declared artifacts into a fresh Sandbox.
 
 **Unscored rather than low.** With `[agent].sudo` the agent can also make what runs on its
 disk after it fail under snapshot verification: the sanitation before the solver's save, the
-save itself, and the boot of a verifier from the snapshot. The Episode then ends without a
-score, as an environment or Task error, rather than with a low one; a sanitation that fails
-before a retention only forces the Sandbox's destruction. A Task where that difference
-matters withholds sudo.
+save itself, and the boot of a verifier from the snapshot; and, with validation rounds in
+any mode, a round's save or the boot of the next turn's solver from its snapshot. The
+Episode then ends without a score, as an environment or Task error, rather than with a low
+one; a sanitation that fails before a retention only forces the Sandbox's destruction. A
+Task where that difference matters withholds sudo.
 
 **Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
 physical GPUs, whole or by device memory, are admitted per sandbox or rejected. Network

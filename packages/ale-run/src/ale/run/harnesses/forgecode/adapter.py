@@ -82,6 +82,7 @@ class ForgecodeHarness(CliHarness):
     settings_type = ForgecodeSettings
     settings: ForgecodeSettings
     logs = (LOG_ROOT, trajectory.DUMPS, trajectory.MCP_CONFIG)
+    credentials = (f"{STATE}/.credentials.json",)
 
     def __init__(
         self,

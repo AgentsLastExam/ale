@@ -16,7 +16,7 @@ from aiohttp import ClientSession, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 from tests.support import MemoryProvider, MemorySandbox
 
-from ale.core.capability import GpuHold, GpuModel, SandboxNeeds
+from ale.core.capability import Arch, GpuHold, GpuModel, SandboxNeeds
 from ale.core.config import DockerProviderConfig
 from ale.core.errors import ProviderCapabilityError, ProviderCapacityError, ProviderStartError
 from ale.core.fleet import (
@@ -1055,3 +1055,27 @@ class TestRecovery:
             "sandbox-0002.json",
         ]
         assert "sandbox-0008.json" in caplog.text
+
+
+def test_a_request_that_saves_otherwise_than_its_grant_is_refused() -> None:
+    """A grant is placed for the saves a solver plans and the verifier a validation round
+    boots beside it; a request that differs in either is not the one granted."""
+    from ale.fleet.node import _mismatch
+
+    wanted = request(planned_saves=2, round_verifier=Resources(cpus=1, memory_mb=512))
+    demand = SandboxDemand(
+        kind=wanted.image_kind,
+        os=wanted.os,
+        arch=Arch.X86_64,
+        network_mode=wanted.network.mode,
+        resources=wanted.resources,
+        image=KEY,
+        framework=fleet_framework_identity(),
+        round_verifier=wanted.round_verifier,
+        planned_saves=2,
+    )
+    assert _mismatch(demand, wanted) is None
+    assert _mismatch(demand, wanted.model_copy(update={"planned_saves": 1})) == "planned saves"
+    assert _mismatch(demand, wanted.model_copy(update={"round_verifier": None})) == (
+        "validation round's verifier"
+    )

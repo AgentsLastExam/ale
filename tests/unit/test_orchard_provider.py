@@ -1015,7 +1015,7 @@ async def test_a_solver_is_refused_by_its_snapshot_verifiers_own_rules(monkeypat
         snapshot=True,
         verifier=verifier,
     )
-    refused = ("its snapshot verifier: Orchard storage_mb must be a whole GiB",)
+    refused = ("the verifier booted from its snapshot: Orchard storage_mb must be a whole GiB",)
     assert await provider.unserved(needs, user="user", role=SandboxRole.SOLVER) == refused
     fleet = FleetProvider(SimpleNamespace())  # type: ignore[arg-type]
     fleet._profiles = await provider.profiles()
