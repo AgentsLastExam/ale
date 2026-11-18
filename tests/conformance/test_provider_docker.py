@@ -673,6 +673,74 @@ async def test_a_gvisor_sandbox_whose_container_engine_writes_past_its_storage_i
         )
 
 
+#: Run in a Sandbox whose engine runs: an image pulled, one built whose layer deletes a file,
+#: a named volume and a stopped container with a file in its layer and one deleted.
+_ENGINE_STATE = """
+set -ex
+mkdir -p /tmp/ale-build && cd /tmp/ale-build
+printf 'FROM busybox:1.36.1\\nRUN rm /bin/ls && echo built >/built\\n' >Dockerfile
+docker build -q -t ale-built . >/dev/null
+docker volume create ale-kept >/dev/null
+docker run --name ale-keeper --network none -v ale-kept:/kept busybox:1.36.1 \\
+    sh -c 'echo in-volume >/kept/f; echo in-layer >/layer; rm -f /bin/ls'
+"""
+#: Run in a Sandbox booted from its snapshot, once its engine runs again: all of it is back.
+_ENGINE_STATE_BACK = """
+set -ex
+docker image inspect busybox:1.36.1 >/dev/null
+docker run --rm --network none ale-built sh -c 'test ! -e /bin/ls && cat /built' | grep -qx built
+test "$(docker inspect -f '{{.State.Status}}' ale-keeper)" = exited
+docker start -a ale-keeper
+docker run --rm --network none -v ale-kept:/kept busybox:1.36.1 cat /kept/f | grep -qx in-volume
+docker cp ale-keeper:/layer - | tar -xO | grep -qx in-layer
+! docker cp ale-keeper:/bin/ls - >/dev/null 2>&1
+echo engine-state-back
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_of_a_gvisor_sandbox_brings_its_container_engines_storage_back() -> None:
+    """A snapshot keeps the engine's volumes beside its image: a Sandbox booted from it, once
+    its engine runs again, has the engine's pulled and built images, its stopped container,
+    which starts again, and its named volume, and what their layers deleted stays deleted.
+    Destroying the snapshot removes its volumes with its image."""
+    skip_without_gvisor()
+    provider = DockerProvider(runtime="gvisor")
+    request = await _engine_request(provider, "gvisor-engine-snapshot", memory_mb=2048)
+    sandbox = await provider.create(request.model_copy(update={"retention": "snapshot"}))
+    try:
+        await sandbox.open_egress()
+        installed = await sandbox.exec(["sh", "-c", _INSTALL_ENGINE], timeout_sec=600)
+        assert installed.ok, installed.stderr[-2000:]
+        made = await sandbox.exec(["sh", "-c", _ENGINE_STATE], timeout_sec=300)
+        assert made.ok, made.stderr[-2000:]
+        retained = await sandbox.snapshot(roles=("solver",), reason="conformance")
+    finally:
+        await sandbox.destroy()
+    snapshot_of = retained.handle.rpartition(":")[2]
+    labels = {"ale.managed": "true", "ale.retention": "snapshot"}
+    try:
+        saved = await volumes.saved(snapshot_of, labels)
+        assert set(saved) == set(gvisor.ENGINE_STORAGE)
+        async with await provider.create(
+            request.model_copy(update={"snapshot": retained.handle})
+        ) as fork:
+            # The engine was stopped with its Sandbox, uncleanly, so its pid file is still
+            # there, as after a `docker restart`, and may name a process of this Sandbox.
+            started = await fork.exec(
+                ["sh", "-c", _START_ENGINE],
+                env={"START": "rm -f /var/run/docker.pid; (dockerd >/tmp/dockerd.log 2>&1 &)"},
+                timeout_sec=120,
+            )
+            assert started.ok and started.stdout.strip(), started.stderr[-2000:]
+            back = await fork.exec(["sh", "-c", _ENGINE_STATE_BACK], timeout_sec=300)
+            assert "engine-state-back" in back.stdout, back.stderr[-2000:]
+    finally:
+        await provider.destroy_retained(retained.handle)
+    for name in saved.values():
+        assert not await _exists("volume", name), f"volume {name} outlived its snapshot"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("start", ["service docker start", "(dockerd >/tmp/dockerd.log 2>&1 &)"])
 async def test_a_gvisor_sandbox_runs_the_docker_its_image_has(tmp_path, start: str) -> None:

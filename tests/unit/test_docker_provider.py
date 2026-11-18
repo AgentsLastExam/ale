@@ -353,6 +353,7 @@ def _sandbox() -> DockerSandbox:
     sandbox._watchdog = gpu_sharing.Watchdog()
     sandbox._storage = None
     sandbox._meter = None
+    sandbox.volumes = {}
     sandbox._host_ports = rootless.HostPorts(_in_our_namespace)
     sandbox._context = contextvars.copy_context()
     sandbox.container_id = "f" * 64
@@ -451,7 +452,19 @@ async def test_a_snapshot_boots_only_for_the_tasks_prepared_image(
 async def test_a_snapshot_is_listed_and_destroyed_by_its_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Its volumes go with its image, only once the image has: a snapshot a Sandbox still
+    uses keeps both."""
     removed: list[str] = []
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        if argv[1:3] == ("volume", "ls"):
+            assert "label=ale.snapshot=e1-abcdef" in argv
+            return 0, f"{SAVED} /var/lib/docker\n", ""
+        assert argv[1:3] == ("volume", "rm"), argv
+        removed.append(argv[3])
+        return 0, "", ""
+
+    monkeypatch.setattr(volumes, "run", run)
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         if argv[0] == "ps":
@@ -475,8 +488,14 @@ async def test_a_snapshot_is_listed_and_destroyed_by_its_handle(
     ]
     with pytest.raises(ProviderStartError, match="being used"):
         await provider.destroy_retained("docker:snapshot:e1-abcdef")
+    assert removed == ["ale-snapshot:e1-abcdef"]
     await provider.destroy_retained("docker:snapshot:e1-abcdef")
-    assert removed == ["ale-snapshot:e1-abcdef"] * 2
+    assert removed == ["ale-snapshot:e1-abcdef"] * 2 + [SAVED]
+
+
+#: A container engine's storage on a Sandbox's volumes, and one volume of a snapshot.
+ENGINE_VOLUMES = {"/var/lib/containerd": "c" * 64, "/var/lib/docker": "d" * 64}
+SAVED = "ale-snapshot-e0-abcdef-var-lib-docker"
 
 
 def _volume_calls(
@@ -499,6 +518,142 @@ def _volume_calls(
 
 def _mounts(argv: tuple[str, ...]) -> list[str]:
     return [argv[index + 1] for index, flag in enumerate(argv) if flag == "--mount"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [None, "volume", "copy"])
+async def test_a_snapshot_keeps_each_volume_of_its_sandbox_in_one_of_its_own(
+    monkeypatch: pytest.MonkeyPatch, fails: str | None
+) -> None:
+    """After the commit, which keeps no volume, each is copied by a runc helper with no
+    network and Docker's default capabilities, the Sandbox's read-only, into a volume labelled
+    with the snapshot's Sandbox and the directory it belongs at. A snapshot that fails leaves
+    neither its image nor its volumes."""
+    calls = _scripted(monkeypatch)
+    asked: list[tuple[str, ...]] = []
+    failure = (1, "", "cp: cannot create special file")
+    _volume_calls(
+        monkeypatch,
+        asked,
+        {("volume", "create", "--label"): failure} if fails == "volume" else
+        {("run",): failure} if fails == "copy" else {},
+    )  # fmt: skip
+    sandbox = _sandbox()
+    sandbox.volumes = dict(ENGINE_VOLUMES)
+    if fails:
+        with pytest.raises(ProviderStartError, match="cannot create special file"):
+            await sandbox.snapshot(roles=("solver",), reason="kept")
+    else:
+        retained = await sandbox.snapshot(roles=("solver",), reason="kept")
+        assert retained.handle == "docker:snapshot:e1-abcdef"
+    names = ["ale-snapshot-e1-abcdef-var-lib-containerd", "ale-snapshot-e1-abcdef-var-lib-docker"]
+    assert asked[0] == (
+        "volume", "create",
+        "--label", "ale.managed=true", "--label", "ale.retention=snapshot",
+        "--label", "ale.snapshot=e1-abcdef", "--label", "ale.path=/var/lib/containerd",
+        names[0],
+    )  # fmt: skip
+    assert [call[0] for call in calls[:2]] == ["stop", "commit"]
+    if fails is None:
+        ((copy, helper),) = [
+            (call, call[call.index("--name") + 1]) for call in asked if call[0] == "run"
+        ]
+        assert (copy[copy.index("--runtime") + 1], copy[copy.index("--network") + 1]) == (
+            "runc",
+            "none",
+        )
+        assert "--cap-add" not in copy and volumes.IMAGE in copy
+        assert _mounts(copy) == [
+            f"type=volume,src={'c' * 64},dst=/from/0,readonly",
+            f"type=volume,src={names[0]},dst=/to/0",
+            f"type=volume,src={'d' * 64},dst=/from/1,readonly",
+            f"type=volume,src={names[1]},dst=/to/1",
+        ]
+        assert "cp -a --reflink=auto --preserve=xattr" in copy[copy.index("-c") + 1]
+        assert asked[-1] == ("rm", "-f", helper)
+        assert len(calls) == 2
+    else:
+        assert ("volume", "rm", *names) in asked
+        assert calls[-1] == ("rmi", "ale-snapshot:e1-abcdef")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kept", ["/var/lib/docker", "/var/lib/mysql"])
+async def test_a_sandbox_booted_from_a_snapshot_gets_its_volumes_back_before_it_starts(
+    monkeypatch: pytest.MonkeyPatch, kept: str
+) -> None:
+    """It is created with a fresh volume at each directory the snapshot keeps, which Docker
+    must not fill from the image, as it does as it creates a container, filled from the
+    snapshot's own by a runc helper, and only then started. A snapshot that keeps a directory
+    this Sandbox does not mount is refused before anything starts."""
+    labels = {
+        "ale.managed": "true",
+        "ale.retention": "snapshot",
+        "ale.role": "solver",
+        "ale.prepared": DIGEST,
+    }
+    calls: list[tuple[str, ...]] = []
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        if argv[:2] == ("image", "inspect"):
+            return 0, _snapshot_inspect(labels), ""
+        if argv[0] == "create":
+            return 0, "f" * 64 + "\n", ""
+        if argv[0] == "start":
+            return 1, "", "stopped once it was started"
+        return _scripted_reply(argv)
+
+    fresh = [
+        {"Type": "volume", "Destination": path, "Name": f"fresh{path.replace('/', '-')}"}
+        for path in gvisor.ENGINE_STORAGE
+    ]
+    _volume_calls(
+        monkeypatch,
+        calls,
+        {
+            ("volume", "ls"): (0, f"{SAVED} {kept}\n", ""),
+            ("inspect",): (0, json.dumps([*fresh, {"Type": "bind", "Destination": "/x"}]), ""),
+        },
+    )
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    provider = DockerProvider(runtime="gvisor")
+    asked = request(
+        network=NetworkPolicy(mode=NetworkMode.OPEN),
+        resources=Resources(container_features=(ContainerFeature.NESTED_CONTAINERS,)),
+        snapshot="docker:snapshot:e0-abcdef",
+    )
+    if kept != "/var/lib/docker":
+        with pytest.raises(ProviderCapabilityError, match=f"keeps {kept} on volumes"):
+            await provider.create(asked)
+        assert not [call for call in calls if call[0] in {"create", "run"}]
+        return
+    with pytest.raises(ProviderStartError, match="stopped once it was started"):
+        await provider.create(asked)
+    listed = next(call for call in calls if call[:2] == ("volume", "ls"))
+    filters = [listed[index + 1] for index, flag in enumerate(listed) if flag == "--filter"]
+    assert filters == [
+        "label=ale.managed=true",
+        "label=ale.retention=snapshot",
+        "label=ale.snapshot=e0-abcdef",
+    ]
+    order = [
+        index
+        for index, call in enumerate(calls)
+        if call[0] in {"create", "start"} or (call[0] == "run" and "/from/0" in str(call))
+    ]
+    created, copy, started = (calls[index] for index in order)
+    assert (created[0], copy[0], started) == ("create", "run", ("start", created[2]))
+    assert _mounts(created) == [
+        "type=volume,dst=/var/lib/containerd",
+        "type=volume,dst=/var/lib/containers",
+        "type=volume,dst=/var/lib/docker,volume-nocopy",
+    ]
+    assert _mounts(copy) == [
+        f"type=volume,src={SAVED},dst=/from/0,readonly",
+        "type=volume,src=fresh-var-lib-docker,dst=/to/0",
+    ]
+    assert ("rm", "-f", "-v", created[2]) in calls[order[-1] :]
 
 
 @pytest.mark.asyncio
@@ -1636,8 +1791,8 @@ async def test_each_runtime_is_a_leaf_with_the_features_it_gives() -> None:
     assert (runc.provider, in_kata.provider) == ("docker:runc", "docker:kata")
     for in_gvisor in (raw, nested):
         assert in_gvisor.provider == "docker:gvisor" and in_gvisor.gui
-    # A commit keeps no volume, which a container engine's storage is on.
-    assert raw.snapshot and not nested.snapshot
+    # A snapshot keeps the volumes a container engine's storage is on beside its image.
+    assert raw.snapshot and nested.snapshot
     common = {ContainerFeature.USER_NAMESPACES, ContainerFeature.FUSE, ContainerFeature.MOUNT}
     assert raw.container_features == {*common, ContainerFeature.RAW_SOCKETS}
     assert nested.container_features == {*common, ContainerFeature.NESTED_CONTAINERS}
@@ -2334,12 +2489,6 @@ async def test_a_feature_its_runtime_does_not_give_is_refused_before_anything_st
         await DockerProvider(runtime="gvisor").create(
             request(resources=Resources(container_features=both))
         )
-    # A commit would keep none of a container engine's storage.
-    engine = request(
-        resources=Resources(container_features=(ContainerFeature.NESTED_CONTAINERS,))
-    ).model_copy(update={"snapshot": "ale-snapshot:x"})
-    with pytest.raises(ProviderCapabilityError):
-        await DockerProvider(runtime="gvisor").create(engine)
     assert calls == []
 
 

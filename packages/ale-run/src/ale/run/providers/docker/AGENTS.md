@@ -364,11 +364,8 @@ its own.
   it does under runc. They stay in the Sentry and give nothing on the Host; `SYS_PTRACE`,
   which gVisor's own guide lists, was not needed.
 - Volumes rather than a tmpfs, which would charge every image layer to the Sandbox's memory.
-  A commit keeps no volume, so the profile for container engines takes no snapshots,
-  rather than lose the engine's images and containers in one: an engine's layers,
-  whiteouts among them, cannot be part of an image's layer, whose whiteouts would read as
-  the layer's own. The storage watch measures them through a helper
-  ([A container engine's volumes](#a-container-engines-volumes-in-the-storage-watch)).
+  Snapshots and the storage watch see them through a helper
+  ([A container engine's volumes](#a-container-engines-volumes-in-snapshots-and-the-storage-watch)).
 - gVisor's own gaps are closed as ALE patches that do what Linux does, rather than worked
   around in the Sandbox, so that a Task needs nothing for gVisor.
 - ALE's chains stay in iptables rather than move to nf_tables, whose gVisor implementation
@@ -658,7 +655,7 @@ under rootless Docker and off xfs mounted with `pquota`, so there such a Sandbox
 past `storage_mb` MiB the Sandbox kills the container, logs the stop to the execution trace
 as the GPU watchdog logs a kill, and has its sessions raise `StorageExhaustedError`, which
 the episode records as `storage_exhausted`. What a Sandbox's Docker volumes take counts too
-([A container engine's volumes](#a-container-engines-volumes-in-the-storage-watch)).
+([A container engine's volumes](#a-container-engines-volumes-in-snapshots-and-the-storage-watch)).
 What measuring leaves to the agent is
 [issue #152](https://github.com/AgentsLastExam/ale/issues/152).
 
@@ -691,46 +688,84 @@ What measuring leaves to the agent is
   - Firecracker, which gives each Sandbox a disk of its size: it attaches no GPU and needs
     `/dev/kvm`.
 
-## A container engine's volumes in the storage watch
+## A container engine's volumes in snapshots and the storage watch
 
-**Problem.** The storage watch read only `SizeRw`, which counts no volume, so the profile for
-container engines, whose storage is on volumes
-([above](#a-container-engine-in-a-gvisor-sandbox)), held no Sandbox to `storage_mb`: a Task
-that runs Docker and names `storage_mb`, as ale-tasks-base's `docker_in_vm` names 8192, found
-no Docker leaf.
+**Problem.** A snapshot is a `docker commit`, which keeps no volume, and the storage watch
+read only `SizeRw`, which counts none, so the profile for container engines, whose storage
+is on volumes ([above](#a-container-engine-in-a-gvisor-sandbox)), took no snapshots and held
+no Sandbox to `storage_mb`: a Task that runs Docker and names `storage_mb`, as
+ale-tasks-base's `docker_in_vm` names 8192, found no Docker leaf, and none could be
+continued from a snapshot.
 
 **Context.** Measured in November 2026 under rootful Docker 29.1.3 (Linux 7.0) and rootless
 29.9.3 (Linux 6.12), the containerd image store, ALE's runsc 0.1.2 under `runsc-nested`, on
 the storage of a `docker:29-dind` engine that had pulled ubuntu, python, node and busybox,
 built an image whose layers delete a file and replace a directory, and stopped a container
 with a named volume: about 20,800 entries and 725 MB.
-- A rootful daemon's volume directories are root's alone, and under rootless Docker the files
-  of the engine's containers belong to sub-UIDs; root in a runc helper of the daemon's reads
-  them all, with Docker's default capabilities.
+- What the volumes hold: 11 whiteouts (0:0 character devices), 46 to 48 setuid or setgid
+  files, 411 hard links, 6 or 7 sparse files, and one xattr name, `user.overlay.opaque`, on
+  32 to 40 directories. gVisor's gofer refuses `trusted.*` and `security.*` xattrs on a
+  volume (`ENOTSUP`), so `setcap` fails in the Sandbox and in its engine's containers, and
+  no file capability can be there.
+- A rootful daemon's volume directories are root's alone, and under rootless Docker the
+  files of the engine's containers belong to sub-UIDs; root in a runc helper of the daemon's
+  reads and writes them all, with Docker's default capabilities.
+- GNU `cp -a --reflink=auto --preserve=xattr` in such a helper copied every entry alike in
+  type, mode, owner, size, mtime, device number, xattrs, contents and hard-link group, holes
+  included, both ways; only some files' allocated blocks differed. The engine in a container
+  booted with the copies had every image, the stopped container started again, and the
+  deleted files stayed deleted.
+- Docker copies an image's files into a fresh anonymous volume as `docker create` makes the
+  container (10 entries of busybox's `/etc` before it started), and copies nothing with
+  `volume-nocopy`.
 - `docker rm -v` keeps an anonymous volume another container mounts, and the volume stays
   once that container goes too.
 - A helper started with `docker run -i --rm` was gone 0.18 to 0.24 s after its CLI was
   killed with `SIGKILL`.
 - One `du` of the store took 0.05 to 0.13 s and as much of its CPU; a `docker run --rm` per
   measurement took 0.25 to 0.40 s and 0.08 to 0.22 s of dockerd's and containerd's CPU
-  besides its shim's (the README has the table).
+  besides its shim's (the README has the table). `docker create` and `docker start` took 20
+  to 30 ms more than `docker run -d` (busybox, runc, 10 each).
 
-**Solution.** A watched Sandbox's volumes are measured by one helper outside it, kept running
-beside `SizeRw`, in the daemon's unit ([`volumes.py`](volumes.py),
+**Solution.** Each volume is measured and copied by a helper outside the Sandbox
+([`volumes.py`](volumes.py)): a watched Sandbox's volumes by one helper kept running beside
+`SizeRw`, in the daemon's unit; a snapshot's by copies into volumes of its own, labelled
+with its Sandbox and the directory each belongs at, into which a Sandbox booted from it is
+filled before it starts. Destroying the snapshot removes them with its image
+([Snapshots](../README.md#snapshots),
 [Docker writable storage](../README.md#docker-writable-storage)).
 
 **Decisions.**
 - Keep the volumes and count them, as Kubernetes counts a Pod's `emptyDir` volumes into its
-  `ephemeral-storage`, rather than refuse limits to the profile that needs them most.
+  `ephemeral-storage` and Sysbox carries an inner engine's images through a commit, rather
+  than refuse snapshots and limits to the profile that needs them most.
 - From a helper of the daemon's, never through guestd: root in the Sandbox could hide what
   it wrote under a mount, the walk would be charged to the Sandbox, and ALE's own user can
   read no volume. The helper mounts the volumes read-only by name, under runc, with no
   network.
 - In the daemon's unit: `du`'s blocks under the containerd store, the bytes of every file
   but a directory under a classic graph driver, so that one limit means one thing on a
-  daemon.
+  daemon. A restored snapshot's volumes count in full, as a VM's disk does.
 - One helper per watched Sandbox, kept running and asked by a line on its stdin, rather than
   one per measurement: a quarter to a third of the time, and none of the daemons' CPU, every
   5 s for every such Sandbox. It ends with its stdin, so a crashed run leaves none, and it
   is removed before the Sandbox, whose volumes Docker would otherwise keep; discarding a
   Sandbox by its handle removes one left behind first.
+- `cp -a` with Docker's default capabilities: they create every kind of entry found, and no
+  `trusted.*` xattr exists on a volume that `SYS_ADMIN` would be needed for. An xattr it
+  cannot copy fails the copy rather than leave a store that reads otherwise.
+- Copied after `docker stop`, as the commit is: the engine is killed with the Sandbox, so
+  its storage is what a power loss leaves, which the engine recovers from as on a VM. Its
+  pid file in `/run`, which is in the image, comes back too, as after `docker restart`, and
+  Docker refuses to start while it names a running process (it did, in a continuation's
+  setup): ALE leaves `/run` as the Sandbox left it, as Docker does across a restart, rather
+  than empty it as a VM's tmpfs is at boot, and an image that starts Docker removes the file
+  first, as `docker:dind`'s entrypoint does.
+- Only a Sandbox booted from a snapshot with volumes is created and then started, with
+  `volume-nocopy` on each directory the snapshot fills, so that Docker's copy of the image's
+  files never mixes into the snapshot's; every other Sandbox keeps `docker run -d`, one CLI
+  call fewer. A GPU Sandbox's fill happens under the GPU admission lock, which covers
+  everything until the Sandbox starts.
+- A snapshot that keeps a directory the booted Sandbox does not mount is refused before
+  anything starts; a snapshot's volumes go only once its image has, so a snapshot never
+  boots without them.

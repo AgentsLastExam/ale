@@ -6,7 +6,8 @@ unprivileged: it cannot read a rootful daemon's volume directories, and under ro
 Docker the files of the engine's containers belong to sub-UIDs it cannot read. So a runc
 helper with no network mounts them by name, never anything in the Sandbox, whose root could
 hide what it wrote under a mount: one per watched Sandbox measures them, read-only, for the
-storage watch (:class:`Meter`).
+storage watch (:class:`Meter`), and one copies them into a snapshot's own volumes, and those
+into a Sandbox booted from it (:func:`copy`).
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Iterable, Mapping
+import uuid
+from collections.abc import Iterable, Mapping, Sequence
 
 from ale.core.errors import ProviderStartError
 from ale.run import HELPER_RUNTIME, ale_image
@@ -22,21 +24,32 @@ from ale.run.process import run
 
 __all__ = [
     "IMAGE",
+    "PATH_LABEL",
+    "SNAPSHOT_LABEL",
     "Meter",
+    "copy",
     "counts_blocks",
     "gone",
     "meter_name",
     "mounted",
     "of",
+    "remove",
+    "save",
+    "saved",
 ]
 
-#: GNU coreutils' ``du`` and GNU findutils' ``find``, which ALE's QEMU runner, the image of
-#: the Provider's other helpers, has.
+#: GNU coreutils' ``du`` and ``cp`` and GNU findutils' ``find``, which ALE's QEMU runner, the
+#: image of the Provider's other helpers, has.
 IMAGE = ale_image("ale-qemu-runner")
+#: The labels of a snapshot's volume: the Sandbox it was taken of, and the directory of that
+#: Sandbox it holds.
+SNAPSHOT_LABEL = "ale.snapshot"
+PATH_LABEL = "ale.path"
 #: How long a helper may take to start, and Docker to remove one, on a loaded daemon, as any
-#: container of the Provider's.
+#: container of the Provider's; and a copy, as a commit.
 _START_SEC = 300.0
 _REMOVE_SEC = 300.0
+_COPY_SEC = 1800.0
 #: How long one measurement may take once its helper runs, as ``SizeRw``'s.
 _MEASURE_SEC = 60.0
 #: Run by ``sh`` in the measuring helper with each volume's mount: answers each line on its
@@ -54,6 +67,14 @@ _MEASURE = {
         "| awk '!seen[$1]++ { total += $2 } END { printf \"%.0f\\n\", total }'; done"
     ),
 }
+#: Run by ``sh`` in the copying helper, with the index of each pair: copies ``/from/<i>`` into
+#: ``/to/<i>`` with all a container engine's storage holds: owners, modes (setuid among them),
+#: timestamps, hard and symbolic links, the 0:0 character devices by which an overlay marks
+#: what a layer deletes, the holes of sparse files, and every xattr, ``user.overlay.opaque``
+#: among them, an xattr it cannot copy failing the copy.
+_COPY = (
+    'set -e; for i in "$@"; do cp -a --reflink=auto --preserve=xattr "/from/$i/." "/to/$i/"; done'
+)
 
 
 async def counts_blocks() -> bool:
@@ -180,3 +201,87 @@ class Meter:
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
             await process.wait()
+
+
+async def copy(pairs: Sequence[tuple[str, str]]) -> None:
+    """Copy each volume of ``pairs``, ``(source, target)``, into the other, all in one runc
+    helper with no network, as root with Docker's default capabilities, which create every
+    kind of entry an engine's storage holds there: gVisor stores no xattr outside the
+    ``user`` namespace on a volume. The sources are mounted read-only. The helper is removed
+    even when the copy is cancelled or times out."""
+    helper = f"ale-copy-{uuid.uuid4().hex[:12]}"
+    mounts: list[str] = []
+    for index, (source, target) in enumerate(pairs):
+        mounts += [
+            "--mount", f"type=volume,src={source},dst=/from/{index},readonly",
+            "--mount", f"type=volume,src={target},dst=/to/{index}",
+        ]  # fmt: skip
+    try:
+        code, _, stderr = await run(
+            "docker", "run", "--rm", "--name", helper, *HELPER_RUNTIME, "--network", "none",
+            *mounts, "--entrypoint", "sh", IMAGE,
+            "-c", _COPY, "sh", *(str(index) for index in range(len(pairs))),
+            timeout=_COPY_SEC,
+        )  # fmt: skip
+    finally:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(gone(helper))
+    if code != 0:
+        raise ProviderStartError(f"could not copy Docker volumes: {stderr.strip()[-2000:]}")
+
+
+def _snapshot_volume(sandbox_id: str, path: str) -> str:
+    """The name of the volume that keeps directory ``path`` of Sandbox ``sandbox_id`` in its
+    snapshot."""
+    return f"ale-snapshot-{sandbox_id}{path.replace('/', '-')}"
+
+
+async def save(sandbox_id: str, volumes: Mapping[str, str], labels: Mapping[str, str]) -> None:
+    """Copy a stopped Sandbox's ``volumes``, by the directory each is at, into volumes of its
+    snapshot, labelled with ``labels``, its id and the directory each belongs at. One that
+    cannot be made leaves none behind."""
+    names = {path: _snapshot_volume(sandbox_id, path) for path in volumes}
+    try:
+        for path, name in names.items():
+            label = {**labels, SNAPSHOT_LABEL: sandbox_id, PATH_LABEL: path}
+            flags = [flag for item in label.items() for flag in ("--label", "=".join(item))]
+            code, _, stderr = await run(
+                "docker", "volume", "create", *flags, name, timeout=_START_SEC
+            )
+            if code != 0:
+                raise ProviderStartError(f"could not create volume {name}: {stderr.strip()}")
+        await copy([(volumes[path], name) for path, name in names.items()])
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(remove(names.values()))
+        raise
+
+
+async def saved(sandbox_id: str, labels: Mapping[str, str]) -> dict[str, str]:
+    """The volumes of the snapshot of Sandbox ``sandbox_id``, by the directory each belongs
+    at; only those that carry ``labels`` too."""
+    label = {**labels, SNAPSHOT_LABEL: sandbox_id}
+    filters = [flag for item in label.items() for flag in ("--filter", "label=" + "=".join(item))]
+    code, out, stderr = await run(
+        "docker", "volume", "ls", *filters,
+        "--format", f'{{{{.Name}}}} {{{{.Label "{PATH_LABEL}"}}}}',
+        timeout=30,
+    )  # fmt: skip
+    if code != 0:
+        raise ProviderStartError(f"could not list the snapshot's volumes: {stderr.strip()}")
+    found: dict[str, str] = {}
+    for line in out.splitlines():
+        name, _, path = line.strip().partition(" ")
+        if name and path:
+            found[path] = name
+    return found
+
+
+async def remove(names: Iterable[str]) -> None:
+    """Remove the volumes ``names``; one already gone needs nothing."""
+    if not (listed := list(names)):
+        return
+    code, _, stderr = await run("docker", "volume", "rm", *listed, timeout=_REMOVE_SEC)
+    errors = [line for line in stderr.splitlines() if line.strip()]
+    if code != 0 and not all("no such volume" in line.lower() for line in errors):
+        raise ProviderStartError(f"could not remove volumes {', '.join(listed)}: {stderr.strip()}")
