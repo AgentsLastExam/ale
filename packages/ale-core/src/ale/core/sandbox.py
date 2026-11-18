@@ -15,7 +15,14 @@ from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ale.core.capability import Arch, CapabilityProfile, GpuHold, SandboxNeeds, closest
+from ale.core.capability import (
+    Arch,
+    CapabilityProfile,
+    GpuHold,
+    SandboxNeeds,
+    closest,
+    solver_saves,
+)
 from ale.core.errors import ProviderCapabilityError
 from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 
@@ -218,6 +225,13 @@ class SandboxRequest(BaseModel):
     snapshot_verifier: Resources | None = None
     """The resources of the snapshot verifier that boots from this solver's snapshot: the
     solver is saved as a snapshot whatever its retention, on a leaf that serves both."""
+    round_verifier: Resources | None = None
+    """Under shared verification, the resources of the verifier each validation round boots
+    from this solver's snapshot (:func:`~ale.core.capability.round_verifier_resources`), on
+    the leaf that saved it, which serves both."""
+    planned_saves: int = Field(default=0, ge=0)
+    """How many runs of ``validation/`` still to come save this solver, each the one booted
+    from the previous save, whatever its retention."""
     resources: Resources
     network: NetworkPolicy
     gateway_url: str | None = Field(
@@ -243,6 +257,16 @@ class SandboxRequest(BaseModel):
         return self.prepared_image.kind
 
     @property
+    def saves(self) -> int:
+        """How many snapshots in a row its episode may save, as
+        :func:`~ale.core.capability.solver_saves` counts them."""
+        return solver_saves(
+            self.planned_saves,
+            snapshot_verified=self.snapshot_verifier is not None,
+            kept_as_snapshot=self.retention == "snapshot",
+        )
+
+    @property
     def needs(self) -> SandboxNeeds:
         return SandboxNeeds(
             kind=self.image_kind,
@@ -252,12 +276,11 @@ class SandboxRequest(BaseModel):
             # The elevation it gets, which an image builder's request grants beyond its
             # size.
             resources=self.resources.model_copy(update={"sudo": self.sudo}),
-            snapshot=self.retention == "snapshot"
-            or self.snapshot is not None
-            or self.snapshot_verifier is not None,
+            snapshot=self.saves > 0 or self.snapshot is not None,
+            saves=self.saves,
             verifier=None
-            if self.snapshot_verifier is None
-            else snapshot_verifier_needs(self.image_kind, self.os, self.snapshot_verifier),
+            if (verifier := self.snapshot_verifier or self.round_verifier) is None
+            else snapshot_verifier_needs(self.image_kind, self.os, verifier),
         )
 
 
@@ -576,7 +599,7 @@ class Provider(ABC):
         if needs.verifier is None:
             return reasons
         return reasons + tuple(
-            f"its snapshot verifier: {why}"
+            f"the verifier booted from its snapshot: {why}"
             for why in self.refusals(needs.verifier, user=user, role=SandboxRole.VERIFIER)
         )
 

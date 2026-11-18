@@ -30,6 +30,10 @@ class LogMirror:
     with its Host copy once and copies a rewritten file again. One check per file and run
     keeps the cost linear in the size of the logs. The rule needs no file identity, so
     every guest OS behaves alike.
+
+    The agent's turns after a validation round each run in a new Sandbox, booted from a
+    snapshot that holds the same files, so the mirror follows the current one and goes on
+    extending the copies it holds.
     """
 
     def __init__(
@@ -49,6 +53,11 @@ class LogMirror:
         self._copies: dict[str, _Copy] = {}
         self._failures: dict[str, str] = {}
         self._reported: dict[str, str] = {}
+
+    def follow(self, sandbox: Sandbox) -> None:
+        """Copy from ``sandbox`` from now on: the next turn's solver, which holds the logs the
+        last one did at the same paths."""
+        self._sandbox = sandbox
 
     @property
     def incomplete(self) -> bool:

@@ -36,6 +36,8 @@ class CodexCliHarness(CliHarness):
     settings_type = CodexCliSettings
     settings: CodexCliSettings
     logs = (LOG_ROOT, ".codex-ale/sessions", trajectory.TRACES)
+    # Its CODEX_HOME, where a login keeps its credentials.
+    credentials = (".codex-ale/auth.json",)
 
     async def install_resources(
         self,

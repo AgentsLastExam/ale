@@ -11,9 +11,10 @@ The format is based on Harbor's task format (`task.toml`, `environment/`, `tests
 A field ALE adds sits in the Harbor table of what it configures, under a name Harbor gives
 no other meaning: a separate namespace would not stop one name meaning two things, and would
 have to mirror every table it extends. The exception is `[[calibration]]`, which no Harbor
-table configures. `schema_version` is the ALE version in which the
-format last changed, and ALE accepts exactly that value, so a file written for another
-format fails as it loads instead of being read with a different meaning.
+table configures; `validation/` and `calibration/` are ALE's directories. `schema_version`
+is the ALE version in which the format last changed, and ALE accepts exactly that value, so
+a file written for another format fails as it loads instead of being read with a different
+meaning.
 
 ## Task folder
 
@@ -31,6 +32,9 @@ my-task/
 │   ├── test.sh                # test.ps1 on Windows
 │   ├── verify.py
 │   └── Dockerfile             # optional separate-verifier image (context tests/)
+├── validation/                # ALE; optional verifier whose results the agent receives
+│   ├── test.sh                # as tests/test.sh
+│   └── verify.py
 └── calibration/               # ALE; known final states and the scores they must receive
     ├── solution/              # the reference solution, Harbor's solution/
     │   └── solve.sh           # solve.ps1 on Windows
@@ -41,7 +45,8 @@ my-task/
 Required files are `task.toml`, `instruction.md`, and the tests and reference solution
 entries for the Task OS: `tests/test.sh` and `calibration/solution/solve.sh` on Linux and
 macOS, `test.ps1` and `solve.ps1` on Windows; every further
-[calibration case](#calibration)'s directory holds the same entry. `[environment].image` and
+[calibration case](#calibration)'s directory holds the same entry, and
+[`validation/`](#validation), when there is one, the tests entry. `[environment].image` and
 `environment/` decide the solver's image:
 
 - `environment/Dockerfile` builds a Linux container. It names its base in `FROM`, so an
@@ -110,6 +115,7 @@ network_mode = "allowlist"                  # no-network | allowlist | public; d
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
 # workdir = "project"                       # ALE; where the agent starts; default its home
+validation_rounds = 0                       # ALE; validation/ results it gets; default 0
 
 [verifier]
 timeout_sec = 600                           # positive seconds; default 600
@@ -134,10 +140,15 @@ env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 [[calibration]]                             # ALE; one per added case or changed default
 name = "missing-summary"                    # lowercase slug: calibration/missing-summary/
 expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or [lo, hi]
+# expect_validation = { reward = 1 }        # validation/'s instead; default expect
 ```
 
 `[agent].workdir` is below the agent's home when relative, so a Task need not spell its home
 per OS. It must be a directory when the agent starts; stages keep their fixed directories.
+`[agent].validation_rounds`, an integer from 0, is how many results of
+[`validation/`](#validation) the agent receives; above 0 it requires `validation/`. Run
+policy may replace it with `validation_rounds`, a non-negative integer, recorded as the
+timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
 
 Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
@@ -151,6 +162,8 @@ belongs in `[metadata]`, so there is no `source`.
 
 These values differ from Harbor's:
 
+- `validation/` and `[agent].validation_rounds` are ALE's: a verifier whose results the
+  agent receives between its turns; see [validation/](#validation).
 - A Sandbox always has a size and a time limit, and its network stays closed until a Task opens
   it, so some defaults differ: `cpus` is 1, `memory_mb` 4096 and `[agent].timeout_sec` 900, where
   Harbor sets no limit; `[agent].user` is `user`, not the image's `USER`;
@@ -341,8 +354,8 @@ Harbor's `env` tables set environment variables for the Task's commands:
 
 | Table | Received by |
 |---|---|
-| `[environment].env` | setup, the agent and the oracle, and a shared verifier |
-| `[verifier].env` | the verifier |
+| `[environment].env` | setup, the agent and the oracle, and, under shared verification, the verifier of `tests/` and of `validation/` |
+| `[verifier].env` | the verifier, of `tests/` and of `validation/` alike |
 | `[verifier.environment].env` | a verifier of its own, instead of `[environment].env` |
 | `[solution].env` | the oracle |
 | `[[environment.mcp_servers]].headers` | the agent's MCP client |
@@ -532,13 +545,15 @@ its root-only stage directory, not to Harbor's `/tests`, and runs the entry with
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
 absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
 own when it has one, since that is where the Task installs what `verify.py` imports, and
-otherwise the framework's own. It stages `ale_verify` and its schema validator into that
+otherwise the framework's own. It stages `ale_verify` and its JSON Schema library into that
 interpreter's site-packages, checks the import, then sets `ALE_VERIFY_PYTHON` in the
 entrypoint's process environment.
 It is available to the tests and their child processes, including during `calibrate` and
 `reverify`; it is not initialized by the image build, setup stage, or SDK import.
 ALE does not install Python into the image's environment or replace the solver's default
-interpreter.
+interpreter. The agent's model session is closed once its last turn ends, in every episode,
+so a `tests/` that runs the agent's program cannot use the agent's model session
+([Security](security.md#5-answers-are-absent-not-hidden)).
 
 The Linux and macOS entry is:
 
@@ -556,6 +571,64 @@ exit $LASTEXITCODE
 ```
 
 APIs, scoring, and record behavior are defined in [Verification](verification.md).
+
+## validation/
+
+Research-style Tasks split their data as machine learning does. What `environment/` gives
+the agent is its training data, to use as it likes. `validation/` is the validation set:
+its results reach the agent between turns. `tests/` is the test set, run once at the end
+and never shown to the agent. An agent that sees the score it is finally ranked by can
+overfit to it, round after round; one that sees only a validation set's cannot overfit to
+the test set except through what the validation set shares with it.
+
+`validation/` has the contract of [`tests/`](#tests): the entry `test.sh` (`test.ps1` on
+Windows), conventionally `verify.py`, writes `reward.json` and optionally
+`verification.json` and [`feedback.md`](verification.md#feedback), and may use `ale_verify`
+and Judges. It is staged only when it runs, in its own root-only stage directory,
+`/opt/ale/validation` (`C:\ProgramData\ALE\validation` on Windows), where its entry runs
+with `ALE_STAGE_DIR` set, as `tests/`'s does. It is absent during every turn of the agent,
+as `tests/` is. It runs under `tests/`'s `[verifier]` settings and
+[verification topology](#verification-topology): it has no table, Dockerfile or image of
+its own, and a separate verifier runs it on the image `tests/` runs on: a
+`validation/Dockerfile` is only a file there, since the verifier's image always comes from
+`tests/`. Under shared verification it runs in a Sandbox booted from a snapshot of the
+agent's, with the agent's resources and `[environment].env` and no sudo, since the agent
+goes on from that state. It receives no solver trajectory, which is converted once, after
+the agent's last turn. A copy of `tests/` therefore works unless it reads the trajectory:
+`judge(..., trajectory=True)` and the `checks.trajectory_*` checks raise there. Nothing
+requires the two to differ.
+
+With `[agent].validation_rounds = N`, the agent works in up to `N + 1` turns: its first turn
+ends, `validation/` scores the state it left, the agent receives that result as its next
+turn begins, and so on until `tests/` scores the state its last turn left, once. A turn ends
+when the agent's program finishes normally, so the agent submits its work by ending its
+turn; there is nothing else to call. A turn that a timeout, a limit or a failure ends is the
+last. `[agent].timeout_sec` covers all turns together. Between turns the agent's Sandbox is
+saved and a new one booted from what it saved, without setup: files on its disk survive the
+end of a turn; files in memory, such as a tmpfs, and its desktop session do not, nor does
+any process, the agent's or a service setup started. `validation/` therefore never sees a
+process the agent or setup left running. How the rounds run is in the
+[Episode protocol](episode-protocol.md#validation-rounds).
+
+Rounds need a Harness that resumes its native session, since every turn after the first
+resumes it: a Run that gives rounds to one that cannot, such as the `computer-use` policy
+Harness, is refused before provisioning, and can set `validation_rounds = 0` instead. Each
+round costs a save of the agent's Sandbox, a verifier run under the verify limit
+(`[verifier].timeout_sec`, or the Run's `timeouts.verify`) that its Judge calls share, and a
+boot; none of them spends the agent's time. Since every calibration case checks
+`validation/` too, a Task with `validation/` cannot [calibrate](#calibration) on a Provider
+without snapshots.
+
+The agent's model session is closed between turns, and no credential file stays on the
+disk a round saves. The round's verifier has verification's open egress and, under shared or
+snapshot verification, runs on the agent's disk, so a `validation/` that runs the agent's
+program runs it with that network; with `[agent].sudo`, what the agent left there can write
+the round's feedback and reward. The round's reward, status and feedback text are all that
+reaches the agent ([Security](security.md#5-answers-are-absent-not-hidden)).
+
+What the feedback text reveals is the author's decision: a score alone, the cases that
+fail, or a diagnosis. Whatever it says, the agent can use, so it must not hold what `tests/`
+checks for if the test set is to stay unseen.
 
 ## calibration/
 
@@ -604,6 +677,16 @@ decimals ([Result](verification.md#result)), so an expected reward lies in that 
 exact one has at most two decimals, and an interval holds at least one two-decimal value.
 Any other key names a top-level number of the Episode's
 [Verification Result](verification.md#result), compared as written, so a measured value
-takes an interval; a missing key, or a value that is not a number, fails the case. How
-`ale calibrate` runs the cases is defined in
+takes an interval; a missing key, or a value that is not a number, fails the case.
+
+A Task with `validation/` checks it in every case too, with a validation check rather than a
+round: `ale calibrate` runs `validation/` once on the case's final state, before `tests/`,
+with no turn after it. `expect` applies to both, unless an entry's `expect_validation`, by
+the same rules, says what `validation/`'s result must be; it is refused without
+`validation/`. The check saves the oracle's Sandbox, as a round saves the agent's, so a Task
+with `validation/` needs a Provider that saves snapshots for calibration too, and under
+shared verification `tests/` then runs in a Sandbox booted from that snapshot: like
+`validation/`, it sees no process the oracle left running.
+
+How `ale calibrate` runs the cases is defined in
 [the episode protocol](episode-protocol.md#calibration).

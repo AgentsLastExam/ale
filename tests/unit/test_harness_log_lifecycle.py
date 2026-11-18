@@ -71,6 +71,7 @@ def _context(path: Path) -> SimpleNamespace:
         artifacts=SimpleNamespace(enabled=False),
         agent_resources=SimpleNamespace(digest="resources"),
         home="/home/agent",
+        validation_prompts={},
     )
 
 

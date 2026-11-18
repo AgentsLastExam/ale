@@ -8,7 +8,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 | `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, audio, subagents | setup/verify commands, rewards, aggregate usage |
 | `trace.transport.jsonl` | Gateway calls in API-key and subscription modes (verification Judge calls marked `purpose: judge`), retries, refusals, token usage, call-to-step links | full conversation messages |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
-| `result.json` | terminal status, all named rewards, failure, phase timings, the agent's native continuation | conversation, provenance |
+| `result.json` | terminal status, all named rewards, failure, phase timings, the agent's native continuation, its validation rounds | conversation, provenance |
 | `verification.json` | the complete Task-authored result, including nested details | terminal status, solver trajectory, native Agent transcript |
 | `lock.json` | immutable provenance and enforced termination limits | live run state |
 
@@ -17,13 +17,13 @@ rewards, and unconditional `agent-output-*.txt` files do not exist.
 
 Compatibility boundary: during early development a record is read only by the engine
 commit recorded in its RunLock (`framework.commit`). ALE ships no migrations or legacy
-readers; a record whose shape differs from the reading engine fails validation instead of
-being reinterpreted with values that were never observed.
+readers; a record whose shape differs from the reading engine is refused as it is read,
+instead of being reinterpreted with values that were never observed.
 
 ## ATIF trajectory
 
-`trajectory.json` is a Harbor ATIF v1.8 document, not an ALE envelope. It is validated
-before atomic replacement:
+`trajectory.json` is a Harbor ATIF v1.8 document, not an ALE envelope. It is checked
+against that schema before atomic replacement:
 
 ```json
 {
@@ -42,13 +42,16 @@ before atomic replacement:
 ```
 
 Step IDs start at 1 and are contiguous. The complete instruction is the first
-agent-visible user content. Native tool-use/result events are grouped into one agent
-step; every observation `source_call_id` resolves to a tool call in that step. An empty
-result is valid, while a missing result remains absent. A call that a tool's own program
-made, rather than a model inference, is a separate agent step with `llm_call_count: 0`,
-ATIF's mark for a deterministic dispatch, so no export treats it as sampled model output.
-It stands where it happened, after the model call that preceded it, and names the call
-that ran the program, since a program can outlive the model call that started it.
+agent-visible user content, followed, when the agent receives validation rounds, by the
+framework's preamble, as it was sent. Each round's prompt is a user message of the same
+native session, so one trajectory covers every turn. Native tool-use/result events are
+grouped into one agent step; every observation `source_call_id` resolves to a tool call in
+that step. An empty result is valid, while a missing result remains absent. A call that a
+tool's own program made, rather than a model inference, is a separate agent step with
+`llm_call_count: 0`, ATIF's mark for a deterministic dispatch, so no export treats it as
+sampled model output. It stands where it happened, after the model call that preceded it,
+and names the call that ran the program, since a program can outlive the model call that
+started it.
 
 All ALE extensions live under `extra.ale`:
 
@@ -63,7 +66,10 @@ All ALE extensions live under `extra.ale`:
   `conversion_failed` when the parser raised and the trajectory fell back to the
   instruction and final message;
 - `parse_issues`: bounded `{reason, detail}` records of native evidence the parser could not
-  convert.
+  convert;
+- `validation_round`: on the user step that gave the agent a validation round's result, the
+  round's index, where its next turn begins; a round's prompt the parsed session lacks is a
+  `validation_round_not_found` parse issue.
 
 Images and audio use ATIF media parts whose `source.path` is episode-relative. Audio
 sources carry `media_type`, `path`, and optional nonnegative `duration_sec`; unknown
@@ -98,8 +104,9 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
   token usage, stop reason, latency, and `forwarded`/`failed`/`refused` disposition.
   `input_tokens` counts every input token in every dialect, and `cache_read_tokens` and
   `cache_write_tokens` say how many of them the provider's prompt cache served or stored.
-  A refused call's `refusal_limit` names the ceiling, or the request policy
-  (`web_tools`, `unsupported_method`) that refused it;
+  A refused call's `refusal_limit` names the ceiling, the request policy
+  (`web_tools`, `unsupported_method`) that refused it, or `session_suspended` for a call
+  made while its session was closed, as the agent's is between turns;
 - `replay`: the original call ID, request digest, replay reason, and `charged=false`, since
   a replay counts toward neither usage nor limits;
 - `trajectory_link`: call ID, trajectory ID, and ATIF step ID.
@@ -134,7 +141,10 @@ Event kinds:
 - `partial_output_recovered`.
 
 Setup, oracle, verifier, harness preparation/launch, artifact collection, and cleanup are
-framework/task execution. Agent-owned Bash/MCP/CUA calls belong only in ATIF.
+framework/task execution. Agent-owned Bash/MCP/CUA calls belong only in ATIF. Each
+validation round records, with its index, its turn's end and the solver's save in the
+`agent` phase, its verifier in a `validate` phase, and the next solver's boot in a
+`provision` phase.
 
 Command output at or below 16 KiB stays inline. Larger output becomes a text BlobRef.
 Credentials, bearer tokens, provider keys, configured secrets and the Task's credential
@@ -160,14 +170,23 @@ Canonical JSON never embeds base64. No blob manifest exists.
 ## Result and run status
 
 `result.json` is the episode's atomic terminal truth. A completed result has a non-empty,
-finite named reward map and no failure. A failed result has failure information, and has
-rewards exactly when verification still completed after the agent
-[stopped early](episode-protocol.md#agent-or-oracle). ALE supplies no primary reward or
-aggregation policy. Where a result becomes one number, as in an export for training, a
+finite named reward map and no failure. Its rewards are `tests/`'s alone. A failed result
+has failure information, and has rewards exactly when verification still completed after the
+agent [stopped early](episode-protocol.md#agent-or-oracle). ALE supplies no primary reward
+or aggregation policy. Where a result becomes one number, as in an export for training, a
 final status without rewards, the agent's own outcome whose Sandbox went before verification
-such as `memory_exhausted` or `storage_exhausted`, counts as zero, since the agent failed the
-Task; any other result without rewards, such as an `env_error` or a `task_error`, has no
+such as `memory_exhausted` or `storage_exhausted`, counts as zero, since the agent failed
+the Task; any other result without rewards, such as an `env_error` or a `task_error`, has no
 score, since the environment or the Task failed rather than the agent.
+
+The result's `validation_rounds` lists each
+[validation round](episode-protocol.md#validation-rounds) in order: its index, its status
+(`completed` when it scored, else what its failure is), its reward or none, its failure, its
+start and end, the feedback the agent was shown, by its episode-relative `path`, `digest`
+and `size_bytes`, since the text itself is that file, and the allocation of the solver it
+booted for the agent's next turn, such as its GPU devices, since every turn after the first
+runs in a new Sandbox; the RunLock keeps the first solver's. Calibration records each case's
+validation check there too, as its one entry, with no solver allocation.
 
 `runs/<run>/ledger.db` is a rebuildable run-level projection for queued/running/current
 phase/terminal/interrupted state. It uses WAL and stores bounded failures and final reward
@@ -208,6 +227,9 @@ runs/<run>/<episode>/
   result.json                  # last attempt; only this result participates in the run
   lock.json                    # provenance of the same attempt
   trajectory.json              # evidence of the same attempt, when produced
+  validation/1/                # each validation round's result, feedback and Judge logs
+    verification.json
+    feedback.md
   attempts/1/                  # first attempt, only if a later retry replaced it
     result.json
     lock.json
@@ -263,9 +285,13 @@ its sanitized native stdout/stderr are retained as response events in
 
 ## Verification result
 
-`verification.json` preserves the complete Task-authored JSON result. Only `reward`
-is projected into episode rewards. `llm-judge.jsonl` and `agent-judge.jsonl` sit alongside
-it and are collected independently, including after failure.
+`verification.json` preserves the complete Task-authored JSON result. Only `reward` is
+projected into episode rewards. `llm-judge.jsonl` and `agent-judge.jsonl` sit alongside it
+and are collected independently, including after failure. Each validation round keeps the
+same files in `validation/<round>/`, with `feedback.md`, the feedback text the agent was
+shown. A separate verifier's copy of the round's artifacts is deleted when the round ends,
+even with `artifacts.collect = "host"`. The RunLock records the effective
+`validation_rounds` and each Judge's `placement`, `verify` or `validate`.
 See [Verification](verification.md) for the result and tool contracts.
 
 ## Interoperability

@@ -55,7 +55,7 @@ Providers; a Node lends no scheduler, since it is itself where Sandboxes start.
 | Part | Holds |
 |---|---|
 | `resources` | CPUs, memory, disk, GPUs by model, and `macos_vm_slots` |
-| `profiles` | The **capability profiles** of each lent leaf, one per combination it can start (a leaf whose features exclude each other declares several), in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots, GPUs, their models and memory and how it shares them, CPU and memory limits (never more than the Node lends in all), whether it holds a Sandbox to its `storage_mb`, and container features |
+| `profiles` | The **capability profiles** of each lent leaf, one per combination it can start (a leaf whose features exclude each other declares several), in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots and how many it saves in a row, GPUs, their models and memory and how it shares them, CPU and memory limits (never more than the Node lends in all), whether it holds a Sandbox to its `storage_mb`, and container features |
 | `framework` | The identity of the framework its engine installs into every Sandbox |
 | `boot_id` | The machine's boot: it changes when the machine restarts, which ends every Sandbox on it, and a restarted node agent keeps it |
 
@@ -71,14 +71,15 @@ it took, the snapshots it keeps, and its free disk. A Node silent for 30 seconds
 
 ## Placement
 
-A Run asks for each Sandbox with a **demand**: kind, operating system, architecture,
-network mode, resources with their container features, the image's key, the Run's framework
-identity, the episode's retention, any snapshot it boots from, and, for the solver of a
-snapshot verifier, the verifier's resources. A Sandbox runs the framework of the engine
-driving it, so only a Node with the same framework identity serves it. Every Node prepares
-the images it serves itself, and Nodes never copy images from one another; an image's
-**key** is the identity of what it is prepared from, which the Run knows before any Node
-prepares it, and a Node keeps each image it prepared under its key.
+A Run asks for each Sandbox with a **demand**: kind, operating system, architecture, network
+mode, resources with their container features, the image's key, the Run's framework
+identity, the episode's retention, any snapshot it boots from, how many validation rounds
+save it, and, for the solver of a snapshot verifier or of a shared validation round's, the
+verifier's resources. A Sandbox runs the framework of the engine driving it, so only a Node
+with the same framework identity serves it. Every Node prepares the images it serves itself,
+and Nodes never copy images from one another; an image's **key** is the identity of what it
+is prepared from, which the Run knows before any Node prepares it, and a Node keeps each
+image it prepared under its key.
 
 1. **Filter.** A Node is a candidate when it is online and not draining, has a profile that
    serves the demand, has not refused this Sandbox, and can be reached by its Run. Profiles

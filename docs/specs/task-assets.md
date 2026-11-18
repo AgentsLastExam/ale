@@ -10,15 +10,16 @@ beside the files of the stage that reads them, at these roots of a
 |---|---|
 | `environment/assets/` | the image build, container or VM, through its ordinary context |
 | `tests/assets/` | verification |
+| `validation/assets/` | the verifier of each [validation round](episode-protocol.md#validation-rounds) |
 | `calibration/<case>/assets/` | the oracle of that [case](task-authoring.md#calibration) |
 
 To the runtime they are ordinary files of their stage, uploaded with it and read through
 relative paths such as `assets/reference.json` or `.\assets\seed.json`; `ALE_STAGE_DIR`
 gives a subprocess the stage's absolute path. A stage's assets are therefore as visible as
-the stage: the image build places what the agent sees, and tests and calibration assets
-are absent while the evaluated agent works. Setup has no asset root: large data it
-needs is built into the image, at a root-only location when the agent must not read it
-directly. Running a Task never implicitly downloads assets.
+the stage: the image build places what the agent sees, and tests, validation and
+calibration assets are absent while the evaluated agent works. Setup has no asset root:
+large data it needs is built into the image, at a root-only location when the agent must not
+read it directly. Running a Task never implicitly downloads assets.
 Source digests leave the asset roots out; assets have their own commit identity.
 
 ## Offline software
@@ -43,9 +44,10 @@ and declare external dependencies. Linux has no required package format. For Win
 software requiring repackaging, prefer the
 [MSIX workflow](../guides/windows-task-images.md). No Task depends on another Task's files.
 
-Record the source, version, integrity hash, compatible base, and deployment requirements. Keep
-credentials out of assets. Validate from a clean base as the actual agent user, including required
-writes, child tools and save/reopen, without repeating the interactive acquisition process.
+Record the source, version, integrity hash, compatible base, and deployment requirements.
+Keep credentials out of assets. Test from a clean base as the actual agent user, including
+required writes, child tools and save/reopen, without repeating the interactive acquisition
+process.
 
 Asset commands treat these as ordinary Task-local files and mirror their paths to HF. They do
 not consolidate software into a repository-level directory.

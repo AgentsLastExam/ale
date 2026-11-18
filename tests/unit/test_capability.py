@@ -110,6 +110,18 @@ class TestUnmet:
         assert unmet(plain, needs(snapshot=True)) == ("saves and boots no snapshots",)
         assert unmet(plain, needs()) == ()
 
+    def test_a_profile_that_saves_few_snapshots_in_a_row_serves_no_longer_chain(self) -> None:
+        """A chain of saves, one booted from the snapshot before, as validation rounds make."""
+        short = PROFILE.model_copy(update={"snapshot": True, "max_saves": 3})
+        assert unmet(short, needs(snapshot=True, saves=3)) == ()
+        assert unmet(short, needs(snapshot=True, saves=4)) == (
+            "saves 4 snapshots in a row, more than its 3",
+        )
+        assert (
+            unmet(PROFILE.model_copy(update={"snapshot": True}), needs(snapshot=True, saves=40))
+            == ()
+        )
+
     def test_a_gpu_needs_a_profile_that_attaches_one_of_an_accepted_model(self) -> None:
         gpu = needs(resources=Resources(gpus=1, gpu_types=("H100",)))
         assert unmet(PROFILE.model_copy(update={"gpus": False}), gpu) == ("attaches no GPUs",)
@@ -209,7 +221,14 @@ class TestNeeds:
         assert (
             request.needs
             == demand.needs
-            == needs(network_mode=NetworkMode.OPEN, resources=resources, snapshot=True)
+            == needs(network_mode=NetworkMode.OPEN, resources=resources, snapshot=True, saves=1)
+        )
+        # Validation rounds plan more saves in a row, one each.
+        planned = {"planned_saves": 2}
+        assert (
+            request.model_copy(update=planned).needs
+            == demand.model_copy(update=planned).needs
+            == needs(network_mode=NetworkMode.OPEN, resources=resources, snapshot=True, saves=3)
         )
         booted = request.model_copy(update={"retention": "destroy", "snapshot": "docker:x"})
         assert booted.needs.snapshot
@@ -325,3 +344,15 @@ class TestProviders:
             match=r"^daytona cannot serve this Sandbox: gives no container features perf",
         ):
             await DaytonaProvider().accepts(request)
+
+
+def test_a_solver_saves_one_snapshot_for_each_round_to_come_and_one_at_its_end_at_most() -> None:
+    """Its end's save serves a snapshot verifier and retention alike; a shared solver, which
+    its verifier runs in, is saved at its end only to keep it."""
+    from ale.core.capability import solver_saves
+
+    assert solver_saves(2, snapshot_verified=False, kept_as_snapshot=False) == 2
+    assert solver_saves(2, snapshot_verified=True, kept_as_snapshot=False) == 3
+    assert solver_saves(2, snapshot_verified=False, kept_as_snapshot=True) == 3
+    assert solver_saves(2, snapshot_verified=True, kept_as_snapshot=True) == 3
+    assert solver_saves(0, snapshot_verified=False, kept_as_snapshot=False) == 0

@@ -38,6 +38,7 @@ _TOP_LEVEL = {
     INSTRUCTION,
     ENVIRONMENT_DIR,
     Stage.TESTS,
+    Stage.VALIDATION,
     CALIBRATION_DIR,
     ".ale-cache",
 }

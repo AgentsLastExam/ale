@@ -118,6 +118,10 @@ class GatewaySession:
 
     refusal: LimitReached | None = field(default=None, repr=False)
     """The first limit that refused one of this session's calls, if any."""
+    suspended: bool = False
+    """Whether its calls are refused for now: an agent's from the end of its first turn, or
+    of its policy rollout, except while a later turn runs; a Judge's except while a verifier
+    runs. Nothing run between the agent's turns or after its last then spends either."""
 
     purpose: Literal["agent", "judge"] = "agent"
     """A Judge session is unlimited and never replays: a retried verdict must sample again."""
@@ -240,6 +244,12 @@ class SessionRegistry:
         return session
 
     def resolve(self, token: str | None) -> GatewaySession | None:
+        """The open session of ``token``; none for an unknown or a suspended one."""
+        session = self.known(token)
+        return None if session is None or session.suspended else session
+
+    def known(self, token: str | None) -> GatewaySession | None:
+        """The session of ``token``, suspended or not, until its episode ends."""
         return self._by_token.get(token) if token else None
 
     def close(self, session: GatewaySession) -> None:

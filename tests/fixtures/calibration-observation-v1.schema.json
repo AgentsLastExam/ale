@@ -121,23 +121,42 @@
         }
       ]
     },
+    "expect": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/expectation"}
+    },
+    "observed": {
+      "type": "object",
+      "additionalProperties": {"type": ["number", "null"]}
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expect", "observed", "failures", "passed"],
+      "properties": {
+        "expect": {"$ref": "#/$defs/expect"},
+        "observed": {"$ref": "#/$defs/observed"},
+        "failures": {"type": "array", "items": {"$ref": "#/$defs/notice"}},
+        "passed": {"type": "boolean"}
+      }
+    },
     "case": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "expect", "attempt", "observed", "failures", "passed"],
+      "required": ["name", "expect", "attempt", "observed", "failures", "validation", "passed"],
       "properties": {
         "name": {"type": "string", "minLength": 1},
-        "expect": {
-          "type": "object",
-          "minProperties": 1,
-          "additionalProperties": {"$ref": "#/$defs/expectation"}
-        },
+        "expect": {"$ref": "#/$defs/expect"},
         "attempt": {"$ref": "#/$defs/attempt"},
-        "observed": {
-          "type": "object",
-          "additionalProperties": {"type": ["number", "null"]}
-        },
+        "observed": {"$ref": "#/$defs/observed"},
         "failures": {"type": "array", "items": {"$ref": "#/$defs/notice"}},
+        "validation": {
+          "oneOf": [
+            {"$ref": "#/$defs/check"},
+            {"type": "null"}
+          ]
+        },
         "passed": {"type": "boolean"}
       }
     },

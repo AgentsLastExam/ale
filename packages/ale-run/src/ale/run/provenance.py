@@ -18,6 +18,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from ale.core.config import RunConfig, RunTimeouts
 from ale.core.harness import EffectiveAgentResources
@@ -96,12 +97,15 @@ def gateway_provenance(settings: RunConfig, *, observable: bool = True) -> Gatew
 
 
 def judge_provenance(
-    invocations: tuple[JudgeInvocation, ...], endpoints: Mapping[str, str] | None = None
+    invocations: tuple[JudgeInvocation, ...],
+    endpoints: Mapping[str, str] | None = None,
+    *,
+    placement: Literal["verify", "validate"] = "verify",
 ) -> tuple[JudgeProvenance, ...]:
     """Project collected sandbox observations into the stable RunLock shape.
 
     ``endpoints`` names each Judge kind's real endpoint, which replaces the Gateway
-    address the verifier observed.
+    address the verifier observed; ``placement`` says which verifier called them.
     """
     endpoints = endpoints or {}
     observed: list[JudgeProvenance] = []
@@ -120,6 +124,7 @@ def judge_provenance(
                 schema_hash=first.schema_hash,
                 adapter=invocation.adapter,
                 adapter_version=invocation.adapter_version,
+                placement=placement,
                 attempts=len(invocation.attempts),
             )
         )
@@ -203,6 +208,8 @@ class ProvenanceInputs:
     gateway: GatewayProvenance
     config_hash: str
     timeouts: RunTimeouts = field(default_factory=RunTimeouts)
+    validation_rounds: int = 0
+    """The effective count, which the run layer resolves before anything is prepared."""
     judges: tuple[JudgeProvenance, ...] = ()
     framework: FrameworkProvenance = field(default_factory=framework_provenance)
 
@@ -246,6 +253,7 @@ def build_lock(
         sandbox=sandbox,
         config_hash=inputs.config_hash,
         timeouts=inputs.timeouts,
+        validation_rounds=inputs.validation_rounds,
         seed=seed,
         ale_verify=ale_verify,
         judges=inputs.judges,

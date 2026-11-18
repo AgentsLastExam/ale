@@ -1197,9 +1197,12 @@ class TestRetention:
 
     def test_a_node_that_saves_no_snapshots_takes_none(self, control: ControlPlane) -> None:
         control.register(linux("plain"))
-        placement = ask(control, 1, container(retention="snapshot"))
-        assert placement.status is SandboxStatus.FAILED
-        assert placement.reason.endswith("saves and boots no snapshots")
+        # Kept as a snapshot, or saved for the validation round after its turn.
+        saved_for_a_round = container().model_copy(update={"planned_saves": 2})
+        for number, saved in enumerate((container(retention="snapshot"), saved_for_a_round)):
+            placement = ask(control, number, saved)
+            assert placement.status is SandboxStatus.FAILED
+            assert placement.reason.endswith("saves and boots no snapshots")
 
     def test_snapshots_follow_what_their_node_reports(
         self, control: ControlPlane, clock: Clock

@@ -2,7 +2,7 @@
 
 This is the implementation contract for adding an agent program that owns its own
 interaction loop. ALE supplies one instruction, a live Sandbox, a resolved authentication
-mode, validated settings, and resolved resources. The Harness launches the program in
+mode, checked settings, and resolved resources. The Harness launches the program in
 that Sandbox and returns a typed result.
 
 ## Required Files
@@ -14,7 +14,7 @@ Every shipped autonomous harness must include:
 3. a complete packaged preset at `ale/run/presets/<harness>.toml`;
 4. adapter-specific and common conformance tests;
 5. version and integrity reporting;
-6. explicit Skill, MCP, and resume validation;
+6. explicit Skill, MCP, and resume checks;
 7. episode-local configuration and evidence logs;
 8. a deterministic host-side evidence parser;
 9. provenance integration; and
@@ -22,7 +22,7 @@ Every shipped autonomous harness must include:
 
 Native CLI integrations subclass `CliHarness` in a package containing `adapter.py`,
 `settings.py`, `trajectory.py`, and `README.md`. The base owns everything that is the same
-for every CLI: settings validation, version and integrity, installation, prompt
+for every CLI: settings checks, version and integrity, installation, prompt
 delivery, the evidence layout, failure classification, and continuation checks. An
 adapter supplies only native knowledge: its configuration (`install_resources()`), its
 command line (`prepare_command()`), how to read one invocation's stdout
@@ -65,7 +65,7 @@ listed in the [Harness index](../../packages/ale-run/src/ale/run/harnesses/READM
 default. A release-binary adapter accepts only its pinned version, because only that
 version's digests are known. An already matching installation may be reused.
 
-Harnesses declare `supported_os` and validate it before Sandbox creation; the CLI also
+Harnesses declare `supported_os` and check it before Sandbox creation; the CLI also
 checks it before image preparation. The default is Linux only. An npm CLI adapter
 supports Linux, Windows and macOS. A release-binary adapter supports exactly the systems
 its table covers, and its README names any system upstream ships no build for. Unsupported
@@ -85,7 +85,7 @@ Every CLI adapter supports local Skills, canonical stdio and Streamable HTTP MCP
 servers, and native resume at its pinned version, except for a limit its
 package README names. Support is determined from the pinned program's verified behavior,
 not a permanent assumption about a product name. In particular, `openclaw@2026.7.1`
-supports MCP; a future pin that changes this must update validation and acceptance
+supports MCP; a future pin that changes this must update its checks and acceptance
 together.
 
 Claude Code, Codex CLI, and Grok Build support `agent.authentication = "auto" |
@@ -108,7 +108,7 @@ The preset lists every public setting, even when its value is a sentinel.
   native options are invalid.
 
 Accepted settings require a total translation: every field either changes native
-configuration or has a documented sentinel behavior. Unvalidated `**kwargs` forwarding
+configuration or has a documented sentinel behavior. Unchecked `**kwargs` forwarding
 is forbidden.
 
 ## Lifecycle
@@ -116,7 +116,7 @@ is forbidden.
 ### Construct
 
 Construction receives only definition-level values such as requested version and
-validated settings. It must not inspect ambient agent homes, allocate episode paths,
+checked settings. It must not inspect ambient agent homes, allocate episode paths,
 generate session IDs, retain a sandbox, access the network, or mutate process-global
 state.
 
@@ -124,10 +124,10 @@ One adapter instance may serve concurrent episodes. Any value containing an epis
 sandbox ID, home directory, token, config path, log path, observed version, or native
 session ID belongs in method-local or session state, never on the adapter instance.
 
-### Validate
+### Check
 
 `validate_resources()` runs before provider creation. The base implementation rejects
-all optional resources. An adapter that supports resources must explicitly validate:
+all optional resources. An adapter that supports resources must explicitly check:
 
 - Skills;
 - each accepted MCP transport and field;
@@ -145,7 +145,7 @@ Preparation runs after task setup and before agent egress is sealed:
 1. `install()` verifies or installs the pinned program and returns the observed version.
 2. `install_resources()` stages only `EffectiveAgentResources`: `install_skills` copies the
    Task's `skills_dir` into the native skills directory, then uploads the operator's Skills.
-3. ALE validates stdio MCP commands and working directories inside the sandbox.
+3. ALE checks stdio MCP commands and working directories inside the sandbox.
 
 Use only the provider-independent `Sandbox` API. Run measured and staged agent-owned
 content as `Identity.AGENT`. Native config, Skills, MCP files, and temporary state must
@@ -209,6 +209,16 @@ adapter recognizes by its exact ID in the Sandbox it is given. The session is th
 agent's files, so it continues in a later episode that adopted the retained solver
 ([Episode protocol](episode-protocol.md#continuation)); model, settings and
 resources may differ there, and that episode's RunLock records its own.
+
+[Validation rounds](episode-protocol.md#validation-rounds) are native resumes too: each turn
+after the first resumes the session in the solver booted from the round's snapshot, with the
+round's prompt, so a Run giving rounds to a Harness without native resume is refused before
+provisioning. The framework's preamble below the instruction and each round's prompt reach
+the program as any prompt does and are recorded with it, and every turn's invocation
+appends to the same evidence logs, so the trajectory is the one native session across all
+turns. Each Harness declares the files in which its program keeps credentials
+(`Harness.credentials`), which ALE removes, every Harness's, before a solver is saved or
+kept ([Security](security.md#5-answers-are-absent-not-hidden)).
 
 An adapter must never use a "latest session" selector, replay the transcript, copy a
 session into another Sandbox, or silently start a new conversation.
@@ -361,7 +371,7 @@ A new adapter is complete only when:
 A shipped integration therefore follows this acceptance order:
 
 1. strict settings, preset, native translation, parser, and error unit tests;
-2. official CLI configuration validation;
+2. the official CLI's acceptance of the generated configuration;
 3. shared deterministic conformance and sandbox integration;
 4. a real Skill plus MCP task through the selected authentication path;
 5. a real tool-surface smoke task that exercises every safely callable visible tool and
@@ -376,5 +386,5 @@ scored from its explicit tool lists, not trusted summary counters, and every cla
 must have an observed call and result in the collected evidence.
 
 For native resume, live acceptance directly calls `launch()` and then `resume()` twice
-inside one sandbox. Multi-segment orchestration by the episode protocol or the CLI is not
-part of this contract.
+inside one sandbox. A Harness takes no part in validation rounds beyond resuming: the
+episode protocol orchestrates them from this same contract.

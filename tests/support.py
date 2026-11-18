@@ -1,21 +1,41 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tomllib
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from ale.core.capability import CapabilityProfile, SandboxNeeds
 from ale.core.config import RunConfig, SandboxConfig
-from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, Sandbox, SandboxRequest
+from ale.core.errors import ProviderStartError
+from ale.core.harness import (
+    AgentRun,
+    AutonomousHarness,
+    HarnessSession,
+    NativeContinuation,
+    ResumeSupport,
+    TrajectoryParseContext,
+)
+from ale.core.sandbox import (
+    ExecResult,
+    ImageRef,
+    PreparedTaskImage,
+    Provider,
+    Sandbox,
+    SandboxRequest,
+    SandboxRole,
+)
 from ale.core.taskspec import (
     SCHEMA_VERSION,
     ContainerFeature,
@@ -26,8 +46,12 @@ from ale.core.taskspec import (
     Resources,
 )
 from ale.core.trace import ExecutionLog
+from ale.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
 from ale.run import ale_image
+from ale.run.harnesses.base import CliHarness
 from ale.run.providers import ProviderRegistry, machine_arch
+from ale.run.scaffold import scaffold_task
+from ale.run.tasksets.manifest import ManifestTask, load_tasks
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 #: The current ALE bases, for images a test builds or runs.
@@ -97,6 +121,17 @@ def provider_registry(*providers: Provider, only: bool = False) -> ProviderRegis
     registry = ProviderRegistry(RunConfig.model_validate({"sandbox": {"providers": order}}))
     for provider in providers:
         registry._instances[provider.id] = provider
+    return registry
+
+
+def fleet_registry(provider: Provider, client: Any, url: str) -> ProviderRegistry:
+    """A Run's registry whose one Provider is ``provider``, the Fleet at ``url`` that
+    ``client`` reaches."""
+    registry = ProviderRegistry(
+        RunConfig.model_validate({"sandbox": {"providers": ["fleet"], "fleet": {"url": url}}})
+    )
+    registry._instances["fleet"] = provider
+    registry._fleet = client
     return registry
 
 
@@ -428,12 +463,23 @@ class MemorySandbox(Sandbox):
 
     async def exec(self, argv, *, cwd=None, env=None, timeout_sec=None, identity=None,
                    output_sink=None):  # type: ignore[no-untyped-def]  # fmt: skip
-        import asyncio
-
-        from ale.core.sandbox import ExecResult
-
         if argv[0] == "sleep":
             await asyncio.sleep(float(argv[1]))
+        if argv[:2] == ["python3", "-c"] and argv[3:4] == ["inspect"]:
+            # The artifact copier: the declared file, when the Sandbox holds it.
+            found = argv[4] in self.files
+            entries = [{"source": argv[4], "kind": "file", "mode": 0o644}] if found else []
+            report = {"entries": entries, "skipped": [], "truncated": False}
+            return ExecResult(exit_code=0, stdout=json.dumps(report))
+        if argv[:2] == ["python3", "-c"] and argv[3:4] == ["read"]:
+            await output_sink("stdout", self.files[argv[4]])
+            return ExecResult(exit_code=0)
+        if argv[:3] == ["rm", "-rf", "--"]:
+            for path in argv[3:]:
+                for name in [
+                    name for name in self.files if name == path or name.startswith(path + "/")
+                ]:
+                    del self.files[name]
         text = " ".join(argv)
         if output_sink is not None:
             for word in argv:
@@ -502,7 +548,11 @@ class MemorySandbox(Sandbox):
     async def snapshot(self, *, roles, reason):  # type: ignore[no-untyped-def]
         from ale.core.sandbox import RetainedSandbox
 
+        # A Sandbox's first snapshot is named by its id, each later one by a number too.
         handle = f"memory:snapshot:{self.sandbox_id}"
+        taken = sum(name.startswith(handle) for name in self.provider.saved)
+        handle = f"{handle}-{taken}" if taken else handle
+        self.provider.saved.append(handle)
         self.provider.snapshots[handle] = dict(self.files)
         return RetainedSandbox(
             provider=self.provider.name,
@@ -542,6 +592,8 @@ class MemoryProvider(Provider):
         #: Retained Sandboxes and snapshots (their files), by handle.
         self.kept: dict[str, MemorySandbox] = {}
         self.snapshots: dict[str, dict[str, bytes]] = {}
+        #: Every snapshot handle it gave out, destroyed ones too.
+        self.saved: list[str] = []
         self.attached: list[str] = []
         #: How long handing a retained Sandbox to a later episode takes.
         self.attach_delay = 0.0
@@ -637,6 +689,96 @@ class MemoryProvider(Provider):
         return sandbox
 
 
+class _NoSettings(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class ScriptedCliHarness(CliHarness):
+    """The smallest agent CLI that resumes its native session, for episodes of several turns.
+
+    Each turn keeps its prompt in the session, reads the first line of it back from there
+    and appends it to ``work.txt`` in the agent's home, so a verifier that counts the lines
+    scores more each turn and reads which prompt each turn received, and reports its
+    session as a CLI's stream would. On Linux it also starts a process meant to outlive the
+    turn, after noting in ``survivors`` any an earlier turn left that still runs, and in
+    ``leaks`` what of ``validation/`` and its feedback it can see.
+    """
+
+    name = "scripted-cli"
+    package = "scripted-cli"
+    binary = "sh"
+    default_version = "1"
+    settings_type = _NoSettings
+    supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
+    logs = (".ale-harness", ".scripted-cli")
+
+    async def install(self, sandbox: Sandbox) -> str:
+        return self.version()
+
+    def integrity(self) -> str:
+        return "test-double"
+
+    def is_session_file(self, path: PurePosixPath, session_id: str) -> bool:
+        return path.parts[:2] == (".scripted-cli", session_id)
+
+    async def prepare_command(  # type: ignore[no-untyped-def]
+        self, prompt_path, sandbox, session, *, native_session_id
+    ):
+        from ale.run.harnesses.base import CliCommand
+
+        session_id = native_session_id or "scripted"
+        home = shlex.quote(session.home)
+        directory = shlex.quote(f"{session.home}/.scripted-cli/{session_id}")
+        survivors = f"""
+for process in /proc/[0-9]*; do
+  if tr '\\0' ' ' < "$process/cmdline" 2>/dev/null | grep -q '^sleep 9999'; then
+    echo "turn $turn" >> {home}/survivors
+  fi
+done
+(setsid sleep 9999 > /dev/null 2>&1 &)
+for leaked in /opt/ale/validation /logs/verifier/feedback.md; do
+  if [ -e "$leaked" ]; then echo "turn $turn: $leaked" >> {home}/leaks; fi
+done
+"""
+        script = f"""
+mkdir -p {directory}
+turn=$(( $(ls {directory} | wc -l) + 1 ))
+cp {shlex.quote(prompt_path)} {directory}/turn-$turn.md
+head -n 1 {directory}/turn-$turn.md >> {home}/work.txt
+{survivors if session.os is OperatingSystem.LINUX else ""}
+printf '{{"session_id": "%s", "result": "turn %s"}}\\n' {shlex.quote(session_id)} "$turn"
+"""
+        return CliCommand(script.strip(), {}, session_id)
+
+    def read_result(self, stdout: str):  # type: ignore[no-untyped-def]
+        from ale.run.harnesses.base import NativeResult
+
+        for line in reversed(stdout.splitlines()):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            return NativeResult(event.get("session_id"), event.get("result"))
+        return NativeResult(None, None, error="no result")
+
+    def parse_trajectory(self, context):  # type: ignore[no-untyped-def]
+        """Each turn's prompt as a user message and its result as the agent's answer."""
+        from ale.core.trajectory import AtifAgent, TrajectoryBuilder
+        from ale.run.harnesses.base import invocations
+
+        builder = TrajectoryBuilder(
+            trajectory_id=context.trajectory_id,
+            session_id=context.session_id,
+            agent=AtifAgent(name=self.name, version=context.agent_version),
+        )
+        for invocation in invocations(context):
+            builder.add(source="user", message=invocation.prompt)
+            answer = self.read_result(invocation.stdout).final_message
+            if answer:
+                builder.add(source="agent", message=answer)
+        return builder.build()
+
+
 class TraceSink:
     """An episode's execution trace, as the episode's logging writes it."""
 
@@ -647,3 +789,165 @@ class TraceSink:
         assert isinstance(event, ExecutionLog)
         self.events.append(event)
         return len(self.events)
+
+
+# --- validation rounds ---
+
+#: The line of work a :class:`TurnsHarness` adds each turn, which :class:`Verifiers` score.
+ROUNDS_WORK = "/home/user/work.txt"
+#: Where a :class:`TurnsHarness` keeps its native session: every prompt and its answer.
+TURNS_LOG = "/home/user/.turns/session.jsonl"
+TURNS_SESSION = NativeContinuation(harness="turns", native_session_id="session")
+
+
+class TurnsHarness(AutonomousHarness):
+    """Writes one more line of work each turn, and keeps its native session in the agent's
+    home: every prompt it received and what it answered."""
+
+    name = "turns"
+    resume_support = ResumeSupport.NATIVE
+    logs = (".turns",)
+
+    def __init__(self, *, stops: dict[int, Exception] | None = None, sleep: float = 0.0) -> None:
+        self.stops = stops or {}
+        self.sleep = sleep
+        self.prompts: list[str] = []
+        self.timeouts: list[float] = []
+        self.sandboxes: list[str] = []
+
+    def version(self) -> str:
+        return "1"
+
+    async def launch(self, instruction, sandbox, session, *, timeout_sec):  # type: ignore[no-untyped-def]
+        return await self._turn(instruction, sandbox, session, timeout_sec)
+
+    async def resume(self, instruction, continuation, sandbox, session, *, timeout_sec):  # type: ignore[no-untyped-def]
+        assert continuation == TURNS_SESSION
+        # Its session is in the Sandbox booted from the round's snapshot.
+        assert await sandbox.read_file(TURNS_LOG)
+        return await self._turn(instruction, sandbox, session, timeout_sec)
+
+    async def _turn(
+        self, prompt: str, sandbox: Any, session: HarnessSession, timeout_sec: float
+    ) -> AgentRun:
+        turn = len(self.prompts) + 1
+        self.prompts.append(prompt)
+        self.timeouts.append(timeout_sec)
+        self.sandboxes.append(sandbox.sandbox_id)
+        await asyncio.sleep(self.sleep)
+        for path, line in (
+            (ROUNDS_WORK, "line\n"),
+            (TURNS_LOG, json.dumps({"user": prompt, "agent": f"turn {turn}"}) + "\n"),
+        ):
+            try:
+                held = await sandbox.read_file(path)
+            except Exception:
+                held = b""
+            await sandbox.write_file(path, held + line.encode())
+        if turn in self.stops:
+            raise self.stops[turn]
+        return AgentRun(exit_code=0, final_message=f"turn {turn}", continuation=TURNS_SESSION)
+
+    def parse_trajectory(self, context: TrajectoryParseContext) -> AtifTrajectory:
+        builder = TrajectoryBuilder(
+            trajectory_id=context.trajectory_id,
+            session_id=context.session_id,
+            agent=AtifAgent(name=self.name, version="1"),
+        )
+        session = context.logs_dir / ".turns" / "session.jsonl"
+        for line in session.read_text().splitlines():
+            event = json.loads(line)
+            builder.add(source="user", message=event["user"])
+            builder.add(source="agent", message=event["agent"])
+        return builder.build()
+
+
+class RoundsProvider(MemoryProvider):
+    """Saves snapshots, ``max_saves`` in a row, gives each Sandbox an id of its own, and fails
+    what ``fail`` names."""
+
+    def __init__(self) -> None:
+        super().__init__("docker:runc", saves_snapshots=True)
+        self.fail: Callable[[SandboxRequest], bool] = lambda request: False
+        self.refusal: type[Exception] = ProviderStartError
+        #: The Sandboxes a Run's selection asked it about, in order: their role and needs.
+        self.asked: list[tuple[SandboxRole, SandboxNeeds]] = []
+        self.max_saves: int | None = None
+
+    async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        return tuple(
+            profile.model_copy(update={"max_saves": self.max_saves})
+            for profile in await super().profiles()
+        )
+
+    async def create(self, request: SandboxRequest) -> MemorySandbox:
+        if self.fail(request):
+            self.requests.append(request)
+            raise self.refusal(f"no room for the {request.role}")
+        sandbox = await super().create(request)
+        assert isinstance(sandbox, MemorySandbox)
+        sandbox.sandbox_id = f"{request.episode_id}-{len(self.sandboxes)}"
+        return sandbox
+
+    async def unserved(
+        self, needs: SandboxNeeds, *, user: str, role: SandboxRole
+    ) -> tuple[str, ...]:
+        self.asked.append((role, needs))
+        return await super().unserved(needs, user=user, role=role)
+
+    def booted(self, role: SandboxRole) -> list[SandboxRequest]:
+        return [request for request in self.requests if request.role is role]
+
+
+class Verifiers:
+    """``validation/`` and ``tests/`` both score the lines of work, a third each, and write
+    feedback; ``failing`` validation rounds exit 1 instead, and ``seen`` is called with the
+    Sandbox each run of ``validation/`` scores."""
+
+    def __init__(self) -> None:
+        self.failing: set[int] = set()
+        self.seen: Callable[[MemorySandbox], None] = lambda sandbox: None
+        self.feedback: dict[str, str] = {
+            "/opt/ale/validation": "{lines} lines; write more",
+            "/opt/ale/tests": "hidden test detail",
+        }
+        self.runs: list[tuple[str, str]] = []
+
+    async def __call__(self, sandbox: MemorySandbox, argv: Any, options: dict[str, Any]) -> bool:
+        cwd = options.get("cwd")
+        if list(argv) != ["bash", "test.sh"] or cwd not in self.feedback:
+            return True
+        self.runs.append((cwd, sandbox.sandbox_id))
+        if cwd == "/opt/ale/validation":
+            self.seen(sandbox)
+            if sum(stage == cwd for stage, _ in self.runs) in self.failing:
+                return False
+        lines = sandbox.files.get(ROUNDS_WORK, b"").count(b"\n")
+        reward = round(min(1.0, lines / 3), 2)
+        sandbox.files["/logs/verifier/reward.json"] = json.dumps({"reward": reward}).encode()
+        text = self.feedback[cwd].format(lines=lines)
+        sandbox.files["/logs/verifier/feedback.md"] = text.encode()
+        return True
+
+
+def rounds_task(
+    tmp_path: Path, *, rounds: int = 2, mode: str = "shared", **config: Any
+) -> ManifestTask:
+    """A Task whose agent receives ``rounds`` validation rounds, verified in ``mode``."""
+    root = scaffold_task(tmp_path / "task")
+    (root / "validation").mkdir()
+    (root / "validation" / "test.sh").write_text("#!/usr/bin/env bash\n")
+    verifier: dict[str, Any] = {"environment_mode": mode}
+    if mode != "shared":
+        verifier["environment"] = {"cpus": 4, "memory_mb": 2048}
+    edit_task_config(
+        root,
+        {
+            "environment": {"cpus": 1, "memory_mb": 1024},
+            "agent": {"validation_rounds": rounds, "timeout_sec": 600},
+            "verifier": verifier,
+            "artifacts": ["work.txt"],
+            **config,
+        },
+    )
+    return load_tasks(root)[0]

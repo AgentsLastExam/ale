@@ -26,7 +26,7 @@ an agent-owned rollout against ALE's stepwise Sandbox environment.
 Every autonomous Harness keeps provider-specific configuration local, but follows the
 same lifecycle:
 
-1. validate and install the pinned program;
+1. verify or install the pinned program;
 2. translate declared Skills and MCP servers;
 3. send model calls through the episode Gateway token;
 4. launch as the image-declared agent user;

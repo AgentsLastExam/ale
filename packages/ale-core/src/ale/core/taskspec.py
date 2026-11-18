@@ -553,21 +553,32 @@ class CalibrationCase(BaseModel):
     expect: dict[Annotated[str, Field(min_length=1)], Expectation]
     """``reward`` and any other top-level number of the Verification Result, each with the
     number it must equal or the closed interval it must fall in."""
+    expect_validation: dict[Annotated[str, Field(min_length=1)], Expectation] | None = None
+    """What ``validation/``'s result must be, by the same rules, where it differs from
+    ``expect``."""
 
-    def admits(self, key: str, value: float) -> bool:
-        """Whether ``value`` is what this case expects of ``key``."""
-        expected = self.expect[key]
+    @property
+    def validation_expect(self) -> dict[str, float | tuple[float, float]]:
+        """What ``validation/``'s result must be: ``expect_validation``, else ``expect``."""
+        return self.expect if self.expect_validation is None else self.expect_validation
+
+    def admits(self, key: str, value: float, *, validation: bool = False) -> bool:
+        """Whether ``value`` is what this case expects of ``key``, of ``validation/``'s
+        result when ``validation``."""
+        expected = (self.validation_expect if validation else self.expect)[key]
         if isinstance(expected, tuple):
             return expected[0] <= value <= expected[1]
         return value == expected
 
     # --- validation ---
 
-    @field_validator("expect")
+    @field_validator("expect", "expect_validation")
     @classmethod
     def _reward(
-        cls, expect: dict[str, float | tuple[float, float]]
-    ) -> dict[str, float | tuple[float, float]]:
+        cls, expect: dict[str, float | tuple[float, float]] | None
+    ) -> dict[str, float | tuple[float, float]] | None:
+        if expect is None:
+            return None
         reward = expect.get("reward")
         if reward is None:
             raise ValueError("must include reward")
@@ -642,6 +653,9 @@ class TaskSpec(BaseModel):
     """``[agent].workdir``: where the evaluated agent starts, below its home when relative;
     ``None`` for its home."""
     timeouts: PhaseTimeouts = PhaseTimeouts()
+    validation_rounds: int = Field(default=0, ge=0)
+    """``[agent].validation_rounds``: how many results of ``validation/`` the evaluated agent
+    receives, each between two of its turns."""
     artifacts: tuple[Artifact, ...] = ()
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
@@ -870,6 +884,9 @@ class AgentTable(BaseModel):
     allowed_hosts: tuple[str, ...] | None = None
     sudo: bool = Field(default=False, strict=True)
     workdir: str | None = Field(default=None, min_length=1)
+    validation_rounds: int = Field(default=0, ge=0, strict=True)
+    """How many results of ``validation/`` the agent receives, each between two of its turns;
+    ``N`` gives it ``N + 1`` turns."""
 
     @property
     def network(self) -> NetworkPolicy:

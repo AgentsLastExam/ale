@@ -644,6 +644,8 @@ class FirecrackerProvider(Provider):
                 gui=True,
                 network_modes=frozenset(NetworkMode),
                 snapshot=True,
+                # Each save stacks one more layer, so a chain of them is capped.
+                max_saves=MAX_LAYERS,
                 max_cpus=MAX_CPUS,
                 # Each microVM writes to a disk of its own, sized from storage_mb.
                 storage_limit=True,
@@ -689,11 +691,11 @@ class FirecrackerProvider(Provider):
         else:
             resolved_image = await self._disk(request)
             layers = ()
-        saves = request.retention == "snapshot" or request.snapshot_verifier is not None
-        if saves and len(layers) >= MAX_LAYERS:
+        if len(layers) + request.saves > MAX_LAYERS:
             raise ProviderCapabilityError(
-                f"{request.snapshot} stacks {len(layers)} layers, the most a microVM boots, so "
-                "a Sandbox booted from it saves no snapshot"
+                f"{request.snapshot or 'its image'} stacks {len(layers)} layers, and saving it "
+                f"{request.saves} more times would stack more than the {MAX_LAYERS} a microVM "
+                "boots"
             )
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"

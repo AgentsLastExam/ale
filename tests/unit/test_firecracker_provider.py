@@ -397,13 +397,15 @@ async def test_the_layer_chain_is_capped_before_the_guest_is_stopped(
 
 
 @pytest.mark.asyncio
-async def test_a_sandbox_that_would_save_on_a_full_layer_stack_is_refused_up_front(
+async def test_a_sandbox_that_would_save_past_the_layer_limit_is_refused_up_front(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A Sandbox booted from a snapshot of MAX_LAYERS layers could not be saved again, so one
-    that will be, kept as a snapshot or saved for its snapshot verifier, never starts."""
-    _snapshot(tmp_path, disks=["rootfs.ext4", *(f"layer-{i}.ext4" for i in range(MAX_LAYERS))])
-    for index in range(MAX_LAYERS):
+    """Each save stacks one more layer, MAX_LAYERS at most, so a Sandbox whose snapshot's
+    layers and planned saves, kept as a snapshot, saved for its snapshot verifier or for
+    validation rounds, exceed it never starts; selection already passes over the profile when
+    a Sandbox booted from an image plans more."""
+    _snapshot(tmp_path, disks=["rootfs.ext4", *(f"layer-{i}.ext4" for i in range(MAX_LAYERS - 2))])
+    for index in range(MAX_LAYERS - 2):
         (tmp_path / "snapshots/e1-abc" / f"layer-{index}.ext4").write_bytes(b"disk")
     recorder = _Recorder()
     monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
@@ -411,11 +413,14 @@ async def test_a_sandbox_that_would_save_on_a_full_layer_stack_is_refused_up_fro
     monkeypatch.setattr(provider, "preflight", AsyncMock())
     handle = f"{SNAPSHOT_PREFIX}e1-abc"
     for saving in (
-        {"retention": "snapshot"},
-        {"snapshot_verifier": Resources(cpus=4, memory_mb=4096)},
+        {"retention": "snapshot", "planned_saves": 2},
+        {"snapshot_verifier": Resources(cpus=4, memory_mb=4096), "planned_saves": 2},
+        {"planned_saves": 3},
     ):
-        with pytest.raises(ProviderCapabilityError, match="saves no snapshot"):
+        with pytest.raises(ProviderCapabilityError, match="saving it 3 more times would stack"):
             await provider.create(request(snapshot=handle, **saving))
+    (profile,) = await provider.profiles()
+    assert profile.max_saves == MAX_LAYERS
     assert recorder.calls == []
 
 

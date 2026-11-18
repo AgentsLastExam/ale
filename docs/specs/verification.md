@@ -28,20 +28,35 @@ check = checks.text_equals("/home/user/output/answer.txt", "42")
 write({"reward": check["score"], "answer": check})
 ```
 
-`write(result)` validates and rounds `reward`, then atomically replaces `verification.json`
-with the complete result and `reward.json` with `{"reward": ...}`, without modifying the
-caller's object. It does not end the program or mark the episode successful. Repeated
-calls replace the previous result. Other languages or Python programs may write the same
-files directly, `verification.json` being optional; the engine applies the same checks.
-An exception, timeout or nonzero exit still fails verification after a result was written.
+`write(result, *, feedback=None)` checks and rounds `reward`, then atomically replaces
+`verification.json` with the complete result and `reward.json` with `{"reward": ...}`,
+without modifying the caller's object. It does not end the program or mark the episode
+successful. Repeated calls replace the previous result. Other languages or Python programs
+may write the same files directly, `verification.json` being optional; the engine applies
+the same checks. An exception, timeout or nonzero exit still fails verification after a
+result was written.
+
+### Feedback
+
+Beside the result, a verifier may write a feedback text for the agent, `feedback.md` in the
+verifier directory: UTF-8, at most 64 KiB (`ale_verify.MAX_FEEDBACK_BYTES`). `write(result,
+feedback=text)` writes it beside the result, each file atomically, and refuses a longer text
+before it writes anything; `write(result)` removes one an earlier call wrote. Only
+[`validation/`](task-authoring.md#validation)'s feedback is read: it reaches the agent,
+verbatim below its reward, as its next turn begins. `tests/`'s is ignored, so a `verify.py`
+both stages run may write it. A validation feedback text that is larger, is not UTF-8 or
+holds a Judge's token fails that run of `validation/` as a Task error, as a malformed result
+does, and other credentials in it are redacted.
 
 Before every attempt the engine clears the verification staging directory and empties the
 verifier directory, which only the framework can then write
 ([Security](security.md#4-the-agent-cannot-change-what-it-is-measured-under)).
 
 On the host, `verification.json` contains the complete result, which is `reward.json`'s
-object when the verifier wrote no `verification.json`. Episode rewards contain only
-`reward`; the episode status and failure remain in `result.json`. `ale calibrate` reads the
+object when the verifier wrote no `verification.json`; a
+[validation round](episode-protocol.md#validation-rounds)'s, with its feedback text, is in
+its own directory. Episode rewards contain only `reward`; the episode status and failure
+remain in `result.json`. `ale calibrate` reads the
 result's other top-level numbers only to check a
 [calibration case](task-authoring.md#calibration)'s expectation, never to score.
 
@@ -82,7 +97,7 @@ write(verify())
 trajectory=False, mcp_servers=())` returns a normal dictionary. `kind` is `llm` or
 `agent`. Names label logs and need not be unique. Optional `output_schema` uses JSON
 Schema draft 04, 06 or 07; without it the response must still be a JSON object. Schema
-validation does not insert defaults or coerce values. References must be self-contained;
+checking does not insert defaults or coerce values. References must be self-contained;
 external schema downloads are unsupported. Task Python handles all subsequent scoring.
 
 Both Judge kinds use the model provider, model and reasoning effort configured by the run.
@@ -119,8 +134,8 @@ inline text; `trajectory=True` includes the solver trajectory. Missing or unusab
 raises `EvidenceError`; the tool does not decide that it deserves zero. Authors should check
 expected submissions before invoking a Judge and assign missing or unusable submissions
 the task's intended deductions or zero score. Passing missing evidence to a Judge still
-raises. Invalid JSON or schema-mismatched model output receives the validation error and
-schema for up to three repair attempts after the initial response; only exhaustion raises.
+raises. Invalid JSON or schema-mismatched model output receives the error and the schema
+for up to three repair attempts after the initial response; only exhaustion raises.
 An unhandled Judge failure is not a score.
 
 Evidence is bounded: 20 MiB per file, 32 MiB per invocation, 256 KiB for inline references,

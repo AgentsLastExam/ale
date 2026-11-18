@@ -146,8 +146,9 @@ class TaskFolder:
         Verification and the calibration cases, the reference solution among them, never reach
         an evaluated agent, so ``tests/``, ``calibration/`` and ``task.toml``'s ``[solution]``
         and ``[[calibration]]`` tables are left out: changing them keeps a retained solver
-        reverifiable. Asset bytes are left to their own commit identity rather than hashed
-        on every load; reverification compares that commit separately.
+        reverifiable. ``validation/`` stays in, since the agent receives its results. Asset
+        bytes are left to their own commit identity rather than hashed on every load;
+        reverification compares that commit separately.
         """
         files = tree_digest(
             self.root,
@@ -328,6 +329,7 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
         network=config.agent.network,
         workdir=config.agent.workdir,
         timeouts={"agent": config.agent.timeout_sec, "verify": config.verifier.timeout_sec},
+        validation_rounds=config.agent.validation_rounds,
         artifacts=config.artifacts,
         tools=ToolProvision(
             skills_dir=config.environment.skills_dir,
@@ -453,7 +455,9 @@ def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
 
     A calibration case runs as the oracle, so its directory holds ``solve.sh``, or
     ``solve.ps1`` on Windows. ``calibration/solution/`` is the reference solution every Task
-    has; any other directory there needs a ``[[calibration]]`` entry.
+    has; any other directory there needs a ``[[calibration]]`` entry. ``validation/`` is
+    optional, and has the entry ``tests/`` has when it exists; validation rounds and a case's
+    ``expect_validation`` need it.
     """
     # Harbor's reference solution is solution/: say where ALE's is, not only that it is missing.
     if (folder.root / "solution").is_dir():
@@ -464,10 +468,16 @@ def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
     operating_system = config.environment.os
     solve = case_entry(operating_system)
     cases = [case.name for case in config.calibration_cases]
+    validation = folder.stage_dir(Stage.VALIDATION) is not None
     required = (
         folder.root / TASK_CONFIG,
         folder.root / INSTRUCTION,
         folder.root / Stage.TESTS / Stage.TESTS.entry(operating_system),
+        *(
+            (folder.root / Stage.VALIDATION / Stage.VALIDATION.entry(operating_system),)
+            if validation
+            else ()
+        ),
         *(folder.root / CALIBRATION_DIR / name / solve for name in cases),
     )
     missing = [path.relative_to(folder.root).as_posix() for path in required if not path.is_file()]
@@ -475,6 +485,17 @@ def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
         raise TaskDefinitionError(
             f"{folder.root} is missing required Task file(s): {', '.join(missing)}"
         )
+    if not validation:
+        if config.agent.validation_rounds:
+            raise TaskDefinitionError(
+                f"{folder.root}: [agent].validation_rounds needs validation/, the verifier "
+                "whose results the agent receives"
+            )
+        if unchecked := [case.name for case in config.calibration if case.expect_validation]:
+            raise TaskDefinitionError(
+                f"{folder.root}: expect_validation of [[calibration]] {', '.join(unchecked)} "
+                "needs validation/"
+            )
     for name in sorted(path.name for path in (folder.root / CALIBRATION_DIR).glob("*/")):
         if name not in cases:
             raise TaskDefinitionError(

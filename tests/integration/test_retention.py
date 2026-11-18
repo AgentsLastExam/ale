@@ -144,6 +144,7 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
         agent_run=run,
         logging_policy=policy,
         trajectory_written=False,
+        validation_prompts={},
     )
 
 
@@ -313,9 +314,10 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
     oracle = task / "calibration/solution/solve.sh"
     oracle.write_text(
         oracle.read_text()
-        + "mkdir -p /home/user/.codex /home/user/.claude\n"
-        + "printf secret > /home/user/.codex/auth.json\n"
-        + "printf secret > /home/user/.claude/.credentials.json\n"
+        # Another Harness's credentials, which sanitation removes whichever Harness ran.
+        + "mkdir -p /home/user/.codex-ale /home/user/.claude-config\n"
+        + "printf secret > /home/user/.codex-ale/auth.json\n"
+        + "printf secret > /home/user/.claude-config/.credentials.json\n"
     )
     result = await run_episode(
         load_tasks(task)[0],
@@ -349,8 +351,8 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
             container,
             "sh",
             "-c",
-            "test ! -e /home/user/.codex/auth.json && "
-            "test ! -e /home/user/.claude/.credentials.json && "
+            "test ! -e /home/user/.codex-ale/auth.json && "
+            "test ! -e /home/user/.claude-config/.credentials.json && "
             "test ! -e /logs/verifier",
         )
         assert await credentials.wait() == 0

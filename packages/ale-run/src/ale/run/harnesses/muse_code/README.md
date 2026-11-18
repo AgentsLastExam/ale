@@ -13,8 +13,8 @@ pinned by SHA-256 from the release manifest.
 Muse keeps settings under `XDG_CONFIG_HOME` and sessions under `XDG_DATA_HOME`. The
 command names their defaults, `.config` and `.local/share` in the agent home, so both
 stay in the episode on every system. `settings.json` turns telemetry off and holds the
-MCP servers; Skills go to `.config/muse/skills`. Muse ignores unknown settings keys, so
-the generated file is checked by the Docker integration run, not by a validator.
+MCP servers; Skills go to `.config/muse/skills`. Muse ignores unknown settings keys, so it
+reports no mistake in the generated file; the Docker integration run checks the file.
 
 Muse decides from the provider, not the model, whether to send images, and always sends
 them to Meta's; it has no setting for it.

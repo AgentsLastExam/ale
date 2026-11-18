@@ -11,6 +11,7 @@ contracts first).
 
 from ale.core.calibration import (
     CalibrationAttempt,
+    CalibrationCheck,
     CalibrationEngine,
     CalibrationNotice,
     CalibrationObservation,
@@ -21,6 +22,7 @@ from ale.core.taskspec import ImageKind, ImageSpec
 
 __all__ = [
     "CalibrationAttempt",
+    "CalibrationCheck",
     "CalibrationEngine",
     "CalibrationNotice",
     "CalibrationObservation",

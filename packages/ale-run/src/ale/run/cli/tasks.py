@@ -16,12 +16,14 @@ import typer
 
 from ale.core.calibration import (
     CalibrationAttempt,
+    CalibrationCheck,
     CalibrationEngine,
     CalibrationNotice,
     CalibrationObservation,
     CaseCalibrationObservation,
     TaskCalibrationObservation,
 )
+from ale.core.capability import round_verifier_resources
 from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
 from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
 from ale.core.fleet import RunPlan
@@ -74,6 +76,7 @@ from ale.run.protocol.episode_protocol import (
     Resume,
     ReverificationProtocol,
     SolverSnapshot,
+    validation_rounds,
 )
 from ale.run.provenance import (
     ProvenanceInputs,
@@ -266,8 +269,13 @@ async def _run_one(
     try:
         resolved = resolve(reference)
         tasks = load_tasks(resolved.task_dir)
+        rounds: dict[str, int] = {}
         for task in tasks:
             harness.validate_os(task.spec.os)
+            rounds[str(task.spec.name)] = validation_rounds(
+                task, harness, settings.validation_rounds
+            )
+            task.validations = rounds[str(task.spec.name)]
         _resolve_variables(tasks, settings, oracle=settings.agent.name == "oracle")
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         continued = (
@@ -359,6 +367,7 @@ async def _run_one(
                     max_steps=settings.agent.max_steps,
                     timeouts=settings.timeouts,
                     resume=resume,
+                    validation_rounds=inputs.validation_rounds,
                 ),
                 providers,
                 run_dir=run_dir,
@@ -444,6 +453,7 @@ async def _run_one(
                 gateway=gateway_provenance(settings),
                 config_hash=settings.config_hash,
                 timeouts=settings.timeouts,
+                validation_rounds=rounds[str(task.spec.name)],
             )
             if task.prepared_image is None:
                 raise TaskDefinitionError(f"solver image was not prepared for {task.spec.name}")
@@ -689,6 +699,8 @@ async def _reverify(
                 gateway=source_lock.gateway,
                 config_hash=settings.config_hash,
                 timeouts=settings.timeouts,
+                # What the agent whose state it verifies received.
+                validation_rounds=source_lock.validation_rounds,
             )
             episode_id = f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}"
 
@@ -896,15 +908,15 @@ def _continued(episode_dir: Path, tasks: list[ManifestTask], settings: RunConfig
         raise TaskDefinitionError(
             f"episode {result.episode_id} left no retained solver and native session"
         )
-    if (
-        retained.outcome == "retained"
-        and tasks[0].spec.verify.environment_mode is VerificationMode.SNAPSHOT
-    ):
-        # Its verifier would boot from a snapshot of it, whose save stops the kept solver.
+    snapshot = tasks[0].spec.verify.environment_mode is VerificationMode.SNAPSHOT
+    if retained.outcome == "retained" and (snapshot or tasks[0].validations):
+        # Its verifier, or its first validation round, would boot from a snapshot of it,
+        # whose save stops the kept solver.
+        saving = "snapshot verification" if snapshot else "a validation round"
         raise TaskDefinitionError(
-            f"episode {result.episode_id} kept its solver running, which snapshot "
-            "verification would save and destroy; continue from a snapshot of it instead, "
-            "kept with sandbox_retention.solver = 'snapshot'"
+            f"episode {result.episode_id} kept its solver running, which {saving} "
+            "would save and destroy; continue from a snapshot of it instead, kept with "
+            "sandbox_retention.solver = 'snapshot'"
         )
     return _Continued(result, lock, trajectory, retained, retained.handle)
 
@@ -1036,6 +1048,9 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
     try:
         resolved = resolve(reference)
         tasks = load_tasks(resolved.task_dir)
+        for task in tasks:
+            # Every case checks validation/ too, on a snapshot of the same final state.
+            task.validations = int(task.folder.stage_dir(Stage.VALIDATION) is not None)
         _resolve_variables(tasks, settings, oracle=True)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
@@ -1106,6 +1121,7 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                                 harness,
                                 max_steps=settings.agent.max_steps,
                                 timeouts=settings.timeouts,
+                                check_validation=task.validates,
                             ),
                             providers,
                             run_dir=run_dir,
@@ -1135,6 +1151,11 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                     observed, case_failures = _calibration_check(
                         case, result.verdict, result.run_dir
                     )
+                    validation = (
+                        _validation_check(case, result.record, result.run_dir)
+                        if task.validates
+                        else None
+                    )
                     cases.append(
                         CaseCalibrationObservation(
                             name=case.name,
@@ -1142,7 +1163,8 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                             attempt=_calibration_attempt(result, run_dir),
                             observed=observed,
                             failures=case_failures,
-                            passed=not case_failures,
+                            validation=validation,
+                            passed=not case_failures and (validation is None or validation.passed),
                         )
                     )
                     typer.echo(_case_line(str(spec.name), cases[-1]))
@@ -1259,7 +1281,12 @@ def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
-    return [task.folder.root / Stage.TESTS for task in tasks]
+    """The verifier stages the Run runs: ``tests/``, and ``validation/`` where it runs."""
+    return [
+        task.folder.root / stage
+        for task in tasks
+        for stage in ((Stage.TESTS, Stage.VALIDATION) if task.validates else (Stage.TESTS,))
+    ]
 
 
 def _note(notices: tuple[str, ...]) -> None:
@@ -1279,7 +1306,7 @@ async def _prepare_images(
     hold for a Task is refused first.
     """
     for task in tasks:
-        check_retention(task.spec, providers.settings.sandbox_retention)
+        check_retention(task.spec, providers.settings.sandbox_retention, validates=task.validates)
     await resolve_image_kinds(tasks)
     _note(
         await providers.select(
@@ -1383,14 +1410,50 @@ def _calibration_check(
     if verdict.status is not Status.COMPLETED or verdict.rewards is None:
         message = f"the episode ended with {_episode_outcome(verdict)}"
         return {}, (CalibrationNotice(code="not_completed", message=message),)
+    return _expected_values(
+        case, verdict.rewards.get("reward"), episode_dir / "verification.json", validation=False
+    )
+
+
+def _validation_check(
+    case: CalibrationCase, record: ResultRecord, episode_dir: Path
+) -> CalibrationCheck:
+    """What ``validation/`` gave a case's final state, which its episode ran once before
+    ``tests/``, against ``expect_validation``, or ``expect`` without one."""
+    expect = case.validation_expect
+    scored = next(iter(record.validation_rounds), None)
+    observed: dict[str, float | None] = {}
+    if scored is None:
+        message = f"the episode ended with {record.status.value} before validation/ ran"
+        failures: tuple[CalibrationNotice, ...] = (
+            CalibrationNotice(code="not_completed", message=message),
+        )
+    elif scored.status is not Status.COMPLETED:
+        failure = scored.failure
+        detail = f" ({failure.error_type}: {failure.message})" if failure is not None else ""
+        message = f"validation/ ended with {scored.status.value}{detail}"
+        failures = (CalibrationNotice(code="not_completed", message=message),)
+    else:
+        path = episode_dir / "validation" / str(scored.index) / "verification.json"
+        observed, failures = _expected_values(case, scored.reward, path, validation=True)
+    return CalibrationCheck(
+        expect=expect, observed=observed, failures=failures, passed=not failures
+    )
+
+
+def _expected_values(
+    case: CalibrationCase, reward: float | None, result: Path, *, validation: bool
+) -> tuple[dict[str, float | None], tuple[CalibrationNotice, ...]]:
+    """Each value a case expects of one verifier's result, ``reward`` and the numbers the
+    Verification Result at ``result`` holds, and how they differ from it."""
+    expect = case.validation_expect if validation else case.expect
     values: dict[str, object] = {}
-    if any(key != "reward" for key in case.expect):
-        path = episode_dir / "verification.json"
-        values = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    values["reward"] = verdict.rewards.get("reward")
+    if any(key != "reward" for key in expect):
+        values = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else {}
+    values["reward"] = reward
     observed: dict[str, float | None] = {}
     failures: list[CalibrationNotice] = []
-    for key, expected in case.expect.items():
+    for key, expected in expect.items():
         value = values.get(key)
         if key not in values:
             observed[key] = None
@@ -1403,7 +1466,7 @@ def _calibration_check(
             failures.append(CalibrationNotice(code="not_a_number", message=message))
             continue
         observed[key] = float(value)
-        if not case.admits(key, value):
+        if not case.admits(key, value, validation=validation):
             message = f"{key} is {value}, expected {_expectation_text(expected)}"
             failures.append(CalibrationNotice(code="unexpected_value", message=message))
     return observed, tuple(failures)
@@ -1430,11 +1493,16 @@ def _calibration_attempt(result: EpisodeResult, run_dir: Path) -> CalibrationAtt
 
 def _case_line(task: str, case: CaseCalibrationObservation) -> str:
     """One case: the values it observed when it passed, or each way it failed."""
-    if case.passed:
-        outcome = ", ".join(f"{key}={value}" for key, value in case.observed.items())
-    else:
-        outcome = "; ".join(notice.message for notice in case.failures)
-    return f"{'ok  ' if case.passed else 'FAIL'}  {task} {case.name}: {outcome}"
+
+    def outcome(observed: dict[str, float | None], failures: tuple[CalibrationNotice, ...]) -> str:
+        if failures:
+            return "; ".join(notice.message for notice in failures)
+        return ", ".join(f"{key}={value}" for key, value in observed.items())
+
+    line = outcome(case.observed, case.failures)
+    if case.validation is not None:
+        line += "; validation/: " + outcome(case.validation.observed, case.validation.failures)
+    return f"{'ok  ' if case.passed else 'FAIL'}  {task} {case.name}: {line}"
 
 
 def _episode_outcome(verdict: Verdict) -> str:
@@ -1472,6 +1540,8 @@ async def _plan_on_fleet(
                     and task.spec.verify.resources is not None
                     else None
                 ),
+                round_verifier=round_verifier_resources(task.spec, task.validations),
+                planned_saves=task.validations,
             )
         )
     fleet = providers.fleet

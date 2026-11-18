@@ -296,7 +296,7 @@ async def test_missing_requested_verify_asset_is_a_task_error_not_zero(
     result = await execute(task, tmp_path / "runs")
     assert result.verdict.status is Status.TASK_ERROR
     assert result.verdict.rewards is None
-    assert "verify failed with exit code" in result.verdict.failure.message
+    assert "tests/ failed with exit code" in result.verdict.failure.message
 
 
 @pytest.mark.asyncio

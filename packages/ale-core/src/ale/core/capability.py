@@ -15,7 +15,15 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ale.core.taskspec import ContainerFeature, ImageKind, NetworkMode, OperatingSystem, Resources
+from ale.core.taskspec import (
+    ContainerFeature,
+    ImageKind,
+    NetworkMode,
+    OperatingSystem,
+    Resources,
+    TaskSpec,
+    VerificationMode,
+)
 
 __all__ = [
     "Arch",
@@ -91,6 +99,9 @@ class CapabilityProfile(BaseModel):
     network_modes: frozenset[NetworkMode]
     snapshot: bool = False
     """Whether it saves snapshots and boots Sandboxes from them."""
+    max_saves: int | None = Field(default=None, ge=1)
+    """How many snapshots in a row it saves, of a Sandbox booted from an image and of each
+    one booted from the snapshot before; ``None`` when it saves any number."""
     gpus: bool = False
     """Whether it attaches NVIDIA GPUs."""
     gpu_models: tuple[GpuModel, ...] = ()
@@ -122,9 +133,32 @@ class SandboxNeeds(BaseModel):
     resources: Resources
     snapshot: bool = False
     """Whether it saves a snapshot at its end or boots from one."""
+    saves: int = Field(default=0, ge=0)
+    """How many snapshots in a row its episode may save, of it and of each Sandbox booted from
+    the snapshot before, as :func:`solver_saves` counts them."""
     verifier: SandboxNeeds | None = None
-    """What the snapshot verifier that boots from its snapshot needs. Only the leaf that saved
-    a snapshot boots from it, so one profile serves both."""
+    """What the verifier that boots from its snapshot needs: a snapshot verifier, or a shared
+    validation round's. Only the leaf that saved a snapshot boots from it, so one profile
+    serves both."""
+
+
+def solver_saves(validations: int, *, snapshot_verified: bool, kept_as_snapshot: bool) -> int:
+    """How many snapshots in a row a solver's episode saves, of it and of each solver booted
+    from the snapshot before: one for each of the ``validations`` runs of ``validation/``
+    still to come, and one at its end when it is saved for a snapshot verifier or kept as a
+    snapshot, which is then the same save. A shared solver is never saved at its end for its
+    verifier, which runs in it."""
+    return validations + int(snapshot_verified or kept_as_snapshot)
+
+
+def round_verifier_resources(spec: TaskSpec, validations: int = 1) -> Resources | None:
+    """The resources of the verifier a validation round boots from a snapshot of a solver of
+    ``spec``, on the leaf that saved it, under shared verification with ``validations`` runs
+    of ``validation/`` still to come: the solver's, never elevated. None otherwise: a
+    snapshot verifier's are the Task's, and a separate one runs on a leaf of its own."""
+    if spec.verify.environment_mode is not VerificationMode.SHARED or validations <= 0:
+        return None
+    return spec.resources.model_copy(update={"sudo": False})
 
 
 #: Harbor's names whose words are not the model's, by the model they stand for: GKE
@@ -217,8 +251,13 @@ def unmet(profile: CapabilityProfile, needs: SandboxNeeds) -> tuple[str, ...]:
         )
     if needs.snapshot and not profile.snapshot:
         reasons.append("saves and boots no snapshots")
+    elif profile.max_saves is not None and needs.saves > profile.max_saves:
+        reasons.append(f"saves {needs.saves} snapshots in a row, more than its {profile.max_saves}")
     if needs.verifier is not None:
-        reasons.extend(f"its snapshot verifier: {why}" for why in unmet(profile, needs.verifier))
+        reasons.extend(
+            f"the verifier booted from its snapshot: {why}"
+            for why in unmet(profile, needs.verifier)
+        )
     return tuple(reasons)
 
 

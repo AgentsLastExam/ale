@@ -20,7 +20,7 @@ from ale.core.blob import BlobSink
 from ale.core.config import LoggingPolicy, VerificationConfig
 from ale.core.harness import AgentRun, EffectiveAgentResources, HarnessSession
 from ale.core.lock import AleVerifyProvenance, LimitTermination, ResumedFrom, SandboxProvenance
-from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
+from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome, ValidationRound
 from ale.core.sandbox import (
     PreparedTaskImage,
     ResolvedImage,
@@ -51,6 +51,8 @@ class Phase(StrEnum):
     PROVISION = "provision"
     SETUP = "setup"
     AGENT = "agent"
+    VALIDATE = "validate"
+    """A validation round's verifier, between two of the agent's turns."""
     VERIFY = "verify"
     TEARDOWN = "teardown"
 
@@ -64,7 +66,11 @@ class SandboxLease(Protocol):
     booted from it.
     """
 
-    async def acquire(self, request: SandboxRequest) -> Sandbox: ...
+    async def acquire(self, request: SandboxRequest, *, validation: bool = False) -> Sandbox:
+        """Lease a new Sandbox; one booted from a snapshot of this lease's comes from the
+        Provider that saved it. A ``validation`` round's verifier is destroyed whatever the
+        Run's retention."""
+        ...
 
     async def adopt(
         self, request: SandboxRequest, attach: Callable[[SandboxRequest], Awaitable[Sandbox]]
@@ -74,10 +80,12 @@ class SandboxLease(Protocol):
 
     async def release(self, sandbox: Sandbox) -> None: ...
 
-    async def snapshot(self, sandbox: Sandbox) -> str:
+    async def snapshot(self, sandbox: Sandbox, *, validation: bool = False) -> str:
         """Save a sanitized Sandbox's disk as a snapshot a verifier boots from, which stops
         and destroys the Sandbox, and return the snapshot's handle. Releasing the Sandbox
-        then destroys the snapshot, unless its retention keeps it."""
+        then destroys the snapshot once no Sandbox booted from it runs, unless its retention
+        keeps it; a ``validation`` round's, which the next turn's solver boots from too, it
+        never keeps."""
         ...
 
     def mark_sanitized(
@@ -99,6 +107,11 @@ class ArtifactSink(Protocol):
     def cleanup(self) -> None: ...
 
     def path(self, name: str) -> Path: ...
+
+    def for_validation(self, directory: Path) -> ArtifactSink:
+        """A sink of its own, below ``directory``, for one validation round's separate
+        verifier, whose copy goes once it is cleaned up."""
+        ...
 
 
 class EventSink(Protocol):
@@ -158,6 +171,15 @@ class EpisodeContext:
     current_phase: Phase | None = None
     limit_refusal: Callable[[], LimitTermination | None] | None = None
     """Reports the Gateway limit that refused one of this episode's model calls, if any."""
+    open_agent_session: Callable[[bool], None] | None = None
+    """Opens (``True``) or suspends (``False``) the agent's Gateway session. It is open from
+    its creation through the agent's first turn, then only while a turn runs, and a policy
+    Harness's while it rolls out: nothing run between the agent's turns or after its last,
+    ``validation/`` and ``tests/`` included, reaches the model with the agent's token."""
+    open_judge_sessions: Callable[[bool], None] | None = None
+    """Opens or suspends the Judges' Gateway sessions, which are open only while a verifier
+    runs, a validation round's, calibration's validation check or ``tests/``: a Judge's token
+    that reaches the agent is refused in its later turns."""
     prepared_image: PreparedTaskImage | None = None
     """Validated solver image selected before provisioning."""
     prepared_verifier_image: PreparedTaskImage | None = None
@@ -221,6 +243,13 @@ class EpisodeContext:
     judge_tokens: dict[str, str] = field(default_factory=dict)
     """Gateway tokens of this episode's Judge sessions, by Judge kind."""
     judge_invocations: tuple[object, ...] = ()
+    validation_judge_invocations: tuple[object, ...] = ()
+    """What the Judges of every validation round recorded, in order."""
+    validation_rounds: list[ValidationRound] = field(default_factory=list)
+    """Each validation round so far; copied into the terminal result."""
+    validation_prompts: dict[int, str] = field(default_factory=dict)
+    """The prompt that gave the agent each round's result, by round, which marks where the
+    round falls in its trajectory."""
     ale_verify_provenance: AleVerifyProvenance | None = None
     verifier_resolved_image: ResolvedImage | None = None
     verifier_resource_allocation: ResourceAllocation | None = None

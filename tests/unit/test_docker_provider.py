@@ -2583,3 +2583,40 @@ async def test_a_kata_sandbox_that_stopped_ends_its_sessions(
     assert str(explained).startswith(
         "the sandbox itself died: its main process exited with code 255"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "refused"),
+    [
+        ('[["Backing Filesystem","extfs"]]', True),
+        ('[["driver-type","io.containerd.snapshotter.v1"]]', False),
+    ],
+)
+async def test_a_sandbox_that_would_save_past_the_layer_stores_limit_is_refused_up_front(
+    monkeypatch: pytest.MonkeyPatch, status: str, refused: bool
+) -> None:
+    """Each commit stacks one more layer: Docker's layer store chains 125 at most, under any
+    graph driver, so a Sandbox whose image and planned saves exceed that never starts; the
+    containerd store's snapshotter stacks far more."""
+    layers = "120\n"
+
+    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
+        if argv[:3] == ("info", "--format", "{{json .DriverStatus}}"):
+            return 0, f"{status}\n", ""
+        if argv[:2] == ("image", "inspect"):
+            return 0, layers, ""
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    provider = DockerProvider()
+    if refused:
+        with pytest.raises(ProviderCapabilityError, match="more than the 125"):
+            await provider._refuse_deep_stacks("image@sha256:abc", 6)
+    else:
+        await provider._refuse_deep_stacks("image@sha256:abc", 6)
+    await provider._refuse_deep_stacks("image@sha256:abc", 5)
+    layers = "<no value>\n"
+    if refused:
+        with pytest.raises(ProviderStartError, match="could not count the layers"):
+            await provider._refuse_deep_stacks("image@sha256:abc", 1)

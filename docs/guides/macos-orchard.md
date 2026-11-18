@@ -122,7 +122,7 @@ sudo on the base, with its home and a file in it at `ALE_HOME`, and signs it in;
 `sudo = false`, its oracle finds the account out of the `admin` group, without sudo, and the
 file its build left.
 
-## Run and validate
+## Run and check
 
 ```bash
 uv run ale lint /absolute/path/to/task
