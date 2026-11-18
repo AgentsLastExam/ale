@@ -234,3 +234,41 @@ async def test_an_agent_improves_over_a_validation_round_in_a_windows_vm(
     result = await _episode(tmp_path, root, provider)
     _check(result, rounds=1)
     assert await provider.list_retained() == []
+
+
+@pytest.mark.asyncio
+async def test_calibration_checks_validation_on_each_cases_final_state_in_docker(
+    tmp_path: Path,
+) -> None:
+    """Each case's final state is saved, scored by validation/, and then by tests/ in a
+    solver booted from it, against each expectation."""
+    from ale.core.config import RunConfig
+    from ale.run.cli.tasks import _calibrate
+
+    root = _task(tmp_path / "rounds-calibration", "shared", rounds=0)
+    edit_task_config(
+        root,
+        {
+            "calibration": [
+                {"name": "solution", "expect": {"reward": 1}},
+                {
+                    "name": "partial",
+                    "expect": {"reward": 0.33},
+                    "expect_validation": {"reward": 0.33},
+                },
+            ]
+        },
+    )
+    for case, lines in (("solution", "a\\nb\\nc\\n"), ("partial", "a\\n")):
+        (root / "calibration" / case).mkdir(parents=True, exist_ok=True)
+        (root / "calibration" / case / "solve.sh").write_text(
+            f'#!/usr/bin/env bash\nprintf "{lines}" > "${{ALE_HOME:-$HOME}}/work.txt"\n'
+        )
+    settings = RunConfig.model_validate({"sandbox": {"providers": ["docker:runc"]}})
+    code = await _calibrate(str(root), settings, tmp_path / "runs")
+    (path,) = (tmp_path / "runs").glob("calibrate-*/calibration.json")
+    observation = json.loads(path.read_text())
+    assert code == 0, observation
+    cases = {case["name"]: case for case in observation["tasks"][0]["cases"]}
+    assert cases["solution"]["validation"]["observed"] == {"reward": 1.0}
+    assert cases["partial"]["validation"]["observed"] == {"reward": 0.33}

@@ -566,7 +566,7 @@ rather than failing its episodes one by one.
 
 Each [validation round](episode-protocol.md#validation-rounds) saves the solver and boots
 the next from the snapshot, on the same leaf, so a solver plans its saves: one for each
-round still to come, and one at its end only when
+round still to come, or for calibration's validation check, and one at its end only when
 it is kept as a snapshot or saved for a snapshot verifier. A shared solver is never saved at
 its end for its verifier. Selection compares that count with how many snapshots in a row a
 profile saves (`max_saves`), and a leaf that saves fewer in a row is not chosen. Under

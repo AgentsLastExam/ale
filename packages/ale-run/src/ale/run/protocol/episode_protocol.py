@@ -372,6 +372,7 @@ class EpisodeProtocol:
         timeouts: RunTimeouts | None = None,
         resume: Resume | None = None,
         validation_rounds: int = 0,
+        check_validation: bool = False,
     ) -> None:
         self.harness = harness
         self.max_steps = max_steps
@@ -381,11 +382,21 @@ class EpisodeProtocol:
         self.resume = resume
         self.validation_rounds = validation_rounds
         """How many results of ``validation/`` the agent receives, each between two turns."""
+        self.check_validation = check_validation
+        """Run ``validation/`` once on the final state, before ``tests/``, with no turn
+        after it, as calibration checks it."""
+
+    @property
+    def validations(self) -> int:
+        """How many times its episodes run ``validation/`` before ``tests/``: once for each of
+        the agent's validation rounds, or once for calibration's validation check; each saves
+        the solver as a snapshot."""
+        return self.validation_rounds or int(self.check_validation)
 
     @property
     def validates(self) -> bool:
-        """Whether its episodes run ``validation/``, each round saving the solver."""
-        return self.validation_rounds > 0
+        """Whether its episodes run ``validation/``."""
+        return self.validations > 0
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         spec = task.spec
@@ -394,8 +405,10 @@ class EpisodeProtocol:
             self.harness.validate_os(spec.os)
             self.harness.validate_resources(ctx.agent_resources)
         if self.validates:
-            _require_validation(task, self.harness if self.agent_enabled else None)
-            if not self.agent_enabled:
+            _require_validation(
+                task, self.harness if self.validation_rounds and self.agent_enabled else None
+            )
+            if self.validation_rounds and not self.agent_enabled:
                 raise ConfigError("validation rounds need an agent to receive them")
         image = ctx.prepared_image
         solver = _Solver(await self._timed(ctx, Phase.PROVISION, self._provision(ctx)), image)
@@ -525,7 +538,7 @@ class EpisodeProtocol:
 
     async def _provision(self, ctx: EpisodeContext) -> Sandbox:
         spec = ctx.spec
-        request = self._solver_request(ctx, validations=self.validation_rounds)
+        request = self._solver_request(ctx, validations=self.validations)
         resume = self.resume
         if resume is None:
             sandbox = await ctx.sandboxes.acquire(request)
@@ -898,6 +911,7 @@ class EpisodeProtocol:
         """Run ``validation/`` each time a turn of the agent ends normally, and give the
         agent each result as its next turn, in a solver booted from the snapshot the round
         saved; a turn that something else ended, a Gateway limit included, is the last.
+        ``check_validation`` runs it once, with no turn after it.
 
         Each round copies the agent's logs, saves the solver, which stops it and every
         process in it, scores the snapshot with ``validation/`` as the Task's verification
@@ -907,25 +921,26 @@ class EpisodeProtocol:
         """
         mode = ctx.spec.verify.environment_mode
         logger = logging.getLogger("ale.execution")
-        for index in range(1, self.validation_rounds + 1):
+        for index in range(1, self.validations + 1):
             if ctx.agent_stop is not None:
                 return
-            refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
-            if refusal is not None:
-                # A turn that exited normally after the Gateway refused one of its calls
-                # was stopped by that limit.
-                ctx.agent_stop = BudgetExceededError(
-                    refusal.name, float(refusal.configured_value), refusal.observed_value
-                )
-                return
-            run = ctx.agent_run
-            if run is None or run.continuation is None:
-                ctx.agent_stop = NativeContinuationError(
-                    f"{self.harness.name} reported no native session to resume"
-                )
-                return
-            if budget.remaining <= 0:
-                return
+            if self.validation_rounds:
+                refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
+                if refusal is not None:
+                    # A turn that exited normally after the Gateway refused one of its calls
+                    # was stopped by that limit.
+                    ctx.agent_stop = BudgetExceededError(
+                        refusal.name, float(refusal.configured_value), refusal.observed_value
+                    )
+                    return
+                run = ctx.agent_run
+                if run is None or run.continuation is None:
+                    ctx.agent_stop = NativeContinuationError(
+                        f"{self.harness.name} reported no native session to resume"
+                    )
+                    return
+                if budget.remaining <= 0:
+                    return
             directory = ctx.run_dir / "validation" / str(index)
             artifacts: ArtifactSink | None = None
             # The turn's end is the solver's, as its save for a snapshot verifier is.
@@ -972,6 +987,8 @@ class EpisodeProtocol:
             solver.sandbox, solver.saved = booted, False
             if logs is not None:
                 logs.follow(booted)
+            if not self.validation_rounds:
+                return
             ctx.validation_rounds[-1] = ctx.validation_rounds[-1].model_copy(
                 update={"solver_allocation": booted.allocation}
             )
@@ -2087,6 +2104,7 @@ class ReverificationProtocol(EpisodeProtocol):
         self.resume = None
         # It runs tests/ alone: what the source episode's agent received is its own.
         self.validation_rounds = 0
+        self.check_validation = False
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         if isinstance(self.solver, SolverSnapshot):

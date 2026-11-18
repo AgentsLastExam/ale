@@ -195,7 +195,7 @@ No solver of an episode with rounds is kept running: each after the first runs o
 round's snapshot, which is never kept, and `snapshot` keeps the last one's disk. A setting
 whose effective policy would keep such a solver running, `keep` for the solver, or for the
 verifier under shared verification, where the verifier is the solver, is refused before
-anything is prepared. Every round's verifier and snapshot
+anything is prepared, and so is a calibration with one. Every round's verifier and snapshot
 are destroyed. A round's snapshot that cannot be is recorded `not-destroyed`, with its
 handle, the reason and its cleanup command, and stays listed by `ale sandbox list`; it
 holds the agent's state between turns, so it is never a continuation or reverification
@@ -329,17 +329,24 @@ is still allowed when the retry configuration is nonzero.
 
 `ale calibrate` runs every [calibration case](task-authoring.md#calibration) of a Task
 through this same protocol as the oracle, each a complete episode in fresh Sandboxes:
-`solution` first, then the other cases in the order `task.toml` lists them.
+`solution` first, then the other cases in the order `task.toml` lists them. When the Task
+has `validation/`, each case also runs a validation check: `validation/` once on the case's
+final state, before `tests/`, in a verifier placed as a round's is, with no turn after it,
+so it is not a round. The oracle's solver is saved for it, so both verifiers score one
+state, and under shared verification `tests/` then runs in a solver booted from that
+snapshot, where it sees, as `validation/` always does, no process the oracle left running.
 
 - a case passes when its episode completes and meets its
-  [expectation](task-authoring.md#calibration);
+  [expectation](task-authoring.md#calibration), and, when the Task has `validation/`, its
+  validation check completes and meets the expectation for `validation/`;
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures
   fail the case rather than becoming scores.
 
 Calibration tests Task feasibility and verifier behavior. It is separate from ordinary
 run admission and from endpoint availability checks. The persisted `calibration.json`
 records, for each case, its expectation, its attempt with scores and RunLock reference, the
-values it observed and its failures, and whether each case and Task passed.
+values it observed and its failures, the same of its validation check, and whether each
+case and Task passed.
 
 Calibration honors `episode_retries` independently for each case. Every retry starts the
 complete protocol in fresh Sandboxes. Only each case's last result enters

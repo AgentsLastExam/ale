@@ -881,7 +881,7 @@ async def run_episode(
     # their retention.
     alone = task.provider is None
     if alone:
-        task.validations = protocol.validation_rounds
+        task.validations = protocol.validations
         check_retention(task.spec, sandbox_retention, validates=task.validates)
         await providers.select([task], snapshots=sandbox_retention.solver == "snapshot")
     assert task.provider is not None

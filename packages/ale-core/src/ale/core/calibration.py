@@ -64,18 +64,14 @@ class CalibrationAttempt(BaseModel):
         return self
 
 
-class CaseCalibrationObservation(BaseModel):
-    """One calibration case: what it expects, the episode that ran it, and what it observed.
-
-    ``observed`` holds each expected key's value from a completed episode, ``None`` where
-    the Verification Result has no number by that name.
-    """
+class CalibrationCheck(BaseModel):
+    """What ``validation/`` gave a case's final state: what the case expects of it, each
+    expected key's value, ``None`` where its Verification Result has no number by that name,
+    and how it differs."""
 
     model_config = _FROZEN
 
-    name: str = Field(min_length=1)
     expect: dict[str, Expectation] = Field(min_length=1)
-    attempt: CalibrationAttempt
     observed: dict[str, float | None] = Field(default_factory=dict)
     failures: tuple[CalibrationNotice, ...] = ()
     passed: bool
@@ -87,7 +83,39 @@ class CaseCalibrationObservation(BaseModel):
         if not set(self.observed) <= set(self.expect):
             raise ValueError("observed values are recorded only for expected keys")
         if self.passed == bool(self.failures):
-            raise ValueError("a case passes exactly when it has no failures")
+            raise ValueError("a check passes exactly when it has no failures")
+        return self
+
+
+class CaseCalibrationObservation(BaseModel):
+    """One calibration case: what it expects, the episode that ran it, and what it observed.
+
+    ``observed`` holds each expected key's value from a completed episode, ``None`` where
+    the Verification Result has no number by that name. ``validation`` checks the same final
+    state with ``validation/``, when the Task has one.
+    """
+
+    model_config = _FROZEN
+
+    name: str = Field(min_length=1)
+    expect: dict[str, Expectation] = Field(min_length=1)
+    attempt: CalibrationAttempt
+    observed: dict[str, float | None] = Field(default_factory=dict)
+    failures: tuple[CalibrationNotice, ...] = ()
+    validation: CalibrationCheck | None = None
+    passed: bool
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if not set(self.observed) <= set(self.expect):
+            raise ValueError("observed values are recorded only for expected keys")
+        checked = self.validation is None or self.validation.passed
+        if self.passed != (not self.failures and checked):
+            raise ValueError(
+                "a case passes exactly when it has no failures, and its validation check none"
+            )
         return self
 
 

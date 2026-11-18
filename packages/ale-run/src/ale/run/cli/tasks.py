@@ -16,6 +16,7 @@ import typer
 
 from ale.core.calibration import (
     CalibrationAttempt,
+    CalibrationCheck,
     CalibrationEngine,
     CalibrationNotice,
     CalibrationObservation,
@@ -1047,6 +1048,9 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
     try:
         resolved = resolve(reference)
         tasks = load_tasks(resolved.task_dir)
+        for task in tasks:
+            # Every case checks validation/ too, on a snapshot of the same final state.
+            task.validations = int(task.folder.stage_dir(Stage.VALIDATION) is not None)
         _resolve_variables(tasks, settings, oracle=True)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
@@ -1117,6 +1121,7 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                                 harness,
                                 max_steps=settings.agent.max_steps,
                                 timeouts=settings.timeouts,
+                                check_validation=task.validates,
                             ),
                             providers,
                             run_dir=run_dir,
@@ -1146,6 +1151,11 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                     observed, case_failures = _calibration_check(
                         case, result.verdict, result.run_dir
                     )
+                    validation = (
+                        _validation_check(case, result.record, result.run_dir)
+                        if task.validates
+                        else None
+                    )
                     cases.append(
                         CaseCalibrationObservation(
                             name=case.name,
@@ -1153,7 +1163,8 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                             attempt=_calibration_attempt(result, run_dir),
                             observed=observed,
                             failures=case_failures,
-                            passed=not case_failures,
+                            validation=validation,
+                            passed=not case_failures and (validation is None or validation.passed),
                         )
                     )
                     typer.echo(_case_line(str(spec.name), cases[-1]))
@@ -1399,14 +1410,50 @@ def _calibration_check(
     if verdict.status is not Status.COMPLETED or verdict.rewards is None:
         message = f"the episode ended with {_episode_outcome(verdict)}"
         return {}, (CalibrationNotice(code="not_completed", message=message),)
+    return _expected_values(
+        case, verdict.rewards.get("reward"), episode_dir / "verification.json", validation=False
+    )
+
+
+def _validation_check(
+    case: CalibrationCase, record: ResultRecord, episode_dir: Path
+) -> CalibrationCheck:
+    """What ``validation/`` gave a case's final state, which its episode ran once before
+    ``tests/``, against ``expect_validation``, or ``expect`` without one."""
+    expect = case.validation_expect
+    scored = next(iter(record.validation_rounds), None)
+    observed: dict[str, float | None] = {}
+    if scored is None:
+        message = f"the episode ended with {record.status.value} before validation/ ran"
+        failures: tuple[CalibrationNotice, ...] = (
+            CalibrationNotice(code="not_completed", message=message),
+        )
+    elif scored.status is not Status.COMPLETED:
+        failure = scored.failure
+        detail = f" ({failure.error_type}: {failure.message})" if failure is not None else ""
+        message = f"validation/ ended with {scored.status.value}{detail}"
+        failures = (CalibrationNotice(code="not_completed", message=message),)
+    else:
+        path = episode_dir / "validation" / str(scored.index) / "verification.json"
+        observed, failures = _expected_values(case, scored.reward, path, validation=True)
+    return CalibrationCheck(
+        expect=expect, observed=observed, failures=failures, passed=not failures
+    )
+
+
+def _expected_values(
+    case: CalibrationCase, reward: float | None, result: Path, *, validation: bool
+) -> tuple[dict[str, float | None], tuple[CalibrationNotice, ...]]:
+    """Each value a case expects of one verifier's result, ``reward`` and the numbers the
+    Verification Result at ``result`` holds, and how they differ from it."""
+    expect = case.validation_expect if validation else case.expect
     values: dict[str, object] = {}
-    if any(key != "reward" for key in case.expect):
-        path = episode_dir / "verification.json"
-        values = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    values["reward"] = verdict.rewards.get("reward")
+    if any(key != "reward" for key in expect):
+        values = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else {}
+    values["reward"] = reward
     observed: dict[str, float | None] = {}
     failures: list[CalibrationNotice] = []
-    for key, expected in case.expect.items():
+    for key, expected in expect.items():
         value = values.get(key)
         if key not in values:
             observed[key] = None
@@ -1419,7 +1466,7 @@ def _calibration_check(
             failures.append(CalibrationNotice(code="not_a_number", message=message))
             continue
         observed[key] = float(value)
-        if not case.admits(key, value):
+        if not case.admits(key, value, validation=validation):
             message = f"{key} is {value}, expected {_expectation_text(expected)}"
             failures.append(CalibrationNotice(code="unexpected_value", message=message))
     return observed, tuple(failures)
@@ -1446,11 +1493,16 @@ def _calibration_attempt(result: EpisodeResult, run_dir: Path) -> CalibrationAtt
 
 def _case_line(task: str, case: CaseCalibrationObservation) -> str:
     """One case: the values it observed when it passed, or each way it failed."""
-    if case.passed:
-        outcome = ", ".join(f"{key}={value}" for key, value in case.observed.items())
-    else:
-        outcome = "; ".join(notice.message for notice in case.failures)
-    return f"{'ok  ' if case.passed else 'FAIL'}  {task} {case.name}: {outcome}"
+
+    def outcome(observed: dict[str, float | None], failures: tuple[CalibrationNotice, ...]) -> str:
+        if failures:
+            return "; ".join(notice.message for notice in failures)
+        return ", ".join(f"{key}={value}" for key, value in observed.items())
+
+    line = outcome(case.observed, case.failures)
+    if case.validation is not None:
+        line += "; validation/: " + outcome(case.validation.observed, case.validation.failures)
+    return f"{'ok  ' if case.passed else 'FAIL'}  {task} {case.name}: {line}"
 
 
 def _episode_outcome(verdict: Verdict) -> str:

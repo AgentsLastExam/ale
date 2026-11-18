@@ -139,8 +139,9 @@ class Task(ABC):
         self.variables: ResolvedVariables | None = None
         self.validations: int = 0
         """How many times the Run's episodes of it run ``validation/`` before ``tests/``: once
-        for each validation round its agent receives. Each saves the solver as a snapshot, so
-        selection gives it a Provider that saves that many in a row."""
+        for each validation round its agent receives, or once for calibration's validation
+        check of each case's final state. Each saves the solver as a snapshot, so selection
+        gives it a Provider that saves that many in a row."""
 
     @property
     def id(self) -> str:

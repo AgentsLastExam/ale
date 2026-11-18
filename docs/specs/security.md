@@ -266,7 +266,7 @@ that some future code path could forget to check; a file that was never uploaded
 be read by anything.
 
 `validation/` runs only in a round's verifier, a Sandbox apart from every solver, between
-two of the agent's turns, and the next turn's solver
+two of the agent's turns, or in calibration's validation check, and the next turn's solver
 boots from the snapshot saved before it ran, so it is in no solver at any time. Its reward,
 status and feedback text are the only channel from it to the agent, and `tests/` has none:
 its result is recorded and never shown. What the feedback reveals is the Task author's
@@ -455,7 +455,9 @@ Startup folder on Windows, and, with sudo, system services. So does the next tur
 validation round boots, which is sealed as soon as it is up, before anything is checked or
 staged in it, so what starts at boot has the agent's own sealed network. A Task that needs a
 strict boundary uses separate verification, which restores only the declared artifacts into
-a fresh Sandbox.
+a fresh Sandbox. Calibration's validation check saves the oracle's solver before `tests/`
+runs, so in calibration of a Task with `validation/` no process the oracle left reaches
+`tests/` in any mode.
 
 **Programs on the agent's disk.** A shared or snapshot verifier runs as root on the disk the
 agent left. With `[agent].sudo` the agent could change any program there, the image's

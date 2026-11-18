@@ -456,7 +456,8 @@ def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
     A calibration case runs as the oracle, so its directory holds ``solve.sh``, or
     ``solve.ps1`` on Windows. ``calibration/solution/`` is the reference solution every Task
     has; any other directory there needs a ``[[calibration]]`` entry. ``validation/`` is
-    optional, and has the entry ``tests/`` has when it exists; validation rounds need it.
+    optional, and has the entry ``tests/`` has when it exists; validation rounds and a case's
+    ``expect_validation`` need it.
     """
     # Harbor's reference solution is solution/: say where ALE's is, not only that it is missing.
     if (folder.root / "solution").is_dir():
@@ -484,11 +485,17 @@ def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
         raise TaskDefinitionError(
             f"{folder.root} is missing required Task file(s): {', '.join(missing)}"
         )
-    if not validation and config.agent.validation_rounds:
-        raise TaskDefinitionError(
-            f"{folder.root}: [agent].validation_rounds needs validation/, the verifier whose "
-            "results the agent receives"
-        )
+    if not validation:
+        if config.agent.validation_rounds:
+            raise TaskDefinitionError(
+                f"{folder.root}: [agent].validation_rounds needs validation/, the verifier "
+                "whose results the agent receives"
+            )
+        if unchecked := [case.name for case in config.calibration if case.expect_validation]:
+            raise TaskDefinitionError(
+                f"{folder.root}: expect_validation of [[calibration]] {', '.join(unchecked)} "
+                "needs validation/"
+            )
     for name in sorted(path.name for path in (folder.root / CALIBRATION_DIR).glob("*/")):
         if name not in cases:
             raise TaskDefinitionError(

@@ -178,7 +178,7 @@ class EpisodeContext:
     ``validation/`` and ``tests/`` included, reaches the model with the agent's token."""
     open_judge_sessions: Callable[[bool], None] | None = None
     """Opens or suspends the Judges' Gateway sessions, which are open only while a verifier
-    runs, a validation round's or ``tests/``: a Judge's token
+    runs, a validation round's, calibration's validation check or ``tests/``: a Judge's token
     that reaches the agent is refused in its later turns."""
     prepared_image: PreparedTaskImage | None = None
     """Validated solver image selected before provisioning."""

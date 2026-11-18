@@ -185,7 +185,8 @@ The result's `validation_rounds` lists each
 start and end, the feedback the agent was shown, by its episode-relative `path`, `digest`
 and `size_bytes`, since the text itself is that file, and the allocation of the solver it
 booted for the agent's next turn, such as its GPU devices, since every turn after the first
-runs in a new Sandbox; the RunLock keeps the first solver's.
+runs in a new Sandbox; the RunLock keeps the first solver's. Calibration records each case's
+validation check there too, as its one entry, with no solver allocation.
 
 `runs/<run>/ledger.db` is a rebuildable run-level projection for queued/running/current
 phase/terminal/interrupted state. It uses WAL and stores bounded failures and final reward

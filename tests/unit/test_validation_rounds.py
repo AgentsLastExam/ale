@@ -756,6 +756,184 @@ async def test_feedback_that_is_too_large_or_not_text_fails_its_round(
     assert round_.failure is not None and problem in round_.failure.message
 
 
+# --- calibration ---
+
+
+@pytest.mark.asyncio
+async def test_calibration_runs_validation_once_on_a_snapshot_of_the_final_state(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    provider = RoundsProvider()
+    task = _task(tmp_path, rounds=2)
+    lock = make_lock()
+    result = await run_episode(
+        task,
+        EpisodeProtocol(OracleHarness(), check_validation=True),
+        provider_registry(provider),
+        run_dir=tmp_path / "runs",
+        provenance=ProvenanceInputs(
+            source=lock.task.source,
+            agent=lock.agent,
+            gateway=lock.gateway,
+            config_hash=lock.config_hash,
+            framework=lock.framework,
+        ),
+    )
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    # The oracle ran once; validation/ scored its state from a snapshot, and tests/ the
+    # same state in a solver booted from it.
+    (round_,) = result.record.validation_rounds
+    assert round_.status is Status.COMPLETED
+    first, booted = provider.booted(SandboxRole.SHARED)
+    (validator,) = provider.booted(SandboxRole.VERIFIER)
+    assert booted.snapshot == validator.snapshot is not None
+    assert (first.planned_saves, booted.planned_saves) == (1, 0)
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/validation", "/opt/ale/tests"]
+    assert verifiers.runs[1][1] == provider.sandboxes[-1].sandbox_id
+    assert provider.snapshots == {}
+    assert result.lock is not None and result.lock.validation_rounds == 0
+
+
+@pytest.mark.asyncio
+async def test_a_calibration_case_that_ends_early_gets_no_validation_check(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    class Fails(OracleHarness):
+        async def launch(self, *args: Any, **options: Any) -> AgentRun:
+            raise AgentError("the solution failed")
+
+    result = await run_episode(
+        _task(tmp_path, rounds=2),
+        EpisodeProtocol(Fails(), check_validation=True),
+        provider_registry(RoundsProvider()),
+        run_dir=tmp_path / "runs",
+    )
+    assert result.verdict.status is Status.AGENT_ERROR
+    assert result.record.validation_rounds == ()
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/tests"]
+
+
+def test_a_case_may_expect_other_scores_of_validation(tmp_path: Path) -> None:
+    from ale.core.taskspec import CalibrationCase
+
+    case = CalibrationCase.model_validate(
+        {"name": "solution", "expect": {"reward": 1}, "expect_validation": {"reward": [0.5, 1]}}
+    )
+    assert case.validation_expect == {"reward": (0.5, 1.0)}
+    assert case.admits("reward", 0.6, validation=True)
+    assert not case.admits("reward", 0.6)
+    assert CalibrationCase(name="x", expect={"reward": 0}).validation_expect == {"reward": 0}
+    with pytest.raises(ValidationError, match="must include reward"):
+        CalibrationCase.model_validate(
+            {"name": "x", "expect": {"reward": 0}, "expect_validation": {"tflops": 1}}
+        )
+    root = scaffold_task(tmp_path / "task")
+    edit_task_config(
+        root,
+        {
+            "calibration": [
+                {"name": "solution", "expect": {"reward": 1}, "expect_validation": {"reward": 1}}
+            ]
+        },
+    )
+    with pytest.raises(TaskDefinitionError, match=r"expect_validation .* needs validation/"):
+        load_tasks(root)
+
+
+@pytest.mark.asyncio
+async def test_calibrate_checks_validation_of_every_case_against_its_expectation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+    from importlib import import_module
+    from unittest.mock import AsyncMock
+
+    import jsonschema
+
+    from ale.core.result import ValidationRound
+    from ale.core.verdict import Verdict
+    from ale.run.episode import EpisodeResult
+    from ale.run.providers import ProviderRegistry
+    from ale.run.recording import atomic_write_json
+
+    task_cli = import_module("ale.run.cli.tasks")
+    root = _task(tmp_path, rounds=0).folder.root
+    edit_task_config(
+        root,
+        {
+            "calibration": [
+                {"name": "solution", "expect": {"reward": 1}, "expect_validation": {"reward": 0.5}},
+                {"name": "partial", "expect": {"reward": 0.5}},
+            ]
+        },
+    )
+    (root / "calibration/partial").mkdir(parents=True)
+    (root / "calibration/partial/solve.sh").write_text("true\n")
+    # validation/ gives each case's state this reward, tests/ the case's own.
+    validation = {"solution": 0.5, "partial": 0.75}
+    tests = {"solution": 1.0, "partial": 0.5}
+    lock = make_lock()
+    checked: list[bool] = []
+
+    async def prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
+        for item in tasks:
+            item.prepared_image = IMAGE
+        return ()
+
+    async def execute(task, protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
+        case = getattr(protocol.harness, "case", None)
+        checked.append(protocol.check_validation and task.validates)
+        directory = kwargs["run_dir"] / kwargs["episode_id"]
+        now = datetime.now(UTC)
+        reward = validation.get(case, 0.0)
+        atomic_write_json(directory / "validation/1/verification.json", {"reward": reward})
+        rewards = {"reward": tests.get(case, 0.0)}
+        record = ResultRecord(
+            episode_id=kwargs["episode_id"],
+            status=Status.COMPLETED,
+            rewards=rewards,
+            started_at=now,
+            finished_at=now,
+            validation_rounds=(
+                ValidationRound(
+                    index=1, status=Status.COMPLETED, reward=reward, started_at=now, finished_at=now
+                ),
+            ),
+        )
+        atomic_write_json(directory / "result.json", record)
+        atomic_write_json(directory / "lock.json", lock)
+        (directory / "verification.json").write_text(json.dumps(rewards))
+        verdict = Verdict.completed(rewards)
+        return EpisodeResult(kwargs["episode_id"], verdict, directory, 0, record, lock)
+
+    monkeypatch.setattr(ProviderRegistry, "preflight", AsyncMock())
+    monkeypatch.setattr(task_cli, "_prepare_images", prepare)
+    monkeypatch.setattr(task_cli, "run_episode", execute)
+    code = await task_cli._calibrate(str(root), RunConfig(), tmp_path / "runs")
+    assert code == 2
+    assert all(checked)
+    (path,) = (tmp_path / "runs").glob("calibrate-*/calibration.json")
+    observation = json.loads(path.read_text())
+    schema = Path(__file__).resolve().parents[1] / "fixtures/calibration-observation-v1.schema.json"
+    jsonschema.validate(observation, json.loads(schema.read_text()))
+    cases = {case["name"]: case for case in observation["tasks"][0]["cases"]}
+    solution, partial = cases["solution"], cases["partial"]
+    # expect_validation replaces expect for validation/ alone.
+    assert solution["validation"] == {
+        "expect": {"reward": 0.5},
+        "observed": {"reward": 0.5},
+        "failures": [],
+        "passed": True,
+    }
+    assert solution["passed"] is True
+    # expect applies to both verifiers otherwise: validation/ gave 0.75, not 0.5.
+    assert partial["failures"] == []
+    assert [notice["code"] for notice in partial["validation"]["failures"]] == ["unexpected_value"]
+    assert partial["passed"] is False
+    output = capsys.readouterr().out
+    assert "partial: reward=0.5; validation/: reward is 0.75, expected 0.5" in output
+
+
 # --- what each turn starts from ---
 
 

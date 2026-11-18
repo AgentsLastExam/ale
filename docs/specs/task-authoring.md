@@ -140,6 +140,7 @@ env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 [[calibration]]                             # ALE; one per added case or changed default
 name = "missing-summary"                    # lowercase slug: calibration/missing-summary/
 expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or [lo, hi]
+# expect_validation = { reward = 1 }        # validation/'s instead; default expect
 ```
 
 `[agent].workdir` is below the agent's home when relative, so a Task need not spell its home
@@ -676,6 +677,16 @@ decimals ([Result](verification.md#result)), so an expected reward lies in that 
 exact one has at most two decimals, and an interval holds at least one two-decimal value.
 Any other key names a top-level number of the Episode's
 [Verification Result](verification.md#result), compared as written, so a measured value
-takes an interval; a missing key, or a value that is not a number, fails the case. How
-`ale calibrate` runs the cases is defined in
+takes an interval; a missing key, or a value that is not a number, fails the case.
+
+A Task with `validation/` checks it in every case too, with a validation check rather than a
+round: `ale calibrate` runs `validation/` once on the case's final state, before `tests/`,
+with no turn after it. `expect` applies to both, unless an entry's `expect_validation`, by
+the same rules, says what `validation/`'s result must be; it is refused without
+`validation/`. The check saves the oracle's Sandbox, as a round saves the agent's, so a Task
+with `validation/` needs a Provider that saves snapshots for calibration too, and under
+shared verification `tests/` then runs in a Sandbox booted from that snapshot: like
+`validation/`, it sees no process the oracle left running.
+
+How `ale calibrate` runs the cases is defined in
 [the episode protocol](episode-protocol.md#calibration).

@@ -93,7 +93,8 @@ class ValidationRound(BaseModel):
     """The text the agent was shown below the reward; none when the verifier wrote none."""
     solver_allocation: ResourceAllocation | None = None
     """What the solver the round booted for the agent's next turn was given, its GPUs
-    included; the RunLock records the first turn's."""
+    included; the RunLock records the first turn's. Calibration's validation check, which no
+    turn follows, has none."""
     started_at: datetime
     finished_at: datetime
 
