@@ -660,6 +660,7 @@ class _Artifacts(ArtifactSink):
         source: str,
         name: str,
         exclude: tuple[str, ...] = (),
+        destination: str | None = None,
         *,
         restored: bool = True,
     ) -> None:
@@ -671,12 +672,19 @@ class _Artifacts(ArtifactSink):
         path_type = (
             PureWindowsPath if sandbox.request.os is OperatingSystem.WINDOWS else PurePosixPath
         )
+        pattern = any(char in source for char in "*?[")
         base = path_type(source).parent
         while any(char in str(base) for char in "*?["):
             base = base.parent
         # A separate directory for each declaration prevents basename collisions and
         # keeps snapshot.json reserved for the inventory, even for that literal filename.
         batch = self.root / f"{len(self.collected):04d}"
+        if destination is not None:
+            # As in Harbor, a path is kept as the destination itself, and a pattern's matches
+            # below it, each where it is below the pattern's fixed part.
+            batch = self.root.joinpath(*PurePosixPath(destination).parts)
+            if not pattern:
+                base = path_type(source)
         self.collected.append(name)
         captured = {entry["source"] for entry in self.entries}
         try:

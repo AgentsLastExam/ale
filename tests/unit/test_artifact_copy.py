@@ -283,3 +283,27 @@ def test_recursive_pattern_and_hidden_directory_contents(tmp_path):
     assert [entry["source"] for entry in matches["entries"]] == [str(tmp_path / "nested/game.sgf")]
     directory = inspect(str(tmp_path / "nest*"))
     assert str(tmp_path / "nested/.notes") in [entry["source"] for entry in directory["entries"]]
+
+
+@pytest.mark.asyncio
+async def test_a_destination_names_where_the_host_keeps_the_copy_as_in_harbor(tmp_path):
+    project = _project(tmp_path)
+    games = tmp_path / "games"
+    games.mkdir()
+    (games / "one.sgf").write_text("game")
+    (tmp_path / "report.json").write_text("{}")
+    (tmp_path / "notes.txt").write_text("notes")
+    sink = _Artifacts(tmp_path / "run")
+    sandbox = LocalSandbox()
+    await sink.collect(sandbox, str(tmp_path / "report.json"), "report.json", (), "out/r.json")
+    await sink.collect(sandbox, str(project), "project", (".venv", "*.pyc"), "tree")
+    await sink.collect(sandbox, str(games / "*.sgf"), "*.sgf", (), "games")
+    await sink.collect(sandbox, str(tmp_path / "notes.txt"), "notes.txt")
+    stored = {entry["stored_path"]: entry["source"] for entry in sink.entries}
+    assert stored["out/r.json"] == str(tmp_path / "report.json")
+    assert stored["tree/keep.txt"] == str(project / "keep.txt")
+    assert stored["tree/src/keep.py"] == str(project / "src/keep.py")
+    assert stored["games/one.sgf"] == str(games / "one.sgf")
+    # Without a destination, a declaration keeps its numbered directory, here the fourth.
+    assert stored["0003/notes.txt"] == str(tmp_path / "notes.txt")
+    assert (sink.root / "out/r.json").read_text() == "{}"

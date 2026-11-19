@@ -165,7 +165,6 @@ def test_task_config_requires_only_its_version_and_name() -> None:
             {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},
             "verifier.environment.os",
         ),
-        ({"artifacts": [{"source": "/o", "destination": "o"}]}, "artifact destination"),
         ({"artifacts": [{"source": "/o", "service": "db"}]}, "artifact service"),
     ],
 )
@@ -207,6 +206,31 @@ def test_an_mcp_server_s_transport_is_sse_unless_written_as_in_harbor() -> None:
         StreamableHttpMcpServer,
         SseMcpServer,
     ]
+
+
+def test_an_artifact_destination_is_harbor_s_relative_host_path() -> None:
+    kept = config(
+        {"artifacts": [{"source": "/o", "destination": "out/report"}, "/p", {"source": "/q"}]}
+    ).artifacts
+    assert [artifact.destination for artifact in kept] == ["out/report", None, None]
+    # Unset, it leaves every existing specification's identity as it was.
+    assert "destination" not in kept[1].model_dump()
+    for destinations, message in (
+        (["/abs"], "relative path"),
+        (["a/../b"], "relative path"),
+        (["a\\b"], "relative path"),
+        (["."], "relative path"),
+        (["0001/x"], "takes a name ALE keeps"),
+        (["snapshot.json"], "takes a name ALE keeps"),
+        (["out", "out/inner"], "overlap"),
+        (["same", "same"], "overlap"),
+    ):
+        artifacts = [
+            {"source": f"/s{index}", "destination": destination}
+            for index, destination in enumerate(destinations)
+        ]
+        with pytest.raises(ValidationError, match=message):
+            config({"artifacts": artifacts})
 
 
 def test_docker_image_is_harbor_s_name_for_image() -> None:

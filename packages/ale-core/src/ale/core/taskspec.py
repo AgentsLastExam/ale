@@ -89,6 +89,11 @@ def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | 
     return path_type(path)
 
 
+#: Names the Host's artifact copies keep for ALE: its inventory, and a numbered directory per
+#: declaration without a ``destination``.
+_RESERVED_DESTINATION = re.compile(r"snapshot\.json|[0-9]+")
+
+
 class Artifact(BaseModel):
     """One ``artifacts`` entry: a path or glob, below where the agent starts when relative.
 
@@ -100,6 +105,11 @@ class Artifact(BaseModel):
 
     source: str = Field(min_length=1)
     exclude: tuple[str, ...] = ()
+    destination: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None
+    )
+    """Where the Host keeps the copy, relative to the episode's ``artifacts/``, as in Harbor;
+    a numbered directory there otherwise. The copy restored for a verifier keeps ``source``."""
 
     # --- validation ---
 
@@ -107,6 +117,22 @@ class Artifact(BaseModel):
     @classmethod
     def _plain_path(cls, data: Any) -> Any:
         return {"source": data} if isinstance(data, str) else data
+
+    @field_validator("destination")
+    @classmethod
+    def _relative_destination(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or not path.parts or ".." in path.parts:
+            raise ValueError(
+                "an artifact destination is a relative path with forward slashes and no '..'"
+            )
+        if _RESERVED_DESTINATION.fullmatch(path.parts[0]):
+            raise ValueError(
+                f"artifact destination {value!r} takes a name ALE keeps for its own copies"
+            )
+        return path.as_posix()
 
 
 def _validate_artifact_paths(
@@ -116,6 +142,13 @@ def _validate_artifact_paths(
         path = _task_path(artifact.source, operating_system)
         if ".." in path.parts or (path.is_absolute() and path == path.parent):
             raise ValueError("artifact paths must not be filesystem roots or contain '..'")
+    destinations = [
+        PurePosixPath(artifact.destination) for artifact in artifacts if artifact.destination
+    ]
+    for index, first in enumerate(destinations):
+        for second in destinations[index + 1 :]:
+            if first == second or first in second.parents or second in first.parents:
+                raise ValueError(f"artifact destinations {first} and {second} overlap")
 
 
 _ACCOUNT = r"^[a-z_][a-z0-9_-]{0,31}$"
@@ -1146,7 +1179,7 @@ class TaskConfig(BaseModel):
             if isinstance(item, dict):
                 unsupported.extend(
                     f"artifact {key} is not supported by ALE"
-                    for key in sorted({"destination", "service"} & item.keys())
+                    for key in sorted({"service"} & item.keys())
                 )
         if unsupported:
             raise ValueError("; ".join(unsupported))

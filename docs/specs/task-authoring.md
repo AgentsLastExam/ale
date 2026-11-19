@@ -73,7 +73,7 @@ schema_version = "0.2.0"                    # required; exactly this
 artifacts = [                               # outcome paths
   "output",                                 # below where the agent starts
   "/home/user/games/*.sgf",
-  { source = "/srv/app", exclude = [".venv", "*.pyc"] },
+  { source = "/srv/app", exclude = [".venv", "*.pyc"], destination = "app" },
 ]
 
 [task]                                      # required
@@ -169,8 +169,7 @@ covers the rest. `docker_image` is `image` under Harbor's name, in `[environment
 `[verifier.environment]` alike: one field, so a table holds either, never both. `environment/setup/` can wait for a service, so there is no `healthcheck`.
 Stages run in fixed directories under the framework's identity, so there is no
 `[environment].workdir` or `[verifier].user`. `[agent].network_mode` is the one network setting.
-ALE keeps its copies in an inventory of its own, so an artifact has no `destination`. An origin
-belongs in `[metadata]`, so there is no `source`.
+An origin belongs in `[metadata]`, so there is no `source`.
 
 These values differ from Harbor's:
 
@@ -210,6 +209,11 @@ that same destination; do not declare one path while instructing the agent to us
 relative path is below the directory the agent starts in. A table adds `exclude`, patterns that
 match as `tar --exclude` does, as in Harbor: `.venv` is that name at any depth and `*.pyc` every
 such file. ALE never walks what it leaves out, so a dependency tree costs nothing.
+`destination`, as in Harbor, is where the Host keeps the copy: a relative path below the
+episode's `artifacts/`, where a path lands as that name and a glob's matches below it. Without
+one, each declaration gets a numbered directory there; those names and the inventory,
+`snapshot.json`, are ALE's, and destinations may not overlap. A verifier still receives every
+copy at its source path.
 
 ALE copies each match according to its actual type and skips links, missing paths, and copy
 failures. No link is followed anywhere on an artifact's path, a directory above it included:

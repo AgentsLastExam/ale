@@ -106,11 +106,12 @@ class ArtifactSink(Protocol):
         source: str,
         name: str,
         exclude: tuple[str, ...] = (),
+        destination: str | None = None,
         *,
         restored: bool = True,
     ) -> None:
-        """Copy ``source`` out; one not ``restored`` reaches no separate verifier, which
-        mounts a view of it instead."""
+        """Copy ``source`` out, kept on the Host at ``destination`` when given; one not
+        ``restored`` reaches no separate verifier, which mounts a view of it instead."""
         ...
 
     async def restore(self, sandbox: Sandbox) -> None: ...

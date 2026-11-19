@@ -1789,7 +1789,9 @@ class EpisodeProtocol:
                 continue
             path = ctx.spec.artifact_path(artifact, ctx.home)
             name = path_type(path).name or f"artifact-{index}"
-            await sink.collect(sandbox, path, name, artifact.exclude, restored=not view)
+            await sink.collect(
+                sandbox, path, name, artifact.exclude, artifact.destination, restored=not view
+            )
             logging.getLogger("ale.execution").info(
                 "artifact collection attempted",
                 extra={"ale_data": {"source": path, "name": name}},
