@@ -180,7 +180,7 @@ allowed, but a Task never inherits another Task's final image or an ALE domain i
 There is no Image Tree. Docker layer caching handles repeated installation without adding
 a cross-Task contract.
 
-`COPY .` cannot expose `setup/`, `tests/` or `calibration/`: the last two are outside the
+`COPY .` cannot expose `setup/`, `tests/`, `solution/` or `calibration/`: the last three are outside the
 build context, and ALE excludes `setup/` after the Task's own `.dockerignore`
 rules, so a Task cannot bring it back. Files in the context, its asset root included, use
 ordinary relative `COPY`; ALE creates no generated view or named BuildKit context.
@@ -255,7 +255,7 @@ top layer's.
 Image source identity describes the files of the build context, separately from the exact
 built image recorded in RunLock. It is not the decision to reuse a solver's answer.
 A Task run records `task.non_verifier_digest`: a content hash of every Task file outside
-`tests/` and `calibration/` (paths, executable bits and link targets), with `task.toml` read
+`tests/`, `solution/` and `calibration/` (paths, executable bits and link targets), with `task.toml` read
 without its `[solution]` and `[[calibration]]` tables, computed once per Task folder. None
 of these reaches an evaluated agent, so changing verification, the reference solution or
 another calibration case keeps a retained solver reverifiable. `validation/` is part of the
@@ -541,7 +541,9 @@ the leaves its registered Nodes lend, Daytona the one of its own Sandboxes. Whic
 scheduler uses, and in which order, is its own configuration, never a Run's.
 
 A Sandbox needs its image's kind and operating system, the architecture that system implies
-(arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, the
+(arm64 for macOS, x86-64 otherwise), its network mode (a verifier's is the verifier's, and a
+solver that serves a shared verifier needs the least open of the agent's and the verifier's,
+since it applies both), its resources (CPUs, memory, the
 storage it may write, GPUs, the models it accepts and the memory it needs on each, container
 features), snapshots, and how many in a row, when it saves or boots from one, and volume
 artifacts, when its Task has any. One rule compares needs with a profile, naming each need
@@ -617,7 +619,7 @@ Task content (the engine).
 | Uploads land with the fixed modes and owner of their identity | guestd `put_tree` (Windows: Provider ACL reset) | `test_uploads_ignore_host_modes_and_belong_to_their_identity` |
 | File reads, listings and digests proceed while a command runs and never pass through a link | a second guest connection from the Provider; guestd | `test_file_reads_progress_while_a_command_is_running` |
 | Replies of any size arrive whatever Python variables the image sets | the Provider starting guestd isolated; guestd writing each reply whole | `test_large_replies_arrive_whatever_python_the_image_configures` |
-| Framework phases have the network; after `close_egress` the agent reaches its Gateway (and, for `allowlist`, the declared hosts) and nothing else; `open` Tasks are never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
+| After `open_egress` a Sandbox has the network; after `close_egress` it reaches its Gateway (and, for `allowlist`, the hosts the episode's egress session admits) and nothing else, whichever phase sealed it; sealing a sealed Sandbox and opening an open one leave it so; an `open` request is never sealed | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_task_that_declared_open_is_never_sealed` |
 | Every Sandbox reaches its Gateway at the same fixed port, whatever port the Host serves it on, and a reattached Sandbox reaches a later run's Gateway there: an agent may keep the address in its native session | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address` |
 | Resources are applied or rejected; the RunLock records the observed image and allocation, with the Provider selected for the Sandbox and the leaf whose profile served it | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
 | A container Sandbox that asks for the container features a profile declares has each of them, as root | Provider in `create`; the Run's preflight on the Host | `test_gives_every_container_feature_it_declares` |
@@ -631,9 +633,9 @@ Task content (the engine).
 | No platform service inside the sandbox gives the agent more than its account | Provider check in `create` | `test_the_agent_cannot_reach_the_platform_daemon` |
 
 `open_egress` and `close_egress` are abstract: a default that did nothing would let a new
-backend run the agent with the network while its RunLock said `block`. A backend that
-cannot change policy at runtime raises there, and one that cannot apply a policy leaves its
-mode out of its profiles. A Provider is complete when it passes
+backend run the agent, or a verifier, with the network while its RunLock said `block`. A
+backend that cannot change policy at runtime raises there, and one that cannot apply a policy
+leaves its mode out of its profiles. A Provider is complete when it passes
 `ale.core.testkit.ProviderConformance`; an escape the suite cannot observe, such as a
 platform's own in-sandbox service, is that Provider's to close and to check in `create`.
 

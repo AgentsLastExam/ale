@@ -86,12 +86,12 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
             test=None,
             solve=None,
         )
-        for directory in ("environment/setup", "tests", "calibration/solution"):
+        for directory in ("environment/setup", "tests", "solution"):
             (root / directory).mkdir(parents=True, exist_ok=True)
         # Built on the base, so the image gets the Windows framework.
         (root / "environment/build.ps1").write_text("exit 0\n")
         (root / "environment/setup/setup.ps1").write_text("exit 0\n")
-        (root / "calibration/solution/solve.ps1").write_text("exit 0\n")
+        (root / "solution/solve.ps1").write_text("exit 0\n")
         (root / "tests/test.ps1").write_text("python.exe .\\verify.py\nexit $LASTEXITCODE\n")
     else:
         scaffold_task(root)

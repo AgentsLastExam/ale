@@ -35,15 +35,15 @@ my-task/
 ├── validation/                # ALE; optional verifier whose results the agent receives
 │   ├── test.sh                # as tests/test.sh
 │   └── verify.py
-└── calibration/               # ALE; known final states and the scores they must receive
-    ├── solution/              # the reference solution, Harbor's solution/
-    │   └── solve.sh           # solve.ps1 on Windows
+├── solution/                  # the reference solution, as in Harbor
+│   └── solve.sh               # solve.ps1 on Windows
+└── calibration/               # ALE; optional further known final states and their scores
     └── missing-summary/       # one directory per further case
         └── solve.sh
 ```
 
 Required files are `task.toml`, `instruction.md`, and the tests and reference solution
-entries for the Task OS: `tests/test.sh` and `calibration/solution/solve.sh` on Linux and
+entries for the Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and
 macOS, `test.ps1` and `solve.ps1` on Windows; every further
 [calibration case](#calibration)'s directory holds the same entry, and
 [`validation/`](#validation), when there is one, the tests entry. `[environment].image` and
@@ -73,7 +73,7 @@ schema_version = "0.2.0"                    # required; exactly this
 artifacts = [                               # outcome paths
   "output",                                 # below where the agent starts
   "/home/user/games/*.sgf",
-  { source = "/srv/app", exclude = [".venv", "*.pyc"] },
+  { source = "/srv/app", exclude = [".venv", "*.pyc"], destination = "app" },
 ]
 
 [task]                                      # required
@@ -88,7 +88,7 @@ network_justification = "the Task reads one publisher's live catalog"
 
 [environment]                               # the solver's machine
 os = "linux"                                # linux | windows | macos; default linux
-# image = "registry.example/image:tag"      # ALE; used directly, or a build script's base
+# image = "registry.example/image:tag"      # or docker_image; used directly, or a build's base
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
 cpus = 1                                    # whole CPUs; default 1
 memory_mb = 4096                            # default 4096
@@ -98,11 +98,23 @@ gpus = 0                                    # GPU count, not indices; default 0
 # gpu_memory_mb = 8192                      # ALE; MiB needed on each GPU; default whole GPUs
 container_features = []                     # ALE; such as ["perf", "mount"]; default none
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
+# workdir = "/app"                          # the agent's start and verification's directory
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
+# network_mode = "public"                   # Harbor's baseline for the agent and the verifier
+# allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
+# allow_internet = true                     # Harbor's deprecated switch, without network_mode
+
+[environment.healthcheck]                   # optional; Harbor's, run once setup is done
+command = "curl -sf localhost:8080/health"  # required; exit 0 is healthy
+interval_sec = 5                            # between attempts; default 5
+timeout_sec = 30                            # one attempt's limit; default 30
+start_period_sec = 0                        # failures meanwhile do not count; default 0
+start_interval_sec = 5                      # between attempts meanwhile; default 5
+retries = 3                                 # failures in a row that fail the Task; default 3
 
 [[environment.mcp_servers]]                 # one table per server
 name = "search"
-transport = "stdio"                         # required: stdio | streamable-http (or http)
+transport = "stdio"                         # stdio | sse | streamable-http (or http); default sse
 command = "/opt/search-mcp/server"          # stdio: a program in the image
 args = ["--index", "/srv/index"]            # stdio
 # url = "https://mcp.example.org/mcp"       # streamable-http
@@ -111,19 +123,22 @@ args = ["--index", "/srv/index"]            # stdio
 [agent]                                     # the evaluated agent and the oracle
 user = "user"                               # account in the image; root needs sudo; default user
 timeout_sec = 900                           # positive seconds; default 900
-network_mode = "allowlist"                  # no-network | allowlist | public; default no-network
+network_mode = "allowlist"                  # no-network | allowlist | public; default above, or no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
-# workdir = "project"                       # ALE; where the agent starts; default its home
+# workdir = "project"                       # ALE; where the agent starts; default as above
 validation_rounds = 0                       # ALE; validation/ results it gets; default 0
 
 [verifier]
 timeout_sec = 600                           # positive seconds; default 600
 environment_mode = "separate"               # shared | separate | snapshot (ALE)
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
+# user = "grader"                           # Harbor's: its account, name or uid; Linux, macOS
+# network_mode = "no-network"               # tests/ and validation/ alike; default below
+# allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
 
 [verifier.environment]                      # a separate or snapshot verifier's own sandbox
-# image = "registry.example/verifier:tag"   # ALE; separate only; not with tests/Dockerfile
+# image = "registry.example/verifier:tag"   # or docker_image; separate only; no tests/Dockerfile
 build_timeout_sec = 3600                    # separate only; default 3600
 cpus = 1                                    # default [environment].cpus
 memory_mb = 4096                            # default [environment].memory_mb
@@ -133,6 +148,10 @@ gpus = 0                                    # default 0
 # gpu_memory_mb = 4096                      # ALE; default whole GPUs
 container_features = []                     # ALE; default none
 env = {}                                    # replaces [environment].env
+# workdir = "/grade"                        # verification's directory; default as above
+# network_mode = "allowlist"                # Harbor's baseline for this verifier; default public
+# allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
+# allow_internet = false                    # Harbor's deprecated switch, without network_mode
 
 [validation]                                # ALE; where validation/ runs; default [verifier]'s
 environment_mode = "separate"               # shared | separate | snapshot
@@ -145,6 +164,7 @@ gpus = 0                                    # default 0
 # gpu_types = ["H100"]                      # default any
 # gpu_memory_mb = 4096                      # default whole GPUs
 container_features = []                     # default none
+# workdir = "/grade"                        # validation/'s directory; default tests/'s
 
 [solution]
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
@@ -156,7 +176,18 @@ expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or
 ```
 
 `[agent].workdir` is below the agent's home when relative, so a Task need not spell its home
-per OS. It must be a directory when the agent starts; stages keep their fixed directories.
+per OS. It must be a directory when the agent starts. `[environment].workdir`, Harbor's
+working directory, follows the same rules: the agent starts there unless `[agent].workdir`
+names another start, and `tests/` and `validation/` run there, their entries named by full
+path, so Harbor's verifiers find what they expect; `[verifier.environment].workdir` replaces it
+for a verifier with a Sandbox of its own. Setup and the oracle keep their stage directories.
+
+`[verifier].user`, as in Harbor, is the account, by name or uid, that `tests/` and
+`validation/` run as on Linux and macOS; Windows verification always runs as Administrator.
+ALE then gives that one account the stage directory and the verifier directory, which are
+otherwise the framework's alone, so a verifier running as an account the agent controls,
+such as `[agent].user`, can be changed by what the agent left: that is the Task's choice. Without
+it, verification runs as the framework, as setup does.
 `[agent].validation_rounds`, an integer from 0, is how many results of
 [`validation/`](#validation) the agent receives; above 0 it requires `validation/`. Run
 policy may replace it with `validation_rounds`, a non-negative integer, recorded as the
@@ -165,11 +196,8 @@ timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
 Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
 an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
-covers the rest. `[environment].image` names every image, so `docker_image` is an unknown
-key. `environment/setup/` can wait for a service, so there is no `healthcheck`.
-Stages run in fixed directories under the framework's identity, so there is no
-`[environment].workdir` or `[verifier].user`. `[agent].network_mode` is the one network setting.
-ALE keeps its copies in an inventory of its own, so an artifact has no `destination`. An origin
+covers the rest. `docker_image` is `image` under Harbor's name, in `[environment]` and
+`[verifier.environment]` alike: one field, so a table holds either, never both. An origin
 belongs in `[metadata]`, so there is no `source`.
 
 These values differ from Harbor's:
@@ -191,13 +219,14 @@ These values differ from Harbor's:
 - `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
 - `environment_mode` also takes `snapshot`, ALE's: a verifier booted from a snapshot of the
   solver; see [Verification topology](#verification-topology).
-- The reference solution is `calibration/solution/`, one [calibration case](#calibration)
-  among the others, where Harbor's is `solution/`, so a Harbor conversion moves it; a Task
-  still holding `solution/` fails as it loads.
+- The reference solution, `solution/` as in Harbor, is also the [calibration case](#calibration)
+  `solution`; further cases live in `calibration/<name>/`, and a `calibration/solution/`
+  fails as the Task loads.
 - `gpu_types` holds at least one name and requires `gpus`, and every Provider honors it,
   where Harbor's Docker environment ignores it; see [GPUs](#gpus).
 - `allowed_hosts` refuses entries that reach the Host; see [Resources and network](#resources-and-network).
-- The verifier writes `reward.json` only, with `reward` between 0 and 1; see [tests/](#tests).
+- The verifier writes `reward.json`, or `reward.txt` holding one number, with `reward` between
+  0 and 1, and only `reward` is scored; see [Result](verification.md#result).
 
 When the instruction requires deliverable files, every instructed destination must equal or be
 contained by a declared `artifacts` path, or matched by a declared glob. Commands and examples in `instruction.md` must write to
@@ -209,6 +238,11 @@ that same destination; do not declare one path while instructing the agent to us
 relative path is below the directory the agent starts in. A table adds `exclude`, patterns that
 match as `tar --exclude` does, as in Harbor: `.venv` is that name at any depth and `*.pyc` every
 such file. ALE never walks what it leaves out, so a dependency tree costs nothing.
+`destination`, as in Harbor, is where the Host keeps the copy: a relative path below the
+episode's `artifacts/`, where a path lands as that name and a glob's matches below it. Without
+one, each declaration gets a numbered directory there; those names and the inventory,
+`snapshot.json`, are ALE's, and destinations may not overlap. A verifier still receives every
+copy at its source path.
 
 ALE copies each match according to its actual type and skips links, missing paths, and copy
 failures. No link is followed anywhere on an artifact's path, a directory above it included:
@@ -284,8 +318,12 @@ The Verification APIs and records are defined only in [Verification](verificatio
 ### Resources and network
 
 `[environment]` selects container or VM behavior; Tasks never name a Provider.
-`[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches
-only the Gateway, `allowlist` also the declared hosts, `public` everything. An
+The agent's network applies to the evaluated agent and the oracle: `no-network` reaches
+only the Gateway, `allowlist` also the declared hosts, `public` everything. It resolves as
+in Harbor: `[agent].network_mode` and `allowed_hosts` when `[agent]` names a mode, else
+`[environment]`'s, Harbor's baseline, where `allow_internet = true` or `false`, Harbor's
+deprecated switch, stands for `public` or `no-network` when no mode is named, and else
+`no-network`, ALE's default where Harbor's is `public`. An
 `allowed_hosts` entry `pypi.org` is that host alone, `*.pypi.org` that host and every name
 below it at any depth, which every Provider that offers `allowlist` can enforce, and an
 address or CIDR range a client connecting to that address, never a name that resolves into
@@ -293,11 +331,24 @@ it. Entries reaching the Host itself (loopback, link-local, and ranges holding t
 because allowed traffic leaves from the Host. An allowlist carries TLS and needs a client
 that honors the proxy variables or, on a desktop, the agent account's system proxy (WinINet
 on Windows, GNOME's settings on Linux, the network services' web proxies on macOS), both of
-which the framework points at the proxy for the agent and the oracle; raw TCP to an allowed
-address stays blocked. Setup and verification network is framework-controlled; its
-enforcement is specified in [Security](security.md). The quality standard owns resource
-feasibility and network-policy selection. `ale lint` requires
-`[metadata].network_justification` for `public`.
+which the framework points at the proxy for whatever runs under an allowlist; raw TCP to an
+allowed address stays blocked.
+
+The verifier's network applies to `tests/` and `validation/` alike, in every topology, with the
+same three modes and host rules. It resolves as in Harbor, with ALE's open default:
+`[verifier].network_mode` and `allowed_hosts` when `[verifier]` names a mode; else, for a
+verifier with a Sandbox of its own (`separate` or `snapshot`) that declares
+`[verifier.environment]`, that table's `network_mode`, `allowed_hosts` and `allow_internet`,
+and `public` when it names none, as Harbor's separate environment is; else `[environment]`'s
+baseline; else `public`. So a shared verifier of a Task whose `[environment]` says `no-network`
+runs without network, as Harbor's does, while one that names nothing keeps the network a
+verifier usually needs. `[validation.environment]` takes no network: a validation verifier has
+the verifier's. Under `no-network` a verifier still reaches the Gateway, so its
+[Judges](verification.md#judge-tools) work. Setup, the Harness's installation and image builds
+have the network, since they are the Task's trusted preparation and ours; enforcement is
+specified in [Security](security.md). The quality standard owns resource feasibility and
+network-policy selection. `ale lint` requires `[metadata].network_justification` when the
+agent's network resolves to `public`.
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,
@@ -524,6 +575,13 @@ episode: reset mutable data, generate per-episode values, create writable copies
 services that depend on dynamic state. Stable installation and configuration belong in the
 image.
 
+`[environment.healthcheck]`, Harbor's readiness check, runs right after setup, in the
+directory the agent starts in, under the framework's identity and setup's time limit. As in
+Harbor and Docker's `HEALTHCHECK`, its first success passes, a failure counts only once
+`start_period_sec` has passed, and `retries` failures in a row fail the Episode as a Task
+error: a service that never became ready is the Task's fault, not the agent's. Its command
+runs in `bash` (`cmd.exe` on Windows, as Harbor runs it) with `[environment].env`.
+
 Setup and verification use the framework's privileged identity; solver and oracle use
 the agent identity. See [Permissions](sandbox-image.md#permissions). Image/setup code must
 explicitly set required ownership, write and execute permissions instead of relying on Host modes.
@@ -546,13 +604,15 @@ below `environment/` and have the Dockerfile, `build.ps1` or `build.sh` place th
 Skill. The Harness copies its contents to the agent's skills directory before the agent starts.
 
 `[[environment.mcp_servers]]` uses Harbor's `name`, `transport`, `command`, `args`, `url` and
-`headers`. `transport` is required because Harbor's default, `sse`, is not implemented; `http`
-means `streamable-http`, as in Harbor. A stdio server is a program in the image; one that needs
-its own directory or variables starts through a wrapper script there. A `streamable-http` URL
-must be reachable under `[agent]`'s network, which ALE checks before any Sandbox exists: under
-`allowlist` that means `https`.
+`headers`, with Harbor's default `transport`, `sse`; `http` means `streamable-http`, as in
+Harbor. A stdio server is a program in the image; one that needs its own directory or variables
+starts through a wrapper script there. An `sse` or `streamable-http` URL must be reachable under
+`[agent]`'s network, which ALE checks before any Sandbox exists: under `allowlist` that means
+`https`. Each Harness configures an SSE server as Harbor's adapter for its agent does, and one
+whose agent has no SSE transport is refused before any Sandbox exists
+([Harnesses](../../packages/ale-run/src/ale/run/harnesses/README.md#mcp-transports)).
 
-`headers` belongs to a `streamable-http` server. As in Harbor, and unlike an `env` value, a
+`headers` belongs to an `sse` or `streamable-http` server. As in Harbor, and unlike an `env` value, a
 header holds `${NAME}` or `${NAME:-default}` anywhere in its text, so `Bearer ${SEARCH_TOKEN}`
 works. References resolve as [Variables](#variables) describe, for an agent's run only: an
 oracle has no MCP client. A credential header (`Authorization`, `Cookie`, or a name that marks
@@ -575,7 +635,7 @@ that run; the RunLock records what the run used. See
 whose root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
-directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
+directory as cwd, or with [Harbor's working directory](#tasktoml) when the Task names one. Stage code uses ordinary relative paths; solver outputs use literal
 absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
 own when it has one, since that is where the Task installs what `verify.py` imports, and
 otherwise the framework's own. It stages `ale_verify` and its JSON Schema library into that
@@ -625,7 +685,7 @@ as `tests/` is. It runs where ALE's `[validation]` places it, by `[verifier]`'s
 `[verifier]`'s budget and variables either way. It has no Dockerfile or image of its own: a
 separate verifier runs it on the image a separate verifier of `tests/` runs, or else the
 solver's, so a `validation/Dockerfile` is only a file there and `[validation.environment]`
-sets only the Sandbox's size and capabilities. Placed apart, a Task can, for example, score
+sets only the Sandbox's size and capabilities, and its working directory. Placed apart, a Task can, for example, score
 each round in a separate verifier that mounts views of the agent's output and the final
 state in the solver itself, where a running service can be checked; a validation score then
 predicts the final one less well where the two see different things. Run shared, it runs in
@@ -690,7 +750,7 @@ name = "solution"                           # replaces the default { reward = 1 
 expect = { reward = [0.0, 0.05], tflops = [600, 680] }
 ```
 
-Every Task has the case `solution`, its reference solution in `calibration/solution/`. It
+Every Task has the case `solution`, its reference solution in `solution/`. It
 expects `{ reward = 1 }`, and an entry of that name only replaces the expectation, so the
 directory needs none. An open-ended Task whose reference solution is its baseline rather
 than a full-marks answer declares what that baseline earns, as the last entry above does:
@@ -702,9 +762,9 @@ start state earns nothing, declare a case whose `solve.sh` does nothing and that
 In each case, its directory's `solve.sh` (`solve.ps1` on Windows) supplies the case's final
 state: it may execute a solution normally or write that state directly from reference data
 it carries. It runs as the oracle, with `[solution].env`, and like `tests/` it is absent
-while an evaluated agent works. `calibration/` holds only case directories, and `ale lint`
-refuses any other entry there, a link included. A directory there other than `solution`
-without an entry fails the Task as it loads, so a case cannot exist without its
+while an evaluated agent works. `calibration/` holds only the further case directories, and
+`ale lint` refuses any other entry there, a link or a `solution/` included. A directory
+there without an entry fails the Task as it loads, so a case cannot exist without its
 expectation.
 
 `expect` includes `reward`. Each value is a number the result must equal, or `[lo, hi]`, a

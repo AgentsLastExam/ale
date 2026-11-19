@@ -47,9 +47,7 @@ LINUX = {
         "#!/usr/bin/env bash\nset -euo pipefail\npython3 observe.py setup\n"
         'echo "setup stderr: ${SERVICE_TOKEN}" >&2\n'
     ),
-    "calibration/solution/solve.sh": (
-        "#!/usr/bin/env bash\nset -euo pipefail\npython3 observe.py oracle\n"
-    ),
+    "solution/solve.sh": ("#!/usr/bin/env bash\nset -euo pipefail\npython3 observe.py oracle\n"),
     "tests/test.sh": (
         "#!/usr/bin/env bash\nset -euo pipefail\npython3 observe.py verify\n"
         'exec "$ALE_VERIFY_PYTHON" verify.py\n'
@@ -60,7 +58,7 @@ WINDOWS = {
         "python.exe .\\observe.py setup\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\n"
         '[Console]::Error.WriteLine("setup stderr: $env:SERVICE_TOKEN")\n'
     ),
-    "calibration/solution/solve.ps1": "python.exe .\\observe.py oracle\nexit $LASTEXITCODE\n",
+    "solution/solve.ps1": "python.exe .\\observe.py oracle\nexit $LASTEXITCODE\n",
     "tests/test.ps1": (
         "python.exe .\\observe.py verify\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\n"
         "& $env:ALE_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"

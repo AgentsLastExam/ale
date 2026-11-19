@@ -255,8 +255,8 @@ async def test_an_agent_improves_over_a_validation_round_in_a_windows_vm(
     (root / "environment").mkdir(exist_ok=True)
     # Built on the base, so the image gets the Windows framework.
     (root / "environment/build.ps1").write_text("exit 0\n")
-    (root / "calibration/solution").mkdir(parents=True)
-    (root / "calibration/solution/solve.ps1").write_text("exit 0\n")
+    (root / "solution").mkdir(parents=True)
+    (root / "solution/solve.ps1").write_text("exit 0\n")
     _stages(root, TEST_PS1, "test.ps1")
     provider = QemuProvider(
         image=image, overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots"
@@ -289,9 +289,9 @@ async def test_calibration_checks_validation_on_each_cases_final_state_in_docker
             ]
         },
     )
-    for case, lines in (("solution", "a\\nb\\nc\\n"), ("partial", "a\\n")):
-        (root / "calibration" / case).mkdir(parents=True, exist_ok=True)
-        (root / "calibration" / case / "solve.sh").write_text(
+    for case, lines in (("solution", "a\\nb\\nc\\n"), ("calibration/partial", "a\\n")):
+        (root / case).mkdir(parents=True, exist_ok=True)
+        (root / case / "solve.sh").write_text(
             f'#!/usr/bin/env bash\nprintf "{lines}" > "${{ALE_HOME:-$HOME}}/work.txt"\n'
         )
     settings = RunConfig.model_validate({"sandbox": {"providers": ["docker:runc"]}})

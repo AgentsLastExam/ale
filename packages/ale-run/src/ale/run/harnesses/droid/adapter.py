@@ -53,6 +53,7 @@ class DroidHarness(CliHarness):
     name = "droid"
     package = "droid"
     binary = "droid"
+    mcp_sse = False  # no SSE transport is documented for Droid's configuration
     default_version = DEFAULT_CLI_VERSION
     settings_type = DroidSettings
     settings: DroidSettings

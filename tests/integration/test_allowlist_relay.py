@@ -31,7 +31,10 @@ async def _proxy() -> AsyncIterator[tuple[EgressProxy, str]]:
     sessions = SessionRegistry()
     session = sessions.open(
         GatewaySession(
-            episode_id="allowlist", model="none", allowed_hosts=frozenset({"example.com"})
+            episode_id="allowlist",
+            model="",
+            purpose="egress",
+            allowed_hosts=frozenset({"example.com"}),
         )
     )
     proxy = EgressProxy(sessions, host="0.0.0.0")

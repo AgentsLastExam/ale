@@ -130,7 +130,8 @@ class OpenHandsCliHarness(CliHarness):
                         for key, value in server.environment.items()
                     }
             else:
-                native = {"transport": "http", "url": server.url, **http_headers(resolved)}
+                transport = "sse" if server.transport == "sse" else "http"
+                native = {"transport": transport, "url": server.url, **http_headers(resolved)}
             servers[resolved.name] = native
         await sandbox.write_file(
             str(home / trajectory.MCP_CONFIG),

@@ -89,7 +89,7 @@ def judged_task(root: Path) -> Path:
         'test -z "${ALE_OPENAI_API_KEY-}${ALE_ANTHROPIC_API_KEY-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
-    (task / "calibration/solution" / "solve.sh").write_text(
+    (task / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nprintf blue > /home/user/output/answer.txt\n"
     )
     (task / "tests" / "test.sh").write_text(

@@ -432,6 +432,10 @@ async def test_reverification_retries_only_with_fresh_verifiers(
         if snapshot:
             assert protocol.solver.handle == "docker:snapshot:source"
             assert protocol.solver.episode_id == source.record.episode_id
+        else:
+            # The protocol reconnects the kept solver, with the episode's egress session.
+            assert protocol.solver.request.episode_id == source.record.episode_id
+            await protocol.solver.attach(protocol.solver.request)
         chosen.append((_task.provider, _task.verifier_provider))
         assert kwargs["destroy_failed_sandboxes"]
         assert str(kwargs["desktop_resolution"]) == "1366x768"
@@ -485,7 +489,7 @@ async def test_calibration_projects_only_final_episode_attempts(
     task_cli = import_module("ale.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
     edit_task_config(task_path, {"calibration": [{"name": "start-state", "expect": {"reward": 0}}]})
-    (task_path / "calibration/start-state").mkdir()
+    (task_path / "calibration/start-state").mkdir(parents=True)
     (task_path / "calibration/start-state/solve.sh").write_text("#!/usr/bin/env bash\n")
     counts: Counter[str] = Counter()
     lock = make_lock()

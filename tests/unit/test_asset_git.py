@@ -363,7 +363,7 @@ def test_a_calibration_case_keeps_its_assets_until_the_case_goes(
 def test_push_publishes_each_case_s_assets_and_status_reports_them(
     write_task_repo, asset_remote: Path
 ) -> None:  # type: ignore[no-untyped-def]
-    roots = ("calibration/partial/assets", "calibration/solution/assets")
+    roots = ("calibration/partial/assets", "solution/assets")
     task = write_task_repo(asset_roots=roots) / "tasks/demo"
     _declare_case(task, "partial")
     (pushed,) = push_assets([task])

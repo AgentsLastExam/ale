@@ -95,9 +95,9 @@ class ScriptedPolicyHarness(StepwisePolicy):
 class OracleHarness(AutonomousHarness):
     """Runs one of the task's known solutions in place of an agent.
 
-    ``case`` names the calibration case whose directory, ``calibration/<case>/``, runs; by
-    default the reference solution. The episode protocol stages it before this runs; see
-    :func:`solution_dir`.
+    ``case`` names the calibration case whose directory runs: by default the reference
+    solution, ``solution/``, otherwise ``calibration/<case>/``. The episode protocol stages
+    it before this runs; see :func:`solution_dir`.
     """
 
     name = "oracle"

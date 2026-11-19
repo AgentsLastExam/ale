@@ -231,10 +231,10 @@ async def test_task_local_helper_and_framework_package_are_importable(tmp_path: 
 @pytest.mark.asyncio
 async def test_solution_assets_are_staged_with_the_solution(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "solution-assets")
-    asset = task / "calibration/solution/assets/result.txt"
+    asset = task / "solution/assets/result.txt"
     asset.parent.mkdir(parents=True)
     asset.write_text("hello\n")
-    (task / "calibration/solution/solve.sh").write_text(
+    (task / "solution/solve.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "cp assets/result.txt /home/user/output/result.txt\n"
@@ -321,7 +321,7 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
         "&& chown -R user:user /home/user/output /var/lib/ale-report\n"
     )
     (task / "tests/Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
-    (task / "calibration/solution/solve.sh").write_text(
+    (task / "solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         'printf \'{"status":"ok"}\\n\' > /home/user/output/result.json\n'
         "printf ready > /var/lib/ale-report/state.txt\n"
@@ -371,7 +371,7 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
     setup.parent.mkdir()
     setup.write_text("#!/bin/sh\nset -eu\ntouch /tmp/solver-setup-ran\n")
     setup.chmod(0o755)
-    (task / "calibration/solution/solve.sh").write_text(
+    (task / "solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\nprintf 'hello\\n' > /home/user/output/result.txt\n"
     )
     (task / "tests/verify.py").write_text(
@@ -415,7 +415,7 @@ async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
         "ln -s /root/answers/result.json /root/answers/result.json/loop\n"
     )
     setup.chmod(0o755)
-    (task / "calibration/solution/solve.sh").write_text("#!/bin/sh\nset -eu\n[ $(id -u) -ne 0 ]\n")
+    (task / "solution/solve.sh").write_text("#!/bin/sh\nset -eu\n[ $(id -u) -ne 0 ]\n")
     (task / "tests/verify.py").write_text(
         "import os\n"
         "from pathlib import Path\n"
@@ -515,7 +515,7 @@ async def test_a_snapshot_verifier_sees_the_solvers_disk_with_its_own_resources(
     setup = task / "environment/setup/setup.sh"
     setup.parent.mkdir()
     setup.write_text("#!/bin/sh\nset -eu\ntrue\n")
-    (task / "calibration/solution/solve.sh").write_text(
+    (task / "solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\nmkdir -p /home/user/checkpoints\n"
         "printf weights > /home/user/checkpoints/step-1000.bin\n"
     )
@@ -648,11 +648,11 @@ async def test_a_snapshot_verifier_boots_a_vm_of_its_own_size_on_the_solvers_dis
             test=None,
             solve=None,
         )
-        for directory in ("environment", "tests", "calibration/solution"):
+        for directory in ("environment", "tests", "solution"):
             (root / directory).mkdir(parents=True, exist_ok=True)
         # Built on the base, so the image gets the Windows framework.
         (root / "environment/build.ps1").write_text("exit 0\n")
-        (root / "calibration/solution/solve.ps1").write_text(
+        (root / "solution/solve.ps1").write_text(
             "New-Item -ItemType Directory -Force C:\\Users\\user\\checkpoints | Out-Null\n"
             "Set-Content -NoNewline -Value weights C:\\Users\\user\\checkpoints\\step-1000.bin\n"
         )
@@ -673,7 +673,7 @@ async def test_a_snapshot_verifier_boots_a_vm_of_its_own_size_on_the_solvers_dis
         )
         (root / "environment/Dockerfile").unlink()
         (root / "environment/build.sh").write_text("true\n")
-        (root / "calibration/solution/solve.sh").write_text(
+        (root / "solution/solve.sh").write_text(
             "#!/bin/sh\nset -eu\nmkdir -p /home/user/checkpoints\n"
             "printf weights > /home/user/checkpoints/step-1000.bin\n"
         )

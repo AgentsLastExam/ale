@@ -106,11 +106,12 @@ class ArtifactSink(Protocol):
         source: str,
         name: str,
         exclude: tuple[str, ...] = (),
+        destination: str | None = None,
         *,
         restored: bool = True,
     ) -> None:
-        """Copy ``source`` out; one not ``restored`` reaches no separate verifier, which
-        mounts a view of it instead."""
+        """Copy ``source`` out, kept on the Host at ``destination`` when given; one not
+        ``restored`` reaches no separate verifier, which mounts a view of it instead."""
         ...
 
     async def restore(self, sandbox: Sandbox) -> None: ...
@@ -215,8 +216,14 @@ class EpisodeContext:
 
     proxy_url: str = ""
     """Egress proxy for allowlist tasks; empty when none was started."""
-    allowed_hosts: frozenset[str] = field(default_factory=frozenset)
-    """Effective task plus harness allowlist enforced by the egress proxy."""
+    egress_token: str = ""
+    """The token of this episode's egress session, which a Sandbox's relay presents to the
+    egress proxy; empty when the episode has none."""
+    open_egress_session: Callable[[tuple[str, ...]], None] | None = None
+    """Opens the egress session for the hosts of a phase's ``allowlist`` policy, the agent's
+    while its turn runs or the verifier's while ``validation/`` or ``tests/`` runs, or
+    suspends it, given none: the proxy refuses it between phases, so nothing the agent left
+    running reaches a host outside the phase that declared it."""
 
     sandbox_identity: SandboxProvenance | None = None
     """Observed at provisioning: which account the agent ran as, and whether it could
@@ -276,4 +283,5 @@ class EpisodeContext:
     @property
     def secrets(self) -> tuple[str, ...]:
         """Every value this episode keeps out of what it records."""
-        return (self.session.token, *self.verification_secrets, *self.variables.secrets)
+        egress = (self.egress_token,) if self.egress_token else ()
+        return (self.session.token, *egress, *self.verification_secrets, *self.variables.secrets)

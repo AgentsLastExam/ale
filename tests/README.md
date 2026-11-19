@@ -15,6 +15,9 @@ just test-vm          # VM Sandboxes on KVM (needs_kvm)
 just lint             # formatting, lint and import boundaries
 ```
 
+A unit test fails after 60 seconds, so one that waits for something its fake never does
+fails with the stack it was waiting in instead of blocking the suite.
+
 `just test-int` and CI's container backend run four test files at a time
 (`pytest -n 4 --dist loadfile`), so an integration test neither relies on what another file
 leaves behind nor assumes it is the only run on the host. Every Kata and gVisor sandbox, an

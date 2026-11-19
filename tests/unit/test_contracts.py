@@ -17,6 +17,7 @@ from ale.core.taskspec import (
     NetworkPolicy,
     OperatingSystem,
     SkillSource,
+    SseMcpServer,
     StdioMcpServer,
     StreamableHttpMcpServer,
     TaskConfig,
@@ -40,6 +41,13 @@ def make_spec(**overrides: object) -> TaskSpec:
         "instruction": "Write hello into /home/user/output/result.txt",
     }
     return TaskSpec(**(base | overrides))  # type: ignore[arg-type]
+
+
+_OPEN = NetworkPolicy(mode=NetworkMode.OPEN)
+_BLOCK = NetworkPolicy(mode=NetworkMode.BLOCK)
+_PYPI = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",))
+_ALLOW_PYPI = {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]}
+_OWN = {"cpus": 1, "memory_mb": 512}
 
 
 def test_task_spec_is_strict_and_path_independent() -> None:
@@ -109,6 +117,47 @@ def test_task_spec_hash_tracks_semantics() -> None:
     assert make_spec().spec_hash != make_spec(resources={"cpus": 2}).spec_hash
 
 
+def test_an_open_verifier_network_keeps_the_spec_hash() -> None:
+    """Open is the default, left out of a dump, so a Task that names no verifier network
+    keeps the hash it had; any other policy is part of it."""
+    assert "network" not in VerifySpec().model_dump()
+    assert make_spec(verify={"network": _OPEN}).spec_hash == make_spec().spec_hash
+    sealed = make_spec(verify={"network": _BLOCK})
+    assert sealed.spec_hash != make_spec().spec_hash
+    assert TaskSpec.model_validate_json(sealed.model_dump_json()) == sealed
+    with pytest.raises(ValidationError, match="verifier's network"):
+        make_spec(verify={"network": _BLOCK}, validation={"network": _OPEN})
+
+
+@pytest.mark.parametrize(
+    ("agent", "verifier", "mode", "expected"),
+    [
+        (_BLOCK, _OPEN, "shared", _BLOCK),
+        (_OPEN, _BLOCK, "shared", _BLOCK),
+        (_OPEN, _OPEN, "shared", _OPEN),
+        (_BLOCK, _PYPI, "shared", _PYPI),
+        (_PYPI, _OPEN, "shared", _PYPI),
+        (
+            _PYPI,
+            NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org", "example.org")),
+            "shared",
+            NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org", "example.org")),
+        ),
+        # A verifier of its own applies its network in its own Sandbox.
+        (_OPEN, _BLOCK, "separate", _OPEN),
+        (_BLOCK, _PYPI, "snapshot", _BLOCK),
+    ],
+)
+def test_a_solver_can_apply_both_phases_networks(
+    agent: NetworkPolicy, verifier: NetworkPolicy, mode: str, expected: NetworkPolicy
+) -> None:
+    """A shared solver is created with the least open mode either phase needs."""
+    resources = VerifierResources(cpus=1, memory_mb=512, storage_mb=None, gpus=0)
+    placed = {} if mode == "shared" else {"environment_mode": mode, "resources": resources}
+    spec = make_spec(network=agent, verify={**placed, "network": verifier})
+    assert spec.solver_network == expected
+
+
 def test_task_spec_round_trips() -> None:
     spec = make_spec(metadata={"category": "cli"})
     restored = TaskSpec.model_validate_json(spec.model_dump_json())
@@ -135,7 +184,7 @@ def test_task_config_requires_only_its_version_and_name() -> None:
     assert (minimal.environment.cpus, minimal.environment.memory_mb) == (1, 4096)
     assert minimal.environment.build_timeout_sec == 3600
     assert (minimal.agent.user, minimal.agent.timeout_sec) == ("user", 900)
-    assert minimal.agent.network.mode is NetworkMode.BLOCK
+    assert minimal.agent_network.mode is NetworkMode.BLOCK
     assert minimal.verifier.timeout_sec == 600
     for table, key in (("", "schema_version"), ("task", "name")):
         payload = merged_config(MINIMAL_TASK_CONFIG, {table: {key: None}} if table else {key: None})
@@ -156,15 +205,15 @@ def test_task_config_requires_only_its_version_and_name() -> None:
     [
         ({"steps": [{"name": "one"}]}, "steps"),
         ({"source": "x"}, "source"),
-        ({"environment": {"healthcheck": {"command": "true"}}}, "environment.healthcheck"),
-        ({"environment": {"network_mode": "public"}}, "environment.network_mode"),
-        ({"environment": {"workdir": "/app"}}, "environment.workdir"),
-        ({"verifier": {"user": "root"}}, "verifier.user"),
+        ({"environment": {"tpu": {"type": "v6e", "topology": "2x4"}}}, "environment.tpu"),
+        (
+            {"verifier": {"environment": {"healthcheck": {"command": "true"}}}},
+            "verifier.environment.healthcheck",
+        ),
         (
             {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},
             "verifier.environment.os",
         ),
-        ({"artifacts": [{"source": "/o", "destination": "o"}]}, "artifact destination"),
         ({"artifacts": [{"source": "/o", "service": "db"}]}, "artifact service"),
     ],
 )
@@ -178,12 +227,84 @@ def test_task_config_rejects_unknown_keys() -> None:
         {"domain": "demo"},
         {"ale": {"sudo": True}},
         {"task": {"org": "x"}},
-        # Harbor's container reference; ALE names every image with [environment].image.
-        {"environment": {"docker_image": "ghcr.io/acme/task:v1"}},
         {"environment": {"vm": True}},
-        {"verifier": {"environment": {"docker_image": "ghcr.io/acme/verifier:v1"}}},
     ):
         with pytest.raises(ValidationError, match="Extra inputs"):
+            config(layer)
+
+
+def test_an_mcp_server_s_transport_is_sse_unless_written_as_in_harbor() -> None:
+    servers = config(
+        {
+            "environment": {
+                "mcp_servers": [
+                    {"name": "a", "url": "https://mcp.example.org/sse"},
+                    {"name": "b", "transport": "http", "url": "https://mcp.example.org/mcp"},
+                    {
+                        "name": "c",
+                        "transport": "sse",
+                        "url": "https://mcp.example.org/sse",
+                        "headers": {"Authorization": "Bearer ${SEARCH_TOKEN}"},
+                    },
+                ]
+            }
+        }
+    ).environment.mcp_servers
+    assert [type(entry.server) for entry in servers] == [
+        SseMcpServer,
+        StreamableHttpMcpServer,
+        SseMcpServer,
+    ]
+
+
+def test_an_artifact_destination_is_harbor_s_relative_host_path() -> None:
+    kept = config(
+        {"artifacts": [{"source": "/o", "destination": "out/report"}, "/p", {"source": "/q"}]}
+    ).artifacts
+    assert [artifact.destination for artifact in kept] == ["out/report", None, None]
+    # Unset, it leaves every existing specification's identity as it was.
+    assert "destination" not in kept[1].model_dump()
+    for destinations, message in (
+        (["/abs"], "relative path"),
+        (["a/../b"], "relative path"),
+        (["a\\b"], "relative path"),
+        (["."], "relative path"),
+        (["0001/x"], "takes a name ALE keeps"),
+        (["snapshot.json"], "takes a name ALE keeps"),
+        (["out", "out/inner"], "overlap"),
+        (["same", "same"], "overlap"),
+    ):
+        artifacts = [
+            {"source": f"/s{index}", "destination": destination}
+            for index, destination in enumerate(destinations)
+        ]
+        with pytest.raises(ValidationError, match=message):
+            config({"artifacts": artifacts})
+
+
+def test_the_verifier_s_account_is_harbor_s_name_or_uid() -> None:
+    assert config({"verifier": {"user": "grader"}}).verifier.user == "grader"
+    assert config({"verifier": {"user": 1000}}).verifier.user == 1000
+    for user in ("Grader", "a b", -1, True):
+        with pytest.raises(ValidationError):
+            config({"verifier": {"user": user}})
+    with pytest.raises(ValidationError, match="Windows verification runs as Administrator"):
+        config({"environment": {"os": "windows"}, "verifier": {"user": "grader"}})
+
+
+def test_docker_image_is_harbor_s_name_for_image() -> None:
+    named = config(
+        {"environment": {"docker_image": "ghcr.io/acme/task:v1"}},
+        {"verifier": {"environment": {"docker_image": "ghcr.io/acme/verifier:v1"}}},
+    )
+    assert named.environment.image == "ghcr.io/acme/task:v1"
+    assert named.verifier.environment is not None
+    assert named.verifier.environment.image == "ghcr.io/acme/verifier:v1"
+    for layer in (
+        {"environment": {"image": "a:1", "docker_image": "a:1"}},
+        {"verifier": {"environment": {"image": "a:1", "docker_image": "b:1"}}},
+    ):
+        with pytest.raises(ValidationError, match="image and docker_image are one field"):
             config(layer)
 
 
@@ -246,14 +367,7 @@ def test_task_config_rejects_unknown_keys() -> None:
         ({"environment": {"gpus": 1, "gpu_types": []}}, "at least 1 item"),
         ({"environment": {"gpus": 1, "gpu_types": [" - "]}}, "should match pattern"),
         ({"agent": {"sudo": "yes"}}, "valid boolean"),
-        (
-            {
-                "environment": {
-                    "mcp_servers": [{"name": "s", "transport": "sse", "url": "http://x"}]
-                }
-            },
-            "stdio",
-        ),
+        ({"environment": {"mcp_servers": [{"name": "s"}]}}, "transport 'sse' requires url"),
         (
             {
                 "environment": {
@@ -334,12 +448,135 @@ def test_verification_mode_follows_harbor() -> None:
 
 
 def test_network_modes_map_onto_the_runtime_policy() -> None:
-    assert config().agent.network == NetworkPolicy(mode=NetworkMode.BLOCK)
+    assert config().agent_network == NetworkPolicy(mode=NetworkMode.BLOCK)
     allowlist = config({"agent": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]}})
-    assert allowlist.agent.network == NetworkPolicy(
+    assert allowlist.agent_network == NetworkPolicy(
         mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",)
     )
-    assert config({"agent": {"network_mode": "public"}}).agent.network.mode is NetworkMode.OPEN
+    assert config({"agent": {"network_mode": "public"}}).agent_network.mode is NetworkMode.OPEN
+
+
+@pytest.mark.parametrize(
+    ("agent", "environment", "expected"),
+    [
+        # Nothing named: ALE's default.
+        ({}, {}, NetworkPolicy(mode=NetworkMode.BLOCK)),
+        # [environment] is Harbor's baseline, which the agent gets unless it names its own.
+        ({}, {"network_mode": "public"}, NetworkPolicy(mode=NetworkMode.OPEN)),
+        (
+            {},
+            {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
+            NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",)),
+        ),
+        ({"network_mode": "no-network"}, {"network_mode": "public"}, NetworkPolicy()),
+        # Harbor's deprecated switch, read only without a mode.
+        ({}, {"allow_internet": True}, NetworkPolicy(mode=NetworkMode.OPEN)),
+        ({}, {"allow_internet": False}, NetworkPolicy(mode=NetworkMode.BLOCK)),
+        (
+            {},
+            {"allow_internet": True, "network_mode": "no-network"},
+            NetworkPolicy(mode=NetworkMode.BLOCK),
+        ),
+    ],
+)
+def test_the_agent_s_network_resolves_as_harbor_s_does(
+    agent: dict[str, object], environment: dict[str, object], expected: NetworkPolicy
+) -> None:
+    resolved = config({"agent": {"network_mode": None, **agent}, "environment": environment})
+    assert resolved.agent_network == expected
+
+
+@pytest.mark.parametrize(
+    ("verifier", "environment", "expected"),
+    [
+        # Nothing named: open, ALE's default for verification.
+        ({}, {}, _OPEN),
+        # [verifier]'s own policy wins in every topology.
+        ({"network_mode": "no-network"}, {"network_mode": "public"}, _BLOCK),
+        ({**_ALLOW_PYPI}, {}, _PYPI),
+        (
+            {"network_mode": "no-network", "environment": {**_OWN, "network_mode": "public"}},
+            {},
+            _BLOCK,
+        ),
+        # A shared verifier has [environment]'s baseline, as in Harbor.
+        ({}, {"network_mode": "no-network"}, _BLOCK),
+        ({}, {"allow_internet": False}, _BLOCK),
+        ({}, {**_ALLOW_PYPI}, _PYPI),
+        # A verifier of its own with an environment: that environment's baseline...
+        ({"environment": {**_OWN, "network_mode": "no-network"}}, {}, _BLOCK),
+        ({"environment": {**_OWN, **_ALLOW_PYPI}}, {}, _PYPI),
+        ({"environment": {**_OWN, "allow_internet": False}}, {"network_mode": "public"}, _BLOCK),
+        (
+            {"environment": {**_OWN, "allow_internet": True, "network_mode": "no-network"}},
+            {},
+            _BLOCK,
+        ),
+        # ... and public when it names none, as Harbor's separate environment is, whatever
+        # [environment] says.
+        ({"environment": {**_OWN}}, {"network_mode": "no-network"}, _OPEN),
+        (
+            {"environment_mode": "snapshot", "environment": {**_OWN}},
+            {"network_mode": "no-network"},
+            _OPEN,
+        ),
+        (
+            {"environment_mode": "snapshot", "environment": {**_OWN, "network_mode": "no-network"}},
+            {"network_mode": "public"},
+            _BLOCK,
+        ),
+        # Without an environment of its own, [environment]'s baseline again.
+        ({"environment_mode": "separate"}, {"network_mode": "no-network"}, _BLOCK),
+        ({"environment_mode": "snapshot"}, {"allow_internet": False}, _BLOCK),
+    ],
+)
+def test_the_verifier_s_network_resolves_as_harbor_s_does(
+    verifier: dict[str, object], environment: dict[str, object], expected: NetworkPolicy
+) -> None:
+    resolved = config({"verifier": verifier, "environment": environment})
+    assert resolved.verifier_network == expected
+    # The agent's own network is never the verifier's.
+    assert resolved.agent_network == config({"environment": environment}).agent_network
+
+
+def test_a_verifier_s_network_obeys_the_agent_s_host_rules() -> None:
+    for layer, message in (
+        ({"verifier": {"network_mode": "allowlist"}}, "non-empty allowed_hosts"),
+        ({"verifier": {"allowed_hosts": ["pypi.org"]}}, "requires network_mode 'allowlist'"),
+        (
+            {"verifier": {"network_mode": "allowlist", "allowed_hosts": ["169.254.169.254"]}},
+            "metadata service",
+        ),
+        (
+            {"verifier": {"environment": {**_OWN, "network_mode": "allowlist"}}},
+            "non-empty allowed_hosts",
+        ),
+        (
+            {"verifier": {"environment": {**_OWN, "allowed_hosts": ["pypi.org"]}}},
+            "requires network_mode 'allowlist'",
+        ),
+        ({"verifier": {"network_mode": "offline"}}, "network_mode"),
+        ({"verifier": {"environment": {**_OWN, "allow_internet": "yes"}}}, "allow_internet"),
+        # validation/ runs with the verifier's network.
+        (
+            {"validation": {"environment": {**_OWN, "network_mode": "public"}}},
+            "verifier's network",
+        ),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            config(layer)
+    verifier = config({"verifier": {"network_mode": "allowlist", "allowed_hosts": ["PyPI.org."]}})
+    assert verifier.verifier_network == _PYPI
+
+
+def test_an_environment_baseline_obeys_the_agent_s_host_rules() -> None:
+    for environment, message in (
+        ({"network_mode": "allowlist"}, "non-empty allowed_hosts"),
+        ({"allowed_hosts": ["pypi.org"]}, "requires network_mode 'allowlist'"),
+        ({"network_mode": "allowlist", "allowed_hosts": ["127.0.0.1"]}, "reaches the Host"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            config({"environment": environment})
 
 
 def test_windows_artifacts_use_windows_path_rules() -> None:

@@ -219,17 +219,26 @@ def test_setup_stays_the_parent_of_the_worker_it_started(tmp_path, monkeypatch):
 
 def test_only_the_controller_outlives_the_setup_command(tmp_path, monkeypatch):
     sessions = {}
+    started = []
     real = subprocess.Popen
 
+    # Each stand-in runs until the test ends: start_process fails a process that has already
+    # exited, so one that exits at once would race its check.
     def popen(argv, **kwargs):
         sessions[argv[0]] = kwargs["start_new_session"]
-        return real(["true"], stdin=subprocess.DEVNULL)
+        started.append(real(["sleep", "60"], stdin=subprocess.DEVNULL))
+        return started[-1]
 
     monkeypatch.setattr(setup.subprocess, "Popen", popen)
     monkeypatch.setattr(setup, "process_info", lambda pid: ("", ""))
     state = {"owner": setup.OWNER, "processes": {}}
-    setup.start_process(tmp_path, state, "controller", ["controller"], {})
-    setup.start_process(tmp_path, state, "worker", ["worker"], {})
+    try:
+        setup.start_process(tmp_path, state, "controller", ["controller"], {})
+        setup.start_process(tmp_path, state, "worker", ["worker"], {})
+    finally:
+        for process in started:
+            process.kill()
+            process.wait()
     assert sessions == {"controller": True, "worker": False}
 
 

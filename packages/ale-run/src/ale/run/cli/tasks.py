@@ -10,6 +10,7 @@ import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import typer
@@ -40,7 +41,7 @@ from ale.core.sandbox import (
     SandboxRole,
 )
 from ale.core.task import Stage, TaskAssetObservation
-from ale.core.taskspec import CalibrationCase, Expectation, VerificationMode
+from ale.core.taskspec import CalibrationCase, Expectation, NetworkMode, VerificationMode
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
@@ -73,6 +74,7 @@ from ale.run.ledger import Ledger, episode_identity
 from ale.run.lint import lint_repository
 from ale.run.protocol.episode_protocol import (
     EpisodeProtocol,
+    KeptSolver,
     Resume,
     ReverificationProtocol,
     SolverSnapshot,
@@ -357,8 +359,6 @@ async def _run_one(
         inputs: ProvenanceInputs,
         agent_resources: EffectiveAgentResources,
     ) -> Status | None:
-        allowed = frozenset(task.spec.network.allowed_hosts)
-
         async def execute() -> EpisodeResult:
             return await run_episode(
                 task,
@@ -376,9 +376,6 @@ async def _run_one(
                 gateway=gateway,
                 session_registry=sessions,
                 limits=limits,
-                # What the Task and selected Harness declared, and nothing else: the
-                # proxy refuses the rest, so the agent cannot widen its own reach.
-                allowed_hosts=allowed,
                 seed=settings.seed,
                 collect_artifacts=settings.artifacts.collect == "host",
                 provenance=inputs,
@@ -575,7 +572,9 @@ async def _reverify(
 
     gateway = await _judge_gateway(settings)
     gateway_url = gateway.base_url if gateway is not None else ""
+    proxy: EgressProxy | None = None
     try:
+        proxy, sessions = await _egress_proxy(unique, gateway)
         run_dir = runs_dir / f"reverify-{uuid.uuid4().hex[:8]}"
         failures = 0
         planned: list[tuple[ManifestTask, Callable[[], Awaitable[EpisodeResult]]]] = []
@@ -692,7 +691,7 @@ async def _reverify(
                 retention="keep",
                 prepared_image=task.prepared_image,
                 resources=task.spec.resources,
-                network=task.spec.network,
+                network=task.spec.solver_network,
                 gateway_url=gateway_url or None,
                 sudo=task.spec.resources.sudo,
                 user=task.spec.image.user,
@@ -718,7 +717,7 @@ async def _reverify(
                 episode_id: str = episode_id,
                 snapshot: bool = snapshot,
             ) -> EpisodeResult:
-                solver: Sandbox | SolverSnapshot
+                solver: KeptSolver | SolverSnapshot
                 if snapshot:
                     assert source_lock.resources is not None
                     solver = SolverSnapshot(
@@ -728,7 +727,10 @@ async def _reverify(
                         allocation=source_lock.resources.effective,
                     )
                 else:
-                    solver = await _attach_retained(handle, request, source_lock, providers)
+                    solver = KeptSolver(
+                        request,
+                        partial(_attach_retained, handle, lock=source_lock, providers=providers),
+                    )
                 return await run_episode(
                     task,
                     ReverificationProtocol(
@@ -743,6 +745,8 @@ async def _reverify(
                     episode_id=episode_id,
                     gateway=gateway,
                     gateway_url=gateway_url,
+                    proxy_url=proxy.url if proxy is not None else "",
+                    session_registry=sessions,
                     verification_config=settings.verification,
                     sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
                     desktop_resolution=settings.desktop_resolution,
@@ -780,6 +784,8 @@ async def _reverify(
         return 0 if failures == 0 else EXIT_SOME_FAILED
     finally:
         await providers.close()
+        if proxy is not None:
+            await proxy.stop()
         if gateway is not None:
             await gateway.stop()
 
@@ -988,6 +994,7 @@ def _continuation(
 async def _attach_retained(
     handle: str,
     request: SandboxRequest,
+    *,
     lock: RunLock,
     providers: ProviderRegistry,
 ) -> Sandbox:
@@ -1132,7 +1139,6 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                             episode_id=episode_id,
                             seed=settings.seed,
                             collect_artifacts=settings.artifacts.collect == "host",
-                            allowed_hosts=frozenset(task.spec.network.allowed_hosts),
                             proxy_url=proxy.url if proxy is not None else "",
                             session_registry=sessions,
                             provenance=inputs,
@@ -1259,13 +1265,19 @@ async def _judge_gateway(settings: RunConfig) -> Gateway | None:
 async def _egress_proxy(
     tasks: list[ManifestTask], gateway: Gateway | None
 ) -> tuple[EgressProxy | None, SessionRegistry | None]:
-    """The egress proxy when a Task declares hosts, and the sessions only it serves.
+    """The egress proxy when a Task's agent or verifier has an allowlist, and the sessions
+    only it serves.
 
-    The oracle meets the agent's network, allowlist included, so the proxy starts whether
-    or not anything calls a model. With a Gateway it authenticates the Gateway's sessions;
-    without one, the episodes open theirs in a registry of the proxy's own.
+    The oracle meets the agent's network, allowlist included, and a verifier its own, so
+    the proxy starts whether or not anything calls a model. With a Gateway it shares the
+    Gateway's registry, where each episode opens its egress session; without one, the
+    episodes open theirs in a registry of the proxy's own.
     """
-    if not any(task.spec.network.allowed_hosts for task in tasks):
+    if not any(
+        policy.mode is NetworkMode.ALLOWLIST
+        for task in tasks
+        for policy in (task.spec.network, task.spec.verify.network)
+    ):
         return None, None
     registry = gateway.sessions if gateway is not None else SessionRegistry()
     proxy = EgressProxy(registry, host=_gateway_host())
@@ -1535,7 +1547,7 @@ async def _plan_on_fleet(
                 task.spec.name,
                 task.prepared_image,
                 task.spec.os,
-                task.spec.network,
+                task.spec.solver_network,
                 task.spec.resources,
                 settings.episodes,
                 verifier=(
@@ -1545,6 +1557,7 @@ async def _plan_on_fleet(
                     else None
                 ),
                 round_verifier=round_verifier_resources(task.spec, task.validations),
+                verifier_network=task.spec.verify.network,
                 planned_saves=task.validations,
             )
         )

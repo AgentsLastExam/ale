@@ -34,7 +34,12 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.sandbox import ExecResult, SandboxFile
-from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
+from ale.core.taskspec import (
+    OperatingSystem,
+    SseMcpServer,
+    StdioMcpServer,
+    StreamableHttpMcpServer,
+)
 from ale.core.trajectory import AtifTrajectory
 from ale.run.cli.tasks import PRESET_DIR, _harness
 from ale.run.harnesses import _release
@@ -511,6 +516,64 @@ def test_a_header_a_cli_would_expand_is_refused_for_every_cli(
     with pytest.raises(AgentUnsupportedError, match="would change") as failure:
         harness_type().validate_resources(_remote_with_headers(value))
     assert value not in str(failure.value)
+
+
+def _sse_server() -> EffectiveAgentResources:
+    return EffectiveAgentResources(
+        mcp_servers=(
+            ResolvedMcpServer(
+                name="remote",
+                server=SseMcpServer(
+                    name="remote", transport="sse", url="https://mcp.example.org/sse"
+                ),
+                source_layers=("task",),
+                declared_sources=("[[environment.mcp_servers]]",),
+                digest="sha256:" + "c" * 64,
+                reportable=False,
+            ),
+        ),
+        digest="sha256:" + "d" * 64,
+    )
+
+
+#: How each CLI is told a server speaks SSE, as Harbor's adapter for that CLI writes it: its
+#: native spelling, or its URL alone where Harbor writes no more. ``None``: no SSE transport.
+SSE_SPELLINGS = [
+    (AntigravityCliHarness, '"serverUrl"'),
+    (ClaudeCodeHarness, '"type": "sse"'),
+    (CodexCliHarness, 'url = "https://mcp.example.org/sse"'),
+    (DroidHarness, None),
+    (ForgecodeHarness, None),
+    (GrokBuildHarness, 'url = "https://mcp.example.org/sse"'),
+    (HermesHarness, "https://mcp.example.org/sse"),
+    (KimiCodeHarness, '"transport": "sse"'),
+    (MuseCodeHarness, None),
+    (OpenClawCliHarness, '"transport": "sse"'),
+    (OpenHandsCliHarness, '"transport": "sse"'),
+    (PiCliHarness, '"url": "https://mcp.example.org/sse"'),
+    (QwenCodeHarness, '"url": "https://mcp.example.org/sse"'),
+    (ZCodeHarness, None),
+]
+
+
+@pytest.mark.parametrize(("harness_type", "spelling"), SSE_SPELLINGS)
+async def test_every_cli_configures_an_sse_server_as_harbor_does(
+    harness_type, spelling: str | None
+) -> None:
+    resources = _sse_server()
+    harness = harness_type()
+    if spelling is None:
+        with pytest.raises(AgentUnsupportedError, match="has no SSE transport"):
+            harness.validate_resources(resources)
+        return
+    harness.validate_resources(resources)
+    sandbox = FakeSandbox()
+    await harness.install_resources(sandbox, session(model="gemini-3.8-flash"), resources)  # type: ignore[arg-type]
+    rendered = [d.decode() for d in sandbox.files.values() if b"mcp.example.org/sse" in d]
+    assert len(rendered) == 1
+    assert spelling in rendered[0]
+    assert "httpUrl" not in rendered[0]
+    assert '"type": "http"' not in rendered[0]
 
 
 async def test_grok_chat_gateway_selects_native_chat_backend(tmp_path: Path) -> None:

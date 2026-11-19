@@ -47,3 +47,22 @@ command line, configuration, result reading, and parser. The rules every CLI fol
 are in the specification, which also pins Claude Code, Codex CLI, Grok Build and
 OpenClaw. Every other package README gives its own pin, Gateway dialects and public
 settings, and each notes what is particular to its CLI.
+
+## MCP transports
+
+Every CLI Harness writes stdio and Streamable HTTP MCP servers in its agent's own
+configuration. An SSE server, Harbor's default transport, is written as Harbor's adapter for
+the same agent writes it, so a Harbor Task behaves alike in both:
+
+| Harness | SSE server written as |
+|---|---|
+| `claude-code` | `"type": "sse"` |
+| `kimi-code` | `"url"` with `"transport": "sse"` |
+| `openclaw-cli` | `"transport": "sse"` |
+| `openhands-cli` | `"transport": "sse"` |
+| `qwen-code` | `"url"`, where Streamable HTTP is `"httpUrl"` |
+| `codex-cli`, `grok-build`, `pi-cli`, `hermes`, `antigravity-cli` | its URL alone, the entry Streamable HTTP gets, as Harbor writes it; the CLI then speaks Streamable HTTP to it |
+| `muse-code` | refused: Muse Code has no SSE transport, and Harbor refuses it too |
+| `zcode`, `forgecode`, `droid` | refused: their configuration documents no SSE transport, and Harbor has no adapter for them |
+
+A refused server fails the Run before any Sandbox exists, with a message naming the server.

@@ -155,6 +155,7 @@ def _sandboxes(
         spec.image.kind,
         spec.os,
         (snapshot_verifier, round_verifier_resources(spec, task.validations)),
+        spec.verify.network.mode,
     )
     saves = solver_saves(
         task.validations,
@@ -169,7 +170,8 @@ def _sandboxes(
                 kind=spec.image.kind,
                 os=spec.os,
                 arch=Arch.of(spec.os),
-                network_mode=spec.network.mode,
+                # Able to apply the shared verifier's network too.
+                network_mode=spec.solver_network.mode,
                 resources=spec.resources,
                 snapshot=saves > 0 or verifier is not None,
                 saves=saves,
@@ -199,7 +201,7 @@ def _sandboxes(
                 kind=image.kind,
                 os=spec.os,
                 arch=Arch.of(spec.os),
-                network_mode=NetworkMode.OPEN,
+                network_mode=placed.network.mode,
                 resources=placed.resources.as_resources(),
             ),
         )

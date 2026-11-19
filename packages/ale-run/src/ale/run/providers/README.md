@@ -104,14 +104,15 @@ serves it on.
 
 ## Allowlist relay
 
-The egress proxy knows an episode by its token, which many programs cannot present: Chrome,
-Edge, Firefox and PowerShell 5.1's `Invoke-WebRequest` send proxy credentials only in answer
-to a challenge, and the proxy's 407 carries none (Chrome reports
+The egress proxy knows an episode by its egress session's token, which many programs cannot
+present: Chrome, Edge, Firefox and PowerShell 5.1's `Invoke-WebRequest` send proxy
+credentials only in answer to a challenge, and the proxy's 407 carries none (Chrome reports
 `ERR_PROXY_AUTH_UNSUPPORTED`); Chromium also drops those in the proxy variables. So once
 Docker, QEMU, Firecracker, Daytona or Orchard has sealed an `allowlist` Sandbox, `relay.py`
 has guestd (`guestd/egress.py`) listen on an ephemeral loopback port, add the token to the
-request that opens each tunnel, and forward it to the proxy. The agent's proxy variables
-name that port, with no token. On a desktop the agent account's system proxy names it too,
+request that opens each tunnel, and forward it to the proxy. While the Sandbox is sealed,
+the proxy variables of every command, the agent's and a verifier's, name that port, with no
+token. On a desktop the agent account's system proxy names it too,
 bypassed for the Host's address and loopback: on Windows the default connection's WinINet
 settings, which WinINet clients and Chromium-family browsers read; on Linux the GNOME
 settings (`org.gnome.system.proxy`), which Chromium-family browsers and Firefox read in a
@@ -130,7 +131,9 @@ desktop. guestd keeps what it changed in `/run/ale/system-proxy.json`,
 `%ProgramData%\ALE\system-proxy.json` on Windows or `/var/db/ale/system-proxy.json` on
 macOS, because a guestd connected over `docker exec` or Orchard's exec ends with its run,
 sealed or not. A run that reattaches to a sealed Sandbox starts the relay again with its own
-proxy and token.
+proxy and token, and so does sealing a sealed Sandbox, as a shared verifier sealed after the
+agent is: QEMU and Firecracker then keep the runner rules they have rather than insert them
+twice, which one opening would not lift.
 
 Measured with Chrome 157 on Windows base 0.1.3, where a browser started before the seal
 switches as well, with Chrome 157 and Firefox 160 on the container base's GNOME 42, started

@@ -54,9 +54,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
         'test -z "${ALE_OPENAI_API_KEY-}${ALE_LLM_JUDGE_TOKEN-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
-    (task_root / "calibration/solution" / "solve.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\n"
-    )
+    (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
     (task_root / "tests" / "test.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
@@ -118,9 +116,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
     (task_root / "environment" / "setup" / "setup.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/output\n"
     )
-    (task_root / "calibration/solution" / "solve.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\n"
-    )
+    (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
     (task_root / "tests" / "test.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
@@ -201,7 +197,7 @@ write({
 def _planting_task(root: Path, plant: str, verifier: str) -> Path:
     task_root = scaffold_task(root)
     edit_task_config(task_root, {"agent": {"sudo": True}})
-    (task_root / "calibration/solution" / "solve.sh").write_text(
+    (task_root / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(PLANTED[plant])
     )
     (task_root / "tests" / "verify.py").write_text(verifier)

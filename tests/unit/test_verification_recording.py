@@ -95,12 +95,17 @@ def test_a_lock_in_another_shape_is_rejected_not_reinterpreted() -> None:
 
 
 class RewardsSandbox:
-    """A verifier directory holding ``reward.json`` and, optionally, ``verification.json``."""
+    """A verifier directory holding ``reward.json`` and, optionally, ``verification.json``
+    and Harbor's ``reward.txt``."""
 
-    def __init__(self, reward: object, verification: object = None) -> None:
+    def __init__(self, reward: object, verification: object = None, text: bytes | None = None):
         self.files = {
             name: value if isinstance(value, bytes) else json.dumps(value).encode()
-            for name, value in (("reward.json", reward), ("verification.json", verification))
+            for name, value in (
+                ("reward.json", reward),
+                ("verification.json", verification),
+                ("reward.txt", text),
+            )
             if value is not None
         }
 
@@ -177,5 +182,34 @@ async def test_verifier_rejects_bad_result(
     with pytest.raises(VerifierOutputError):
         await EpisodeProtocol(NopHarness())._read_result(
             _context(tmp_path), RewardsSandbox(reward, verification)
+        )
+    assert not (tmp_path / "verification.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("text", "expected"), [(b"1", 1.0), (b" 0.994\n", 0.99), (b"0", 0.0)])
+async def test_harbor_s_reward_txt_is_read_without_reward_json(
+    tmp_path: Path, text: bytes, expected: float
+) -> None:
+    sandbox = RewardsSandbox(None, text=text)
+    observed = await EpisodeProtocol(NopHarness())._read_result(_context(tmp_path), sandbox)
+    assert observed == {"reward": expected}
+    assert json.loads((tmp_path / "verification.json").read_text()) == observed
+
+
+@pytest.mark.asyncio
+async def test_reward_json_wins_over_reward_txt_as_in_harbor(tmp_path: Path) -> None:
+    sandbox = RewardsSandbox({"reward": 0.25}, text=b"1")
+    assert await EpisodeProtocol(NopHarness())._read_result(_context(tmp_path), sandbox) == {
+        "reward": 0.25
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [b"", b"  \n", b"one", b"0.5 0.5", b"nan", b"inf", b"1.5", b"-1"])
+async def test_a_reward_txt_that_is_not_one_reward_fails(tmp_path: Path, text: bytes) -> None:
+    with pytest.raises(VerifierOutputError):
+        await EpisodeProtocol(NopHarness())._read_result(
+            _context(tmp_path), RewardsSandbox(None, text=text)
         )
     assert not (tmp_path / "verification.json").exists()

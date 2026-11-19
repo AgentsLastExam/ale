@@ -163,7 +163,8 @@ async def test_sandbox_reaches_https_through_the_episode_proxy(
     session = registry.open(
         GatewaySession(
             episode_id="proxy",
-            model="test",
+            model="",
+            purpose="egress",
             allowed_hosts=frozenset({"api.anthropic.com"}),
         )
     )

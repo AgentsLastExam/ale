@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ale.core.errors import TaskDefinitionError
-from ale.core.task import CALIBRATION_DIR, Stage, case_entry
+from ale.core.task import CALIBRATION_DIR, SOLUTION_DIR, Stage, case_entry, case_path
 from ale.core.taskspec import (
     SOLUTION_CASE,
     OperatingSystem,
@@ -39,6 +39,7 @@ _TOP_LEVEL = {
     ENVIRONMENT_DIR,
     Stage.TESTS,
     Stage.VALIDATION,
+    SOLUTION_DIR,
     CALIBRATION_DIR,
     ".ale-cache",
 }
@@ -107,7 +108,13 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         findings.append(Finding(calibration, "calibration must be a directory, not a link or file"))
     elif calibration.is_dir():
         for entry in calibration.iterdir():
-            if entry.is_symlink() or not entry.is_dir():
+            if entry.name == SOLUTION_CASE:
+                findings.append(
+                    Finding(
+                        entry, f"the reference solution lives in {SOLUTION_DIR}/; move it there"
+                    )
+                )
+            elif entry.is_symlink() or not entry.is_dir():
                 findings.append(
                     Finding(
                         entry, "calibration/ holds only case directories; move it into its case"
@@ -133,7 +140,7 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         operating_system = OperatingSystem.LINUX
     for entry in (
         f"{Stage.TESTS}/{Stage.TESTS.entry(operating_system)}",
-        f"{CALIBRATION_DIR}/{SOLUTION_CASE}/{case_entry(operating_system)}",
+        f"{case_path(SOLUTION_CASE)}/{case_entry(operating_system)}",
     ):
         if not (folder.root / entry).is_file():
             findings.append(Finding(folder.root, f"no {entry}"))
@@ -168,11 +175,9 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         )
     findings.extend(_check_variables(folder.root / TASK_CONFIG, config))
     findings.extend(_check_image_versions(folder, config))
-    agent, metadata = config.get("agent"), config.get("metadata")
-    if (
-        isinstance(agent, dict)
-        and agent.get("network_mode") == "public"
-        and not (isinstance(metadata, dict) and metadata.get("network_justification"))
+    metadata = config.get("metadata")
+    if _agent_network_mode(config) == "public" and not (
+        isinstance(metadata, dict) and metadata.get("network_justification")
     ):
         findings.append(
             Finding(
@@ -181,6 +186,18 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             )
         )
     return findings
+
+
+def _agent_network_mode(config: dict[str, object]) -> object:
+    """The agent's network mode as Harbor resolves it: ``[agent]``'s, else ``[environment]``'s
+    baseline, ``allow_internet`` included."""
+    agent, environment = config.get("agent"), config.get("environment")
+    for table in (agent, environment):
+        if isinstance(table, dict) and table.get("network_mode") is not None:
+            return table["network_mode"]
+    if isinstance(environment, dict) and environment.get("allow_internet") is True:
+        return "public"
+    return None
 
 
 def _moves(image: str) -> bool:
@@ -205,7 +222,9 @@ def _check_image_versions(folder: TaskFolder, config: dict[str, object]) -> list
     verifier = config.get("verifier")
     nested = verifier.get("environment") if isinstance(verifier, dict) else None
     for table in (environment, nested):
-        image = table.get("image") if isinstance(table, dict) else None
+        if not isinstance(table, dict):
+            continue
+        image = table.get("image", table.get("docker_image"))
         if isinstance(image, str):
             named.append((folder.root / TASK_CONFIG, image))
     return [

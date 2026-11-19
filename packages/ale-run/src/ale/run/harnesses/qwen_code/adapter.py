@@ -124,6 +124,8 @@ class QwenCodeHarness(CliHarness):
                         key: value.replace("{home}", session.home)
                         for key, value in server.environment.items()
                     }
+            elif server.transport == "sse":
+                native = {"url": server.url, **http_headers(resolved)}
             else:
                 native = {"httpUrl": server.url, **http_headers(resolved)}
             servers[resolved.name] = native

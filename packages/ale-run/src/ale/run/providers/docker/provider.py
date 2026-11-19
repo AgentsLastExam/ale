@@ -1286,7 +1286,7 @@ class DockerSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
-        if identity is Identity.AGENT and self._sealed and self._relay:
+        if self._sealed and self._relay:
             env = relay.variables(self._relay, HOST_ALIAS) | (env or {})
         self._context = contextvars.copy_context()
         loop = asyncio.get_running_loop()

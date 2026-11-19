@@ -49,7 +49,8 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - Every reportable result carries a complete `RunLock`.
 - API-key and shipped subscription credentials, Judge keys included, remain on the Host
   Gateway; a sandbox holds episode tokens and only the variables its Task declares.
-  `tests/`, `validation/` and `calibration/` never appear during the evaluated agent phase.
+  `tests/`, `validation/`, `solution/` and `calibration/` never appear during the evaluated
+  agent phase.
 
 ## Local guides
 

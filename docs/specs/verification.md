@@ -11,6 +11,9 @@ The verifier writes Harbor's reward file, `/logs/verifier/reward.json`
 `/opt/ale/logs/verifier/reward.json`): a flat JSON object whose values are numbers.
 Its `reward` must be a finite number from 0 through 1; booleans and numeric strings are not
 numbers. ALE scores only `reward` and never averages or treats other values as rewards.
+Without `reward.json`, ALE reads Harbor's other reward file, `reward.txt` beside it, which
+holds that one number and nothing else, as a `reward.json` of `reward` alone; as in Harbor,
+`reward.json` wins when both exist.
 Beside it, `verification.json` may hold the complete result: any JSON object, nested values
 included, whose `reward` equals `reward.json`'s. NaN, infinity and duplicate object keys
 make either file invalid.
@@ -154,16 +157,18 @@ later task exceptions and are collected independently of a final result; a forci
 process may leave an incomplete final event. Media evidence is referenced by hash rather
 than duplicated in logs. RunLock records the observed Judge provenance and schema hash.
 
-Both Judge types reach their configured endpoint through the Host Gateway, as the agent
-reaches its model. Each episode opens one Gateway session per configured Judge that holds
-the Judge's endpoint, protocol and key; the verifier receives only the Gateway's address
+Both Judge types reach their configured endpoint through the Host Gateway, as the agent reaches
+its model. A sealed verifier still reaches the Gateway, so Judges work under every [verifier
+network](task-authoring.md#resources-and-network), `no-network` included, and need no host of
+their own in an allowlist. Each episode opens one Gateway session per configured Judge that
+holds the Judge's endpoint, protocol and key; the verifier receives only the Gateway's address
 and that session's token (`ALE_LLM_JUDGE_TOKEN`, `ALE_AGENT_JUDGE_TOKEN`), so code the solver
 wrote cannot read a credential it could spend elsewhere. Judge sessions have no limits and
-never replay a cached response, so a retried verdict samples again; their calls appear in
-the transport trace with `purpose: judge` and are left out of the agent's trajectory and
-usage. A Judge whose key is not set on the Host gets no session. The RunLock records the
-endpoint each Judge's provider resolved to, with an LLM Judge's request path, not the
-Gateway address the verifier saw.
+never replay a cached response, so a retried verdict samples again; their calls appear in the
+transport trace with `purpose: judge` and are left out of the agent's trajectory and usage. A
+Judge whose key is not set on the Host gets no session. The RunLock records the endpoint each
+Judge's provider resolved to, with an LLM Judge's request path, not the Gateway address the
+verifier saw.
 
 A Judge supplies evidence for task scoring, so ALE sets no ceiling of its own on how long it thinks or how
 much it writes, and offers no setting for one. An LLM Judge streams its response and sends

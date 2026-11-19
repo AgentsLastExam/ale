@@ -1079,3 +1079,7 @@ def test_a_request_that_saves_otherwise_than_its_grant_is_refused() -> None:
     assert _mismatch(demand, wanted.model_copy(update={"round_verifier": None})) == (
         "validation round's verifier"
     )
+    # The verifier booted beside it is granted the verifier's network, as the leaf applies it.
+    sealed = {"verifier_network_mode": NetworkMode.BLOCK}
+    assert _mismatch(demand, wanted.model_copy(update=sealed)) == "verifiers' network mode"
+    assert _mismatch(demand.model_copy(update=sealed), wanted.model_copy(update=sealed)) is None

@@ -37,7 +37,7 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem
+from ale.core.taskspec import OperatingSystem, SseMcpServer
 from ale.run.harnesses._diagnostics import failure_detail
 from ale.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli
 from ale.run.harnesses._release import ReleaseAssets, ensure_release_binary, release_identity
@@ -127,6 +127,9 @@ class CliHarness(AutonomousHarness):
     release_assets: ClassVar[ReleaseAssets] = {}
     """Pinned release executables of ``default_version`` by OS and architecture; empty
     installs from npm. Such an adapter supports exactly the systems this table covers."""
+    mcp_sse: ClassVar[bool] = True
+    """Whether the adapter configures an SSE MCP server, natively or as its URL as Harbor's
+    adapter for the CLI does; one that cannot is refused before any Sandbox exists."""
     settings_type: ClassVar[type[BaseModel]]
     settings: BaseModel
 
@@ -164,8 +167,14 @@ class CliHarness(AutonomousHarness):
         return f"npm:{self.package}@{self.version()}"
 
     def validate_resources(self, resources: EffectiveAgentResources) -> None:
-        """Every CLI here supports Skills, both canonical MCP transports and HTTP headers."""
+        """Every CLI here supports Skills, stdio and Streamable HTTP MCP servers and HTTP
+        headers; SSE servers unless ``mcp_sse`` is false."""
         for resolved in resources.mcp_servers:
+            if not self.mcp_sse and isinstance(resolved.server, SseMcpServer):
+                raise AgentUnsupportedError(
+                    f"MCP server {resolved.name}: {self.name} has no SSE transport; "
+                    "use streamable-http or stdio"
+                )
             for name, value in resolved.headers.items():
                 if _CONFIG_EXPANSION.search(value):
                     raise AgentUnsupportedError(

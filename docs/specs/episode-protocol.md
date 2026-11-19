@@ -39,7 +39,7 @@ Every phase is timed and attributed independently. Agent and verify default to t
 `"unlimited"`, and `validation_rounds` with a non-negative count. These overrides are
 recorded in RunLock and the configuration hash without changing the Task identity. The Agent
 deadline starts at Harness launch (or policy rollout), after installation, resource staging,
-and network sealing. Evidence capture, verification, and cleanup do not consume it. An Agent
+and network policy. Evidence capture, verification, and cleanup do not consume it. An Agent
 timeout terminates execution, is not retried, and destroys its Sandbox even if retention was
 requested, after verification. Teardown is cancellation-shielded on every exit path, and
 SIGTERM cancels a command as Ctrl-C does, so a supervisor or timeout that stops `ale` still
@@ -75,7 +75,7 @@ Setup is optional and runs once.
 
 ALE rejects unsupported Harness/OS combinations before provisioning. It installs the
 selected Harness and its declared resources, checks staged stdio MCP
-commands, then applies the Task network policy. Autonomous Harnesses launch inside the
+commands, then applies the agent's network policy. Autonomous Harnesses launch inside the
 sandbox, in `[agent].workdir` or else the agent's home; Policy Harnesses drive the
 framework-owned `TaskEnv`. The evaluated solver and
 the oracle, which runs a calibration case, both run as the image's agent account. Windows
@@ -174,8 +174,12 @@ all of it, and more resources than the solver had, neither copies it through the
 changes the solver. The snapshot outlasts every Sandbox booted from it; once the verifier is
 released per its retention, it is destroyed, unless the solver's retention keeps it.
 
-Verification runs as framework-controlled Task code with open egress and elevated privileges
-(root on Linux and macOS, Administrator on Windows), in every mode. Task code may explicitly
+Verification runs as framework-controlled Task code with elevated privileges (root on Linux
+and macOS, Administrator on Windows), in every mode, and with the verifier's network
+([Task authoring](task-authoring.md#resources-and-network)), which ALE applies just before
+`tests/` or `validation/` runs and records in the trace: in a shared solver it replaces the
+agent's, which is why a solver that serves a shared verifier is created able to apply both
+([Security](security.md#1-a-sandbox-has-only-declared-ways-out)). Task code may explicitly
 drop privileges when executing a submitted program. ALE stages `ale_verify`, the
 instruction, optional solver trajectory, and run-level Judge configuration, then executes
 the OS entry from the verification staging directory. Linux and macOS use
@@ -242,13 +246,14 @@ verified as any stopped agent's is. Each round, whatever the verification mode:
    no sudo, since the agent goes on from the state the snapshot holds; snapshot, booted from
    it with the verifier's resources; separate, of the verifier's image with the artifacts
    restored, which are deleted when the round ends, and views of the snapshot's volumes
-   where the leaf serves it. It runs under the verify limit,
+   where the leaf serves it. It has the verifier's network and runs under the verify limit,
    `[verifier].timeout_sec` or the Run's `timeouts.verify`, which its Judge calls share, and
    Run retention never keeps it;
 4. boots the next turn's solver from the snapshot, with the solver's resources and network,
    on the leaf that saved it, without running setup again, so nothing setup started runs
    in it; the Harness finds its CLI in place, is given the episode's Gateway session, the
-   Sandbox is sealed, and the Harness resumes its native session with the round's prompt.
+   agent's network is applied, and the Harness resumes its native session with the round's
+   prompt.
 
 The rounds are the same in every mode so that nothing a verifier does reaches the state the
 agent continues from: each turn after the first starts from the snapshot, which no verifier

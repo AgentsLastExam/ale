@@ -94,7 +94,7 @@ async def test_a_hanging_agent_times_out_and_keeps_its_trace(
 ) -> None:
     """Partial evidence survives: an episode that ran out of time still explains itself."""
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "calibration/solution" / "solve.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
+    (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
     set_timeout(task_root, "agent", 5)
 
     await build_images(task_root)
@@ -122,7 +122,7 @@ async def test_work_left_by_a_timed_out_agent_is_scored(
     task_root = write_repo(
         tmp_path / "repo", config={"verifier": {"environment_mode": environment_mode}}
     )
-    solve = task_root / "calibration/solution" / "solve.sh"
+    solve = task_root / "solution" / "solve.sh"
     solve.write_text(solve.read_text() + "sleep 600\n")
     set_timeout(task_root, "agent", 5)
 
@@ -140,7 +140,7 @@ async def test_a_failed_verification_leaves_the_agents_stop_as_the_outcome(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(tmp_path / "repo", test_body="#!/usr/bin/env bash\nexit 1\n")
-    (task_root / "calibration/solution" / "solve.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
+    (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nsleep 600\n")
     set_timeout(task_root, "agent", 5)
 
     result = await run_one(task_root, tmp_path / "runs", OracleHarness())
@@ -181,9 +181,7 @@ async def test_runtime_agent_timeout_destroys_descendants_and_does_not_retry(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
     task_root = write_repo(tmp_path / "repo")
-    (task_root / "calibration/solution/solve.sh").write_text(
-        "#!/usr/bin/env bash\nsleep 600 &\nwait\n"
-    )
+    (task_root / "solution/solve.sh").write_text("#!/usr/bin/env bash\nsleep 600 &\nwait\n")
     calls = 0
 
     async def execute():

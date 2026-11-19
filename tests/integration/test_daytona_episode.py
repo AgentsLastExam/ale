@@ -49,7 +49,8 @@ REACH = (
 
 
 async def run_one(task_root: Path, run_dir: Path):  # type: ignore[no-untyped-def]
-    """An oracle episode, with the egress proxy a run starts when the Task declares hosts."""
+    """An oracle episode, with the egress proxy a run starts when the Task declares hosts,
+    where the episode opens its egress session."""
     task = load_tasks(task_root)[0]
     settings = RunConfig()
     sessions = SessionRegistry()
@@ -65,7 +66,6 @@ async def run_one(task_root: Path, run_dir: Path):  # type: ignore[no-untyped-de
             collect_artifacts=True,
             proxy_url=proxy.url if task.spec.network.allowed_hosts else "",
             session_registry=sessions,
-            allowed_hosts=frozenset(task.spec.network.allowed_hosts),
             provenance=ProvenanceInputs(
                 source=TaskSource(kind="git", repo="https://e/x.git", commit="a" * 40, path="t"),
                 agent=agent_provenance(OracleHarness(), "none"),
@@ -115,7 +115,7 @@ async def test_the_network_is_open_for_setup_and_closed_for_the_agent(
         "else echo blocked > /home/user/output/setup_net; fi\n"
         "chown -R user:user /home/user/output\n"
     )
-    (task_root / "calibration/solution" / "solve.sh").write_text(
+    (task_root / "solution" / "solve.sh").write_text(
         textwrap.dedent(f"""\
         #!/usr/bin/env bash
         set -uo pipefail
@@ -141,7 +141,7 @@ async def test_an_allowlisted_task_reaches_its_host_through_the_proxy_and_nothin
         config={"agent": {"network_mode": "allowlist", "allowed_hosts": ["example.com"]}},
     )
     whole_gib(task_root)
-    oracle = task_root / "calibration/solution" / "solve.sh"
+    oracle = task_root / "solution" / "solve.sh"
     oracle.write_text(
         oracle.read_text()
         + textwrap.dedent("""
@@ -173,7 +173,7 @@ async def test_a_gpu_task_runs_on_the_gpu_its_lock_records(
         task_root,
         {"environment": {"cpus": 2, "memory_mb": 8192, "gpus": 1, "gpu_types": ["H100"]}},
     )
-    oracle = task_root / "calibration/solution" / "solve.sh"
+    oracle = task_root / "solution" / "solve.sh"
     oracle.write_text(
         oracle.read_text()
         + "\nnvidia-smi --query-gpu=uuid --format=csv,noheader > /home/user/output/gpu.txt\n"

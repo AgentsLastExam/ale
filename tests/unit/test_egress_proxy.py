@@ -10,16 +10,25 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from aiohttp import ClientSession
 
 from ale.run.gateway.proxy import EgressProxy
+from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, SessionRegistry
 
 pytestmark = pytest.mark.unit
 
 
+def egress(*hosts: str) -> GatewaySession:
+    """An episode's egress session, open for ``hosts``."""
+    return GatewaySession(
+        episode_id="e", model="", purpose="egress", allowed_hosts=frozenset(hosts)
+    )
+
+
 class TestAllowlistMatching:
     def session(self, *hosts: str) -> GatewaySession:
-        return GatewaySession(episode_id="e", model="m", allowed_hosts=frozenset(hosts))
+        return egress(*hosts)
 
     def test_declared_host_is_allowed(self) -> None:
         assert self.session("example.com").may_reach("example.com")
@@ -77,9 +86,7 @@ class TestProxyEnforcement:
     @pytest.fixture
     async def proxy(self):  # type: ignore[no-untyped-def]
         registry = SessionRegistry()
-        session = registry.open(
-            GatewaySession(episode_id="e", model="m", allowed_hosts=frozenset({"example.com"}))
-        )
+        session = registry.open(egress("example.com"))
         proxy = EgressProxy(registry, host="127.0.0.1")
         await proxy.start()
         try:
@@ -90,9 +97,7 @@ class TestProxyEnforcement:
     @pytest.mark.asyncio
     async def test_a_bracketed_address_is_matched_without_its_brackets(self) -> None:
         registry = SessionRegistry()
-        session = registry.open(
-            GatewaySession(episode_id="e", model="m", allowed_hosts=frozenset({"::2"}))
-        )
+        session = registry.open(egress("::2"))
         server = EgressProxy(registry, host="127.0.0.1")
         await server.start()
         try:
@@ -142,3 +147,61 @@ class TestProxyEnforcement:
         server.sessions.close(session)
         status, _ = await self.connect(server, "example.com:443", session.token)
         assert status == 407
+
+    @pytest.mark.asyncio
+    async def test_a_suspended_egress_session_reaches_nothing(self, proxy) -> None:  # type: ignore[no-untyped-def]
+        """Between phases, what the agent left running reaches no host, its own included;
+        a phase's allowlist takes effect only while that phase runs."""
+        server, session = proxy
+        session.suspended = True
+        assert (await self.connect(server, "example.com:443", session.token))[0] == 407
+        # The verifier's phase: its hosts, not the agent's.
+        session.allowed_hosts, session.suspended = frozenset({"localhost"}), False
+        assert (await self.connect(server, "example.com:443", session.token))[0] == 403
+        assert (await self.connect(server, "localhost:1", session.token))[0] == 502
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("purpose", ["agent", "judge"])
+    async def test_a_model_session_is_no_proxy_credential(self, proxy, purpose: str) -> None:  # type: ignore[no-untyped-def]
+        """The agent's model token, which its CLI holds, opens no tunnel, whatever hosts it
+        carries: only the episode's egress session does."""
+        server, _ = proxy
+        model = server.sessions.open(
+            GatewaySession(
+                episode_id="e",
+                model="m",
+                purpose=purpose,  # type: ignore[arg-type]
+                allowed_hosts=frozenset({"example.com"}),
+            )
+        )
+        status, _ = await self.connect(server, "example.com:443", model.token)
+        assert status == 407
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_refuses_an_egress_session_for_model_calls() -> None:
+    """An egress token in the Sandbox's relay is no model credential: every route refuses it
+    as unknown, open or suspended."""
+    gateway = Gateway(host="127.0.0.1")
+    await gateway.start()
+    try:
+        session = gateway.sessions.open(egress("example.com"))
+        async with ClientSession() as client:
+            for suspended in (False, True):
+                session.suspended = suspended
+                for method, path, headers in (
+                    ("POST", "/v1/messages", {"x-api-key": session.token}),
+                    ("POST", "/v1/messages", {"authorization": f"Bearer {session.token}"}),
+                    ("GET", "/v1/models", {"x-api-key": session.token}),
+                    ("POST", f"/v1beta/models/m:generateContent?key={session.token}", {}),
+                ):
+                    async with client.request(
+                        method, f"{gateway.base_url}{path}", headers=headers, json={}
+                    ) as response:
+                        assert response.status == 401, (suspended, path)
+        assert gateway.sessions.resolve(session.token) is None
+        assert gateway.sessions.known(session.token) is None
+        session.suspended = False
+        assert gateway.sessions.egress(session.token) is session
+    finally:
+        await gateway.stop()

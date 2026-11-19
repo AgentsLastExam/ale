@@ -160,6 +160,7 @@ class ZCodeHarness(CliHarness):
     name = "zcode"
     package = f"cdn-zcode.z.ai/zcode/electron/releases/{RELEASE}"
     binary = "zcode"
+    mcp_sse = False  # no SSE transport is documented for ZCode's configuration
     default_version = DEFAULT_CLI_VERSION
     settings_type = ZCodeSettings
     settings: ZCodeSettings

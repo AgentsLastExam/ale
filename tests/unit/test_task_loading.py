@@ -252,19 +252,17 @@ def test_a_vm_image_the_task_folder_decides_takes_no_container_features(
 
 def test_load_errors_name_the_key(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    edit(task, {"environment": {"healthcheck": {"command": "true"}}})
-    with pytest.raises(TaskDefinitionError, match=r"environment\.healthcheck is not supported"):
+    edit(task, {"environment": {"tpu": {"type": "v6e", "topology": "2x4"}}})
+    with pytest.raises(TaskDefinitionError, match=r"environment\.tpu is not supported"):
         load_tasks(task)
-    edit(task, {"environment": {"healthcheck": None}, "task": {"name": None}})
+    edit(task, {"environment": {"tpu": None}, "task": {"name": None}})
     with pytest.raises(TaskDefinitionError, match=r"task\.name is required"):
         load_tasks(task)
     edit(task, {"task": {"name": "agentslastexam/demo"}, "agent": {"shell": "bash"}})
     with pytest.raises(TaskDefinitionError, match=r"agent\.shell is not a task\.toml key"):
         load_tasks(task)
     edit(task, {"agent": {"shell": None}, "environment": {"docker_image": "ghcr.io/a/b:1"}})
-    with pytest.raises(
-        TaskDefinitionError, match=r"environment\.docker_image is not a task\.toml key"
-    ):
+    with pytest.raises(TaskDefinitionError, match=r"remove \[environment\]\.image"):
         load_tasks(task)
     (task / "environment/Dockerfile").unlink()
     edit(task, {"environment": {"docker_image": None, "image": " "}})
@@ -284,8 +282,13 @@ def test_asset_roots_and_setup_are_excluded_where_they_must_be(tmp_path: Path) -
     (task / "validation/test.sh").write_text("true\n")
     loaded = load_tasks(task)[0]
     roots = asset_roots(task)
-    assert roots == (*ASSET_ROOTS, "calibration/partial/assets", "calibration/solution/assets")
-    assert ASSET_ROOTS == ("environment/assets", "tests/assets", "validation/assets")
+    assert roots == (*ASSET_ROOTS, "calibration/partial/assets")
+    assert ASSET_ROOTS == (
+        "environment/assets",
+        "tests/assets",
+        "validation/assets",
+        "solution/assets",
+    )
     for root in roots:
         asset = task / root / "large.bin"
         asset.parent.mkdir(parents=True, exist_ok=True)
@@ -406,7 +409,7 @@ def _windows_task(tmp_path: Path, *, build: bool = False) -> Path:
         },
     )
     (task / "tests/test.sh").rename(task / "tests/test.ps1")
-    (task / "calibration/solution/solve.sh").rename(task / "calibration/solution/solve.ps1")
+    (task / "solution/solve.sh").rename(task / "solution/solve.ps1")
     shutil.rmtree(task / "environment")
     if build:
         (task / "environment").mkdir()
@@ -425,8 +428,8 @@ def test_windows_task_uses_powershell_stage_entries(tmp_path: Path) -> None:
     # Windows runs only VMs, so a registry reference is one without asking the registry.
     edit(task, {"environment": {"image": "ghcr.io/acme/windows:1"}})
     assert load_tasks(task)[0].spec.image.kind is ImageKind.VM
-    (task / "calibration/solution/solve.ps1").unlink()
-    with pytest.raises(TaskDefinitionError, match=r"calibration/solution/solve\.ps1"):
+    (task / "solution/solve.ps1").unlink()
+    with pytest.raises(TaskDefinitionError, match=r"solution/solve\.ps1"):
         load_tasks(task)
 
 
@@ -590,3 +593,57 @@ def test_a_snapshot_verifier_refuses_what_only_an_image_takes(
     with pytest.raises(TaskDefinitionError, match=message):
         load_tasks(task)
     assert any(message in finding.message for finding in lint_repository(task))
+
+
+def test_harbor_s_workdir_is_where_the_agent_starts_and_verification_runs(tmp_path: Path):
+    task = scaffold_task(tmp_path / "demo")
+    unset = load_tasks(task)[0].spec
+    edit(task, {"environment": {"workdir": "/app"}})
+    spec = load_tasks(task)[0].spec
+    assert (spec.workdir, spec.verify.workdir) == ("/app", "/app")
+    assert spec.start_directory("/home/user") == "/app"
+    # [agent].workdir names the agent's start, and only that.
+    edit(task, {"agent": {"workdir": "project"}})
+    spec = load_tasks(task)[0].spec
+    assert (spec.workdir, spec.verify.workdir) == ("project", "/app")
+    # A verifier of its own runs where its own environment says, as in Harbor.
+    edit(task, {"verifier": {"environment": {"cpus": 1, "workdir": "/grade"}}})
+    assert load_tasks(task)[0].spec.verify.workdir == "/grade"
+    # Unset, it leaves a specification's identity as it was.
+    edit(
+        task,
+        {
+            "agent": {"workdir": None},
+            "environment": {"workdir": None},
+            "verifier": {"environment": None},
+        },
+    )
+    assert load_tasks(task)[0].spec.spec_hash == unset.spec_hash
+
+
+def test_harbor_s_healthcheck_loads_with_docker_s_defaults(tmp_path: Path):
+    task = scaffold_task(tmp_path / "demo")
+    unset = load_tasks(task)[0].spec
+    assert unset.healthcheck is None
+    edit(task, {"environment": {"healthcheck": {"command": "curl -sf localhost:8080"}}})
+    check = load_tasks(task)[0].spec.healthcheck
+    assert check is not None
+    assert (check.interval_sec, check.timeout_sec, check.retries) == (5.0, 30.0, 3)
+    assert (check.start_period_sec, check.start_interval_sec) == (0.0, 5.0)
+    edit(task, {"environment": {"healthcheck": {"command": "true", "retries": 0}}})
+    with pytest.raises(TaskDefinitionError, match="retries"):
+        load_tasks(task)
+    edit(task, {"environment": {"healthcheck": None}})
+    assert load_tasks(task)[0].spec.spec_hash == unset.spec_hash
+
+
+def test_a_verifier_runs_as_the_framework_unless_harbor_s_user_names_an_account(
+    tmp_path: Path,
+) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    for verifier in ({}, {"environment_mode": "separate"}, {"environment_mode": "snapshot"}):
+        edit(task, {"verifier": {"environment_mode": None, **verifier}})
+        assert load_tasks(task)[0].spec.verify.user is None
+        edit(task, {"verifier": {"user": 1000}})
+        assert load_tasks(task)[0].spec.verify.user == "1000"
+        edit(task, {"verifier": {"user": None}})

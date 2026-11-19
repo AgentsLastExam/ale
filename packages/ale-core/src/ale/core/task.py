@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from ale.core.lock import TaskVariableProvenance
 from ale.core.sandbox import PreparedTaskImage
-from ale.core.taskspec import OperatingSystem, TaskSpec, TaskVariables
+from ale.core.taskspec import SOLUTION_CASE, OperatingSystem, TaskSpec, TaskVariables
 from ale.core.verdict import Rewards
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CALIBRATION_DIR",
+    "SOLUTION_DIR",
     "ResolvedVariables",
     "Stage",
     "Task",
@@ -25,6 +26,7 @@ __all__ = [
     "TaskFolder",
     "TaskSourceContext",
     "case_entry",
+    "case_path",
 ]
 
 
@@ -58,9 +60,18 @@ class TaskAssetObservation:
     dirty: bool
 
 
-#: The directory of a Task folder holding one directory per calibration case: ``solution``,
-#: the reference solution every Task has, and each further declared case.
+#: The directory of a Task folder holding one directory per further calibration case, each
+#: declared in ``[[calibration]]``.
 CALIBRATION_DIR = "calibration"
+#: The directory of the reference solution every Task has, the calibration case ``solution``:
+#: the Task root's ``solution/``, where Harbor keeps it too.
+SOLUTION_DIR = "solution"
+
+
+def case_path(case: str) -> str:
+    """A calibration case's directory, relative to the Task folder: ``solution/`` for the
+    reference solution, ``calibration/<case>/`` for every further case."""
+    return SOLUTION_DIR if case == SOLUTION_CASE else f"{CALIBRATION_DIR}/{case}"
 
 
 def case_entry(operating_system: OperatingSystem) -> str:

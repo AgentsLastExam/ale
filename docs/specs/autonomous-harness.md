@@ -81,9 +81,9 @@ The built-in `cua-desktop` uses the OS's system Python, and on macOS, which has 
 enough, the framework's, as do the adapters' own helper scripts. A Task's own Skills and
 MCP commands must themselves work on the Task's system.
 
-Every CLI adapter supports local Skills, canonical stdio and Streamable HTTP MCP
-servers, and native resume at its pinned version, except for a limit its
-package README names. Support is determined from the pinned program's verified behavior,
+Every CLI adapter supports local Skills, stdio and Streamable HTTP MCP servers, and
+native resume at its pinned version, and SSE MCP servers where its agent has that
+transport, except for a limit its package README names. Support is determined from the pinned program's verified behavior,
 not a permanent assumption about a product name. In particular, `openclaw@2026.7.1`
 supports MCP; a future pin that changes this must update its checks and acceptance
 together.

@@ -24,12 +24,13 @@ if TYPE_CHECKING:
     from ale.run.tasksets.manifest import TaskFolder
 
 #: Where every Task keeps assets, relative to its folder: beside the files that read them.
-#: Each calibration case, the reference solution among them, has one more,
-#: ``calibration/<case>/assets``; ``asset_roots`` lists them all.
+#: The reference solution's are ``solution/assets``; each further calibration case has one
+#: more, ``calibration/<case>/assets``; ``asset_roots`` lists them all.
 ASSET_ROOTS: tuple[str, ...] = (
     "environment/assets",
     "tests/assets",
     "validation/assets",
+    "solution/assets",
 )
 DEFAULT_NAMESPACE = "agents-last-exam"
 

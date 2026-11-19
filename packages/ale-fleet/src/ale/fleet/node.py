@@ -395,6 +395,8 @@ def _mismatch(demand: SandboxDemand, request: SandboxRequest) -> str | None:
         return "snapshot verifier"
     if request.round_verifier != demand.round_verifier:
         return "validation round's verifier"
+    if request.verifier_network_mode is not demand.verifier_network_mode:
+        return "verifiers' network mode"
     if request.planned_saves != demand.planned_saves:
         return "planned saves"
     return None

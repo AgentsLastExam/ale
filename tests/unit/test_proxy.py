@@ -15,7 +15,8 @@ def test_proxy_accepts_standard_basic_auth_for_the_episode_token() -> None:
     session = sessions.open(
         GatewaySession(
             episode_id="episode",
-            model="none",
+            model="",
+            purpose="egress",
             token="episode-token",
             allowed_hosts=frozenset({"example.com"}),
         )

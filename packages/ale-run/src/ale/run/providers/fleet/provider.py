@@ -761,15 +761,20 @@ class FleetProvider(Provider):
         episodes: int,
         verifier: Resources | None = None,
         round_verifier: Resources | None = None,
+        verifier_network: NetworkPolicy = NetworkPolicy(mode=NetworkMode.OPEN),
         planned_saves: int = 0,
     ) -> PlanItem:
-        """One Task's line of the Run's plan; ``verifier`` the resources of its snapshot
-        verifier and ``round_verifier`` those of a shared validation round's, whose Node and
-        leaf are its solver's, and ``planned_saves`` how many runs of ``validation/`` save
-        its first solver."""
+        """One Task's line of the Run's plan, ``network`` its solver's; ``verifier`` the
+        resources of its snapshot verifier and ``round_verifier`` those of a shared validation
+        round's, whose Node and leaf are its solver's, both with ``verifier_network``, and
+        ``planned_saves`` how many runs of ``validation/`` save its first solver."""
         demand = self._demand(image, operating_system, network.mode, resources, verifier)
         demand = demand.model_copy(
-            update={"round_verifier": round_verifier, "planned_saves": planned_saves}
+            update={
+                "round_verifier": round_verifier,
+                "verifier_network_mode": verifier_network.mode,
+                "planned_saves": planned_saves,
+            }
         )
         return PlanItem(task=task, demand=demand, episodes=episodes)
 
@@ -792,6 +797,7 @@ class FleetProvider(Provider):
                 "snapshot": request.snapshot,
                 "volumes_from": request.volumes_from,
                 "round_verifier": request.round_verifier,
+                "verifier_network_mode": request.verifier_network_mode,
                 "planned_saves": request.planned_saves,
             }
         )

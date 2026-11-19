@@ -260,6 +260,7 @@ def build_lock(
         asset=asset,
         verification=VerificationProvenance(
             mode=spec.verify.environment_mode,
+            network=spec.verify.network,
             image=(
                 _image_provenance(
                     spec.verify.image or spec.image,
