@@ -58,9 +58,8 @@ from ale.run.providers.daytona.provider import (
     _Session,
     _SshHost,
     _start_image_command,
-    _Tunnel,
-    _tunnel_plan,
 )
+from ale.run.providers.tunnel import GatewayTunnel, tunnel_plan
 
 pytestmark = pytest.mark.unit
 
@@ -134,7 +133,7 @@ def allowlist(*hosts: str) -> NetworkPolicy:
 
 def test_the_tunnel_carries_the_gateway_and_an_allowlists_proxy_never_a_wildcard() -> None:
     """The sandbox dials fixed loopback ports whatever ports the Host serves them on."""
-    local_gateway, listeners, targets = _tunnel_plan(
+    local_gateway, listeners, targets = tunnel_plan(
         request(
             network=allowlist("example.com"),
             gateway_url="http://0.0.0.0:41000/v1",
@@ -146,12 +145,12 @@ def test_the_tunnel_carries_the_gateway_and_an_allowlists_proxy_never_a_wildcard
     assert targets == [("127.0.0.1", 41000), ("192.0.2.9", 42000)]
     # An oracle run calls no model, yet its allowlist needs the proxy.
     oracle = request(network=allowlist("example.com"), proxy_url="http://0.0.0.0:42000")
-    assert _tunnel_plan(oracle) == (None, [(PROXY_PORT, 0)], [("127.0.0.1", 42000)])
+    assert tunnel_plan(oracle) == (None, [(PROXY_PORT, 0)], [("127.0.0.1", 42000)])
     blocked = request(gateway_url="http://0.0.0.0:41000", proxy_url="http://0.0.0.0:42000")
-    assert _tunnel_plan(blocked)[1] == [(SANDBOX_GATEWAY_PORT, 0)]
-    assert _tunnel_plan(request()) == (None, [], [])
+    assert tunnel_plan(blocked)[1] == [(SANDBOX_GATEWAY_PORT, 0)]
+    assert tunnel_plan(request()) == (None, [], [])
     with pytest.raises(ProviderCapabilityError, match="explicit port"):
-        _tunnel_plan(request(gateway_url="http://host/"))
+        tunnel_plan(request(gateway_url="http://host/"))
 
 
 async def test_an_allowlist_takes_what_the_egress_proxy_takes() -> None:
@@ -670,7 +669,7 @@ def free_port() -> int:
 
 
 async def test_the_tunnel_runs_isolated_in_the_root_directory() -> None:
-    tunnel = _Tunnel(LocalRelay(), listeners=[(7412, 0)], targets=[("127.0.0.1", 1)])  # type: ignore[arg-type]
+    tunnel = GatewayTunnel(LocalRelay(), listeners=[(7412, 0)], targets=[("127.0.0.1", 1)])  # type: ignore[arg-type]
     assert shlex.split(tunnel._command)[:7] == [
         "cd", "/", "&&", "exec", "/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/tunnel.py"
     ]  # fmt: skip
@@ -686,7 +685,7 @@ async def test_the_host_tunnel_serves_the_sandbox_and_reconnects_when_ssh_drops(
     target_port = server.sockets[0].getsockname()[1]
     sandbox_port = free_port()
     relay = LocalRelay()
-    tunnel = _Tunnel(
+    tunnel = GatewayTunnel(
         relay,  # type: ignore[arg-type]
         listeners=[(sandbox_port, 0)],
         targets=[("127.0.0.1", target_port)],
@@ -725,7 +724,7 @@ async def test_a_relay_that_cannot_listen_fails_the_start_with_its_reason() -> N
     taken.bind(("127.0.0.1", 0))
     taken.listen()
     port = taken.getsockname()[1]
-    tunnel = _Tunnel(
+    tunnel = GatewayTunnel(
         LocalRelay(),  # type: ignore[arg-type]
         listeners=[(port, 0)],
         targets=[("127.0.0.1", 1)],

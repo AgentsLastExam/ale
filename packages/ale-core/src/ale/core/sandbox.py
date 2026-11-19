@@ -377,7 +377,7 @@ class ResourceAllocation(BaseModel):
     ``io.containerd.kata.v2`` for a Kata microVM, or ``runsc``, ``runsc-net-raw`` or
     ``runsc-nested`` under gVisor. None where the Provider has no choice."""
     node: str | None = None
-    """For a Sandbox a Fleet ran, the Node and the Node's leaf, as ``<node>/<leaf>``."""
+    """The compute node, when known. Fleet records its Node and leaf as ``<node>/<leaf>``."""
     desktop_resolution: DesktopResolution | None = None
     """The desktop's size as the guest reported it when the Provider started and checked the
     desktop; None for a sandbox whose desktop it did not start."""
@@ -563,7 +563,7 @@ SandboxCheck = Callable[[Sandbox], Awaitable[None]]
 class Provider(ABC):
     """Supplies Sandboxes.
 
-    A leaf starts them on the machine it runs on; a scheduler places them on machines it
+    A leaf starts and drives them directly; a scheduler places them on machines it
     manages, which start them with the leaves there. Both declare what they can start as
     capability profiles, which every check of a request compares through
     :func:`~ale.core.capability.unmet`.

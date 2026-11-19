@@ -1,0 +1,71 @@
+diff --git a/runsc/config/config.go b/runsc/config/config.go
+index 7ce0196..aa6bc55 100644
+--- a/runsc/config/config.go
++++ b/runsc/config/config.go
+@@ -430,6 +430,10 @@ type Config struct {
+ 	// killer would. 0 leaves the limit to the host's OOM killer alone.
+ 	MemoryLimitHeadroom uint64 `flag:"memory-limit-headroom"`
+ 
++	// EnclosingMemoryCgroup is an externally managed cgroup v2 directory.
++	// Its limit applies to the sandbox without runsc creating or joining a cgroup.
++	EnclosingMemoryCgroup string `flag:"enclosing-memory-cgroup"`
++
+ 	// TPUProxy enables support for TPUs.
+ 	TPUProxy bool `flag:"tpuproxy"`
+ 
+diff --git a/runsc/config/flags.go b/runsc/config/flags.go
+index 6ef8bf6..1f0abad 100644
+--- a/runsc/config/flags.go
++++ b/runsc/config/flags.go
+@@ -204,6 +204,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
+ 	flagSet.Bool("nvproxy-docker", false, "LEGACY: Injects nvidia-container-runtime-hook as a prestart hook. Try to use nvidia-container-runtime or `docker run --gpus` instead. Or manually add nvidia-container-runtime-hook as a prestart hook and set up NVIDIA_VISIBLE_DEVICES container environment variable.")
+ 	flagSet.String("nvproxy-driver-version", "", "NVIDIA driver ABI version to use. If empty, autodetect installed driver version. The special value 'latest' may also be used to use the latest ABI.")
+ 	flagSet.Bool("nvproxy-allow-unsupported-driver", false, "allow nvproxy to be initialized with an unsupported driver version.")
++	flagSet.String("enclosing-memory-cgroup", "", "read the sandbox memory limit from this externally managed cgroup v2 directory (with --ignore-cgroups)")
+ 	flagSet.Uint64(flagMemoryLimitHeadroom, 16<<20, "the memory, in bytes, that the sandbox keeps free below the memory limit of its host cgroup when the cgroup has no swap; an allocation that would take it closer makes the sandbox kill the application process that uses the most memory, as a guest kernel would. 0 leaves the limit to the host's OOM killer alone.")
+ 	flagSet.Uint64(flagNVProxyGPUMemoryLimit, 0, "the most device memory, in bytes, that the sandbox may allocate through nvproxy on each of its GPUs; an allocation beyond it fails as out of memory. Memory the driver allocates for itself and managed (unified) memory are not counted. 0 means no limit.")
+ 	flagSet.String("nvproxy-allowed-driver-capabilities", "utility,compute", "Comma separated list of NVIDIA driver capabilities that are allowed to be requested by the container. If 'all' is specified here, it is resolved to all driver capabilities supported in nvproxy. If 'all' is requested by the container, it is resolved to this list.")
+diff --git a/runsc/sandbox/sandbox.go b/runsc/sandbox/sandbox.go
+index 7726bdd..9d4b286 100644
+--- a/runsc/sandbox/sandbox.go
++++ b/runsc/sandbox/sandbox.go
+@@ -1608,10 +1608,28 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args) error {
+ 			mem = memLimit
+ 		}
+ 		if conf.MemoryLimitHeadroom > 0 && memLimit != math.MaxUint64 {
+-			if files := memoryCgroupFiles(s.CgroupJSON.Cgroup); files != nil {
++			if files := memoryCgroupFiles(s.CgroupJSON.Cgroup.MakePath("memory")); files != nil {
+ 				donations.DonateAndClose("memory-cgroup-fds", files...)
+ 			}
+ 		}
++	} else if dir := conf.EnclosingMemoryCgroup; dir != "" {
++		if !conf.IgnoreCgroups || conf.MemoryLimitHeadroom == 0 {
++			return fmt.Errorf("enclosing-memory-cgroup requires ignore-cgroups and memory-limit-headroom")
++		}
++		data, err := os.ReadFile(filepath.Join(dir, "memory.max"))
++		if err != nil {
++			return fmt.Errorf("reading enclosing memory limit: %w", err)
++		}
++		limit, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
++		if err != nil || limit <= conf.MemoryLimitHeadroom {
++			return fmt.Errorf("invalid enclosing memory limit %q", data)
++		}
++		files := memoryCgroupFiles(dir)
++		if files == nil {
++			return fmt.Errorf("cannot monitor enclosing memory cgroup %q", dir)
++		}
++		mem = min(mem, limit)
++		donations.DonateAndClose("memory-cgroup-fds", files...)
+ 	}
+ 	cmd.Args = append(cmd.Args, "--total-memory", strconv.FormatUint(mem, 10))
+ 
+@@ -3558,8 +3576,7 @@ func rootfsUpperTarFlags(p string) int {
+ // memory below the limit (config.Config.MemoryLimitHeadroom). It returns nil
+ // if the cgroup is not v2, or if it may swap: the host can then reclaim the
+ // Sentry's memory file, and the host's OOM killer is left to act as before.
+-func memoryCgroupFiles(cg cgroup.Cgroup) []*os.File {
+-	dir := cg.MakePath("memory")
++func memoryCgroupFiles(dir string) []*os.File {
+ 	read := func(dir, name string) string {
+ 		data, err := os.ReadFile(filepath.Join(dir, name))
+ 		if err != nil {

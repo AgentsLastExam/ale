@@ -17,7 +17,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from ale.core.capability import CapabilityProfile, SandboxNeeds
-from ale.core.config import RunConfig, SandboxConfig
+from ale.core.config import RunConfig, SandboxConfig, SlurmProviderConfig
 from ale.core.errors import ProviderStartError
 from ale.core.harness import (
     AgentRun,
@@ -102,6 +102,16 @@ def skip_without_gvisor() -> None:
         pytest.skip(f"{path} is not ALE's build {gvisor.BUILD}: {version.stdout.strip()}")
 
 
+def slurm_config() -> SlurmProviderConfig:
+    """The cluster ``$ALE_TEST_SLURM_CONFIG`` names: a Run TOML with ``sandbox.slurm``
+    settings, whose partitions' login hosts share the account's home with their nodes."""
+    path = os.environ.get("ALE_TEST_SLURM_CONFIG")
+    if not path:
+        pytest.skip("set ALE_TEST_SLURM_CONFIG to a Run TOML with sandbox.slurm settings")
+    settings = tomllib.loads(Path(path).read_text())["sandbox"]["slurm"]
+    return SlurmProviderConfig.model_validate(settings)
+
+
 def sibling_checkout(name: str) -> Path:
     """Locate a sibling repository from main or any linked worktree."""
     return next(
@@ -116,9 +126,16 @@ def provider_registry(*providers: Provider, only: bool = False) -> ProviderRegis
     ``only``."""
     if not providers:
         return ProviderRegistry(RunConfig())
+    from ale.run.providers.slurm import SlurmProvider
+
     ids = [provider.id for provider in providers]
     order = ids + ([] if only else [name for name in SandboxConfig().providers if name not in ids])
-    registry = ProviderRegistry(RunConfig.model_validate({"sandbox": {"providers": order}}))
+    sandbox: dict[str, Any] = {"providers": order}
+    for provider in providers:
+        if isinstance(provider, SlurmProvider):
+            # A Run that names Slurm configures its partitions.
+            sandbox["slurm"] = provider.config.model_dump(mode="json")
+    registry = ProviderRegistry(RunConfig.model_validate({"sandbox": sandbox}))
     for provider in providers:
         registry._instances[provider.id] = provider
     return registry

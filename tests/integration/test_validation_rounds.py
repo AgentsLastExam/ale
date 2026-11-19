@@ -18,6 +18,8 @@ from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.providers.docker import DockerProvider
 from ale.run.providers.firecracker import FirecrackerProvider
 from ale.run.providers.qemu import QemuProvider
+from ale.run.providers.slurm import SlurmProvider
+from ale.run.providers.slurm.job import Job
 from ale.run.scaffold import scaffold_task
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import (
@@ -26,6 +28,7 @@ from tests.support import (
     ScriptedCliHarness,
     edit_task_config,
     provider_registry,
+    slurm_config,
     write_task,
 )
 
@@ -157,6 +160,33 @@ async def test_an_agent_improves_over_validation_rounds_in_docker(
         check=True,
     ).stdout.split()
     assert containers == []
+
+
+@pytest.mark.needs_slurm
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "jobs"), [("shared", 1), ("snapshot", 1), ("separate", 4)])
+async def test_an_agent_improves_over_validation_rounds_in_one_slurm_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, jobs: int
+) -> None:
+    """Every turn's solver and every verifier booted from a round's snapshot run in the
+    first solver's allocation, from its node's own store: only a separate verifier, from
+    an image of its own, gets another."""
+    provider = SlurmProvider(slurm_config())
+    submitted: list[str] = []
+    submit = Job.submit
+
+    async def counted(job: Job, **resources: int) -> None:
+        submitted.append(job.name)
+        await submit(job, **resources)
+
+    monkeypatch.setattr(Job, "submit", counted)
+    root = _task(tmp_path / f"rounds-slurm-{mode}", mode)
+    result = await _episode(tmp_path, root, provider)
+    _check(result)
+    assert len(submitted) == jobs
+    assert provider.snapshots == {}
+    kept = await provider.list_retained()
+    assert not [record for record in kept if record["episode"] == result.episode_id]
 
 
 @pytest.mark.needs_kvm

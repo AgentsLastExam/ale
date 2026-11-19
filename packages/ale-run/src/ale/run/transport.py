@@ -316,8 +316,8 @@ class GuestClient:
             ended = GuestUnreachableError(f"guest connection lost: {error}")
         raise await self._transport.explain(ended)
 
-    async def health(self) -> dict[str, Any]:
-        data, _ = await self.call("health", timeout_sec=30)
+    async def health(self, *, timeout_sec: float = 30) -> dict[str, Any]:
+        data, _ = await self.call("health", timeout_sec=timeout_sec)
         self._health = data
         return data
 
