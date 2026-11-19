@@ -454,6 +454,9 @@ class VerifySpec(BaseModel):
     environment_mode: VerificationMode = VerificationMode.SHARED
     image: ImageSpec | None = None
     resources: VerifierResources | None = None
+    workdir: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """Harbor's working directory for ``tests/`` and ``validation/``, below the agent's home
+    when relative; ``None`` runs each in its own stage directory."""
 
     @model_validator(mode="after")
     def _valid_topology(self) -> Self:
@@ -813,7 +816,6 @@ _HARBOR_ENVIRONMENT_ONLY = frozenset(
         "network_mode",
         "storage",
         "tpu",
-        "workdir",
     }
 )
 
@@ -958,6 +960,10 @@ class EnvironmentTable(BaseModel):
     env: TaskEnv = Field(default_factory=dict)
     skills_dir: str | None = Field(default=None, min_length=1)
     mcp_servers: tuple[McpServerTable, ...] = ()
+    workdir: str | None = Field(default=None, min_length=1)
+    """Harbor's working directory: where the agent starts unless ``[agent].workdir`` says
+    otherwise, and where ``tests/`` and ``validation/`` run; below the agent's home when
+    relative."""
 
     # --- validation ---
 
@@ -1030,6 +1036,9 @@ class VerifierEnvironmentTable(BaseModel):
     gpu_memory_mb: int | None = Field(default=None, ge=1, strict=True)
     container_features: _ContainerFeatures = ()
     env: TaskEnv = Field(default_factory=dict)
+    workdir: str | None = Field(default=None, min_length=1)
+    """Where a verifier of its own runs ``tests/`` and ``validation/``, instead of
+    ``[environment].workdir``."""
 
     # --- validation ---
 

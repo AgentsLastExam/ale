@@ -337,7 +337,7 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             "container_features": config.environment.container_features,
         },
         network=config.agent.network,
-        workdir=config.agent.workdir,
+        workdir=config.agent.workdir or config.environment.workdir,
         timeouts={"agent": config.agent.timeout_sec, "verify": config.verifier.timeout_sec},
         validation_rounds=config.agent.validation_rounds,
         artifacts=config.artifacts,
@@ -421,10 +421,13 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     verifier = config.verifier
     mode = verifier.mode
     dockerfile = folder.verifier_dockerfile
+    # Harbor's working directory: a verifier's own environment's, else the agent's.
+    own = verifier.environment.workdir if verifier.environment is not None else None
+    workdir = own or config.environment.workdir
     if mode is not VerificationMode.SEPARATE and dockerfile is not None:
         raise TaskDefinitionError("tests/Dockerfile requires separate verification")
     if mode is VerificationMode.SHARED:
-        return VerifySpec()
+        return VerifySpec(workdir=workdir)
     operating_system = config.environment.os
     if dockerfile is not None and operating_system is not OperatingSystem.LINUX:
         raise TaskDefinitionError(
@@ -458,7 +461,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         gpu_memory_mb=sized.gpu_memory_mb,
         container_features=sized.container_features,
     )
-    return VerifySpec(environment_mode=mode, image=image, resources=resources)
+    return VerifySpec(environment_mode=mode, image=image, resources=resources, workdir=workdir)
 
 
 def _validation(config: TaskConfig, verify: VerifySpec) -> VerifySpec | None:
@@ -468,8 +471,11 @@ def _validation(config: TaskConfig, verify: VerifySpec) -> VerifySpec | None:
     if table is None:
         return None
     mode = table.mode
+    # Harbor's working directory: its own environment's, else where tests/ runs.
+    own = table.environment.workdir if table.environment is not None else None
+    placed = {"workdir": own or verify.workdir}
     if mode is VerificationMode.SHARED:
-        return VerifySpec()
+        return VerifySpec(**placed)
     sized = table.environment or config.environment
     resources = VerifierResources(
         cpus=sized.cpus or config.environment.cpus,
@@ -481,7 +487,7 @@ def _validation(config: TaskConfig, verify: VerifySpec) -> VerifySpec | None:
         container_features=sized.container_features,
     )
     image = verify.image if mode is VerificationMode.SEPARATE else None
-    return VerifySpec(environment_mode=mode, image=image, resources=resources)
+    return VerifySpec(environment_mode=mode, image=image, resources=resources, **placed)
 
 
 def _require_files(folder: TaskFolder, config: TaskConfig) -> None:

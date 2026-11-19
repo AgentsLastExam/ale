@@ -98,6 +98,7 @@ gpus = 0                                    # GPU count, not indices; default 0
 # gpu_memory_mb = 8192                      # ALE; MiB needed on each GPU; default whole GPUs
 container_features = []                     # ALE; such as ["perf", "mount"]; default none
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
+# workdir = "/app"                          # the agent's start and verification's directory
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
 
 [[environment.mcp_servers]]                 # one table per server
@@ -114,7 +115,7 @@ timeout_sec = 900                           # positive seconds; default 900
 network_mode = "allowlist"                  # no-network | allowlist | public; default no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
-# workdir = "project"                       # ALE; where the agent starts; default its home
+# workdir = "project"                       # ALE; where the agent starts; default as above
 validation_rounds = 0                       # ALE; validation/ results it gets; default 0
 
 [verifier]
@@ -133,6 +134,7 @@ gpus = 0                                    # default 0
 # gpu_memory_mb = 4096                      # ALE; default whole GPUs
 container_features = []                     # ALE; default none
 env = {}                                    # replaces [environment].env
+# workdir = "/grade"                        # verification's directory; default as above
 
 [validation]                                # ALE; where validation/ runs; default [verifier]'s
 environment_mode = "separate"               # shared | separate | snapshot
@@ -145,6 +147,7 @@ gpus = 0                                    # default 0
 # gpu_types = ["H100"]                      # default any
 # gpu_memory_mb = 4096                      # default whole GPUs
 container_features = []                     # default none
+# workdir = "/grade"                        # validation/'s directory; default tests/'s
 
 [solution]
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
@@ -156,7 +159,11 @@ expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or
 ```
 
 `[agent].workdir` is below the agent's home when relative, so a Task need not spell its home
-per OS. It must be a directory when the agent starts; stages keep their fixed directories.
+per OS. It must be a directory when the agent starts. `[environment].workdir`, Harbor's
+working directory, follows the same rules: the agent starts there unless `[agent].workdir`
+names another start, and `tests/` and `validation/` run there, their entries named by full
+path, so Harbor's verifiers find what they expect; `[verifier.environment].workdir` replaces it
+for a verifier with a Sandbox of its own. Setup and the oracle keep their stage directories.
 `[agent].validation_rounds`, an integer from 0, is how many results of
 [`validation/`](#validation) the agent receives; above 0 it requires `validation/`. Run
 policy may replace it with `validation_rounds`, a non-negative integer, recorded as the
@@ -167,8 +174,7 @@ Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step T
 an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
 covers the rest. `docker_image` is `image` under Harbor's name, in `[environment]` and
 `[verifier.environment]` alike: one field, so a table holds either, never both. `environment/setup/` can wait for a service, so there is no `healthcheck`.
-Stages run in fixed directories under the framework's identity, so there is no
-`[environment].workdir` or `[verifier].user`. `[agent].network_mode` is the one network setting.
+Stages run under the framework's identity, so there is no `[verifier].user`. `[agent].network_mode` is the one network setting.
 An origin belongs in `[metadata]`, so there is no `source`.
 
 These values differ from Harbor's:
@@ -582,7 +588,7 @@ that run; the RunLock records what the run used. See
 whose root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
 implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
-directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
+directory as cwd, or with [Harbor's working directory](#tasktoml) when the Task names one. Stage code uses ordinary relative paths; solver outputs use literal
 absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
 own when it has one, since that is where the Task installs what `verify.py` imports, and
 otherwise the framework's own. It stages `ale_verify` and its JSON Schema library into that
@@ -632,7 +638,7 @@ as `tests/` is. It runs where ALE's `[validation]` places it, by `[verifier]`'s
 `[verifier]`'s budget and variables either way. It has no Dockerfile or image of its own: a
 separate verifier runs it on the image a separate verifier of `tests/` runs, or else the
 solver's, so a `validation/Dockerfile` is only a file there and `[validation.environment]`
-sets only the Sandbox's size and capabilities. Placed apart, a Task can, for example, score
+sets only the Sandbox's size and capabilities, and its working directory. Placed apart, a Task can, for example, score
 each round in a separate verifier that mounts views of the agent's output and the final
 state in the solver itself, where a running service can be checked; a validation score then
 predicts the final one less well where the two see different things. Run shared, it runs in

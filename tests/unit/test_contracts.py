@@ -159,7 +159,6 @@ def test_task_config_requires_only_its_version_and_name() -> None:
         ({"source": "x"}, "source"),
         ({"environment": {"healthcheck": {"command": "true"}}}, "environment.healthcheck"),
         ({"environment": {"network_mode": "public"}}, "environment.network_mode"),
-        ({"environment": {"workdir": "/app"}}, "environment.workdir"),
         ({"verifier": {"user": "root"}}, "verifier.user"),
         (
             {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},

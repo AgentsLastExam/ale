@@ -2068,6 +2068,13 @@ class EpisodeProtocol:
         assert ctx.execution is not None
         assert ctx.blobs is not None
         execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
+        # Stage code runs in its own directory, unless the Task names Harbor's working
+        # directory for its verifier; its entry is then named by its full path.
+        placed = ctx.spec.validation_spec if phase is Phase.VALIDATE else ctx.spec.verify
+        workdir = None if phase is Phase.SETUP else placed.workdir
+        home = PureWindowsPath if ctx.spec.os is OperatingSystem.WINDOWS else PurePosixPath
+        cwd = str(directory) if workdir is None else str(home(ctx.home) / workdir)
+        script = entry.name if workdir is None else str(entry)
         argv = (
             [
                 "powershell.exe",
@@ -2076,10 +2083,10 @@ class EpisodeProtocol:
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                entry.name,
+                script,
             ]
             if ctx.spec.os is OperatingSystem.WINDOWS
-            else ["bash", entry.name]
+            else ["bash", script]
         )
         recorder = CommandRecorder(
             execution=ctx.execution,
@@ -2090,7 +2097,7 @@ class EpisodeProtocol:
             execution_id=execution_id,
             actor="task",
             argv=argv,
-            cwd=str(directory),
+            cwd=cwd,
             secrets=ctx.secrets,
         )
         started = time.monotonic()
@@ -2098,7 +2105,7 @@ class EpisodeProtocol:
         try:
             result = await sandbox.exec(
                 argv,
-                cwd=str(directory),
+                cwd=cwd,
                 env=env,
                 timeout_sec=timeout_sec,
                 output_sink=recorder.write,

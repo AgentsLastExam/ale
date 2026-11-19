@@ -593,3 +593,29 @@ def test_a_snapshot_verifier_refuses_what_only_an_image_takes(
     with pytest.raises(TaskDefinitionError, match=message):
         load_tasks(task)
     assert any(message in finding.message for finding in lint_repository(task))
+
+
+def test_harbor_s_workdir_is_where_the_agent_starts_and_verification_runs(tmp_path: Path):
+    task = scaffold_task(tmp_path / "demo")
+    unset = load_tasks(task)[0].spec
+    edit(task, {"environment": {"workdir": "/app"}})
+    spec = load_tasks(task)[0].spec
+    assert (spec.workdir, spec.verify.workdir) == ("/app", "/app")
+    assert spec.start_directory("/home/user") == "/app"
+    # [agent].workdir names the agent's start, and only that.
+    edit(task, {"agent": {"workdir": "project"}})
+    spec = load_tasks(task)[0].spec
+    assert (spec.workdir, spec.verify.workdir) == ("project", "/app")
+    # A verifier of its own runs where its own environment says, as in Harbor.
+    edit(task, {"verifier": {"environment": {"cpus": 1, "workdir": "/grade"}}})
+    assert load_tasks(task)[0].spec.verify.workdir == "/grade"
+    # Unset, it leaves a specification's identity as it was.
+    edit(
+        task,
+        {
+            "agent": {"workdir": None},
+            "environment": {"workdir": None},
+            "verifier": {"environment": None},
+        },
+    )
+    assert load_tasks(task)[0].spec.spec_hash == unset.spec_hash

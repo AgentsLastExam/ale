@@ -41,6 +41,7 @@ class StageSandbox:
 
     async def exec(self, *args, output_sink=None, **kwargs):  # type: ignore[no-untyped-def]
         self.env = kwargs.get("env")
+        self.argv, self.cwd = args[0], kwargs.get("cwd")
         for stream, data in self.chunks:
             if output_sink is not None:
                 await output_sink(stream, data)
@@ -202,3 +203,23 @@ async def test_concurrent_episode_output_never_crosses_files(tmp_path: Path) -> 
         records = read_jsonl(tmp_path / name / "trace.execution.jsonl").records
         output = records[-1]["stdout"]["inline"]
         assert output == name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("workdir", "cwd"), [("/app", "/app"), ("project", "/home/user/project")])
+async def test_a_harbor_workdir_is_where_verification_runs(
+    tmp_path: Path, workdir: str, cwd: str
+) -> None:
+    ctx = context(tmp_path)
+    sandbox = StageSandbox(ExecResult(exit_code=0))
+    protocol = EpisodeProtocol(NopHarness())
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY)  # type: ignore[arg-type]
+    assert (sandbox.cwd, sandbox.argv) == ("/opt/ale/tests", ["bash", "test.sh"])
+    ctx.spec.verify = VerifySpec(workdir=workdir)
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY)  # type: ignore[arg-type]
+    assert (sandbox.cwd, sandbox.argv) == (cwd, ["bash", "/opt/ale/tests/test.sh"])
+    assert sandbox.env["ALE_STAGE_DIR"] == "/opt/ale/tests"
+    # Setup keeps its own directory: Harbor's working directory is the agent's and the
+    # verifier's.
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/setup"), Phase.SETUP)  # type: ignore[arg-type]
+    assert sandbox.cwd == "/opt/ale/setup"
