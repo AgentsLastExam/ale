@@ -187,8 +187,9 @@ class Job(Login):
         deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             reply = await self.remote(
-                f"cd {box} && if test -f error; then cat error >&2; exit 1; "
-                "elif test -f ready; then cat ready; elif test -f done; then echo done; fi"
+                # The step's own log holds what Podman said.
+                f"cd {box} && if test -f error; then cat error >&2; tail -c 2000 step.log >&2; "
+                "exit 1; elif test -f ready; then cat ready; elif test -f done; then echo done; fi"
             )
             if reply.startswith("{"):
                 return StepReady.model_validate_json(reply)
@@ -201,8 +202,11 @@ class Job(Login):
             await asyncio.sleep(1)
         raise ProviderStartError(f"Slurm job {self.id} did not start Sandbox {index}")
 
-    async def save(self, index: str, *, timeout: int = 1800) -> str:
-        """Stop a Sandbox and commit its disk to this job's store; return the image."""
+    async def save(
+        self, index: str, *, timeout: int = 1800
+    ) -> tuple[str, dict[str, dict[str, object]]]:
+        """Stop a Sandbox and commit its disk to this job's store; return the image and each
+        volume's stack of layers, by path."""
         box = f"{self.directory}/sandboxes/{index}"
         await self.remote(f"echo save > {box}/stop")
         deadline = asyncio.get_running_loop().time() + timeout
@@ -213,7 +217,8 @@ class Job(Login):
                 "elif test -f done; then echo done; fi"
             )
             if reply.startswith("{"):
-                return "sha256:" + str(json.loads(reply)["image"])
+                saved = json.loads(reply)
+                return "sha256:" + str(saved["image"]), dict(saved.get("stacks") or {})
             if reply == "done":
                 raise ProviderStartError(f"Sandbox {index} ended before its disk was saved")
             await self._alive()

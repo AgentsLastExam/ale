@@ -5,6 +5,12 @@ The batch step holds Podman's private namespace and store on the node and loads 
 the allocation was seeded with. Each Sandbox the Host asks for runs as a job step of its
 own, which Slurm holds to that Sandbox's CPUs, memory and GPUs; control steps overlap it.
 A Sandbox saved as a snapshot is committed to the store, where the next one boots from it.
+
+A Sandbox's volumes are layers in the store: a Podman volume of its own, which Podman fills
+from the image, a copy of a snapshot's layer, or an overlay view of a snapshot's layers under
+an empty layer of its own, mounted in Podman's namespace, where its containers see it. A
+snapshot keeps the layer that holds each one's writes. Every layer has a short link below
+the store, by which an overlay's options name a stack of hundreds in a page.
 """
 
 from __future__ import annotations
@@ -22,10 +28,22 @@ from pathlib import Path
 
 SANDBOXES = Path("sandboxes")
 SNAPSHOT_REPOSITORY = "localhost/ale-snapshot"
+LOADED_REPOSITORY = "localhost/ale-image"
 #: Each allocation's Podman store on its node, below ``$SLURM_TMPDIR`` or ``/tmp``.
 STORE_PREFIX = "ale-slurm-"
 #: In each store, the ID of the job it belongs to.
 OWNER = "job"
+#: Below each store: plain layers, overlays' work directories, views' mount points, and a
+#: short link to every layer, a Podman volume's included.
+LAYERS, WORK, VIEWS, LINKS = "v", "w", "m", "l"
+#: Copies a layer as a whole, its root's owner and mode included: reflinked where the
+#: filesystem can.
+COPY = (
+    'cp -a --reflink=auto "$1"/. "$2"/ '
+    '&& chown --reference="$1" "$2" && chmod --reference="$1" "$2"'
+)
+#: How tar keeps an overlay layer's whiteouts and opaque directories, and its owners.
+TAR = ["tar", "--xattrs", "--xattrs-include=user.*", "--numeric-owner"]
 
 
 def output(*argv: str) -> str:
@@ -80,6 +98,131 @@ def podman(directory: str) -> list[str]:
 
 def container(index: str) -> str:
     return "sandbox-" + index
+
+
+def layer_id(index: str, number: int) -> str:
+    """A layer's name, unique beyond its allocation, whose snapshot another may load."""
+    return f"{Path.cwd().name.removeprefix('ale-')[:6]}.{index}.{number}"
+
+
+def mount_volumes(
+    command: list[str], directory: str, index: str, specs: list[dict[str, object]]
+) -> tuple[list[str], list[dict[str, object]]]:
+    """Make a Sandbox's volumes in the store; return the arguments that mount them and what
+    each is: its path, the layer that holds its writes, the layers it views below that, and
+    whether it is an engine's storage."""
+    store = Path(directory)
+    for part in (LAYERS, WORK, VIEWS, LINKS):
+        (store / part).mkdir(exist_ok=True)
+    args: list[str] = []
+    mounts: list[dict[str, object]] = []
+    namespaced: list[list[object]] = []
+    for number, spec in enumerate(specs):
+        layer = layer_id(index, number)
+        path, kind = str(spec["path"]), spec["kind"]
+        lowers: list[str] = []
+        if kind == "fresh":
+            name = "ale-" + layer
+            subprocess.run(
+                [*command, "volume", "create", name], check=True, stdout=subprocess.DEVNULL
+            )
+            (store / LINKS / layer).symlink_to(f"../volumes/{name}/_data")
+            args.append(f"--volume={name}:{path}")
+        else:
+            (store / LAYERS / layer).mkdir()
+            (store / LINKS / layer).symlink_to(f"../{LAYERS}/{layer}")
+            if kind == "copy":
+                namespaced.append(["copy", spec["layers"][0], layer])
+                args.append(f"--volume={store / LAYERS / layer}:{path}")
+            else:
+                lowers = list(spec["layers"])
+                (store / WORK / layer).mkdir()
+                (store / VIEWS / layer).mkdir()
+                namespaced.append(["view", layer, spec["root"], lowers])
+                args.append(f"--volume={store / VIEWS / layer}:{path}")
+        mounts.append(dict(path=path, layer=layer, lowers=lowers, copied=bool(spec.get("copied"))))
+    if namespaced:
+        in_namespace(command, "volumes", directory, json.dumps(namespaced))
+    return args, mounts
+
+
+def in_namespace(command: list[str], mode: str, *args: str) -> None:
+    """Run this file's ``mode`` in Podman's namespace, where its mounts and owners are."""
+    subprocess.run([*command, "unshare", "python3", "-I", __file__, mode, *args], check=True)
+
+
+def volumes(directory: str, operations: list[list[object]]) -> None:
+    """In Podman's namespace: copy a layer, mount a view whose root gets its stack's owner
+    and mode, unmount one, or remove a layer."""
+    os.chdir(directory)
+    for operation in operations:
+        match operation:
+            case ["copy", str(source), str(layer)]:
+                subprocess.run(
+                    ["sh", "-c", COPY, "sh", f"{LINKS}/{source}", f"{LAYERS}/{layer}"],
+                    check=True,
+                )
+            case ["view", str(layer), [int(uid), int(gid), int(mode)], list(lowers)]:
+                upper = Path(LAYERS) / layer
+                os.chown(upper, uid, gid)
+                os.chmod(upper, mode)
+                stack = ":".join(f"{LINKS}/{lower}" for lower in lowers)
+                subprocess.run(
+                    [
+                        "mount", "-t", "overlay", "overlay", "-o",
+                        f"lowerdir={stack},upperdir={upper},workdir={WORK}/{layer},userxattr",
+                        f"{VIEWS}/{layer}",
+                    ],
+                    check=True,
+                )  # fmt: skip
+            case ["unmount", str(layer)]:
+                if os.path.ismount(f"{VIEWS}/{layer}"):
+                    subprocess.run(["umount", f"{VIEWS}/{layer}"], check=True)
+                for part in (WORK, VIEWS):
+                    subprocess.run(
+                        ["rm", "-rf", "--one-file-system", f"{part}/{layer}"], check=True
+                    )
+            case ["remove", str(layer)]:
+                link = Path(LINKS) / layer
+                if not link.is_symlink():
+                    continue
+                target = os.readlink(link)
+                if target.startswith("../volumes/"):
+                    # A Podman volume: its directory, emptied here, goes with the store.
+                    subprocess.run(
+                        ["find", str(link) + "/", "-mindepth", "1", "-delete"], check=True
+                    )
+                else:
+                    subprocess.run(
+                        ["rm", "-rf", "--one-file-system", f"{LAYERS}/{layer}"], check=True
+                    )
+                link.unlink()
+            case _:
+                raise ValueError(operation)
+
+
+def root_of(command: list[str], directory: str, layer: str) -> list[int]:
+    """The owner and mode of a layer's root, as the Sandbox saw them."""
+    found = output(
+        *command, "unshare", "stat", "-L", "-c", "%u %g %a", f"{directory}/{LINKS}/{layer}"
+    )
+    uid, gid, mode = found.split()
+    return [int(uid), int(gid), int(mode, 8)]
+
+
+def load_layers(command: list[str], directory: str, layers: dict[str, str]) -> None:
+    """Unpack a written-out snapshot's layers, below the cache, into the store."""
+    store = Path(directory)
+    for part in (LAYERS, WORK, VIEWS, LINKS):
+        (store / part).mkdir(exist_ok=True)
+    for layer, archive in layers.items():
+        (store / LAYERS / layer).mkdir()
+        (store / LINKS / layer).symlink_to(f"../{LAYERS}/{layer}")
+        subprocess.run(
+            [*command, "unshare", *TAR, "-xf", str(Path.cwd().parent / archive),
+             "-C", str(store / LAYERS / layer)],
+            check=True,
+        )  # fmt: skip
 
 
 def network(command: list[str], name: str, *, sealed: bool) -> None:
@@ -203,6 +346,20 @@ def launch(index: str, request: dict[str, object], *, gpus: bool) -> subprocess.
         log.close()
 
 
+def load(command: list[str], archive: str, image: str) -> None:
+    """Load an image's archive, below the cache, into the store, and tag it: Podman removes
+    an untagged image with the last snapshot committed over it, which a Sandbox of the
+    image, a separate verifier's, may start after."""
+    subprocess.run(
+        [*command, "load", "-q", "-i", str(Path.cwd().parent / archive)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    if output(*command, "image", "inspect", "-f", "{{.Id}}", image) != image:
+        raise RuntimeError("the staged archive holds a different image")
+    subprocess.run([*command, "tag", image, f"{LOADED_REPOSITORY}:{image[:12]}"], check=True)
+
+
 def stale_stores(scratch: Path) -> list[Path]:
     """The stores on this node of this account's jobs that have ended: one that Slurm
     killed, at its wall time or by preemption, or whose node went down, cleaned up nothing."""
@@ -256,13 +413,8 @@ def supervise() -> None:
                 [*command, "unshare", "rm", "-rf", "--one-file-system", "--", str(store)],
                 check=False,
             )
-        subprocess.run(
-            [*command, "load", "-q", "-i", str(Path.cwd().parent / spec["archive"])],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        if output(*command, "image", "inspect", "-f", "{{.Id}}", spec["image"]) != spec["image"]:
-            raise RuntimeError("the staged archive holds a different image")
+        load(command, spec["archive"], spec["image"])
+        load_layers(command, directory, spec.get("layers") or {})
         runsc = str(runtime_binary(command, spec["version"]))
         version = output(runsc, "--version").splitlines()[0]
         if not version.endswith("+ale." + spec["version"]):
@@ -333,6 +485,8 @@ def start(index: str) -> None:
     gpus = devices() if spec["gpus"] else []
     if len(gpus) != spec["gpus"]:
         raise RuntimeError(f"received {len(gpus)} GPUs, requested {spec['gpus']}")
+    mounts: list[dict[str, object]] = []
+    kept: set[str] = set()
     flags = [
         *command,
         "run",
@@ -355,7 +509,10 @@ def start(index: str) -> None:
     for key, value in spec["env"].items():
         flags.extend(["--env", f"{key}={value}"])
     try:
-        subprocess.run([*flags, spec["image"]], check=True, stdout=subprocess.DEVNULL)
+        arguments, mounts = mount_volumes(
+            command, ready["directory"], index, spec.get("volumes") or []
+        )
+        subprocess.run([*flags, *arguments, spec["image"]], check=True, stdout=subprocess.DEVNULL)
         if output(*command, "inspect", "--format", "{{.Image}}", name) != spec["image"]:
             raise RuntimeError("Podman started a different image")
         if spec["sealed"]:
@@ -376,7 +533,7 @@ def start(index: str) -> None:
         while True:
             order = read(box / "stop")
             if order == "save":
-                save(command, name, index, box)
+                kept = save(command, ready["directory"], name, index, box, mounts)
                 return
             if order:
                 return
@@ -390,17 +547,59 @@ def start(index: str) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if mounts:
+            # Its views and the layers no snapshot of it keeps go with it.
+            in_namespace(
+                command,
+                "volumes",
+                ready["directory"],
+                json.dumps(
+                    [["unmount", m["layer"]] for m in mounts if m["lowers"]]
+                    + [["remove", m["layer"]] for m in mounts if m["layer"] not in kept]
+                ),
+            )
 
 
-def save(command: list[str], name: str, index: str, box: Path) -> None:
-    """Stop the Sandbox and commit its disk to the allocation's store."""
+def save(
+    command: list[str],
+    directory: str,
+    name: str,
+    index: str,
+    box: Path,
+    mounts: list[dict[str, object]],
+) -> set[str]:
+    """Stop the Sandbox and commit its disk to the allocation's store, and record each
+    volume's stack: the layer that holds its writes on what it viewed. Return the layers the
+    snapshot keeps."""
     subprocess.run([*command, "stop", "-t", "30", name], check=True, stdout=subprocess.DEVNULL)
     image = output(*command, "commit", "-q", name, f"{SNAPSHOT_REPOSITORY}:{index}")
-    write(box / "saved", dict(image=image.removeprefix("sha256:")))
+    stacks = {
+        str(m["path"]): dict(
+            layers=[m["layer"], *m["lowers"]],
+            root=root_of(command, directory, str(m["layer"])),
+            copied=m["copied"],
+        )
+        for m in mounts
+    }
+    if any(m["lowers"] for m in mounts):
+        # Before the Host hears of the snapshot: a view's upper layer is no lower of
+        # another view while it is mounted.
+        in_namespace(
+            command,
+            "volumes",
+            directory,
+            json.dumps([["unmount", m["layer"]] for m in mounts if m["lowers"]]),
+        )
+    write(box / "saved", dict(image=image.removeprefix("sha256:"), stacks=stacks))
+    return {str(m["layer"]) for m in mounts}
 
 
-def export(command: list[str], image: str, destination: str) -> None:
-    """Write a snapshot to the shared file system, from which another allocation loads it."""
+def export(
+    command: list[str], directory: str, image: str, destination: str, layers: list[str]
+) -> None:
+    """Write a snapshot to the shared file system, from which another allocation loads it:
+    its image, and each of its volumes' ``layers`` beside it, ``<destination
+    stem>.<layer>.tar``, uncompressed, as a volume's output often is already."""
     path = Path.cwd().parent / destination
     path.parent.mkdir(mode=0o700, exist_ok=True)
     temporary = path.with_name(path.name + ".part")
@@ -412,7 +611,21 @@ def export(command: list[str], image: str, destination: str) -> None:
         if saver.wait() or gzip.returncode:
             temporary.unlink()
             raise RuntimeError(f"could not export {image}")
+    for layer in layers:
+        archive = path.with_name(layer_archive(path.name, layer))
+        part = archive.with_name(archive.name + ".part")
+        subprocess.run(
+            [*command, "unshare", *TAR, "-cf", str(part), "-C", f"{directory}/{LINKS}/{layer}/",
+             "."],
+            check=True,
+        )  # fmt: skip
+        part.replace(archive)
     temporary.replace(path)
+
+
+def layer_archive(image_archive: str, layer: str) -> str:
+    """The name of a written-out snapshot's layer, beside its image's archive."""
+    return f"{image_archive.removesuffix('.tar.gz')}.{layer}.tar"
 
 
 def main() -> None:
@@ -424,6 +637,9 @@ def main() -> None:
             if not Path("ready").exists():
                 write("error", str(exc))
             raise
+        return
+    if mode == "volumes":
+        volumes(args[0], json.loads(args[1]))
         return
     if mode == "release":
         directory = Path(args[0]).resolve()
@@ -472,7 +688,13 @@ def main() -> None:
             stdout=subprocess.DEVNULL,
         )
     elif mode == "export":
-        export(command, args[0], args[1])
+        export(command, ready["directory"], args[0], args[1], args[2:])
+    elif mode == "load":
+        load(command, args[0], args[1])
+    elif mode == "drop":
+        in_namespace(
+            command, "volumes", ready["directory"], json.dumps([["remove", a] for a in args])
+        )
     else:
         raise ValueError(mode)
 

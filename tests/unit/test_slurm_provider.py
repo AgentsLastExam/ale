@@ -10,9 +10,11 @@ from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import (
     ImageKind,
     PreparedTaskImage,
+    ResolvedImage,
     SandboxRequest,
     SandboxRole,
     snapshot_verifier_needs,
+    verifiers_needs,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from ale.run.providers import ProviderRegistry
@@ -21,11 +23,13 @@ from ale.run.providers.slurm.job import Job, JobReady
 from ale.run.providers.slurm.provider import (
     JOB_OVERHEAD_MB,
     MAX_SAVES,
+    _capacity,
     _Chain,
     _handle,
     _parse,
     _profiles,
     _Snapshot,
+    _volume_specs,
     step_memory_mb,
 )
 
@@ -115,14 +119,44 @@ async def test_a_solver_and_its_snapshot_verifier_share_one_partition(solver, ve
 
 
 @pytest.mark.asyncio
-async def test_snapshots_are_saved_except_where_a_container_engine_runs():
+async def test_snapshots_are_saved_as_deep_as_measured_container_engine_or_not():
     slurm = provider()
-    saved = needs(Resources(container_features=("raw_sockets",)), saves=MAX_SAVES)
-    assert not await slurm.unserved(saved, user="user", role=SandboxRole.SOLVER)
+    for feature in ("raw_sockets", "nested_containers"):
+        saved = needs(Resources(container_features=(feature,)), saves=MAX_SAVES)
+        assert not await slurm.unserved(saved, user="user", role=SandboxRole.SOLVER)
     deeper = needs(Resources(), saves=MAX_SAVES + 1)
     assert await slurm.unserved(deeper, user="user", role=SandboxRole.SOLVER)
-    engine = needs(Resources(container_features=("nested_containers",)), saves=1)
-    assert await slurm.unserved(engine, user="user", role=SandboxRole.SOLVER)
+
+
+def test_an_allocation_is_sized_for_every_verifier_it_may_hold_in_turn():
+    """The snapshot verifier, a validation round's, and the separate one that views the
+    solver's volumes: each dimension is the largest."""
+    verifiers = verifiers_needs(
+        ImageKind.CONTAINER,
+        OperatingSystem.LINUX,
+        (Resources(cpus=3, memory_mb=1024), Resources(cpus=1, memory_mb=6144)),
+    )
+    solver = needs(Resources(cpus=2, memory_mb=2048)).model_copy(update={"verifier": verifiers})
+    assert _capacity(solver) == (3, step_memory_mb(6144), 0)
+    assert _capacity(solver, Resources(cpus=1, gpus=1)) == (3, step_memory_mb(6144), 1)
+
+
+def test_a_sandbox_booted_from_a_snapshot_views_its_volumes_and_copies_its_engines():
+    root = [1000, 1000, 0o755]
+    stacks = {
+        "/work": dict(layers=["b", "a"], root=root, copied=False),
+        "/var/lib/docker": dict(layers=["d"], root=[0, 0, 0o711], copied=True),
+    }
+    engines = ("/var/lib/docker", "/var/lib/containerd")
+    assert _volume_specs(stacks, engines, viewing=False) == [
+        dict(path="/work", kind="view", layers=["b", "a"], root=root),
+        dict(path="/var/lib/docker", kind="copy", layers=["d"], copied=True),
+        dict(path="/var/lib/containerd", kind="fresh", copied=True),
+    ]
+    # A verifier of another image views the agent's volumes, never its engine's.
+    assert _volume_specs(stacks, (), viewing=True) == [
+        dict(path="/work", kind="view", layers=["b", "a"], root=root)
+    ]
 
 
 def test_the_largest_sandbox_a_profile_declares_fits_its_partition():
@@ -200,23 +234,38 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
         roles=("solver",),
         reason="r",
         boots=0,
+        stacks={"/work": dict(layers=["x.1.0"], root=[0, 0, 0o755], copied=False)},
     )
     handle = _handle(held.job, "1")
     held.snapshots["1"] = snapshot
     slurm.snapshots[handle] = (held, snapshot)
-    written, allocated = [], []
+    written, allocated, loaded = [], [], []
 
     async def write_out(chain, saved):
         written.append(saved)
         saved.archive = "snapshots/out.tar.gz"
         return saved.archive
 
-    async def allocate(needs, *, image, archive=None, host=None):
-        allocated.append((image, archive, host))
+    async def allocate(needs, *, image, archive=None, host=None, layers=None):
+        allocated.append((image, archive, host, layers))
         return chain(cpus=8, memory_mb=step_memory_mb(8192), gpus=1)
+
+    async def framed(request):
+        return ResolvedImage(
+            kind=ImageKind.CONTAINER,
+            prepared_identity=OTHER,
+            observed_identity=OTHER,
+            observed_ref=OTHER,
+        )
+
+    async def load(chain, image):
+        loaded.append((chain, image))
+        return image
 
     monkeypatch.setattr(slurm, "write_out", write_out)
     monkeypatch.setattr(slurm, "_allocate", allocate)
+    monkeypatch.setattr(slurm, "_framed", framed)
+    monkeypatch.setattr(slurm, "_load", load)
     image = PreparedTaskImage(
         kind=ImageKind.CONTAINER,
         source="external-ref",
@@ -235,17 +284,30 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
             network=NetworkPolicy(mode=NetworkMode.BLOCK),
         )
 
-    booted, index, resolved = await slurm._boot(request(Resources(cpus=2, gpus=1)))
-    assert (booted, index, resolved.observed_identity) == (held, "1", SAVED)
+    view = [dict(path="/work", kind="view", layers=["x.1.0"], root=[0, 0, 0o755])]
+    booted, index, resolved, seed, specs = await slurm._boot(request(Resources(cpus=2, gpus=1)), ())
+    assert (booted, index, resolved.observed_identity, seed) == (held, "1", SAVED, SAVED)
+    assert specs == view and held.viewing["1"] == {"x.1.0"}
     assert not written and not allocated
-    booted, index, _ = await slurm._boot(request(Resources(cpus=8, gpus=1)))
+    # A verifier of the verifier's image views the volumes in the same allocation, which
+    # loads that image.
+    held.running.clear()
+    viewer = request(Resources(cpus=1)).model_copy(
+        update={"snapshot": None, "volumes_from": handle}
+    )
+    booted, index, resolved, seed, specs = await slurm._boot(viewer, ())
+    assert (booted, seed, specs) == (held, OTHER, view) and loaded == [(held, OTHER)]
+    booted, index, _, _, _ = await slurm._boot(request(Resources(cpus=8, gpus=1)), ())
     assert booted is not held and written == [snapshot]
-    assert allocated == [(SAVED, "snapshots/out.tar.gz", "gpu")]
+    assert allocated == [
+        (SAVED, "snapshots/out.tar.gz", "gpu", {"x.1.0": "snapshots/out.x.1.0.tar"})
+    ]
     with pytest.raises(ProviderCapabilityError, match="prepared solver image"):
         await slurm._boot(
             request(Resources()).model_copy(
                 update={"prepared_image": image.model_copy(update={"prepared_identity": OTHER})}
-            )
+            ),
+            (),
         )
 
 
