@@ -34,7 +34,7 @@ gVisor's release tarball:
 
 `runsc` and its sidecars come from one build and are installed together. The image's
 version is `VERSION` in [`build.sh`](build.sh), and `runsc --version` reports the release
-and that version, such as `release-20261109.0+ale.0.1.2`. Nothing in it depends on the
+and that version, such as `release-20261109.0+ale.0.1.4`. Nothing in it depends on the
 engine, so it has its own version, raised when the build changes.
 
 ## Install on a Host
@@ -43,7 +43,7 @@ Copy `/gvisor` into a directory of its own version, so that an upgrade never rep
 binaries of a sandbox that is running:
 
 ```bash
-version=0.1.2
+version=0.1.4
 dir=/usr/local/lib/ale-gvisor/$version
 id=$(docker create ghcr.io/agentslastexam/ale-gvisor:$version)
 sudo mkdir -p "$dir"
@@ -60,7 +60,7 @@ alone:
 {
   "runtimes": {
     "runsc": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.4/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -68,7 +68,7 @@ alone:
       ]
     },
     "runsc-net-raw": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.4/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -77,7 +77,7 @@ alone:
       ]
     },
     "runsc-nested": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.2/runsc",
+      "path": "/usr/local/lib/ale-gvisor/0.1.4/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",

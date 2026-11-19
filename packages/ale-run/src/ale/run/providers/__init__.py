@@ -24,7 +24,7 @@ from ale.core.capability import (
     solver_saves,
     unmet,
 )
-from ale.core.config import DockerProviderConfig, RunConfig
+from ale.core.config import DockerProviderConfig, RunConfig, SlurmProviderConfig
 from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     Provider,
@@ -56,7 +56,7 @@ __all__ = [
 RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "orchard", "fleet")
 
 #: The provider ids of the schedulers, which start Sandboxes on machines they manage; every
-#: other provider id names a leaf, which starts them on this one.
+#: other provider id names a leaf, which starts the final Sandbox directly.
 SCHEDULERS = ("daytona", "fleet")
 
 
@@ -71,10 +71,19 @@ def machine_arch() -> Arch:
     raise ProviderCapabilityError(f"unsupported machine architecture {machine}")
 
 
-def leaf(provider_id: str, *, docker: DockerProviderConfig = DockerProviderConfig()) -> Provider:
+def leaf(
+    provider_id: str,
+    *,
+    docker: DockerProviderConfig = DockerProviderConfig(),
+    slurm: SlurmProviderConfig | None = None,
+) -> Provider:
     """The leaf a provider id names: ``docker:<runtime>`` for each runtime Docker's table
-    holds, ``qemu``, ``firecracker`` or ``orchard``. ``docker`` holds a Docker leaf's
+    holds, ``qemu``, ``firecracker``, ``slurm`` or ``orchard``. ``docker`` holds a Docker leaf's
     settings: the Host GPUs it may lease and the margin it admits a shared one with."""
+    if provider_id == "slurm":
+        from ale.run.providers.slurm import SlurmProvider
+
+        return SlurmProvider(slurm or SlurmProviderConfig())
     if provider_id.startswith("docker:"):
         from ale.run.providers.docker import RUNTIMES, DockerProvider
 
@@ -231,7 +240,7 @@ class ProviderRegistry:
             from ale.run.providers.daytona import DaytonaProvider
 
             return DaytonaProvider(settings.daytona)
-        return leaf(provider_id, docker=settings.docker)
+        return leaf(provider_id, docker=settings.docker, slurm=settings.slurm)
 
     async def select(
         self, tasks: Sequence[Task], *, solvers: bool = True, snapshots: bool = False
@@ -312,7 +321,7 @@ class ProviderRegistry:
         for, again only for needs it has not passed for yet, its check and probes included,
         such as a GPU or another runtime a later Task asks for. Then, for each set of
         container features its Sandboxes ask for, it starts a throwaway Sandbox as it would
-        the first that asks for that set, with the same grants but no GPU, and
+        the first that asks for that set, omitting GPUs when the leaf can serve it that way, and
         :func:`missing_features` probes it: a profile says what the leaf gives, and only the
         Host shows that it does. A Sandbox is probed by its own set, since a grant one
         feature brings can make another pass. Missing features refuse the Run, naming each
@@ -340,9 +349,7 @@ class ProviderRegistry:
                         os=needs.os,
                         role=role,
                         prepared_image=image,
-                        resources=needs.resources.model_copy(
-                            update={"gpus": 0, "gpu_types": (), "gpu_memory_mb": None}
-                        ),
+                        resources=needs.resources,
                         network=NetworkPolicy(mode=NetworkMode.BLOCK),
                         sudo=needs.resources.sudo,
                         user=user,
@@ -368,7 +375,18 @@ class ProviderRegistry:
                 probes[(provider_id, frozenset())] = first[(provider_id, frozenset())]
         lacking: dict[str, dict[ContainerFeature, str]] = {}
         for (provider_id, features), request in probes.items():
-            async with await self.get(provider_id).create(request) as sandbox:
+            leaf = self.get(provider_id)
+            if request.resources.gpus:
+                cpu = request.model_copy(
+                    update={
+                        "resources": request.resources.model_copy(
+                            update={"gpus": 0, "gpu_types": (), "gpu_memory_mb": None}
+                        )
+                    }
+                )
+                if not await leaf.unserved(cpu.needs, user=cpu.user, role=cpu.role):
+                    request = cpu
+            async with await leaf.create(request) as sandbox:
                 if check := checks.pop(provider_id, None):
                     await check(sandbox)
                     self._shown.add(provider_id)

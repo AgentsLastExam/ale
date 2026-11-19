@@ -444,6 +444,31 @@ async def test_each_selected_leaf_is_checked_once_for_each_set_of_features_asked
 
 
 @pytest.mark.asyncio
+async def test_feature_probe_keeps_gpus_when_the_leaf_requires_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class GpuOnlyLeaf(_Leaf):
+        def refusals(self, needs, *, user, role):
+            return () if needs.resources.gpus else ("this partition requires a GPU",)
+
+    leaf = GpuOnlyLeaf("slurm", "mount")
+    registry = ProviderRegistry(_settings("docker:runc"))
+    registry._instances["slurm"] = leaf
+    task = _selected(
+        _task(tmp_path / "gpu", {"environment": {"gpus": 2, "container_features": ["mount"]}}),
+        "slurm",
+    )
+
+    async def probe(sandbox, features):
+        assert sandbox.request.resources.gpus == 2
+        return {}
+
+    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    await registry.preflight([task])
+    assert len(leaf.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_check_the_preflight_of_a_leaf_returns_runs_once_in_a_sandbox_of_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -600,7 +625,7 @@ def test_ale_run_refuses_to_start_when_a_leaf_lacks_a_feature_here(
     async def episode(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("an episode started")
 
-    monkeypatch.setattr("ale.run.providers.leaf", lambda _id, docker=None: kata)
+    monkeypatch.setattr("ale.run.providers.leaf", lambda _id, **settings: kata)
     monkeypatch.setattr("ale.run.cli.tasks.prepare_task_image_result", prepare)
     monkeypatch.setattr("ale.run.providers.missing_features", lacking)
     monkeypatch.setattr("ale.run.cli.tasks.run_episode", episode)

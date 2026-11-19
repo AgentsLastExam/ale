@@ -1,6 +1,6 @@
 """Capability profiles, and the one rule that decides whether a profile serves a Sandbox.
 
-A leaf, a Provider that starts Sandboxes on the machine it runs on, declares each real
+A leaf, a Provider that starts and drives the final Sandbox, declares each real
 combination it can start as a :class:`CapabilityProfile`. A Run choosing a Provider and a
 Fleet placing a Sandbox on a Node both compare the Sandbox's :class:`SandboxNeeds` with
 profiles through :func:`unmet`, so the same Sandbox is accepted or refused the same way

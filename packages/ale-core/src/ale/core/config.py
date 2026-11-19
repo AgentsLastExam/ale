@@ -24,6 +24,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from ale.core.capability import GpuModel
 from ale.core.errors import ConfigError
 from ale.core.ids import content_hash
 from ale.core.sandbox import DesktopResolution
@@ -47,6 +48,8 @@ __all__ = [
     "RunTimeouts",
     "SandboxConfig",
     "SandboxRetentionConfig",
+    "SlurmPartition",
+    "SlurmProviderConfig",
     "VerificationConfig",
     "ale_repo_path",
     "load_run_config",
@@ -245,14 +248,13 @@ class SandboxRetentionConfig(BaseModel):
     verifier: Literal["destroy", "keep"] = "destroy"
 
 
-#: Every Provider a Run can select, by provider id. A leaf starts Sandboxes on this machine:
-#: Docker under one of its runtimes (``docker:<runtime>``), QEMU, Firecracker or Orchard. A
-#: scheduler places them on machines it manages, with the leaves there: the Fleet on its
-#: Nodes, Daytona on its own.
+#: Every Provider a Run can select. A leaf starts the final Sandbox directly. A scheduler
+#: places the request on machines it manages.
 ProviderId = Literal[
     "docker:runc",
     "docker:kata",
     "docker:gvisor",
+    "slurm",
     "qemu",
     "firecracker",
     "orchard",
@@ -284,6 +286,37 @@ class DockerProviderConfig(BaseModel):
         if len(set(values)) != len(values):
             raise ValueError("Docker GPU indices must be unique")
         return values
+
+
+class SlurmPartition(BaseModel):
+    """One single-node allocation a Slurm submission site offers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    host: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]*$")
+    name: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+    qos: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+    max_cpus: int = Field(ge=1)
+    max_memory_mb: int = Field(ge=1)
+    gpu_model: GpuModel | None = None
+    max_gpus: int = Field(default=0, ge=0)
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _gpu_capacity(self) -> Self:
+        if bool(self.max_gpus) != bool(self.gpu_model):
+            raise ValueError("a GPU partition needs both gpu_model and max_gpus")
+        return self
+
+
+class SlurmProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    partitions: tuple[SlurmPartition, ...] = ()
+    """In preference order. One Sandbox fits on one node of one partition."""
+    walltime_minutes: int = Field(default=180, ge=1)
+    queue_timeout_sec: int = Field(default=900, ge=1)
 
 
 class DaytonaProviderConfig(BaseModel):
@@ -321,6 +354,7 @@ class SandboxConfig(BaseModel):
     choice is by capability alone, never by load, so one configuration always chooses the
     same way; a scheduler's own leaves are its deployment's to configure."""
     docker: DockerProviderConfig = DockerProviderConfig()
+    slurm: SlurmProviderConfig = SlurmProviderConfig()
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
     fleet: FleetConfig = FleetConfig()
 
@@ -337,6 +371,8 @@ class SandboxConfig(BaseModel):
 
     @model_validator(mode="after")
     def _settings_have_their_provider(self) -> Self:
+        if "slurm" in self.providers and not self.slurm.partitions:
+            raise ValueError("the slurm Provider needs sandbox.slurm.partitions")
         if self.docker.gpus and not any(name.startswith("docker:") for name in self.providers):
             raise ValueError(
                 "sandbox.docker.gpus selects Docker devices; sandbox.providers names no Docker leaf"

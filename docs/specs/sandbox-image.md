@@ -530,7 +530,7 @@ their type and existence.
 
 A Task states what its Sandboxes need and never names a Provider or runtime, so it runs
 unchanged wherever a Provider serves it. A Provider is one of two classes. A
-[leaf](lexicon.md) starts Sandboxes on the machine it runs on, and declares each real
+[leaf](lexicon.md) starts and drives the Sandbox itself, locally or in an allocation, and declares each real
 combination it can start as a [capability profile](lexicon.md): kind, operating system,
 architecture, desktop, network modes, snapshots and how many it saves in a row, GPUs, their
 models and memory and how it shares them, CPU and memory limits, whether it holds a Sandbox

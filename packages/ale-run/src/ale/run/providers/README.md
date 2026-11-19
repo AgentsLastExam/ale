@@ -5,6 +5,7 @@ Providers turn prepared Task images into Sandboxes. ALE ships the following back
 | Package | Backend | Prepared input |
 |---|---|---|
 | `docker/` | local Docker container, a Kata microVM per container ([Kata](#docker-on-kata-containers)), or a container on gVisor ([gVisor](#docker-on-gvisor)) | immutable OCI image identity |
+| `slurm/` | one Linux gVisor container in a single-node Slurm batch allocation | immutable OCI image identity |
 | `qemu/` | QEMU/KVM guest runner | qcow2 disk, or a chain of [layers](#disk-layers) on one |
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona/` | Daytona cloud container | immutable OCI image identity, pushed by digest |
@@ -58,6 +59,7 @@ leaves its profiles name:
 | `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models and memory nvidia-smi reports, shared by `gpu_memory_mb` and watched ([GPU memory](#gpu-memory)); none without a working nvidia-smi | yes | `raw_sockets` | — |
 | `docker:kata` | Linux containers, on the machine's architecture | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes, but not with `nested_containers` | `user_namespaces`, `fuse` and `mount`, with `raw_sockets` in one profile and `nested_containers` in another | — |
+| `slurm` | Linux x86-64 containers on configured partitions | whole GPUs of the configured partition model | no | as the two gVisor profiles above | more GPUs than one node supplies; explicit writable storage limits |
 | `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
 | `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
@@ -92,6 +94,7 @@ serves it on.
 
 | Provider | Where the fixed port leads |
 |---|---|
+| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a second Slurm step to the Host, carrying only the Gateway and the episode's allowlist proxy |
 | Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)). Under rootless Docker, whose bridges are in a network namespace of rootlesskit's, the Provider listens at the Gateway's port there and relays each connection to the Host ([Docker runtimes](#docker-runtimes)) |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Firecracker | As QEMU, from the guest's tap device in the runner |
@@ -676,7 +679,7 @@ Sandbox runs under `runsc` unless it asks for `raw_sockets` or `nested_container
 entirely under `runsc-net-raw` or `runsc-nested`; no profile gives both, so a Sandbox that
 asks for both is refused before anything starts. Besides finding each name the Run's
 Sandboxes run under, registered with exactly those arguments, the preflight checks that
-`runsc --version` reports the build this engine runs (`+ale.0.1.2`, `VERSION` in its
+`runsc --version` reports the build this engine runs (`+ale.0.1.4`, `VERSION` in its
 `build.sh`; a stock `runsc` lacks the rootless and out-of-memory fixes) and, whenever GPUs
 may be attached, a Sandbox needing them or a Node whose profiles offer the Host's, that
 `runsc nvproxy list-supported-drivers` lists the Host's NVIDIA driver, and, whenever a
@@ -730,6 +733,63 @@ first screenshot came after 7.6 s against 4.3 s and its cgroup held 541 MB idle 
 against 0.07 to 0.13 s, and starting the framework's Python 1.2 to 2.4 s against 0.4 to
 0.9 s. A Run with no Task that asks for a container feature starts one Sandbox more, for
 the preflight's check: about 15 s with that image.
+
+## Slurm
+
+A Run can submit directly to Slurm over an SSH login alias. Each Sandbox, including a
+separate verifier, occupies one batch job on one node. The login and compute nodes must
+share the submitting account's home. The Host prepares and frames images using Docker.
+It sends the compressed image once per content identity to the login user's private
+`~/.cache/ale/slurm`. Compute nodes need Python 3, rootless Podman with slirp4netns, iproute2,
+and cgroup v2 with enforced CPU affinity, a memory limit and zero swap. GPU partitions need
+NVIDIA CDI and a driver supported by the pinned ALE gVisor runtime. The compute node pulls
+the build `docker:gvisor` runs from GHCR into a private, versioned cache shared by the
+login and compute nodes. Tasks run without the login home, agent socket or Slurm credentials.
+
+```toml
+[sandbox]
+providers = ["slurm"]
+
+[sandbox.slurm]
+walltime_minutes = 180
+queue_timeout_sec = 900
+
+[[sandbox.slurm.partitions]]
+host = "cluster-login"
+name = "cpu_1"
+qos = "cpu"
+max_cpus = 42
+max_memory_mb = 204800
+
+[[sandbox.slurm.partitions]]
+host = "cluster-login"
+name = "h100_1"
+qos = "short"
+max_cpus = 166
+max_memory_mb = 1593403
+gpu_model = { name = "NVIDIA H100 80GB HBM3", memory_mb = 81559 }
+max_gpus = 8
+```
+
+Each entry describes a homogeneous partition's effective per-node limits for that QoS.
+Add entries with another login alias to serve another cluster. CPU-only requests use CPU
+entries. The first matching GPU entry supplies the requested count as whole cards. The
+provider checks the job's CPU and memory limits, the started image and the allocated GPU
+UUIDs against the devices the guest sees. Pending jobs have a queue deadline. Running
+jobs have a Slurm wall time even when the Host is lost. `sandbox_id` names the login
+host and job ID; the allocation records the compute node and runtime.
+
+Each job uses its own local Podman store. `srun --overlap --unbuffered` opens guestd's
+command and file sessions and a separate tunnel. Blocking drops packets on the sandbox's
+private tap outside gVisor. Opening removes the filters while the container keeps running.
+The allowlist uses the same seal and the Host's authenticated proxy through the tunnel.
+The runtime modes grant nested Docker or raw sockets separately. Nested storage lasts
+for the job. Slurm supplies no ALE snapshots, retention or writable storage quotas.
+
+The job requests the Task's memory plus 512 MiB for gVisor, Podman and Slurm control
+steps. Partition limits include that overhead. The runtime reads the job's cgroup v2
+limit and usage so that memory pressure can end a process inside the sandbox. Confirm a site with
+`ALE_TEST_SLURM_CONFIG=run.toml uv run pytest tests/conformance/test_provider_slurm.py`.
 
 ## Daytona
 
