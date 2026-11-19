@@ -389,6 +389,8 @@ def _mismatch(demand: SandboxDemand, request: SandboxRequest) -> str | None:
         return "resources"
     if request.snapshot != demand.snapshot:
         return "snapshot"
+    if request.volumes_from != demand.volumes_from:
+        return "snapshot whose volumes it views"
     if request.snapshot_verifier != demand.verifier:
         return "snapshot verifier"
     if request.round_verifier != demand.round_verifier:
@@ -825,9 +827,10 @@ class NodeAgent:
         assert entry is not None
         try:
             request = await self._tunnelled(held.grant.run_id, body, entry.ports)
-            if request.snapshot is not None:
-                handle = self._snapshot_handle(request.snapshot, held.profile)
-                request = request.model_copy(update={"snapshot": handle})
+            for name in ("snapshot", "volumes_from"):
+                if (named := getattr(request, name)) is not None:
+                    handle = self._snapshot_handle(named, held.profile)
+                    request = request.model_copy(update={name: handle})
             entry.request = request
             sandbox = await held.provider.create(entry.request)
         except BaseException as error:
@@ -855,6 +858,7 @@ class NodeAgent:
             agent_home=sandbox.agent_home,
             gateway_url=sandbox.gateway_url,
             create_sec=held.create_sec,
+            volumes=sandbox.volumes,
         )
         entry.handle, entry.description = sandbox.handle, description
         self._write(held)

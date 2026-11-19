@@ -27,7 +27,7 @@ from ale.core.sandbox import (
     ResourceAllocation,
     SandboxFile,
     SandboxRequest,
-    snapshot_verifier_needs,
+    verifiers_needs,
 )
 from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources, TaskSpec
 
@@ -76,7 +76,7 @@ __all__ = [
 ]
 
 #: Peers speaking another version refuse each other instead of guessing.
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 
 #: A Node name: it appears in URLs, Sandbox records and operator commands.
 NODE_NAME = r"^[a-z0-9][a-z0-9-]{0,62}$"
@@ -290,6 +290,9 @@ class SandboxDemand(BaseModel):
     saves them."""
     snapshot: str | None = Field(default=None, pattern=IDENTIFIER)
     """The snapshot to boot from, which only the Node that holds it can serve."""
+    volumes_from: str | None = Field(default=None, pattern=IDENTIFIER)
+    """The snapshot whose volumes a Sandbox of another image mounts views of, which only the
+    leaf that saved it, on the Node that holds it, can serve."""
     verifier: Resources | None = None
     """The resources of the snapshot verifier that boots from this solver's snapshot, which
     only the leaf that saves it, on its Node, boots: that leaf must serve both."""
@@ -307,18 +310,15 @@ class SandboxDemand(BaseModel):
             snapshot_verified=self.verifier is not None,
             kept_as_snapshot=self.retention == "snapshot",
         )
-        verifier = self.verifier or self.round_verifier
         return SandboxNeeds(
             kind=self.kind,
             os=self.os,
             arch=self.arch,
             network_mode=self.network_mode,
             resources=self.resources,
-            snapshot=saves > 0 or self.snapshot is not None,
+            snapshot=saves > 0 or self.snapshot is not None or self.volumes_from is not None,
             saves=saves,
-            verifier=None
-            if verifier is None
-            else snapshot_verifier_needs(self.kind, self.os, verifier),
+            verifier=verifiers_needs(self.kind, self.os, (self.verifier, self.round_verifier)),
         )
 
 
@@ -562,6 +562,8 @@ class SandboxDescription(BaseModel):
     """The Gateway's address inside the Sandbox."""
     create_sec: float = Field(ge=0)
     """Seconds the Node's Provider took to create it."""
+    volumes: tuple[str, ...] = ()
+    """Which of its volume candidates it mounted as volumes of their own."""
 
 
 class LeaseRenewal(BaseModel):
