@@ -838,6 +838,8 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
         "orchard:z",
         "qemu:a",
         "qemu:z",
+        "slurm:a",
+        "slurm:z",
     ]
     await _destroy_retained_sandbox("docker:ale-docker")
     await _destroy_retained_sandbox("firecracker:ale-fc")
@@ -845,6 +847,7 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
     await _destroy_retained_sandbox("daytona:abc")
     await _destroy_retained_sandbox("orchard:ale-vm:uid")
     await _destroy_retained_sandbox("orchard:snapshot:abc")
+    await _destroy_retained_sandbox("slurm:login/ale-0/1")
     assert destroyed == [
         ("docker", "docker:ale-docker"),
         ("firecracker", "firecracker:ale-fc"),
@@ -852,6 +855,7 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
         ("daytona", "daytona:abc"),
         ("orchard", "orchard:ale-vm:uid"),
         ("orchard", "orchard:snapshot:abc"),
+        ("slurm", "slurm:login/ale-0/1"),
     ]
     with pytest.raises(ProviderCapabilityError, match="must start"):
         await _destroy_retained_sandbox("ale-ambiguous")

@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import os
-import tomllib
-from pathlib import Path
-
 import pytest
-from tests.support import CONTAINER_BASE
+from tests.support import CONTAINER_BASE, slurm_config
 
-from ale.core.config import SlurmProviderConfig
 from ale.core.sandbox import Identity, ImageRef, SandboxRequest
 from ale.core.taskspec import Resources
 from ale.core.testkit import ProviderConformance
@@ -33,11 +28,7 @@ class TestSlurmProvider(ProviderConformance):
 
     @pytest.fixture(autouse=True)
     def cluster(self) -> None:
-        config = os.environ.get("ALE_TEST_SLURM_CONFIG")
-        if not config:
-            pytest.skip("set ALE_TEST_SLURM_CONFIG to a Run TOML with sandbox.slurm settings")
-        settings = tomllib.loads(Path(config).read_text())["sandbox"]["slurm"]
-        self.provider = SlurmProvider(SlurmProviderConfig.model_validate(settings))
+        self.provider = SlurmProvider(slurm_config())
 
     @pytest.mark.asyncio
     async def test_the_agent_can_allocate_cuda_memory_on_every_assigned_gpu(self) -> None:

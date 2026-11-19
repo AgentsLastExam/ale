@@ -53,7 +53,7 @@ __all__ = [
 
 #: Every Provider that can leave a sandbox behind. A retained sandbox outlives the run
 #: configuration that made it, so listing and destroying consult all of them.
-RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "orchard", "fleet")
+RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "orchard", "slurm", "fleet")
 
 #: The provider ids of the schedulers, which start Sandboxes on machines they manage; every
 #: other provider id names a leaf, which starts the final Sandbox directly.
@@ -466,6 +466,9 @@ def provider_named(name: str) -> Provider:
         return leaf("docker:runc")
     if name in {"firecracker", "qemu", "orchard"}:
         return leaf(name)
+    if name == "slurm":
+        # Without a Run's partitions it finds no hosts to list, but a handle names its own.
+        return leaf("slurm")
     if name == "daytona":
         from ale.run.providers.daytona import DaytonaProvider
 

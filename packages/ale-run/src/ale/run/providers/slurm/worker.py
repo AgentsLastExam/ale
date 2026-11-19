@@ -1,4 +1,11 @@
-"""Single-node Slurm job and control steps. Copied to the cluster, standard library only."""
+"""A single-node Slurm allocation and the Sandboxes in it. Copied to the cluster, standard
+library only.
+
+The batch step holds Podman's private namespace and store on the node and loads the image
+the allocation was seeded with. Each Sandbox the Host asks for runs as a job step of its
+own, which Slurm holds to that Sandbox's CPUs, memory and GPUs; control steps overlap it.
+A Sandbox saved as a snapshot is committed to the store, where the next one boots from it.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +20,9 @@ import tempfile
 import time
 from pathlib import Path
 
-#: Each job's Podman store on its node, below ``$SLURM_TMPDIR`` or ``/tmp``.
+SANDBOXES = Path("sandboxes")
+SNAPSHOT_REPOSITORY = "localhost/ale-snapshot"
+#: Each allocation's Podman store on its node, below ``$SLURM_TMPDIR`` or ``/tmp``.
 STORE_PREFIX = "ale-slurm-"
 #: In each store, the ID of the job it belongs to.
 OWNER = "job"
@@ -23,10 +32,18 @@ def output(*argv: str) -> str:
     return subprocess.check_output(argv, text=True).strip()
 
 
-def write(name: str, value: object) -> None:
-    path = Path(name + ".tmp")
-    path.write_text(json.dumps(value))
-    path.replace(name)
+def write(path: Path | str, value: object) -> None:
+    path = Path(path)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value))
+    temporary.replace(path)
+
+
+def read(path: Path | str) -> str:
+    try:
+        return Path(path).read_text().strip()
+    except FileNotFoundError:
+        return ""
 
 
 def devices() -> list[dict[str, object]]:
@@ -61,8 +78,12 @@ def podman(directory: str) -> list[str]:
     ]
 
 
-def network(command: list[str], *, sealed: bool) -> None:
-    namespace = output(*command, "inspect", "-f", "{{.NetworkSettings.SandboxKey}}", "sandbox")
+def container(index: str) -> str:
+    return "sandbox-" + index
+
+
+def network(command: list[str], name: str, *, sealed: bool) -> None:
+    namespace = output(*command, "inspect", "-f", "{{.NetworkSettings.SandboxKey}}", name)
     net = [*command, "unshare", "nsenter", "--net=" + namespace]
     # Slirp4netns gives this container one tap. gVisor has taken its routes into netstack.
     interfaces = [
@@ -104,18 +125,41 @@ def network(command: list[str], *, sealed: bool) -> None:
         subprocess.run([*tc, "qdisc", "del", "dev", interface, "clsact"], check=True)
 
 
-def job_cgroup() -> Path:
+def own_cgroup() -> Path:
     relative = next(
         line[3:]
         for line in Path("/proc/self/cgroup").read_text().splitlines()
         if line.startswith("0::")
     )
-    path = Path("/sys/fs/cgroup") / relative.lstrip("/")
+    return Path("/sys/fs/cgroup") / relative.lstrip("/")
+
+
+def job_cgroup() -> Path:
+    path = own_cgroup()
     return next(
         parent
         for parent in (path, *path.parents)
         if parent.name == "job_" + os.environ["SLURM_JOB_ID"]
     )
+
+
+def limit_cgroup() -> Path:
+    """The nearest cgroup above this process that limits its memory: Slurm limits each step
+    of a job on its own, below the job's limit, at a level of its hierarchy that varies."""
+    path = own_cgroup()
+    for parent in (path, *path.parents):
+        limit = parent / "memory.max"
+        if limit.is_file() and limit.read_text().strip() != "max":
+            return parent
+    raise RuntimeError("Slurm placed this step in no cgroup that limits its memory")
+
+
+def alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0]
+    except (FileNotFoundError, IndexError):
+        return False
+    return state not in {"Z", "X"}
 
 
 def runtime_binary(command: list[str], version: str) -> Path:
@@ -134,74 +178,29 @@ def runtime_binary(command: list[str], version: str) -> Path:
     return runtime / "runsc"
 
 
-def start(directory: str) -> None:
-    spec = json.loads(Path("request.json").read_text())
-    job = job_cgroup()
-    if (
-        int((job / "memory.max").read_text()) != spec["job_memory_mb"] << 20
-        or (job / "memory.swap.max").read_text().strip() != "0"
-        or len(os.sched_getaffinity(0)) != spec["cpus"]
-    ):
-        raise RuntimeError(
-            "Slurm did not enforce the requested CPU, memory and zero-swap allocation"
-        )
-    command = podman(directory)
-    archive = spec["image"].removeprefix("sha256:") + ".tar.gz"
-    image = spec["loaded"].removeprefix("sha256:")
-    subprocess.run([*command, "load", "-i", str(Path.cwd().parent / archive)], check=True)
-    runsc = str(runtime_binary(command, spec["version"]))
-    version = output(runsc, "--version").splitlines()[0]
-    if not version.endswith("+ale." + spec["version"]):
-        raise RuntimeError(f"unexpected gVisor build {version}")
-    gpus = devices() if spec["gpus"] else []
-    if len(gpus) != spec["gpus"]:
-        raise RuntimeError(f"received {len(gpus)} GPUs, requested {spec['gpus']}")
-    flags = [
-        *command,
-        "run",
-        "-d",
-        "--name",
-        "sandbox",
-        "--network=slirp4netns:allow_host_loopback=false",
-        "--http-proxy=false",
-        "--runtime",
-        runsc,
-        "--runtime-flag=ignore-cgroups",
-        "--runtime-flag=enclosing-memory-cgroup=" + str(job),
-        "--oom-score-adj=500",
-        *spec["runtime_args"],
+def launch(index: str, request: dict[str, object], *, gpus: bool) -> subprocess.Popen[bytes]:
+    """Run one Sandbox as a step of its own, which Slurm holds to its resources."""
+    args = [
+        "srun",
+        "--exact",
+        "--nodes=1",
+        "--ntasks=1",
+        f"--cpus-per-task={request['cpus']}",
+        f"--mem={request['memory_mb']}M",
+        "--cpu-bind=threads",
     ]
     if gpus:
-        flags += ["--runtime-flag=nvproxy", "-e", "NVIDIA_VISIBLE_DEVICES=void"]
-        for gpu in gpus:
-            flags.extend(["--device", "nvidia.com/gpu=" + str(gpu["id"])])
-    for key, value in spec["env"].items():
-        flags.extend(["--env", f"{key}={value}"])
-    subprocess.run([*flags, image], check=True)
-    observed = output(*command, "inspect", "--format", "{{.Image}}", "sandbox").removeprefix(
-        "sha256:"
-    )
-    if observed != image:
-        raise RuntimeError("Podman started a different image")
-    if spec["sealed"]:
-        network(command, sealed=True)
-    write(
-        "ready",
-        dict(
-            directory=directory,
-            runtime_flags=[
-                flag for flag in spec["runtime_args"] if flag.startswith("--runtime-flag=")
-            ],
-            image="sha256:" + observed,
-            devices=gpus,
-            runtime=version,
-            node=os.uname().nodename,
-        ),
-    )
-    while not Path("stop").read_bytes():
-        if output(*command, "inspect", "-f", "{{.State.Running}}", "sandbox") != "true":
-            raise RuntimeError("the sandbox image command exited")
-        time.sleep(2)
+        # A step that asks for none sees none of the job's GPUs.
+        args.append(f"--gres=gpu:{request['gpus']}")
+    log = (SANDBOXES / index / "step.log").open("wb")
+    try:
+        return subprocess.Popen(
+            [*args, "python3", "-I", __file__, "start", index],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        log.close()
 
 
 def stale_stores(scratch: Path) -> list[Path]:
@@ -225,13 +224,6 @@ def stale_stores(scratch: Path) -> list[Path]:
     return stale
 
 
-def read(path: Path) -> str:
-    try:
-        return path.read_text().strip()
-    except FileNotFoundError:
-        return ""
-
-
 def release(command: list[str], directory: str) -> None:
     """Remove a store and every mount Podman made below it."""
     subprocess.run(
@@ -242,12 +234,12 @@ def release(command: list[str], directory: str) -> None:
 
 
 def supervise() -> None:
-    # The batch step outlives the sandbox step's cgroup, including an OOM that kills
-    # every process there. Keep the terminal counters before the allocation goes away.
+    spec = json.loads(Path("allocation.json").read_text())
     scratch = Path(os.getenv("SLURM_TMPDIR") or "/tmp")
     directory = tempfile.mkdtemp(prefix=STORE_PREFIX, dir=scratch)
     (Path(directory) / OWNER).write_text(os.environ["SLURM_JOB_ID"])
     command = podman(directory)
+    steps: dict[str, subprocess.Popen[bytes]] = {}
 
     def terminated(signum: int, frame: object) -> None:
         raise SystemExit(128 + signum)
@@ -257,7 +249,7 @@ def supervise() -> None:
     signal.signal(signal.SIGTERM, terminated)
     try:
         # Keep the private rootless user namespace alive until the batch step finishes
-        # cleanup, including when Slurm kills the entire workload step.
+        # cleanup, including when Slurm kills every Sandbox's step.
         subprocess.run([*command, "unshare", "true"], check=True)
         for store in stale_stores(scratch):
             subprocess.run(
@@ -265,26 +257,176 @@ def supervise() -> None:
                 check=False,
             )
         subprocess.run(
-            ["srun", "--cpu-bind=threads", "python3", "-I", __file__, "start", directory],
+            [*command, "load", "-q", "-i", str(Path.cwd().parent / spec["archive"])],
             check=True,
+            stdout=subprocess.DEVNULL,
         )
+        if output(*command, "image", "inspect", "-f", "{{.Id}}", spec["image"]) != spec["image"]:
+            raise RuntimeError("the staged archive holds a different image")
+        runsc = str(runtime_binary(command, spec["version"]))
+        version = output(runsc, "--version").splitlines()[0]
+        if not version.endswith("+ale." + spec["version"]):
+            raise RuntimeError(f"unexpected gVisor build {version}")
+        if spec["gpus"]:
+            supported = output(runsc, "nvproxy", "list-supported-drivers").split()
+            for driver in {str(device["driver_version"]) for device in devices()}:
+                if driver not in supported:
+                    raise RuntimeError(
+                        f"the node's NVIDIA driver {driver} is not one gVisor {version} "
+                        "supports; its nvproxy lists them with list-supported-drivers"
+                    )
+        SANDBOXES.mkdir(exist_ok=True)
+        write(
+            "ready",
+            dict(directory=directory, runsc=runsc, runtime=version, node=os.uname().nodename),
+        )
+        while not read("stop"):
+            for request in sorted(SANDBOXES.glob("*/request.json")):
+                index = request.parent.name
+                if index not in steps and not (request.parent / "done").exists():
+                    steps[index] = launch(
+                        index, json.loads(request.read_text()), gpus=bool(spec["gpus"])
+                    )
+            for index, step in list(steps.items()):
+                if (code := step.poll()) is not None:
+                    write(SANDBOXES / index / "done", code)
+                    del steps[index]
+            time.sleep(0.5)
     finally:
+        # The Host stops the allocation once its Sandboxes are gone; any left now end with
+        # their steps, which srun ends on a signal.
+        for step in steps.values():
+            step.terminate()
+        for index, step in steps.items():
+            try:
+                step.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                step.kill()
+                step.wait()
+            write(SANDBOXES / index / "done", step.returncode)
+        # The batch step outlives each Sandbox's step, including an OOM that kills every
+        # process there. Keep the job's counters before the allocation goes away.
         Path("memory").write_text((job_cgroup() / "memory.events").read_text())
         try:
-            subprocess.run([*command, "rm", "-aft", "1"], check=True)
+            subprocess.run([*command, "rm", "-a", "-f", "-v", "-t", "1"], check=True)
             release(command, directory)
         except Exception as exc:
             write("cleanup-error", str(exc))
             raise
 
 
+def start(index: str) -> None:
+    box = SANDBOXES / index
+    spec = json.loads((box / "request.json").read_text())
+    ready = json.loads(Path("ready").read_text())
+    limit = limit_cgroup()
+    if (
+        int((limit / "memory.max").read_text()) != spec["memory_mb"] << 20
+        or (limit / "memory.swap.max").read_text().strip() != "0"
+        or len(os.sched_getaffinity(0)) != spec["cpus"]
+    ):
+        raise RuntimeError(
+            "Slurm did not enforce the requested CPU, memory and zero-swap allocation"
+        )
+    command = podman(ready["directory"])
+    name = container(index)
+    gpus = devices() if spec["gpus"] else []
+    if len(gpus) != spec["gpus"]:
+        raise RuntimeError(f"received {len(gpus)} GPUs, requested {spec['gpus']}")
+    flags = [
+        *command,
+        "run",
+        "-d",
+        "--name",
+        name,
+        "--network=slirp4netns:allow_host_loopback=false",
+        "--http-proxy=false",
+        "--runtime",
+        ready["runsc"],
+        "--runtime-flag=ignore-cgroups",
+        "--runtime-flag=enclosing-memory-cgroup=" + str(limit),
+        "--oom-score-adj=500",
+        *spec["runtime_args"],
+    ]
+    if gpus:
+        flags += ["--runtime-flag=nvproxy", "-e", "NVIDIA_VISIBLE_DEVICES=void"]
+        for gpu in gpus:
+            flags.extend(["--device", "nvidia.com/gpu=" + str(gpu["id"])])
+    for key, value in spec["env"].items():
+        flags.extend(["--env", f"{key}={value}"])
+    try:
+        subprocess.run([*flags, spec["image"]], check=True, stdout=subprocess.DEVNULL)
+        if output(*command, "inspect", "--format", "{{.Image}}", name) != spec["image"]:
+            raise RuntimeError("Podman started a different image")
+        if spec["sealed"]:
+            network(command, name, sealed=True)
+        conmon = int(output(*command, "inspect", "--format", "{{.State.ConmonPid}}", name))
+        write(
+            box / "ready",
+            dict(
+                container=name,
+                runtime_flags=[
+                    flag for flag in spec["runtime_args"] if flag.startswith("--runtime-flag=")
+                ],
+                image=spec["image"],
+                devices=gpus,
+                step=os.environ["SLURM_STEP_ID"],
+            ),
+        )
+        while True:
+            order = read(box / "stop")
+            if order == "save":
+                save(command, name, index, box)
+                return
+            if order:
+                return
+            if not alive(conmon):
+                raise RuntimeError("the sandbox image command exited")
+            time.sleep(1)
+    finally:
+        (box / "memory").write_text((limit / "memory.events").read_text())
+        subprocess.run(
+            [*command, "rm", "-f", "-v", "-t", "1", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+def save(command: list[str], name: str, index: str, box: Path) -> None:
+    """Stop the Sandbox and commit its disk to the allocation's store."""
+    subprocess.run([*command, "stop", "-t", "30", name], check=True, stdout=subprocess.DEVNULL)
+    image = output(*command, "commit", "-q", name, f"{SNAPSHOT_REPOSITORY}:{index}")
+    write(box / "saved", dict(image=image.removeprefix("sha256:")))
+
+
+def export(command: list[str], image: str, destination: str) -> None:
+    """Write a snapshot to the shared file system, from which another allocation loads it."""
+    path = Path.cwd().parent / destination
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    temporary = path.with_name(path.name + ".part")
+    with temporary.open("wb") as file:
+        saver = subprocess.Popen([*command, "save", image], stdout=subprocess.PIPE)
+        assert saver.stdout is not None
+        gzip = subprocess.run(["gzip", "-1"], stdin=saver.stdout, stdout=file, check=False)
+        saver.stdout.close()
+        if saver.wait() or gzip.returncode:
+            temporary.unlink()
+            raise RuntimeError(f"could not export {image}")
+    temporary.replace(path)
+
+
 def main() -> None:
-    mode = sys.argv[1]
+    mode, args = sys.argv[1], sys.argv[2:]
     if mode == "supervise":
-        supervise()
+        try:
+            supervise()
+        except Exception as exc:
+            if not Path("ready").exists():
+                write("error", str(exc))
+            raise
         return
     if mode == "release":
-        directory = Path(sys.argv[2]).resolve()
+        directory = Path(args[0]).resolve()
         # Detach Podman's private namespace and overlay mounts before removing their
         # backing directories. findmnt decodes paths, including mountinfo escapes.
         table = json.loads(output("findmnt", "--json", "--list", "--output", "TARGET"))
@@ -295,31 +437,42 @@ def main() -> None:
         return
     if mode == "start":
         try:
-            start(sys.argv[2])
+            start(args[0])
         except Exception as exc:
-            write("error", str(exc))
+            write(SANDBOXES / args[0] / "error", str(exc))
             raise
         return
     ready = json.loads(Path("ready").read_text())
     command = podman(ready["directory"])
     if mode in ("block", "open"):
-        network(command, sealed=mode == "block")
+        network(command, container(args[0]), sealed=mode == "block")
     elif mode == "exec":
+        box = json.loads((SANDBOXES / args[0] / "ready").read_text())
         os.execvp(
             command[0],
             [
                 *command,
-                *ready["runtime_flags"],
+                *box["runtime_flags"],
                 "exec",
                 "-i",
                 "--user",
                 "0",
                 "--workdir",
                 "/",
-                "sandbox",
-                *sys.argv[2:],
+                box["container"],
+                *args[1:],
             ],
         )
+    elif mode == "rmi":
+        # By its tag: a snapshot that a later one was committed over stays as that one's
+        # parent, and removing it only untags it.
+        subprocess.run(
+            [*command, "rmi", f"{SNAPSHOT_REPOSITORY}:{args[0]}"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+    elif mode == "export":
+        export(command, args[0], args[1])
     else:
         raise ValueError(mode)
 
