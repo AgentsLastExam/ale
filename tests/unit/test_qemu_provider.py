@@ -351,7 +351,12 @@ async def test_a_build_vm_frames_its_own_overlay_on_the_base_copy_before_it_boot
             raise TaskDefinitionError("the agent account 'user' does not exist")
 
     async def boot(
-        _provider: QemuProvider, _request: object, _storage: Path, disk: Path, *_: object
+        _provider: QemuProvider,
+        _request: object,
+        _storage: Path,
+        disk: Path,
+        *_: object,
+        viewed: Path | None = None,
     ) -> str:
         assert disk == base and framed
         raise Booted
@@ -405,6 +410,7 @@ def _snapshotting(
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = Client()  # type: ignore[assignment]
     sandbox._file_client = Client()  # type: ignore[assignment]
+    sandbox.volumes = ("/work",)
     sandbox.sandbox_id = sandbox_id
     sandbox.request = request(role="shared")
     sandbox.container = "ale-qemu-solver"
@@ -456,6 +462,8 @@ async def test_a_snapshot_is_the_overlay_kept_on_its_prepared_disk(
         "role": "shared",
         "os": "linux",
         "prepared_identity": DIGEST,
+        # Its volumes, which a VM booted from it mounts again and a verifier views.
+        "volumes": ["/work"],
     }
 
     provider = QemuProvider(overlay_dir=tmp_path / "overlays", snapshot_dir=sandbox.snapshot_dir)

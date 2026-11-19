@@ -142,6 +142,55 @@ SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 #: to, with that layer's record, and this record of where it came from.
 SNAPSHOT_DISK = "disk.qcow2"
 SNAPSHOT_RECORD = "snapshot.json"
+#: The Linux guest's volumes and views, which the runner hands it as firmware configuration.
+VOLUMES_CONFIG = "volumes.json"
+#: The serial by which a guest finds the disk of the snapshot it views, and the SCSI
+#: controller, of its own, it is attached to.
+VIEW_SERIAL = "ale-view"
+VIEW_BUS = "aleviews"
+#: The runner's QEMU monitor, inside its container.
+MONITOR_PORT = 7100
+#: Which of the paths it is given are directories in a Windows guest, with no reparse point
+#: on their way.
+_WINDOWS_DIRECTORIES = (
+    "import json,os,stat,sys\n"
+    "def plain(path):\n"
+    "    parts = []\n"
+    "    for part in path.rstrip('\\\\').split('\\\\'):\n"
+    "        parts.append(part)\n"
+    "        if len(parts) > 1 and os.lstat('\\\\'.join(parts)).st_file_attributes & "
+    "stat.FILE_ATTRIBUTE_REPARSE_POINT:\n"
+    "            return False\n"
+    "    return True\n"
+    "print(json.dumps([p for p in sys.argv[1:] if os.path.isdir(p) and plain(p)]))\n"
+)
+#: In a Windows verifier: bring online the copy of the snapshot's disk attached with the
+#: serial, mount its largest partition, the solver's system drive, out of the way, and make
+#: each viewed path a junction to that path on it, in place of the verifier's own.
+_WINDOWS_VIEWS = rf"""
+$ErrorActionPreference = 'Stop'
+$disk = $null
+for ($i = 0; $i -lt 60 -and -not $disk; $i++) {{
+    $disk = Get-Disk | Where-Object {{ "$($_.SerialNumber)".Trim() -eq '{VIEW_SERIAL}' }}
+    if (-not $disk) {{ Start-Sleep -Seconds 1 }}
+}}
+if (-not $disk) {{ throw 'no disk with the serial {VIEW_SERIAL} appeared' }}
+# Its signature is the one of the disk the verifier booted from, when both come from one
+# image: Windows keeps such a disk offline, and gives it another signature as it comes online.
+if ($disk.IsOffline) {{ Set-Disk -Number $disk.Number -IsOffline $false }}
+if ($disk.IsReadOnly) {{ Set-Disk -Number $disk.Number -IsReadOnly $false }}
+$partition = Get-Partition -DiskNumber $disk.Number | Sort-Object Size -Descending |
+    Select-Object -First 1
+$root = 'C:\ProgramData\ALE\viewed'
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+$partition | Add-PartitionAccessPath -AccessPath "$root\"
+foreach ($path in $paths) {{
+    $source = Join-Path $root $path.Substring([IO.Path]::GetPathRoot($path).Length)
+    if (Test-Path -LiteralPath $path) {{ Remove-Item -LiteralPath $path -Recurse -Force }}
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    New-Item -ItemType Junction -Path $path -Target $source | Out-Null
+}}
+"""
 
 #: The runner's nat chain that sends the fixed Gateway port to the port the Host serves the
 #: Gateway on; a later run's Gateway replaces its rule.
@@ -546,6 +595,8 @@ class QemuSandbox(Sandbox):
                 "role": self.request.role.value,
                 "os": self.request.os.value,
                 "prepared_identity": self.request.prepared_image.prepared_identity,
+                # Its volumes, each a layer on the disk named by its path.
+                "volumes": list(self.volumes),
             }
             (target / SNAPSHOT_RECORD).write_text(json.dumps(record, indent=2) + "\n")
         except BaseException:
@@ -694,6 +745,9 @@ class QemuProvider(Provider):
                 storage_limit=True,
                 # The models of a VFIO pool are known once a guest sees them.
                 gpus=bool(self.gpu_devices),
+                # A Linux guest mounts them as overlays (guest_volumes.py); a Windows one
+                # keeps them on its disk, and a verifier views them through junctions.
+                volumes=True,
             )
             for system in (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
         )
@@ -764,15 +818,31 @@ class QemuProvider(Provider):
             resolved_image = resolved_image.model_copy(update={"observed_ref": str(base)})
         else:
             resolved_image = await self._framed(resolved_image, request)
+        volumes: dict[str, object] = {"volumes": list(request.volumes)}
+        viewed: Path | None = None
         if request.snapshot is not None:
             resolved_image = await self._snapshot_image(request.snapshot, request, resolved_image)
+            # Those its snapshot keeps, which every VM booted from it mounts again.
+            volumes["volumes"] = self._snapshot_record(request.snapshot).get("volumes") or []
+        elif request.volumes_from is not None:
+            record = self._snapshot_record(request.volumes_from)
+            directory = self.snapshot_dir / request.volumes_from.removeprefix(SNAPSHOT_PREFIX)
+            viewed = directory / SNAPSHOT_DISK
+            volumes = {
+                "volumes": [],
+                "views": {"serial": VIEW_SERIAL, "paths": record.get("volumes") or []},
+            }
         base_image = Path(resolved_image.observed_ref)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         storage = self.overlay_dir / sandbox_id
         storage.mkdir(parents=True, exist_ok=True)
         guest_token = issue_guest_token(storage)
+        (storage / VOLUMES_CONFIG).write_text(json.dumps(volumes))
         try:
+            if viewed is not None and request.os is OperatingSystem.WINDOWS:
+                # A Windows guest writes to the disk it brings online: to a copy of its own.
+                await self._make_overlay(storage / "view.qcow2", viewed)
             await self._make_overlay(
                 storage / "data.qcow2",
                 base_image,
@@ -805,6 +875,7 @@ class QemuProvider(Provider):
                 base_image,
                 host_port,
                 selected,
+                viewed=viewed,
             )
         except BaseException:
             if lease:
@@ -819,6 +890,9 @@ class QemuProvider(Provider):
             client = await _connect(host_port, guest_token, console)
             clients.append(client)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
+            if viewed is not None:
+                await self._attach_view(container, request.os, viewed)
+            mounted = await self._mounted_volumes(client, storage, request.os)
             effective_storage_mb = await self._prepare_root_storage(
                 client, request.resources.storage_mb, request.os
             )
@@ -885,6 +959,7 @@ class QemuProvider(Provider):
             host_ip=host_ip,
             snapshot_dir=self.snapshot_dir,
         )
+        sandbox.volumes = mounted
         try:
             if request.network.mode is NetworkMode.OPEN:
                 await sandbox.open_egress()
@@ -942,8 +1017,11 @@ class QemuProvider(Provider):
         base_image: Path,
         host_port: int,
         gpus: tuple[_VfioGpu, ...] = (),
+        *,
+        viewed: Path | None = None,
     ) -> str:
-        """Start the runner, which starts the machine.
+        """Start the runner, which starts the machine, and, for a Linux guest, hands it its
+        volumes and attaches read-only the disk of the snapshot it ``viewed``.
 
         Every layer of the disk's chain is mounted read-only beside the overlay that backs
         onto it, so one image serves every concurrent episode and none of them can write
@@ -951,6 +1029,12 @@ class QemuProvider(Provider):
         """
         name = f"ale-qemu-{uuid.uuid4().hex[:10]}"
         layers = await chain_mounts(base_image)
+        if viewed is not None:
+            # Its chain shares the layers below with the disk's, which are mounted once.
+            shown = await chain_mounts(viewed)
+            for flag, mount in zip(shown[::2], shown[1::2], strict=True):
+                if mount not in layers:
+                    layers += [flag, mount]
         argv = [
             "docker", "run", "--detach", *HELPER_RUNTIME, "--name", name,
             "--label", f"{MANAGED_LABEL}=true",
@@ -986,6 +1070,11 @@ class QemuProvider(Provider):
         ]
         if request.os is OperatingSystem.WINDOWS and request.sudo:
             arguments.append("-smbios type=1,serial=ale-sudo")
+        if request.os is OperatingSystem.LINUX:
+            arguments.append(f"-fw_cfg name=opt/ale/volumes,file=/storage/{VOLUMES_CONFIG}")
+        if viewed is not None:
+            # The viewed disk is attached to it once the guest is up (_attach_view).
+            arguments.append(f"-device virtio-scsi-pci,id={VIEW_BUS}")
         argv += ["--env", "VGA=std", "--env", f"ARGUMENTS={' '.join(arguments)}"]
         if gpus:
             argv += ["--label", f"{GPU_LABEL}={','.join(gpu.bdf for gpu in gpus)}"]
@@ -1015,6 +1104,87 @@ class QemuProvider(Provider):
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))
             raise
+
+    async def _attach_view(
+        self, container: str, operating_system: OperatingSystem, viewed: Path
+    ) -> None:
+        """Attach the disk of a snapshot a verifier views, through the runner's QEMU monitor,
+        now that the guest is up: it is a copy of a bootable disk, often of the image the
+        guest booted from, whose firmware and boot loader would otherwise find the copy's
+        identical partitions and boot from it. A Linux guest reads the snapshot's own disk;
+        a Windows guest writes to the one it brings online, so it gets a copy of its own."""
+        drive = (
+            f"file={viewed.resolve()},readonly=on"
+            if operating_system is OperatingSystem.LINUX
+            else "file=/storage/view.qcow2"
+        )
+        commands = (
+            f"drive_add 0 {drive},if=none,id=aleview,format=qcow2\n"
+            f"device_add scsi-hd,bus={VIEW_BUS}.0,drive=aleview,serial={VIEW_SERIAL}\n"
+            "info block aleview\n"
+        )
+        code, out, err = await _run(
+            "docker", "exec", container, "sh", "-c",
+            f"printf '{commands}' | nc -w 3 localhost {MONITOR_PORT}",
+            timeout=60,
+        )  # fmt: skip
+        # A drive that a device took says what it is attached to.
+        if code != 0 or "Attached to:" not in out:
+            raise ProviderStartError(
+                f"could not attach the viewed snapshot's disk: {(out + err).strip()[-2000:]}"
+            )
+
+    async def _mounted_volumes(
+        self,
+        client: GuestClient,
+        storage: Path,
+        operating_system: OperatingSystem,
+        *,
+        mount: bool = True,
+    ) -> tuple[str, ...]:
+        """The volumes of a guest given some in ``storage``: those a Linux guest mounted as
+        it booted, as its volume service records, or those that are directories in a
+        Windows guest, which keeps them on its disk; for a verifier that views a
+        snapshot's volumes, whose disk is attached, the views it mounts, unless it did
+        already, as a guest driven again did."""
+        config = storage / VOLUMES_CONFIG
+        given = json.loads(config.read_text()) if config.is_file() else {}
+        views = given.get("views")
+        if views and not mount:
+            return tuple(views["paths"])
+        if operating_system is OperatingSystem.LINUX:
+            if views:
+                argv = [guestd.PYTHON["linux"], "-I", "/opt/ale/volumes.py", "views"]
+                code, out, err, _ = await client.exec(
+                    [*argv, views["serial"], json.dumps(views["paths"])]
+                )
+                if code:
+                    raise ProviderStartError(f"could not mount views of the snapshot: {err}")
+                return tuple(json.loads(out.splitlines()[-1]))
+            if not given.get("volumes"):
+                return ()
+            code, out, err, _ = await client.exec(["cat", "/run/ale/volumes.json"])
+            if code:
+                raise ProviderStartError(f"the guest mounted no volumes: {err.strip()}")
+            return tuple(json.loads(out))
+        if views:
+            paths = json.dumps(views["paths"]).replace("'", "''")
+            script = f"$paths = ConvertFrom-Json '{paths}'\n{_WINDOWS_VIEWS}"
+            code, _, err, _ = await client.exec(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
+            )
+            if code:
+                raise ProviderStartError(f"could not mount views of the snapshot: {err.strip()}")
+            return tuple(views["paths"])
+        if not given.get("volumes"):
+            return ()
+        python = guestd.PYTHON["windows"]
+        code, out, err, _ = await client.exec(
+            [python, "-I", "-c", _WINDOWS_DIRECTORIES, *given["volumes"]]
+        )
+        if code:
+            raise ProviderStartError(f"could not find the guest's volumes: {err.strip()}")
+        return tuple(json.loads(out.splitlines()[-1]))
 
     async def _framed(self, resolved: ResolvedImage, request: SandboxRequest) -> ResolvedImage:
         """Install the engine's framework into a disk that was not prepared with it.
@@ -1500,6 +1670,9 @@ class QemuProvider(Provider):
             # allowlist agent's commands need the proxy only then.
             isolated = request.network.mode is not NetworkMode.OPEN
             sealed = isolated and await _runner_sealed(container)
+            mounted = await self._mounted_volumes(
+                client, Path(storage), attached_request.os, mount=False
+            )
             file_client = await _connect(host_port, token, console)
         except BaseException:
             await client.close()
@@ -1520,6 +1693,7 @@ class QemuProvider(Provider):
             snapshot_dir=self.snapshot_dir,
             sealed=sealed,
         )
+        sandbox.volumes = mounted
         if sealed:
             try:
                 # This run's proxy and token, not those of the run that sealed it.
