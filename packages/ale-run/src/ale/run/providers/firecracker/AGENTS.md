@@ -45,3 +45,23 @@ booted from a snapshot an earlier episode left may.
 **Decisions.**
 - Refused rather than flattened: merging the layers would copy the whole disk, which the
   layers exist to avoid.
+
+## Volumes on a microVM
+
+**Problem.** A separate verifier of another image must see the solver's volumes as its
+snapshot keeps them without a copy through the Host, and a microVM's devices are few.
+
+**Solution.** The init mounts each volume as an overlay of the image's directory and of
+what each layer wrote for it, `volumes/<hash>/upper` on that layer's disk, under a layer on
+the writable disk, apart from the root's own upper. A snapshot keeps it as it keeps the
+root, with no file of its own. A separate verifier attaches the snapshot's root and layer
+disks read-only after its own, at most nine more drives beside its own two, within
+Firecracker's 19 interrupt lines, and mounts the same layers under one of its own.
+
+**Decisions.**
+- On the writable disk rather than a disk per volume: no more devices, and `storage_mb`
+  counts it as it counts the rest.
+- Named by a hash of the path, the same in every snapshot, so a verifier finds a volume's
+  layers without a record of their order.
+- The verifier detaches the snapshot's disks once the overlays hold them, so the rest of
+  the solver's disk is not in its tree.

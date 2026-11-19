@@ -9,6 +9,10 @@ It does for the image what Docker does for a container:
 * lays the sandbox's writable disk over the read-only root with overlayfs, which is how
   one converted disk serves every sandbox of an image, as one image's layers serve every
   container;
+* mounts each of the sandbox's volumes, an overlay of the image's directory and of what
+  each layer wrote there under what the sandbox writes, kept on its writable disk apart from
+  the root's, and each view of another sandbox's snapshot's volumes, whose disks are
+  attached read-only, under a layer of its own;
 * mounts ``/proc``, ``/sys``, ``/dev`` and the rest a process expects, and writes
   ``/etc/hostname``, ``/etc/hosts`` and ``/etc/resolv.conf``;
 * starts guestd as root and the image's own command (``ENTRYPOINT`` and ``CMD``) as its
@@ -22,6 +26,7 @@ from __future__ import annotations
 import ctypes
 import fcntl
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -40,6 +45,11 @@ WORK = f"{RW}/work"
 MERGED = f"{RW}/merged"
 #: Where the boot root goes while the overlay becomes ``/``.
 OLD = f"{HERE}/old"
+#: On the writable disk: each volume's layer and work directory, and those of each view.
+VOLUMES = f"{RW}/volumes"
+VIEWS = f"{RW}/views"
+#: Where a viewed snapshot's disks are mounted.
+VIEWED = f"{RW}/viewed"
 #: A private tmpfs for guestd's claimed token, which must not outlive a boot.
 RUN = f"{HERE}/run"
 COMMAND_LOG = f"{RW}/ale/command.log"
@@ -90,8 +100,65 @@ def _log(message: str) -> None:
         kmsg.write(f"ale-init: {message}\n")
 
 
+def volume_name(path: str) -> str:
+    """The directory of a volume at ``path`` in each layer, the same in every snapshot."""
+    return hashlib.sha256(path.encode()).hexdigest()[:16]
+
+
+def _mount_volume(path: str, lowers: list[str], layer: str) -> None:
+    """Mount at ``MERGED + path`` an overlay of ``lowers``, newest first, under ``layer``,
+    whose root takes the owner and mode of the newest, as the volume's root had them."""
+    upper, work = f"{layer}/upper", f"{layer}/work"
+    # A view's path may be missing from the verifier's own image.
+    os.makedirs(MERGED + path, exist_ok=True)
+    if not os.path.isdir(upper):
+        os.makedirs(upper)
+        os.makedirs(work, exist_ok=True)
+        found = os.stat(lowers[0])
+        os.chown(upper, found.st_uid, found.st_gid)
+        os.chmod(upper, found.st_mode & 0o7777)
+    stack = ":".join(lower.replace(":", "\\:") for lower in lowers)
+    mount(
+        "overlay", MERGED + path, "overlay", 0, f"lowerdir={stack},upperdir={upper},workdir={work}"
+    )
+
+
+def mount_volumes(config: dict, layers: list[str]) -> list[str]:
+    """Mount the sandbox's volumes and views over the root it is about to make ``/``, while
+    the boot root, which holds the image's directories, is still ``/``; return their paths.
+
+    ``layers`` are the mount points of the read-only layers, newest first.
+    """
+    mounted = []
+    for path in config.get("volumes", ()):
+        name = volume_name(path)
+        lowers = [f"{layer}/volumes/{name}/upper" for layer in layers]
+        lowers = [lower for lower in lowers if os.path.isdir(lower)] + [path]
+        _mount_volume(path, lowers, f"{VOLUMES}/{name}")
+        mounted.append(path)
+    views = config.get("views")
+    if views:
+        devices = [views["root"], *views["layers"]]
+        targets = [f"{VIEWED}/root", *(f"{VIEWED}/{i}" for i in range(len(views["layers"])))]
+        for device, target in zip(devices, targets, strict=True):
+            os.makedirs(target, exist_ok=True)
+            mount(device, target, "ext4", MS_RDONLY | MS_NOSUID | MS_NODEV, "noload")
+        for path in views["paths"]:
+            name = volume_name(path)
+            lowers = [f"{target}/volumes/{name}/upper" for target in targets[1:]]
+            lowers = [lower for lower in lowers if os.path.isdir(lower)]
+            lowers.append(f"{VIEWED}/root{path}")
+            _mount_volume(path, lowers, f"{VIEWS}/{name}")
+            mounted.append(path)
+        # The views hold what they stack; the rest of the snapshot's disks is no one's to see.
+        for target in reversed(targets):
+            _check(_libc.umount2(target.encode(), MNT_DETACH), f"umount {target}")
+    return mounted
+
+
 def assemble_root() -> dict:
-    """Mount the overlay of the writable disk on the read-only layers and make it ``/``."""
+    """Mount the overlay of the writable disk on the read-only layers, and the volumes on
+    it, and make it ``/``."""
     mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC)
     mount("none", "/", None, MS_REC | MS_PRIVATE)
     mount("/dev/vdb", RW, "ext4", MS_NOSUID | MS_NODEV, "noinit_itable")
@@ -107,6 +174,7 @@ def assemble_root() -> dict:
         os.makedirs(path, exist_ok=True)
     options = f"lowerdir={':'.join([*lowers, '/'])},upperdir={UPPER},workdir={WORK}"
     mount("overlay", MERGED, "overlay", 0, options)
+    config["mounted"] = mount_volumes(config, [lower.removesuffix("/upper") for lower in lowers])
     os.chdir(MERGED)
     _check(_libc.syscall(SYS_PIVOT_ROOT, b".", OLD.lstrip("/").encode()), "pivot_root")
     os.chroot(".")
@@ -291,7 +359,7 @@ def power_off() -> None:
         _reap_all(5)
     os.closerange(3, 65536)  # the command's log, open for writing on the writable disk
     os.sync()
-    for target in ("/", RW):
+    for target in (*reversed(MOUNTED), "/", RW):
         try:
             mount("none", target, None, MS_REMOUNT | MS_RDONLY)
         except OSError as exc:
@@ -300,9 +368,14 @@ def power_off() -> None:
     _libc.reboot(RB_AUTOBOOT)
 
 
+#: The volumes and views mounted, written back read-only before the machine stops.
+MOUNTED: list[str] = []
+
+
 def main() -> None:
     _check(_libc.reboot(RB_DISABLE_CAD), "disable Ctrl+Alt+Del")
     config = assemble_root()
+    MOUNTED.extend(config["mounted"])
     with open(f"{HERE}/image.json") as handle:
         image = json.load(handle)
     mount_basics()

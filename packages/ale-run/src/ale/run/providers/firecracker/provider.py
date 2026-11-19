@@ -70,6 +70,7 @@ from ale.run.images import acquire_lock, resolve_container_image, resolve_prepar
 from ale.run.process import run
 from ale.run.providers import relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
+from ale.run.providers.docker import volumes as docker_volumes
 from ale.run.providers.privileges import set_and_prove_elevation
 from ale.run.providers.runner import (
     HOST_IP,
@@ -100,6 +101,8 @@ GUEST_TAP = "tap0"
 #: Where the runner finds each disk; the Provider bind-mounts them there.
 RUNNER_ROOTFS = "/images/rootfs.ext4"
 RUNNER_LAYERS = "/layers"
+#: The disks of a snapshot whose volumes a microVM mounts views of.
+RUNNER_VIEWS = "/views"
 RUNNER_STORAGE = "/storage"
 #: The init the kernel starts, run by the framework's Python, and the files it reads.
 INIT_SOURCE = Path(__file__).with_name("guest_init.py")
@@ -201,7 +204,9 @@ def _sparse_digest(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _vm_config(*, cpus: int, memory_mb: int, hostname: str, layers: int) -> dict[str, object]:
+def _vm_config(
+    *, cpus: int, memory_mb: int, hostname: str, layers: int, views: int = 0
+) -> dict[str, object]:
     """Firecracker's configuration file: kernel, disks, network card and machine size.
 
     The kernel configures the guest's address itself (``ip=``) and starts the framework's
@@ -229,6 +234,11 @@ def _vm_config(*, cpus: int, memory_mb: int, hostname: str, layers: int) -> dict
          "is_root_device": False, "is_read_only": True}
         for index in range(layers)
     ]  # fmt: skip
+    drives += [
+        {"drive_id": f"view{index}", "path_on_host": f"{RUNNER_VIEWS}/{index}.ext4",
+         "is_root_device": False, "is_read_only": True}
+        for index in range(views)
+    ]  # fmt: skip
     return {
         "boot-source": {"kernel_image_path": KERNEL, "boot_args": boot_args},
         "drives": drives,
@@ -247,6 +257,16 @@ def _layer_devices(count: int) -> list[str]:
     snapshot chain records them, oldest first, and overlayfs wants the newest leftmost.
     """
     return [f"/dev/vd{chr(ord('c') + index)}" for index in reversed(range(count))]
+
+
+def _view_devices(layers: int, disks: int, paths: Sequence[str]) -> dict[str, object] | None:
+    """For the init, the guest's block devices of a snapshot's ``disks``, after the
+    microVM's own ``layers``: its root, then its layers newest first, and the ``paths`` of
+    its volumes to mount views of."""
+    if not disks:
+        return None
+    devices = [f"/dev/vd{chr(ord('c') + layers + index)}" for index in range(disks)]
+    return {"root": devices[0], "layers": devices[:0:-1], "paths": list(paths)}
 
 
 def _inject(tar_path: Path, image: dict[str, object]) -> tuple[int, int]:
@@ -509,6 +529,8 @@ class FirecrackerSandbox(Sandbox):
                 "prepared_identity": self.request.prepared_image.prepared_identity,
                 "disks": names,
                 "written_mb": written_mb,
+                # Its volumes, each a directory of every layer named by its path.
+                "volumes": list(self.volumes),
                 # What it booted from, which covers the disks under the new layer, then that layer.
                 "identity": "sha256:"
                 + hashlib.sha256(
@@ -650,6 +672,7 @@ class FirecrackerProvider(Provider):
                 # Each microVM writes to a disk of its own, sized from storage_mb.
                 storage_limit=True,
                 container_features=FEATURES,
+                volumes=True,
             ),
         )
 
@@ -678,8 +701,12 @@ class FirecrackerProvider(Provider):
         await self.accepts(request)
         await self.preflight()
         written_mb = 0
+        volumes: tuple[str, ...] = ()
+        viewed: tuple[Path, ...] = ()
+        viewed_paths: tuple[str, ...] = ()
         if request.snapshot is not None:
             resolved_image, layers, written_mb = self._snapshot_image(request.snapshot, request)
+            volumes = tuple(self._snapshot_record(request.snapshot).get("volumes") or ())
             requested = request.resources.storage_mb
             if requested is not None and written_mb >= requested:
                 # A disk of that size holding the snapshot would be full: the Task asks for too
@@ -689,8 +716,18 @@ class FirecrackerProvider(Provider):
                     f"which fills the storage_mb of {requested} MB of a Sandbox booted from it"
                 )
         else:
-            resolved_image = await self._disk(request)
+            resolved_image, framed = await self._disk(request)
             layers = ()
+            if request.volumes_from is not None:
+                record = self._snapshot_record(request.volumes_from)
+                directory = self.snapshot_dir / request.volumes_from.removeprefix(SNAPSHOT_PREFIX)
+                viewed = tuple(directory / disk for disk in record["disks"])
+                viewed_paths = tuple(record.get("volumes") or ())
+            else:
+                # Where the image has a directory, which the image Docker framed shows.
+                volumes = await docker_volumes.directories(
+                    framed, guestd.PYTHON["linux"], request.volumes
+                )
         if len(layers) + request.saves > MAX_LAYERS:
             raise ProviderCapabilityError(
                 f"{request.snapshot or 'its image'} stacks {len(layers)} layers, and saving it "
@@ -704,7 +741,14 @@ class FirecrackerProvider(Provider):
         storage.mkdir(parents=True, exist_ok=True)
         try:
             token = issue_guest_token(storage)
-            self._write_config(storage, request, container.removeprefix("ale-fc-"), len(layers))
+            self._write_config(
+                storage,
+                request,
+                container.removeprefix("ale-fc-"),
+                len(layers),
+                volumes=volumes,
+                views=_view_devices(len(layers), len(viewed), viewed_paths),
+            )
             host_port = free_port()
             await self._boot(
                 container,
@@ -714,6 +758,7 @@ class FirecrackerProvider(Provider):
                 layers,
                 host_port,
                 written_mb=written_mb,
+                views=viewed,
             )
         except BaseException:
             # A failed or cancelled `docker run` may still have created the container.
@@ -774,6 +819,7 @@ class FirecrackerProvider(Provider):
             runner_image=self.runner_image,
             written_mb=written_mb,
         )
+        sandbox.volumes = volumes or viewed_paths
         try:
             if request.network.mode is NetworkMode.OPEN:
                 await sandbox.open_egress()
@@ -784,8 +830,9 @@ class FirecrackerProvider(Provider):
 
     # --- the disk ------------------------------------------------------------------
 
-    async def _disk(self, request: SandboxRequest) -> ResolvedImage:
-        """The microVM disk of the request's image, converted once per image and framework.
+    async def _disk(self, request: SandboxRequest) -> tuple[ResolvedImage, str]:
+        """The microVM disk of the request's image, converted once per image and framework,
+        and the framed image Docker holds, which it was converted from.
 
         The framework layer is the one Docker adds, so both backends run the same files.
         """
@@ -819,7 +866,7 @@ class FirecrackerProvider(Provider):
                 "observed_identity": record["identity"],
                 "observed_ref": str(directory / SNAPSHOT_ROOTFS),
             }
-        )
+        ), framed
 
     async def _convert(self, image: str, directory: Path) -> None:
         """Export the framed image's filesystem and make a read-only ext4 of it.
@@ -883,7 +930,14 @@ class FirecrackerProvider(Provider):
     # --- the machine ---------------------------------------------------------------
 
     def _write_config(
-        self, storage: Path, request: SandboxRequest, hostname: str, layers: int
+        self,
+        storage: Path,
+        request: SandboxRequest,
+        hostname: str,
+        layers: int,
+        *,
+        volumes: Sequence[str] = (),
+        views: dict[str, object] | None = None,
     ) -> None:
         env = dict(request.env)
         env[CONTAINER_VARIABLE] = str(request.desktop_resolution)
@@ -896,12 +950,15 @@ class FirecrackerProvider(Provider):
             "guest_port": GUEST_PORT,
             "env": env,
             "layers": _layer_devices(layers),
+            "volumes": list(volumes),
+            "views": views,
         }
         vm = _vm_config(
             cpus=request.resources.cpus,
             memory_mb=request.resources.memory_mb,
             hostname=hostname,
             layers=layers,
+            views=0 if views is None else 1 + len(views["layers"]),
         )
         (storage / "sandbox.json").write_text(json.dumps(sandbox, indent=2) + "\n")
         (storage / "vm.json").write_text(json.dumps(vm, indent=2) + "\n")
@@ -916,6 +973,7 @@ class FirecrackerProvider(Provider):
         host_port: int,
         *,
         written_mb: int = 0,
+        views: tuple[Path, ...] = (),
     ) -> None:
         """Start the runner, which makes the writable disk and starts the microVM.
 
@@ -941,6 +999,11 @@ class FirecrackerProvider(Provider):
             argv += [
                 "--mount",
                 f"type=bind,src={layer.resolve()},dst={RUNNER_LAYERS}/{index}.ext4,readonly",
+            ]
+        for index, disk in enumerate(views):
+            argv += [
+                "--mount",
+                f"type=bind,src={disk.resolve()},dst={RUNNER_VIEWS}/{index}.ext4,readonly",
             ]
         argv += [
             "--mount", f"type=bind,src={storage.resolve()},dst={RUNNER_STORAGE}",
@@ -1293,7 +1356,7 @@ class FirecrackerProvider(Provider):
         except BaseException:
             await client.close()
             raise
-        return FirecrackerSandbox(
+        attached = FirecrackerSandbox(
             sandbox_id=container.removeprefix("ale-fc-"),
             request=attached_request,
             container=container,
@@ -1310,3 +1373,7 @@ class FirecrackerProvider(Provider):
             runner_image=self.runner_image,
             written_mb=int(labels.get(WRITTEN_LABEL) or 0),
         )
+        attached.volumes = tuple(
+            json.loads((storage / "sandbox.json").read_text()).get("volumes") or ()
+        )
+        return attached
