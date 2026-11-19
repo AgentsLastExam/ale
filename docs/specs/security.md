@@ -14,7 +14,7 @@ stops measuring what it says it measures.
 
 ## 1. A sandbox has only declared ways out
 
-Under `[agent].network_mode = "no-network"` (`block` in the RunLock), Docker uses a
+Under `no-network` (`block` in the RunLock), the agent's or the verifier's, Docker uses a
 per-episode `--internal` bridge with no route off the host. QEMU enforces deny-all in the
 runner network namespace, outside the guest OS, and forwards only the episode's
 framework-owned service ports.
@@ -30,7 +30,7 @@ sandbox never has, so not even root inside it can lift the rule; provisioning fa
 if the rule cannot be applied. QEMU drops forwarded guest traffic in the runner while the
 sandbox is sealed and accepts only replies and the DNATed episode ports. The guest OS has
 no firewall of its own: enforcement lives where the agent cannot reach it, and the
-framework's `open_egress` for setup and verification is not undone by rules inside the
+framework's `open_egress` for setup and an open phase is not undone by rules inside the
 guest.
 
 A Docker sandbox whose runtime keeps a network stack of its own, a Kata microVM's kernel or
@@ -51,11 +51,21 @@ would look like a broken run rather than a broken guarantee.
 `allowlist` preserves that deny-all topology. Docker reaches the host proxy over its
 internal bridge. QEMU DNATs the episode Gateway and proxy ports through the runner. Once the
 sandbox is sealed, guestd relays a port on the guest's loopback to the proxy with the
-episode token, and agent and oracle commands receive proxy variables naming that relay; on
-a desktop the agent account's system proxy names it too, for the programs that take their
-proxy from there, a browser above all. The proxy still decides every connection, and direct
-traffic remains blocked
+episode's egress token, and every command, the agent's and a verifier's, receives proxy
+variables naming that relay; on a desktop the agent account's system proxy names it too, for
+the programs that take their proxy from there, a browser above all. The proxy still decides
+every connection, and direct traffic remains blocked
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#allowlist-relay)).
+
+Each phase applies its own policy: the agent's for its turns and the oracle, the verifier's
+for `tests/` and `validation/` ([Task authoring](task-authoring.md#resources-and-network)).
+A verifier of its own is created with the verifier's. A solver that a shared verifier runs
+in is created with the least open mode either phase needs, `allowlist` before `block`
+before `open`, with the proxy whenever that is `allowlist`, because a Provider fixes at
+creation what it can seal and relay to; each phase then seals or opens it, and the trace
+records the policy each phase applied. A Provider that cannot apply that mode refuses the
+Task before any Sandbox exists, never running it open. Setup and the Harness's first
+installation have the network: they are the Task's trusted preparation and ours.
 
 Every supported Harness mode reaches its model only through the Gateway. Subscription
 provider hosts are Host-side upstreams and never widen the Sandbox's Task-declared
@@ -75,19 +85,22 @@ longer holds what the agent or the framework left running in it
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#restricted-networking)).
 A Mac without that filter refuses restricted Tasks before provisioning.
 
-`open` is a deliberate escape hatch: an ordinary bridge with normal egress. A task must
-declare it, and the declaration is recorded in provenance.
+`open` is a deliberate escape hatch: an ordinary bridge with normal egress. A Task must
+declare it for its agent, while a verifier is open unless the Task seals it, as in Harbor;
+the RunLock records both policies, `sandbox.network` and `verification.network`.
 
 Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
 sandbox reaches no other host port, by the QEMU Provider unit tests for the runner rules,
 by `tests/integration/test_allowlist_relay.py` for the relay and a desktop's system proxy,
-by the Orchard conformance suite on a Mac, and by the `demo-netprobe` task, which attempts
+by `tests/integration/test_verifier_network.py` for a verifier's own policy in the agent's
+Sandbox, by `tests/unit/test_egress_proxy.py` for the egress session, by the Orchard
+conformance suite on a Mac, and by the `demo-netprobe` task, which attempts
 DNS resolution and a raw TCP connection from inside a sandbox and fails admission if either
 succeeds.
 
 ## 2. Egress is a decision made in our code
 
-Two host-side services, one token:
+Two host-side services, each with its own per-episode sessions:
 
 - **The model gateway** serves API-key and subscription Harness modes. It swaps in the
   selected Host credential, imposes the model, enforces ceilings by refusing the next
@@ -97,10 +110,15 @@ Two host-side services, one token:
 - **The egress proxy** serves `CONNECT` for hosts a task declared, and refuses
   everything else with a 403 naming what was declared.
 
-Both authenticate the same per-episode token and share one session registry. The Gateway
-reads it wherever the dialect's clients send their key, such as a bearer header or the
-dialect's own key header; standard proxy clients send it through Basic proxy
-authentication.
+They share one session registry, and neither accepts the other's sessions. The Gateway
+authenticates an episode's model sessions, the agent's and its Judges', wherever the
+dialect's clients send their key, such as a bearer header or the dialect's own key header.
+The proxy authenticates only the episode's egress session, which the Sandbox's relay sends
+through Basic proxy authentication and the Gateway refuses. Its hosts are those of the phase
+that runs, the agent's during its turns and the oracle's, the verifier's while `tests/` or
+`validation/` runs, and it is suspended at every other moment: what the agent left running
+reaches no host once its turn ends, the agent never reaches a verifier's hosts, and the
+model token its CLI holds opens no tunnel.
 
 The Gateway forwards only calls it records and that leave nothing stored with the
 provider:
@@ -290,9 +308,10 @@ files a Harness leaves on disk. A Judge's session is open only while a verifier 
 Judge's token that reaches the agent, in feedback or from a verifier's process, is refused
 in its later turns. Before a solver is saved or kept, between turns included, ALE removes
 the credential files every Harness declares, whichever Harness ran. A refused call is traced
-as refused, `session_suspended`. The round's verifier has verification's open egress and,
-under shared or snapshot verification, runs on the agent's disk, so a `validation/` that
-runs the agent's program runs it with that network, as `tests/` would, and with
+as refused, `session_suspended`. The round's verifier has the verifier's network, open
+unless the Task seals it, and, under shared or snapshot verification, runs on the agent's
+disk, so a `validation/` that runs the agent's program runs it with that network, as
+`tests/` would, and with
 `[agent].sudo` what the agent left there can write the round's feedback and reward; what
 reaches the agent is still only the round's reward, status and feedback.
 
@@ -337,8 +356,8 @@ snapshot verifier the Provider selected and the leaf that started the Sandbox wi
 container runtime, requested and effective resources, GPU allocation and sandbox
 observations, agent version and integrity, harness family, one optional Task-asset
 repository/path/commit/dirty observation, the name and value source of each Task variable,
-verification topology and image/resources, sandbox lifecycle outcomes, config hash, seed,
-and the engine's own commit.
+the agent's and the verifier's network policies, verification topology and image/resources,
+sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 Leaves of one kind isolate a Task differently and give it different kernel features, so a
 result names the one that ran it, under a scheduler too.
 
@@ -463,8 +482,9 @@ build was benign to begin with.
 because a Task may ask the agent to deploy a service that verification then checks, except
 at the end of a turn a validation round follows: saving the solver stops every process in
 it, and the next turn's solver boots without them, setup's included. In shared verification
-a process the last turn left keeps running while verification has open egress for its
-Judges, so it can still change the Sandbox before or during scoring. A snapshot verifier
+a process the last turn left keeps running while the verifier runs with its own network,
+open unless the Task seals it, so it can still reach that network and change the Sandbox
+before or during scoring; Judges reach the Gateway under any policy. A snapshot verifier
 boots fresh, so no process the agent left survives into it, but whatever the agent set to
 start at boot starts again: its account's desktop autostart entries, its `HKCU` Run keys and
 Startup folder on Windows, and, with sudo, system services. So does the next turn's solver a

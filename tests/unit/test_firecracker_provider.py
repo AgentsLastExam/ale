@@ -275,10 +275,11 @@ async def test_an_open_task_is_never_sealed(
 
 
 @pytest.mark.asyncio
-async def test_a_sealed_allowlist_agent_gets_the_proxy(
+async def test_a_sealed_allowlist_sandbox_gets_the_proxy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", _Recorder())
+    recorder = _Recorder()
+    monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
     client = _Client()
     req = request(
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
@@ -294,8 +295,14 @@ async def test_a_sealed_allowlist_agent_gets_the_proxy(
     await box.exec(["true"], identity=Identity.AGENT)
     assert client.env is not None
     assert client.env["HTTPS_PROXY"] == "http://127.0.0.1:41999"
+    # A verifier's command too, under its own allowlist.
     await box.exec(["true"])
-    assert client.env is None
+    assert client.env is not None and client.env["HTTPS_PROXY"] == "http://127.0.0.1:41999"
+    # A verifier sealed after the agent keeps one seal, which one opening lifts.
+    sealed = recorder.rules()
+    await box.close_egress()
+    assert recorder.rules() == sealed
+    assert len(client.relays) == 2
     await box.open_egress()
     assert client.relays[-1] == (None, [], False)
     await box.exec(["true"], identity=Identity.AGENT)

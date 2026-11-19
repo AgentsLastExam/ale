@@ -94,7 +94,9 @@ def needs(resources, *, verifier=None, saves=0):
         saves=saves,
         verifier=None
         if verifier is None
-        else snapshot_verifier_needs(ImageKind.CONTAINER, OperatingSystem.LINUX, verifier),
+        else snapshot_verifier_needs(
+            ImageKind.CONTAINER, OperatingSystem.LINUX, verifier, NetworkMode.OPEN
+        ),
     )
 
 
@@ -135,6 +137,7 @@ def test_an_allocation_is_sized_for_every_verifier_it_may_hold_in_turn():
         ImageKind.CONTAINER,
         OperatingSystem.LINUX,
         (Resources(cpus=3, memory_mb=1024), Resources(cpus=1, memory_mb=6144)),
+        NetworkMode.OPEN,
     )
     solver = needs(Resources(cpus=2, memory_mb=2048)).model_copy(update={"verifier": verifiers})
     assert _capacity(solver) == (3, step_memory_mb(6144), 0)

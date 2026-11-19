@@ -121,15 +121,18 @@ class GatewaySession:
     suspended: bool = False
     """Whether its calls are refused for now: an agent's from the end of its first turn, or
     of its policy rollout, except while a later turn runs; a Judge's except while a verifier
-    runs. Nothing run between the agent's turns or after its last then spends either."""
+    runs; an egress session's except while a phase with an allowlist runs. Nothing run
+    between the agent's turns or after its last then spends either model session."""
 
-    purpose: Literal["agent", "judge"] = "agent"
-    """A Judge session is unlimited and never replays: a retried verdict must sample again."""
+    purpose: Literal["agent", "judge", "egress"] = "agent"
+    """A Judge session is unlimited and never replays: a retried verdict must sample again.
+    An egress session authenticates a Sandbox's relay to the egress proxy and nothing else:
+    the Gateway refuses it, as the proxy refuses every other session."""
     upstream: Upstream | None = field(default=None, repr=False)
     """The session's own upstream, or ``None`` for the Gateway's."""
 
     allowed_hosts: frozenset[str] = frozenset()
-    """Hosts this episode may reach through the proxy, beyond the model endpoint.
+    """The hosts an egress session reaches through the proxy: those of the phase that runs.
 
     Empty means none, which is the default: a task that declared no additional access
     gets none, and cannot acquire any by asking.
@@ -244,13 +247,22 @@ class SessionRegistry:
         return session
 
     def resolve(self, token: str | None) -> GatewaySession | None:
-        """The open session of ``token``; none for an unknown or a suspended one."""
+        """The open model session of ``token``, an agent's or a Judge's; none for an unknown,
+        a suspended or an egress one."""
         session = self.known(token)
         return None if session is None or session.suspended else session
 
     def known(self, token: str | None) -> GatewaySession | None:
-        """The session of ``token``, suspended or not, until its episode ends."""
-        return self._by_token.get(token) if token else None
+        """The model session of ``token``, suspended or not, until its episode ends."""
+        session = self._by_token.get(token) if token else None
+        return None if session is None or session.purpose == "egress" else session
+
+    def egress(self, token: str | None) -> GatewaySession | None:
+        """The open egress session of ``token``; none for any other session."""
+        session = self._by_token.get(token) if token else None
+        if session is None or session.purpose != "egress" or session.suspended:
+            return None
+        return session
 
     def close(self, session: GatewaySession) -> None:
         """Revoke a token the moment its episode ends."""

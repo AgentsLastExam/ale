@@ -384,7 +384,7 @@ class FirecrackerSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
-        if identity is Identity.AGENT and self._sealed and self._relay:
+        if self._sealed and self._relay:
             env = relay.variables(self._relay, HOST_IP) | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -466,14 +466,16 @@ class FirecrackerSandbox(Sandbox):
         self._sealed = False
 
     async def close_egress(self) -> None:
-        """Confine the guest before the agent starts: only its Gateway and proxy remain."""
+        """Confine the guest for a sealed phase: only its Gateway and proxy remain. A sealed
+        guest keeps the rules it has, which inserted again would outlast the next opening."""
         if self.request.network.mode is NetworkMode.OPEN:
             return
-        for rule in (
+        rules = (
             f"iptables -w -I FORWARD 1 -i {GUEST_TAP} -j DROP",
             *(f"iptables -w -I FORWARD 1 {match} -j ACCEPT" for match in self._seal_rules()),
             f"iptables -w -I INPUT 1 -i {GUEST_TAP} -j DROP",
-        ):
+        )
+        for rule in () if self._sealed else rules:
             code, _, stderr = await _run(
                 "docker", "exec", self.container, "sh", "-c", rule, timeout=60
             )

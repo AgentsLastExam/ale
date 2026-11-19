@@ -13,7 +13,7 @@ from ale.core.episode import Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
 from ale.core.sandbox import ExecResult, SandboxFile
 from ale.core.task import ResolvedVariables
-from ale.core.taskspec import Healthcheck, NetworkPolicy, OperatingSystem, VerifySpec
+from ale.core.taskspec import Healthcheck, NetworkMode, NetworkPolicy, OperatingSystem, VerifySpec
 from ale.core.trace import read_jsonl
 from ale.run.harnesses.builtin import NopHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
@@ -35,6 +35,7 @@ class StageSandbox:
         self.chunks = chunks
         self.close_error = close_error
         self.rewards = rewards
+        self.egress: list[str] = []
 
     async def write_file(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
         return None
@@ -50,6 +51,10 @@ class StageSandbox:
     async def close_egress(self) -> None:
         if self.close_error is not None:
             raise self.close_error
+        self.egress.append("close")
+
+    async def open_egress(self) -> None:
+        self.egress.append("open")
 
     async def list_files(self, path: str) -> tuple[SandboxFile, ...]:
         if self.rewards is None:
@@ -80,6 +85,7 @@ def context(tmp_path: Path):
         phase_deadline=None,
         run_dir=tmp_path,
         phases=[],
+        open_egress_session=None,
     )
 
 
@@ -135,17 +141,53 @@ async def test_malformed_verifier_and_network_failure_are_explicit(
         )
 
     ctx = context(tmp_path)
+    granted: list[tuple[str, ...]] = []
+    ctx.open_egress_session = granted.append
     with pytest.raises(RuntimeError, match="cannot seal"):
-        await protocol._seal(
+        await protocol._apply_network(
             ctx,  # type: ignore[arg-type]
             StageSandbox(
                 ExecResult(exit_code=0),
                 close_error=RuntimeError("cannot seal"),
             ),  # type: ignore[arg-type]
+            NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",)),
+            Phase.AGENT,
         )
     policy = read_jsonl(tmp_path / "trace.execution.jsonl").records[-1]
     assert policy["kind"] == "policy_applied"
     assert policy["succeeded"] is False
+    # A policy that failed to apply gives the egress session no hosts.
+    assert granted == []
+
+
+@pytest.mark.asyncio
+async def test_each_phase_applies_and_records_its_own_network(tmp_path: Path) -> None:
+    """A solver that serves a shared verifier applies each phase's policy in turn, records
+    the one it applied, and gives the egress session only that phase's hosts."""
+    ctx = context(tmp_path)
+    granted: list[tuple[str, ...]] = []
+    ctx.open_egress_session = granted.append
+    sandbox = StageSandbox(ExecResult(exit_code=0))
+    protocol = EpisodeProtocol(NopHarness())
+    pypi = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",))
+    for policy, phase in (
+        (NetworkPolicy(mode=NetworkMode.OPEN), Phase.AGENT),
+        (pypi, Phase.VALIDATE),
+        (NetworkPolicy(), Phase.VERIFY),
+    ):
+        await protocol._apply_network(ctx, sandbox, policy, phase)  # type: ignore[arg-type]
+    assert sandbox.egress == ["open", "close", "close"]
+    assert granted == [(), ("pypi.org",), ()]
+    applied = [
+        (record["phase"], record["policy"], record["requested_mode"], record["succeeded"])
+        for record in read_jsonl(tmp_path / "trace.execution.jsonl").records
+        if record["kind"] == "policy_applied"
+    ]
+    assert applied == [
+        ("agent", "open", "open", True),
+        ("validate", "sealed", "allowlist", True),
+        ("verify", "sealed", "block", True),
+    ]
 
 
 @pytest.mark.asyncio

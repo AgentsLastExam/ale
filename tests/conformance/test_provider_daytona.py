@@ -94,7 +94,9 @@ async def _egress_proxy(*hosts: str) -> AsyncIterator[tuple[str, str]]:
     """The Host's egress proxy, with a session for ``hosts``: its URL and the token."""
     sessions = SessionRegistry()
     session = sessions.open(
-        GatewaySession(episode_id="conformance", model="none", allowed_hosts=frozenset(hosts))
+        GatewaySession(
+            episode_id="conformance", model="", purpose="egress", allowed_hosts=frozenset(hosts)
+        )
     )
     proxy = EgressProxy(sessions, host="127.0.0.1")
     await proxy.start()

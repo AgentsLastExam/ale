@@ -230,6 +230,9 @@ class SandboxRequest(BaseModel):
     """Under shared verification, the resources of the verifier each validation round boots
     from this solver's snapshot (:func:`~ale.core.capability.round_verifier_resources`), on
     the leaf that saved it, which serves both."""
+    verifier_network_mode: NetworkMode = NetworkMode.OPEN
+    """The network mode of ``snapshot_verifier`` and ``round_verifier``, the Task's verifier
+    network's (:attr:`~ale.core.taskspec.VerifySpec.network`)."""
     planned_saves: int = Field(default=0, ge=0)
     """How many runs of ``validation/`` still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
@@ -254,9 +257,10 @@ class SandboxRequest(BaseModel):
         default_factory=dict, description="Non-secret variables; credentials stay host side"
     )
     proxy_url: str = ""
-    """Egress proxy for ``allowlist`` mode; empty when the task declared no hosts."""
+    """The Host's egress proxy, for ``allowlist`` mode; empty for any other."""
     proxy_token: str = Field(default="", repr=False)
-    """Episode credential used only for the authenticated allowlist proxy."""
+    """The token of the episode's egress session, which the Sandbox's relay presents to the
+    proxy: it reaches the hosts of the phase that runs, and nothing between phases."""
 
     sudo: bool = False
     """Whether the agent user may elevate. Declared by the task, recorded in provenance."""
@@ -292,7 +296,10 @@ class SandboxRequest(BaseModel):
             snapshot=self.saves > 0 or self.snapshot is not None or self.volumes_from is not None,
             saves=self.saves,
             verifier=verifiers_needs(
-                self.image_kind, self.os, (self.snapshot_verifier, self.round_verifier)
+                self.image_kind,
+                self.os,
+                (self.snapshot_verifier, self.round_verifier),
+                self.verifier_network_mode,
             ),
         )
 
@@ -306,32 +313,39 @@ class SandboxRequest(BaseModel):
 
 
 def verifiers_needs(
-    kind: ImageKind, operating_system: OperatingSystem, verifiers: Sequence[Resources | None]
+    kind: ImageKind,
+    operating_system: OperatingSystem,
+    verifiers: Sequence[Resources | None],
+    network_mode: NetworkMode,
 ) -> SandboxNeeds | None:
     """What the verifiers that boot from a solver's snapshot need, a snapshot verifier's and
-    a validation round's, each of the ``verifiers`` given, the next nested in the one before,
-    so that every check of one profile holds it to all of them."""
+    a validation round's, each of the ``verifiers`` given, with the verifier's
+    ``network_mode``, the next nested in the one before, so that every check of one profile
+    holds it to all of them."""
     distinct: list[Resources] = []
     for each in verifiers:
         if each is not None and each not in distinct:
             distinct.append(each)
     needs = None
     for resources in reversed(distinct):
-        outer = snapshot_verifier_needs(kind, operating_system, resources)
+        outer = snapshot_verifier_needs(kind, operating_system, resources, network_mode)
         needs = outer if needs is None else outer.model_copy(update={"verifier": needs})
     return needs
 
 
 def snapshot_verifier_needs(
-    kind: ImageKind, operating_system: OperatingSystem, resources: Resources
+    kind: ImageKind,
+    operating_system: OperatingSystem,
+    resources: Resources,
+    network_mode: NetworkMode,
 ) -> SandboxNeeds:
-    """What a snapshot verifier of ``resources`` needs: its solver's image, open network,
-    and a snapshot to boot from."""
+    """What a snapshot verifier of ``resources`` needs: its solver's image, the verifier's
+    ``network_mode``, and a snapshot to boot from."""
     return SandboxNeeds(
         kind=kind,
         os=operating_system,
         arch=Arch.of(operating_system),
-        network_mode=NetworkMode.OPEN,
+        network_mode=network_mode,
         resources=resources,
         snapshot=True,
     )
@@ -530,22 +544,23 @@ class Sandbox(ABC):
 
     @abstractmethod
     async def open_egress(self) -> None:
-        """Let the sandbox reach the network, for the framework's own phases.
+        """Let the sandbox reach the network: for setup and the Harness's first installation,
+        which are the Task's trusted preparation and ours, and for a phase whose policy is
+        ``open``. Opening an open sandbox leaves it open.
 
-        A task's network policy describes what binds **the agent** — that is the thing
-        being measured, and the only thing whose reach is a result rather than a detail.
-        Setup and verify are the task's own trusted code and the harness's preparation is
-        ours; holding all three to the agent's limits bought nothing and cost a great deal,
-        most visibly an agent that could not be installed into an image that had not
-        pre-baked it.
+        Holding preparation to the agent's limits bought nothing and cost a great deal, most
+        visibly an agent that could not be installed into an image that had not pre-baked it.
         """
 
     @abstractmethod
     async def close_egress(self) -> None:
-        """Apply the task's declared policy, before the agent starts.
+        """Seal the sandbox to its request's policy for a phase whose policy is not ``open``,
+        the agent's or a verifier's: it reaches the Gateway and, under ``allowlist``, the
+        egress proxy through the relay with the request's ``proxy_token``. Sealing a sealed
+        sandbox keeps it sealed and starts its relay again. Nothing on an ``open`` request.
 
         Abstract rather than a no-op default: a sandbox that silently stayed open through
-        the agent phase would make every isolation claim in a run's provenance false. A
+        a sealed phase would make every isolation claim in a run's provenance false. A
         backend that cannot change policy at runtime raises here, and one that cannot
         apply a policy at all leaves its mode out of :meth:`Provider.profiles`.
         """

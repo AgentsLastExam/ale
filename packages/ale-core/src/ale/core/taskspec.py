@@ -476,6 +476,14 @@ class VerifySpec(BaseModel):
     user: str | None = Field(default=None, exclude_if=lambda value: value is None)
     """``[verifier].user``: the account, by name or uid, ``tests/`` and ``validation/`` run
     as; ``None`` for the framework's identity."""
+    network: NetworkPolicy = Field(
+        default=NetworkPolicy(mode=NetworkMode.OPEN),
+        exclude_if=lambda value: value.mode is NetworkMode.OPEN,
+    )
+    """The network ``tests/`` and ``validation/`` run with (``TaskConfig.verifier_network``);
+    open unless the Task says otherwise."""
+
+    # --- validation ---
 
     @model_validator(mode="after")
     def _valid_topology(self) -> Self:
@@ -756,6 +764,25 @@ class TaskSpec(BaseModel):
         return self.validation or self.verify
 
     @property
+    def solver_network(self) -> NetworkPolicy:
+        """The network a solver Sandbox is created with: the agent's, and when ``tests/`` or
+        ``validation/`` runs in it, one that can also apply the verifier's. A Provider fixes
+        at creation whether it can seal a Sandbox and relay it to the egress proxy, so this
+        is the least open mode either phase needs, with every host either allowlist names;
+        each phase then applies its own policy."""
+        placements = (self.verify.environment_mode, self.validation_spec.environment_mode)
+        if VerificationMode.SHARED not in placements:
+            return self.network
+        policies = (self.network, self.verify.network)
+        modes = {policy.mode for policy in policies}
+        if NetworkMode.ALLOWLIST in modes:
+            hosts = dict.fromkeys(host for policy in policies for host in policy.allowed_hosts)
+            return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=tuple(hosts))
+        if NetworkMode.BLOCK in modes:
+            return NetworkPolicy(mode=NetworkMode.BLOCK)
+        return NetworkPolicy(mode=NetworkMode.OPEN)
+
+    @property
     def volume_candidates(self) -> tuple[str, ...]:
         """The artifacts a Provider may mount as volumes of their own: those named by an
         absolute path, without a glob, that no other of them contains, as it decides before
@@ -791,6 +818,12 @@ class TaskSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _one_verifier_network(self) -> Self:
+        if self.validation is not None and self.validation.network != self.verify.network:
+            raise ValueError("validation/ runs with the verifier's network, as tests/ does")
+        return self
+
+    @model_validator(mode="after")
     def _kind_left_open_only_for_a_registry(self) -> Self:
         for image in (self.image, self.verify.image):
             if image is None or image.kind is not None:
@@ -821,7 +854,7 @@ class TaskSpec(BaseModel):
 #: accepts exactly this value.
 SCHEMA_VERSION = "0.2.0"
 
-#: ``task.toml`` network modes and what they mean for the evaluated agent and the oracle.
+#: ``task.toml`` network modes and what they mean for the agent, the oracle and the verifier.
 _NETWORK_MODES = {
     "no-network": NetworkMode.BLOCK,
     "allowlist": NetworkMode.ALLOWLIST,
@@ -838,11 +871,10 @@ _GpuType = Annotated[str, Field(pattern=r"[A-Za-z0-9]")]
 _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
     (): frozenset({"multi_step_reward_strategy", "source", "steps"}),
     ("environment",): _HARBOR_ENVIRONMENT_ONLY,
-    ("verifier",): frozenset({"allowed_hosts", "collect", "network_mode"}),
+    ("verifier",): frozenset({"collect"}),
     # Harbor runs a healthcheck in the agent's environment only.
     ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY
-    | {"allow_internet", "allowed_hosts", "healthcheck", "mcp_servers", "network_mode", "os"}
-    | {"skills_dir"},
+    | {"healthcheck", "mcp_servers", "os", "skills_dir"},
 }
 
 
@@ -999,7 +1031,8 @@ class EnvironmentTable(BaseModel):
     mcp_servers: tuple[McpServerTable, ...] = ()
     healthcheck: Healthcheck | None = None
     network_mode: _HarborNetworkMode | None = None
-    """Harbor's baseline: the agent's network unless ``[agent]`` names its own."""
+    """Harbor's baseline: the agent's network unless ``[agent]`` names its own, and the
+    verifier's unless ``[verifier]``, or a verifier of its own's environment, names one."""
     allowed_hosts: tuple[str, ...] | None = None
     allow_internet: bool | None = Field(default=None, strict=True)
     """Harbor's deprecated switch, read only without ``network_mode``: ``true`` is
@@ -1072,8 +1105,8 @@ class AgentTable(BaseModel):
 
 
 class VerifierEnvironmentTable(BaseModel):
-    """``[verifier.environment]``: a separate verifier's own image and resources, or a
-    snapshot verifier's resources.
+    """``[verifier.environment]``: a separate verifier's own image, resources and network
+    baseline, or a snapshot verifier's resources and network baseline.
 
     ``cpus`` and ``memory_mb`` fall back to ``[environment]``'s.
     """
@@ -1095,6 +1128,17 @@ class VerifierEnvironmentTable(BaseModel):
     workdir: str | None = Field(default=None, min_length=1)
     """Where a verifier of its own runs ``tests/`` and ``validation/``, instead of
     ``[environment].workdir``."""
+    network_mode: _HarborNetworkMode | None = None
+    """Harbor's baseline for a verifier of its own: its network unless ``[verifier]`` names
+    one."""
+    allowed_hosts: tuple[str, ...] | None = None
+    allow_internet: bool | None = Field(default=None, strict=True)
+    """Harbor's deprecated switch, read only without ``network_mode``."""
+
+    @property
+    def network(self) -> NetworkPolicy | None:
+        """The baseline this table names, or ``None``."""
+        return _table_network(self.network_mode, self.allowed_hosts, self.allow_internet)
 
     # --- validation ---
 
@@ -1103,9 +1147,19 @@ class VerifierEnvironmentTable(BaseModel):
     def _docker_image(cls, data: Any) -> Any:
         return _harbor_image_key(data)
 
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        return None if hosts is None else tuple(_normal_host(host) for host in hosts)
+
+    @model_validator(mode="after")
+    def _hosts_only_for_allowlist(self) -> Self:
+        _check_table_network(self.network_mode, self.allowed_hosts)
+        return self
+
 
 class VerifierTable(BaseModel):
-    """``[verifier]``: the verifier's budget and where it runs."""
+    """``[verifier]``: the verifier's budget, network and where it runs."""
 
     model_config = _FROZEN
 
@@ -1117,6 +1171,10 @@ class VerifierTable(BaseModel):
         Annotated[str, Field(pattern=_ACCOUNT)] | Annotated[int, Field(ge=0, strict=True)] | None
     ) = None
     """Harbor's account for the verifier, by name or uid; unset, the framework's identity."""
+    network_mode: _HarborNetworkMode | None = None
+    """The verifier's own network, for ``tests/`` and ``validation/`` alike; unset, Harbor's
+    baseline applies (``TaskConfig.verifier_network``)."""
+    allowed_hosts: tuple[str, ...] | None = None
 
     @property
     def mode(self) -> VerificationMode:
@@ -1128,7 +1186,22 @@ class VerifierTable(BaseModel):
             return VerificationMode.SEPARATE
         return VerificationMode.SHARED
 
+    @property
+    def network(self) -> NetworkPolicy | None:
+        """The policy this table names, or ``None``."""
+        return _table_network(self.network_mode, self.allowed_hosts)
+
     # --- validation ---
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        return None if hosts is None else tuple(_normal_host(host) for host in hosts)
+
+    @model_validator(mode="after")
+    def _hosts_only_for_allowlist(self) -> Self:
+        _check_table_network(self.network_mode, self.allowed_hosts)
+        return self
 
     @model_validator(mode="after")
     def _environment_fits_the_mode(self) -> Self:
@@ -1181,6 +1254,13 @@ class ValidationTable(BaseModel):
                 "verifier runs the image a separate verifier of tests/ would, with "
                 "[verifier]'s variables"
             )
+        if keys := sorted(
+            {"network_mode", "allowed_hosts", "allow_internet"} & self.environment.model_fields_set
+        ):
+            raise ValueError(
+                f"[validation.environment] cannot set {' or '.join(keys)}: validation/ runs "
+                "with the verifier's network, as tests/ does"
+            )
         return self
 
 
@@ -1221,6 +1301,20 @@ class TaskConfig(BaseModel):
         """Harbor's resolution for the agent and the oracle: ``[agent]``'s own policy, else
         ``[environment]``'s baseline, else ALE's default, no network."""
         return self.agent.network or self.environment.network or NetworkPolicy()
+
+    @property
+    def verifier_network(self) -> NetworkPolicy:
+        """Harbor's resolution for ``tests/`` and ``validation/``: ``[verifier]``'s own policy;
+        else, for a verifier with a Sandbox of its own and a ``[verifier.environment]``, that
+        table's baseline, open when it names none, as Harbor's separate environment is; else
+        ``[environment]``'s baseline; else open, ALE's default for verification."""
+        verifier = self.verifier
+        if (own := verifier.network) is not None:
+            return own
+        open_ = NetworkPolicy(mode=NetworkMode.OPEN)
+        if verifier.mode is not VerificationMode.SHARED and verifier.environment is not None:
+            return verifier.environment.network or open_
+        return self.environment.network or open_
 
     @property
     def calibration_cases(self) -> tuple[CalibrationCase, ...]:

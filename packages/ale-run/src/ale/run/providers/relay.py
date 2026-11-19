@@ -1,10 +1,12 @@
 """How a sealed ``allowlist`` Sandbox reaches the Host's egress proxy.
 
-The proxy knows an episode by its token, which many programs cannot present: a browser
-sends proxy credentials only in answer to a challenge, and Chromium ignores those in the
-proxy variables. So every Provider that seals a Sandbox to the Host's proxy has guestd
-relay a loopback port to it with the token (``guestd/egress.py``). The agent's
-proxy variables name the relay, and on a desktop so does the agent account's system proxy.
+The proxy knows an episode by its egress session's token, which many programs cannot
+present: a browser sends proxy credentials only in answer to a challenge, and Chromium
+ignores those in the proxy variables. So every Provider that seals a Sandbox to the Host's
+proxy has guestd relay a loopback port to it with the token (``guestd/egress.py``). While
+the Sandbox is sealed, the proxy variables of every command, the agent's and a verifier's,
+name the relay, and on a desktop so does the agent account's system proxy. The proxy admits
+the hosts of the phase that runs.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ async def start(
     proxy: str,
     host: str,
 ) -> str | None:
-    """Relay the agent to ``proxy``, the Host proxy as the guest reaches it at ``host``.
+    """Relay the Sandbox to ``proxy``, the Host proxy as the guest reaches it at ``host``.
 
     Returns the relay's address, or None when the Sandbox has no proxy to reach.
     """
@@ -41,7 +43,7 @@ async def start(
             proxy, bypass=_bypass(host), desktop=allocation.desktop_resolution is not None
         )
     except (GuestUnreachableError, TimeoutError) as error:
-        raise ProviderStartError(f"could not start the agent's egress relay: {error}") from error
+        raise ProviderStartError(f"could not start the egress relay: {error}") from error
 
 
 async def stop(client: GuestClient, request: SandboxRequest) -> None:
@@ -63,7 +65,7 @@ async def stop(client: GuestClient, request: SandboxRequest) -> None:
 
 
 def variables(relay: str, host: str) -> dict[str, str]:
-    """The proxy variables of the agent's commands while the Sandbox is sealed."""
+    """The proxy variables of every command while the Sandbox is sealed."""
     proxy = f"http://{relay}"
     return {
         "HTTP_PROXY": proxy,

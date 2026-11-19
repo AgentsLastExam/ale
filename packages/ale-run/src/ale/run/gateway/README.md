@@ -8,12 +8,12 @@ writes the Transport Trace.
 | Module | Responsibility |
 |---|---|
 | `server.py` | HTTP server, session authorization and upstream forwarding |
-| `session.py` | episode sessions, usage and limit state |
+| `session.py` | episode sessions (model sessions, the Gateway's, and egress sessions, the proxy's), usage and limit state |
 | `anthropic.py` | Anthropic Messages normalization |
 | `gemini.py` | Gemini `generateContent` normalization and request policy |
 | `openai_responses.py` | OpenAI Responses normalization |
 | `openai_chat_completions.py` | Chat Completions normalization |
-| `proxy.py` | allowlisted non-model egress for Sandbox processes |
+| `proxy.py` | allowlisted non-model egress for Sandbox processes, authenticated by the episode's egress session |
 
 API-key and subscription modes share the same Sandbox-side protocol. Subscription
 credential loading and refresh live in `ale.run.subscription`; configuration is covered

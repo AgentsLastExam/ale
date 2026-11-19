@@ -610,6 +610,11 @@ def _open_sessions(sessions: tuple[GatewaySession, ...], opened: bool) -> None:
         session.suspended = not opened
 
 
+def _open_egress(session: GatewaySession, hosts: tuple[str, ...]) -> None:
+    session.allowed_hosts = frozenset(hosts)
+    session.suspended = not hosts
+
+
 def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxOutcome:
     return SandboxOutcome(
         roles=entry.roles,
@@ -891,7 +896,6 @@ async def run_episode(
     gateway: Gateway | None = None,
     session_registry: SessionRegistry | None = None,
     limits: Limits | None = None,
-    allowed_hosts: frozenset[str] = frozenset(),
     agent_resources: EffectiveAgentResources | None = None,
     episode_id: str | None = None,
     trajectory_id: str | None = None,
@@ -951,7 +955,6 @@ async def run_episode(
             episode_id=episode_id,
             model=model,
             limits=limits or Limits(),
-            allowed_hosts=allowed_hosts,
             provider_web_tools=task.spec.network.mode is NetworkMode.OPEN,
             redacted=variables.secrets,
             payload_dir=(
@@ -987,6 +990,21 @@ async def run_episode(
     for opened in judge_sessions.values():
         # Usable only while a verifier runs: a token that reaches the agent is no use to it.
         opened.suspended = True
+    # The relays' credential at the egress proxy, when a phase of this episode has an
+    # allowlist, the agent's or the verifier's: its hosts are those of the phase that runs,
+    # and the agent's model token, which its CLI holds, is never one.
+    egress: GatewaySession | None = None
+    if proxy_url and NetworkMode.ALLOWLIST in (
+        task.spec.network.mode,
+        task.spec.verify.network.mode,
+    ):
+        candidate = GatewaySession(
+            episode_id=episode_id, model="", purpose="egress", suspended=True
+        )
+        if gateway is not None:
+            egress = gateway.open_session(candidate)
+        elif session_registry is not None:
+            egress = session_registry.open(candidate)
 
     separate = task.spec.verify.environment_mode is VerificationMode.SEPARATE
     sink = _Artifacts(
@@ -1033,7 +1051,8 @@ async def run_episode(
         result=recording,
         seed=seed,
         proxy_url=proxy_url,
-        allowed_hosts=allowed_hosts,
+        egress_token=egress.token if egress is not None else "",
+        open_egress_session=None if egress is None else partial(_open_egress, egress),
         prepared_image=task.prepared_image,
         prepared_verifier_image=task.prepared_verifier_image,
         phase_callback=phase_callback,
@@ -1085,11 +1104,13 @@ async def run_episode(
     finally:
         if gateway is not None:
             # Tokens die with their episode, so a leaked one is not a standing grant.
-            for opened in (session, *judge_sessions.values()):
+            for opened in (session, *judge_sessions.values(), egress):
                 if opened is not None:
                     gateway.close_session(opened)
-        elif session_registry is not None and session is not None:
-            session_registry.close(session)
+        elif session_registry is not None:
+            for opened in (session, egress):
+                if opened is not None:
+                    session_registry.close(opened)
         finalization_error: RetentionFinalizationError | None = None
         try:
             await lease.finalize(

@@ -428,8 +428,9 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     if mode is not VerificationMode.SEPARATE and dockerfile is not None:
         raise TaskDefinitionError("tests/Dockerfile requires separate verification")
     account = None if verifier.user is None else str(verifier.user)
+    network = config.verifier_network
     if mode is VerificationMode.SHARED:
-        return VerifySpec(workdir=workdir, user=account)
+        return VerifySpec(workdir=workdir, user=account, network=network)
     operating_system = config.environment.os
     if dockerfile is not None and operating_system is not OperatingSystem.LINUX:
         raise TaskDefinitionError(
@@ -464,7 +465,12 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         container_features=sized.container_features,
     )
     return VerifySpec(
-        environment_mode=mode, image=image, resources=resources, workdir=workdir, user=account
+        environment_mode=mode,
+        image=image,
+        resources=resources,
+        workdir=workdir,
+        user=account,
+        network=network,
     )
 
 
@@ -475,10 +481,10 @@ def _validation(config: TaskConfig, verify: VerifySpec) -> VerifySpec | None:
     if table is None:
         return None
     mode = table.mode
-    # [verifier]'s account, and Harbor's working directory: its own environment's, else
-    # where tests/ runs.
+    # [verifier]'s account and network, and Harbor's working directory: its own
+    # environment's, else where tests/ runs.
     own = table.environment.workdir if table.environment is not None else None
-    placed = {"workdir": own or verify.workdir, "user": verify.user}
+    placed = {"workdir": own or verify.workdir, "user": verify.user, "network": verify.network}
     if mode is VerificationMode.SHARED:
         return VerifySpec(**placed)
     sized = table.environment or config.environment

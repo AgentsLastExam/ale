@@ -631,6 +631,7 @@ async def test_calibration_passes_artifact_policy_to_episodes(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("table", ["agent", "verifier"])
 @pytest.mark.parametrize("command", ["calibrate", "run"])
 async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
     monkeypatch: pytest.MonkeyPatch,
@@ -638,12 +639,14 @@ async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
     write_task_repo,  # type: ignore[no-untyped-def]
     host_checks: AsyncMock,
     command: str,
+    table: str,
 ) -> None:
-    """An oracle run calls no model, yet the oracle meets the agent's network, allowlist
-    included: the episode gets the proxy and a registry for its session."""
+    """An oracle run calls no model, yet the oracle meets the agent's network, and the
+    verifier its own, allowlist included: the episode gets the proxy and a registry for its
+    egress session whichever of them has the allowlist."""
     repository = write_task_repo(
         "oracle-allowlist",
-        config={"agent": {"network_mode": "allowlist", "allowed_hosts": ["example.com"]}},
+        config={table: {"network_mode": "allowlist", "allowed_hosts": ["example.com"]}},
     )
     task_cli = import_module("ale.run.cli.tasks")
     digest = "sha256:" + "a" * 64
@@ -665,13 +668,15 @@ async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
 
     seen: dict[str, object] = {}
 
-    async def fake_episode(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    async def fake_episode(task, *_args, **kwargs):  # type: ignore[no-untyped-def]
         seen["gateway"] = kwargs["gateway"]
+        network = task.spec.network if table == "agent" else task.spec.verify.network
         session = kwargs["session_registry"].open(
             GatewaySession(
                 episode_id=kwargs["episode_id"],
                 model="",
-                allowed_hosts=kwargs["allowed_hosts"],
+                purpose="egress",
+                allowed_hosts=frozenset(network.allowed_hosts),
             )
         )
         port = int(kwargs["proxy_url"].rpartition(":")[2])

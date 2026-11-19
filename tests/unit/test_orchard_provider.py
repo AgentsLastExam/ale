@@ -1092,8 +1092,9 @@ async def test_a_sealed_allowlist_agent_reaches_its_proxy_through_the_relay(back
     await sandbox.exec(["curl"], identity=Identity.AGENT)
     env = guest.commands[-1][1]["env"]
     assert env["HTTPS_PROXY"] == "http://127.0.0.1:41000" and host in env["NO_PROXY"].split(",")
+    # A verifier's command too, under its own allowlist.
     await sandbox.exec(["true"])
-    assert guest.commands[-1][1]["env"] is None
+    assert guest.commands[-1][1]["env"]["HTTPS_PROXY"] == "http://127.0.0.1:41000"
 
     await sandbox.open_egress()
     assert guest.relays[-1] == (None, [], False)

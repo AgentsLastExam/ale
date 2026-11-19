@@ -364,6 +364,7 @@ def _sandbox() -> DockerSandbox:
         pass
 
     sandbox = DockerSandbox.__new__(DockerSandbox)
+    sandbox._sealed = False
     sandbox.sandbox_id = "e1-abcdef"
     sandbox.container = "ale-e1-abcdef"
     sandbox.request = request(retention="snapshot")

@@ -49,7 +49,8 @@ REACH = (
 
 
 async def run_one(task_root: Path, run_dir: Path):  # type: ignore[no-untyped-def]
-    """An oracle episode, with the egress proxy a run starts when the Task declares hosts."""
+    """An oracle episode, with the egress proxy a run starts when the Task declares hosts,
+    where the episode opens its egress session."""
     task = load_tasks(task_root)[0]
     settings = RunConfig()
     sessions = SessionRegistry()
@@ -65,7 +66,6 @@ async def run_one(task_root: Path, run_dir: Path):  # type: ignore[no-untyped-de
             collect_artifacts=True,
             proxy_url=proxy.url if task.spec.network.allowed_hosts else "",
             session_registry=sessions,
-            allowed_hosts=frozenset(task.spec.network.allowed_hosts),
             provenance=ProvenanceInputs(
                 source=TaskSource(kind="git", repo="https://e/x.git", commit="a" * 40, path="t"),
                 agent=agent_provenance(OracleHarness(), "none"),

@@ -43,6 +43,13 @@ def make_spec(**overrides: object) -> TaskSpec:
     return TaskSpec(**(base | overrides))  # type: ignore[arg-type]
 
 
+_OPEN = NetworkPolicy(mode=NetworkMode.OPEN)
+_BLOCK = NetworkPolicy(mode=NetworkMode.BLOCK)
+_PYPI = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",))
+_ALLOW_PYPI = {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]}
+_OWN = {"cpus": 1, "memory_mb": 512}
+
+
 def test_task_spec_is_strict_and_path_independent() -> None:
     spec = make_spec()
     assert spec.name == "agentslastexam/demo-hello"
@@ -108,6 +115,47 @@ def test_task_spec_hash_tracks_semantics() -> None:
     assert make_spec().spec_hash == make_spec().spec_hash
     assert make_spec().spec_hash != make_spec(instruction="different").spec_hash
     assert make_spec().spec_hash != make_spec(resources={"cpus": 2}).spec_hash
+
+
+def test_an_open_verifier_network_keeps_the_spec_hash() -> None:
+    """Open is the default, left out of a dump, so a Task that names no verifier network
+    keeps the hash it had; any other policy is part of it."""
+    assert "network" not in VerifySpec().model_dump()
+    assert make_spec(verify={"network": _OPEN}).spec_hash == make_spec().spec_hash
+    sealed = make_spec(verify={"network": _BLOCK})
+    assert sealed.spec_hash != make_spec().spec_hash
+    assert TaskSpec.model_validate_json(sealed.model_dump_json()) == sealed
+    with pytest.raises(ValidationError, match="verifier's network"):
+        make_spec(verify={"network": _BLOCK}, validation={"network": _OPEN})
+
+
+@pytest.mark.parametrize(
+    ("agent", "verifier", "mode", "expected"),
+    [
+        (_BLOCK, _OPEN, "shared", _BLOCK),
+        (_OPEN, _BLOCK, "shared", _BLOCK),
+        (_OPEN, _OPEN, "shared", _OPEN),
+        (_BLOCK, _PYPI, "shared", _PYPI),
+        (_PYPI, _OPEN, "shared", _PYPI),
+        (
+            _PYPI,
+            NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org", "example.org")),
+            "shared",
+            NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org", "example.org")),
+        ),
+        # A verifier of its own applies its network in its own Sandbox.
+        (_OPEN, _BLOCK, "separate", _OPEN),
+        (_BLOCK, _PYPI, "snapshot", _BLOCK),
+    ],
+)
+def test_a_solver_can_apply_both_phases_networks(
+    agent: NetworkPolicy, verifier: NetworkPolicy, mode: str, expected: NetworkPolicy
+) -> None:
+    """A shared solver is created with the least open mode either phase needs."""
+    resources = VerifierResources(cpus=1, memory_mb=512, storage_mb=None, gpus=0)
+    placed = {} if mode == "shared" else {"environment_mode": mode, "resources": resources}
+    spec = make_spec(network=agent, verify={**placed, "network": verifier})
+    assert spec.solver_network == expected
 
 
 def test_task_spec_round_trips() -> None:
@@ -436,6 +484,89 @@ def test_the_agent_s_network_resolves_as_harbor_s_does(
 ) -> None:
     resolved = config({"agent": {"network_mode": None, **agent}, "environment": environment})
     assert resolved.agent_network == expected
+
+
+@pytest.mark.parametrize(
+    ("verifier", "environment", "expected"),
+    [
+        # Nothing named: open, ALE's default for verification.
+        ({}, {}, _OPEN),
+        # [verifier]'s own policy wins in every topology.
+        ({"network_mode": "no-network"}, {"network_mode": "public"}, _BLOCK),
+        ({**_ALLOW_PYPI}, {}, _PYPI),
+        (
+            {"network_mode": "no-network", "environment": {**_OWN, "network_mode": "public"}},
+            {},
+            _BLOCK,
+        ),
+        # A shared verifier has [environment]'s baseline, as in Harbor.
+        ({}, {"network_mode": "no-network"}, _BLOCK),
+        ({}, {"allow_internet": False}, _BLOCK),
+        ({}, {**_ALLOW_PYPI}, _PYPI),
+        # A verifier of its own with an environment: that environment's baseline...
+        ({"environment": {**_OWN, "network_mode": "no-network"}}, {}, _BLOCK),
+        ({"environment": {**_OWN, **_ALLOW_PYPI}}, {}, _PYPI),
+        ({"environment": {**_OWN, "allow_internet": False}}, {"network_mode": "public"}, _BLOCK),
+        (
+            {"environment": {**_OWN, "allow_internet": True, "network_mode": "no-network"}},
+            {},
+            _BLOCK,
+        ),
+        # ... and public when it names none, as Harbor's separate environment is, whatever
+        # [environment] says.
+        ({"environment": {**_OWN}}, {"network_mode": "no-network"}, _OPEN),
+        (
+            {"environment_mode": "snapshot", "environment": {**_OWN}},
+            {"network_mode": "no-network"},
+            _OPEN,
+        ),
+        (
+            {"environment_mode": "snapshot", "environment": {**_OWN, "network_mode": "no-network"}},
+            {"network_mode": "public"},
+            _BLOCK,
+        ),
+        # Without an environment of its own, [environment]'s baseline again.
+        ({"environment_mode": "separate"}, {"network_mode": "no-network"}, _BLOCK),
+        ({"environment_mode": "snapshot"}, {"allow_internet": False}, _BLOCK),
+    ],
+)
+def test_the_verifier_s_network_resolves_as_harbor_s_does(
+    verifier: dict[str, object], environment: dict[str, object], expected: NetworkPolicy
+) -> None:
+    resolved = config({"verifier": verifier, "environment": environment})
+    assert resolved.verifier_network == expected
+    # The agent's own network is never the verifier's.
+    assert resolved.agent_network == config({"environment": environment}).agent_network
+
+
+def test_a_verifier_s_network_obeys_the_agent_s_host_rules() -> None:
+    for layer, message in (
+        ({"verifier": {"network_mode": "allowlist"}}, "non-empty allowed_hosts"),
+        ({"verifier": {"allowed_hosts": ["pypi.org"]}}, "requires network_mode 'allowlist'"),
+        (
+            {"verifier": {"network_mode": "allowlist", "allowed_hosts": ["169.254.169.254"]}},
+            "metadata service",
+        ),
+        (
+            {"verifier": {"environment": {**_OWN, "network_mode": "allowlist"}}},
+            "non-empty allowed_hosts",
+        ),
+        (
+            {"verifier": {"environment": {**_OWN, "allowed_hosts": ["pypi.org"]}}},
+            "requires network_mode 'allowlist'",
+        ),
+        ({"verifier": {"network_mode": "offline"}}, "network_mode"),
+        ({"verifier": {"environment": {**_OWN, "allow_internet": "yes"}}}, "allow_internet"),
+        # validation/ runs with the verifier's network.
+        (
+            {"validation": {"environment": {**_OWN, "network_mode": "public"}}},
+            "verifier's network",
+        ),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            config(layer)
+    verifier = config({"verifier": {"network_mode": "allowlist", "allowed_hosts": ["PyPI.org."]}})
+    assert verifier.verifier_network == _PYPI
 
 
 def test_an_environment_baseline_obeys_the_agent_s_host_rules() -> None:

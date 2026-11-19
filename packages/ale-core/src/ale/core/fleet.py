@@ -300,6 +300,8 @@ class SandboxDemand(BaseModel):
     round_verifier: Resources | None = None
     """Under shared verification, the resources of the verifier each validation round boots
     from this solver's snapshot, on the same leaf."""
+    verifier_network_mode: NetworkMode = NetworkMode.OPEN
+    """The network mode of ``verifier`` and ``round_verifier``, which that leaf applies too."""
     planned_saves: int = Field(default=0, ge=0)
     """How many runs of ``validation/`` still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
@@ -319,7 +321,12 @@ class SandboxDemand(BaseModel):
             resources=self.resources,
             snapshot=saves > 0 or self.snapshot is not None or self.volumes_from is not None,
             saves=saves,
-            verifier=verifiers_needs(self.kind, self.os, (self.verifier, self.round_verifier)),
+            verifier=verifiers_needs(
+                self.kind,
+                self.os,
+                (self.verifier, self.round_verifier),
+                self.verifier_network_mode,
+            ),
         )
 
 

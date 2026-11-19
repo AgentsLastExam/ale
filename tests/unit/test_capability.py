@@ -232,6 +232,12 @@ class TestNeeds:
         )
         booted = request.model_copy(update={"retention": "destroy", "snapshot": "docker:x"})
         assert booted.needs.snapshot
+        # The verifiers booted from its snapshot need the verifier's network, on its leaf.
+        mode = {"verifier_network_mode": NetworkMode.BLOCK}
+        sealed = request.model_copy(update={"snapshot_verifier": resources, **mode}).needs
+        assert sealed == demand.model_copy(update={"verifier": resources, **mode}).needs
+        assert sealed.verifier is not None
+        assert sealed.verifier.network_mode is NetworkMode.BLOCK
 
 
 class TestProviders:

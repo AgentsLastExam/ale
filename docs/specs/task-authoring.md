@@ -100,7 +100,7 @@ container_features = []                     # ALE; such as ["perf", "mount"]; de
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 # workdir = "/app"                          # the agent's start and verification's directory
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
-# network_mode = "public"                   # Harbor's baseline: the agent's unless [agent] names one
+# network_mode = "public"                   # Harbor's baseline for the agent and the verifier
 # allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
 # allow_internet = true                     # Harbor's deprecated switch, without network_mode
 
@@ -134,6 +134,8 @@ timeout_sec = 600                           # positive seconds; default 600
 environment_mode = "separate"               # shared | separate | snapshot (ALE)
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 # user = "grader"                           # Harbor's: its account, name or uid; Linux, macOS
+# network_mode = "no-network"               # tests/ and validation/ alike; default below
+# allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
 
 [verifier.environment]                      # a separate or snapshot verifier's own sandbox
 # image = "registry.example/verifier:tag"   # or docker_image; separate only; no tests/Dockerfile
@@ -147,6 +149,9 @@ gpus = 0                                    # default 0
 container_features = []                     # ALE; default none
 env = {}                                    # replaces [environment].env
 # workdir = "/grade"                        # verification's directory; default as above
+# network_mode = "allowlist"                # Harbor's baseline for this verifier; default public
+# allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
+# allow_internet = false                    # Harbor's deprecated switch, without network_mode
 
 [validation]                                # ALE; where validation/ runs; default [verifier]'s
 environment_mode = "separate"               # shared | separate | snapshot
@@ -190,8 +195,7 @@ timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
 
 Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
-an artifact's `service`, `[[verifier.collect]]`), TPU selection (`tpu`), or the verifier's own
-network keys (`network_mode`, `allowed_hosts`, `allow_internet`). ALE's design
+an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
 covers the rest. `docker_image` is `image` under Harbor's name, in `[environment]` and
 `[verifier.environment]` alike: one field, so a table holds either, never both. An origin
 belongs in `[metadata]`, so there is no `source`.
@@ -327,11 +331,24 @@ it. Entries reaching the Host itself (loopback, link-local, and ranges holding t
 because allowed traffic leaves from the Host. An allowlist carries TLS and needs a client
 that honors the proxy variables or, on a desktop, the agent account's system proxy (WinINet
 on Windows, GNOME's settings on Linux, the network services' web proxies on macOS), both of
-which the framework points at the proxy for the agent and the oracle; raw TCP to an allowed
-address stays blocked. Setup and verification network is framework-controlled; its
-enforcement is specified in [Security](security.md). The quality standard owns resource
-feasibility and network-policy selection. `ale lint` requires
-`[metadata].network_justification` when the agent's network resolves to `public`.
+which the framework points at the proxy for whatever runs under an allowlist; raw TCP to an
+allowed address stays blocked.
+
+The verifier's network applies to `tests/` and `validation/` alike, in every topology, with the
+same three modes and host rules. It resolves as in Harbor, with ALE's open default:
+`[verifier].network_mode` and `allowed_hosts` when `[verifier]` names a mode; else, for a
+verifier with a Sandbox of its own (`separate` or `snapshot`) that declares
+`[verifier.environment]`, that table's `network_mode`, `allowed_hosts` and `allow_internet`,
+and `public` when it names none, as Harbor's separate environment is; else `[environment]`'s
+baseline; else `public`. So a shared verifier of a Task whose `[environment]` says `no-network`
+runs without network, as Harbor's does, while one that names nothing keeps the network a
+verifier usually needs. `[validation.environment]` takes no network: a validation verifier has
+the verifier's. Under `no-network` a verifier still reaches the Gateway, so its
+[Judges](verification.md#judge-tools) work. Setup, the Harness's installation and image builds
+have the network, since they are the Task's trusted preparation and ours; enforcement is
+specified in [Security](security.md). The quality standard owns resource feasibility and
+network-policy selection. `ale lint` requires `[metadata].network_justification` when the
+agent's network resolves to `public`.
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,

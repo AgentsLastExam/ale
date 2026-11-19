@@ -23,7 +23,14 @@ from ale.core.harness import NativeContinuation
 from ale.core.ids import TaskId
 from ale.core.result import SandboxOutcome
 from ale.core.sandbox import ResourceAllocation
-from ale.core.taskspec import ImageKind, ImageSpec, Resources, VerificationMode
+from ale.core.taskspec import (
+    ImageKind,
+    ImageSpec,
+    NetworkMode,
+    NetworkPolicy,
+    Resources,
+    VerificationMode,
+)
 
 __all__ = [
     "AgentProvenance",
@@ -246,6 +253,8 @@ class VerificationProvenance(BaseModel):
     mode: VerificationMode = VerificationMode.SHARED
     image: ImageProvenance | None = None
     resources: ResourceProvenance | None = None
+    network: NetworkPolicy = NetworkPolicy(mode=NetworkMode.OPEN)
+    """The network ``tests/`` and ``validation/`` ran with."""
 
 
 class AleVerifyProvenance(BaseModel):
@@ -267,6 +276,9 @@ class SandboxProvenance(BaseModel):
 
     user: str = Field(description="The unprivileged account the agent ran as")
     sudo: bool = Field(default=False, description="Whether that account could elevate")
+    network: NetworkPolicy
+    """The network the agent ran with, and the oracle; a shared solver's allocation records
+    the mode the Sandbox was created with, which can also apply the verifier's."""
 
 
 class GatewayProvenance(BaseModel):

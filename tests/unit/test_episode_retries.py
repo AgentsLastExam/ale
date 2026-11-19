@@ -432,6 +432,10 @@ async def test_reverification_retries_only_with_fresh_verifiers(
         if snapshot:
             assert protocol.solver.handle == "docker:snapshot:source"
             assert protocol.solver.episode_id == source.record.episode_id
+        else:
+            # The protocol reconnects the kept solver, with the episode's egress session.
+            assert protocol.solver.request.episode_id == source.record.episode_id
+            await protocol.solver.attach(protocol.solver.request)
         chosen.append((_task.provider, _task.verifier_provider))
         assert kwargs["destroy_failed_sandboxes"]
         assert str(kwargs["desktop_resolution"]) == "1366x768"

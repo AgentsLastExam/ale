@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from ale.core.capability import round_verifier_resources
 from ale.core.config import RunTimeouts
@@ -409,6 +409,18 @@ def _separate_verifier(spec: TaskSpec, validations: int) -> Resources | None:
     )
 
 
+def _network(ctx: EpisodeContext, network: NetworkPolicy) -> dict[str, Any]:
+    """A request's ``network``, with the egress proxy and the episode's egress session under
+    ``allowlist``: the relay presents that session, whose hosts are those of the phase that
+    runs, never the agent's model session."""
+    allowlist = network.mode is NetworkMode.ALLOWLIST
+    return {
+        "network": network,
+        "proxy_url": ctx.proxy_url if allowlist else "",
+        "proxy_token": ctx.egress_token if allowlist else "",
+    }
+
+
 def _reward_from_text(content: bytes) -> str:
     """Harbor's ``reward.txt``, one number and nothing else, as the ``reward.json`` holding
     it, which then meets every rule of one."""
@@ -598,12 +610,6 @@ class EpisodeProtocol:
         from its snapshot too."""
         spec = ctx.spec
         mode = spec.verify.environment_mode
-        network = spec.network
-        if ctx.proxy_url and ctx.allowed_hosts and spec.network.mode is not NetworkMode.OPEN:
-            network = NetworkPolicy(
-                mode=NetworkMode.ALLOWLIST,
-                allowed_hosts=tuple(sorted(ctx.allowed_hosts)),
-            )
         return SandboxRequest(
             episode_id=ctx.episode_id,
             os=spec.os,
@@ -613,14 +619,13 @@ class EpisodeProtocol:
             if mode is VerificationMode.SNAPSHOT and spec.verify.resources is not None
             else None,
             round_verifier=round_verifier_resources(spec, validations),
+            verifier_network_mode=spec.verify.network.mode,
             planned_saves=validations,
             volumes=spec.volume_candidates,
             separate_verifier=_separate_verifier(spec, validations),
             resources=spec.resources,
-            network=network,
+            **_network(ctx, spec.solver_network),
             gateway_url=ctx.session.gateway_url or None,
-            proxy_url=ctx.proxy_url,
-            proxy_token=ctx.session.token,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=spec.resources.sudo,
             user=spec.image.user,
@@ -662,7 +667,9 @@ class EpisodeProtocol:
         # that could choose its own working directory was a second answer to a question
         # the image had already answered, and two answers can disagree.
         ctx.home = sandbox.agent_home
-        ctx.sandbox_identity = SandboxProvenance(user=sandbox.agent_user, sudo=spec.resources.sudo)
+        ctx.sandbox_identity = SandboxProvenance(
+            user=sandbox.agent_user, sudo=spec.resources.sudo, network=spec.network
+        )
         return sandbox
 
     def _verifier_request(
@@ -677,7 +684,8 @@ class EpisodeProtocol:
         """A verifier of its own, where ``placed`` puts it, as ``tests/``'s by default: of its
         image, mounting views of the volumes of the solver's snapshot ``volumes_from`` if
         given, or booted from the solver's ``snapshot`` with the solver's ``image``."""
-        resources = (placed or ctx.spec.verify).resources
+        placed = placed or ctx.spec.verify
+        resources = placed.resources
         prepared = (image or ctx.prepared_image) if snapshot else ctx.prepared_verifier_image
         if resources is None or prepared is None:
             raise TaskError("the verifier's image and resources were not prepared")
@@ -689,7 +697,7 @@ class EpisodeProtocol:
             snapshot=snapshot,
             volumes_from=volumes_from,
             resources=resources.as_resources(),
-            network=NetworkPolicy(mode=NetworkMode.OPEN),
+            **_network(ctx, placed.network),
             gateway_url=ctx.session.gateway_url or None,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=False,
@@ -756,7 +764,7 @@ class EpisodeProtocol:
                 prepared_image=image,
                 snapshot=handle,
                 resources=resources,
-                network=NetworkPolicy(mode=NetworkMode.OPEN),
+                **_network(ctx, validation.network),
                 gateway_url=ctx.session.gateway_url or None,
                 env={"ALE_EPISODE_ID": ctx.episode_id},
                 sudo=False,
@@ -934,7 +942,35 @@ class EpisodeProtocol:
         """One turn of the agent, with what is left of its time: the first, launched with the
         instruction, or resumed with it in the session a continued episode left; or a later
         one, resumed with ``prompt``, validation round ``round_index``'s, in its own
-        ``continuation``."""
+        ``continuation``. The egress session is the agent's from the moment its network is
+        applied until the turn ends, whatever ends it."""
+        try:
+            await self._turn(
+                task,
+                ctx,
+                sandbox,
+                logs=logs,
+                budget=budget,
+                prompt=prompt,
+                continuation=continuation,
+                round_index=round_index,
+            )
+        finally:
+            if ctx.open_egress_session is not None:
+                ctx.open_egress_session(())
+
+    async def _turn(
+        self,
+        task: Task,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        *,
+        logs: LogMirror | None,
+        budget: _AgentTime | None,
+        prompt: str | None,
+        continuation: NativeContinuation | None,
+        round_index: int | None,
+    ) -> None:
         spec = ctx.spec
         ctx.agent_started = True
         budget = budget or _AgentTime(self.timeouts.agent or spec.timeouts.agent)
@@ -978,7 +1014,7 @@ class EpisodeProtocol:
         if not first:
             # A booted solver has its CLI in place: sealed before anything is checked or
             # staged in it, so what the agent set to start at boot gets no open egress.
-            await self._seal(ctx, sandbox)
+            await self._apply_network(ctx, sandbox, spec.network, Phase.AGENT)
         try:
             ctx.agent_version = await harness.install(
                 _RecordedSandbox(ctx, sandbox, component="harness-install")
@@ -1008,7 +1044,7 @@ class EpisodeProtocol:
             ctx.agent_stop = stop
             return
         if first:
-            await self._seal(ctx, sandbox)
+            await self._apply_network(ctx, sandbox, spec.network, Phase.AGENT)
 
         variables = ctx.variables.values
 
@@ -1419,7 +1455,7 @@ class EpisodeProtocol:
         ctx.agent_version = await harness.install(
             _RecordedSandbox(ctx, sandbox, component="harness-install")
         )
-        await self._seal(ctx, sandbox)
+        await self._apply_network(ctx, sandbox, ctx.spec.network, Phase.AGENT)
 
         assert ctx.blobs is not None
         assert ctx.trajectory is not None
@@ -1450,43 +1486,44 @@ class EpisodeProtocol:
         self._persist_trajectory(ctx, builder.build())
         ctx.trajectory_written = True
 
-    async def _seal(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
-        """Apply the declared policy, and record that it was applied.
+    async def _apply_network(
+        self, ctx: EpisodeContext, sandbox: Sandbox, policy: NetworkPolicy, phase: Phase
+    ) -> None:
+        """Apply ``policy``, the agent's or the verifier's, for ``phase``, record what was
+        applied, and give the egress session its hosts.
 
-        A failure here ends the episode. An agent that ran with a network it was never
-        meant to have is not a result with a caveat — it is a different experiment, and
-        the lock file would describe the one that was intended rather than the one that
-        happened.
+        A sealed policy closes egress, an open one opens it, since a solver that serves a
+        shared verifier was created able to apply either phase's. A failure here ends the
+        episode. A phase that ran with a network it was never meant to have is not a result
+        with a caveat — it is a different experiment, and the lock file would describe the
+        one that was intended rather than the one that happened.
         """
-        assert ctx.execution is not None
+        execution = ctx.execution
+        assert execution is not None
+        sealed = policy.mode is not NetworkMode.OPEN
+
+        def record(succeeded: bool) -> None:
+            execution.append(
+                PolicyApplied(
+                    episode_id=ctx.episode_id,
+                    phase=phase.value,
+                    component="network-policy",
+                    level="info" if succeeded else "error",
+                    policy="sealed" if sealed else "open",
+                    requested_mode=policy.mode.value,
+                    succeeded=succeeded,
+                ),
+                durable=True,
+            )
+
         try:
-            await sandbox.close_egress()
+            await (sandbox.close_egress() if sealed else sandbox.open_egress())
         except BaseException:
-            ctx.execution.append(
-                PolicyApplied(
-                    episode_id=ctx.episode_id,
-                    phase=Phase.AGENT.value,
-                    component="network-policy",
-                    level="error",
-                    policy="sealed",
-                    requested_mode=ctx.spec.network.mode.value,
-                    succeeded=False,
-                ),
-                durable=True,
-            )
+            record(False)
             raise
-        else:
-            ctx.execution.append(
-                PolicyApplied(
-                    episode_id=ctx.episode_id,
-                    phase=Phase.AGENT.value,
-                    component="network-policy",
-                    policy="sealed",
-                    requested_mode=ctx.spec.network.mode.value,
-                    succeeded=True,
-                ),
-                durable=True,
-            )
+        record(True)
+        if ctx.open_egress_session is not None:
+            ctx.open_egress_session(policy.allowed_hosts)
 
     async def _validate_stdio_mcp(
         self, ctx: EpisodeContext, sandbox: Sandbox, resources: EffectiveAgentResources
@@ -1580,9 +1617,6 @@ class EpisodeProtocol:
             str(layout.path(stage, "instruction.md")), ctx.spec.instruction.encode("utf-8")
         )
         await self._stage_verification_config(ctx, sandbox, stage)
-        # Scoring is the framework's own work, and a verifier may need to reach something
-        # the agent could not. The agent has already finished; nothing it does can follow.
-        await sandbox.open_egress()
 
         python, destination = await self._site_packages(ctx, sandbox)
         framework_source, framework_version, framework_hash = installed_ale_verify()
@@ -1622,6 +1656,9 @@ class EpisodeProtocol:
         )
         phase = Phase.VERIFY if stage is Stage.TESTS else Phase.VALIDATE
         invocations: tuple[JudgeInvocation, ...] = ()
+        # The verifier's own network, applied just before its code runs: in a shared solver
+        # it replaces the agent's, and its Judges reach the Gateway under any policy.
+        await self._apply_network(ctx, sandbox, placed.network, phase)
         if ctx.open_judge_sessions is not None:
             ctx.open_judge_sessions(True)
         try:
@@ -1629,6 +1666,8 @@ class EpisodeProtocol:
         finally:
             if ctx.open_judge_sessions is not None:
                 ctx.open_judge_sessions(False)
+            if ctx.open_egress_session is not None:
+                ctx.open_egress_session(())
             if placed.user is not None and ctx.spec.os is OperatingSystem.LINUX:
                 # A solver kept for continuation gets its framework root back closed.
                 await sandbox.exec(["chmod", "--", "o-x", str(layout.root)])
@@ -2390,6 +2429,15 @@ class SolverSnapshot:
     allocation: ResourceAllocation
 
 
+@dataclass(frozen=True)
+class KeptSolver:
+    """A source episode's solver, kept running: the request it is reconnected for, which the
+    reverification completes with its own egress session, and how it is reconnected."""
+
+    request: SandboxRequest
+    attach: Callable[[SandboxRequest], Awaitable[Sandbox]]
+
+
 class ReverificationProtocol(EpisodeProtocol):
     """Run current verification against a retained episode without rerunning its agent: in
     or beside its kept solver, or, for a snapshot verifier, in a new Sandbox booted from its
@@ -2397,7 +2445,7 @@ class ReverificationProtocol(EpisodeProtocol):
 
     def __init__(
         self,
-        solver: Sandbox | SolverSnapshot,
+        solver: KeptSolver | SolverSnapshot,
         source_run_dir: Path,
         sandbox_identity: SandboxProvenance | None,
         *,
@@ -2419,38 +2467,42 @@ class ReverificationProtocol(EpisodeProtocol):
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
         if isinstance(self.solver, SolverSnapshot):
             return await self._from_snapshot(task, ctx, self.solver)
-        await _require_agent_episode(self.solver, ctx.spec.os, self.solver.request.episode_id)
-        ctx.resolved_image = self.solver.resolved_image
-        ctx.resource_allocation = self.solver.allocation
+        # Reconnected for this episode: a shared verifier's relay presents its egress session.
+        solver = await self.solver.attach(
+            self.solver.request.model_copy(update=_network(ctx, self.solver.request.network))
+        )
+        await _require_agent_episode(solver, ctx.spec.os, solver.request.episode_id)
+        ctx.resolved_image = solver.resolved_image
+        ctx.resource_allocation = solver.allocation
         ctx.sandbox_identity = self.sandbox_identity
-        ctx.home = self.solver.agent_home
+        ctx.home = solver.agent_home
         copy_trajectory(self.source_run_dir, ctx.run_dir)
 
         if ctx.spec.verify.environment_mode is VerificationMode.SHARED:
             try:
-                await self._capture_solver_evidence(ctx, self.solver)
+                await self._capture_solver_evidence(ctx, solver)
                 rewards = await self._with_deadline(
                     ctx,
                     Phase.VERIFY,
                     self._verify_timeout(ctx),
-                    self._verify(task, ctx, self.solver),
+                    self._verify(task, ctx, solver),
                 )
             finally:
-                if await self._sanitize_for_retention(ctx, self.solver):
-                    await self.solver.retain(
+                if await self._sanitize_for_retention(ctx, solver):
+                    await solver.retain(
                         roles=("solver", "verifier"),
                         reason="preserved after shared reverification",
                     )
                 else:
-                    await self.solver.destroy()
-                    self.solver.release_resources()
+                    await solver.destroy()
+                    solver.release_resources()
             ctx.verified_rewards = rewards
             return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
 
         try:
-            await self._capture_solver_evidence(ctx, self.solver)
+            await self._capture_solver_evidence(ctx, solver)
         finally:
-            await self.solver.retain(
+            await solver.retain(
                 roles=("solver",),
                 reason="preserved after artifact capture for reverification",
             )

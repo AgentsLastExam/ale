@@ -50,7 +50,9 @@ async def test_the_relay_opens_tunnels_for_clients_that_carry_no_token() -> None
     target = f"127.0.0.1:{destination.sockets[0].getsockname()[1]}"
     sessions = SessionRegistry()
     session = sessions.open(
-        GatewaySession(episode_id="e", model="m", allowed_hosts=frozenset({"127.0.0.1"}))
+        GatewaySession(
+            episode_id="e", model="", purpose="egress", allowed_hosts=frozenset({"127.0.0.1"})
+        )
     )
     proxy = EgressProxy(sessions, host="127.0.0.1")
     await proxy.start()

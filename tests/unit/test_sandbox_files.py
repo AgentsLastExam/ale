@@ -148,6 +148,7 @@ async def test_provider_reads_use_a_separate_guest_connection(tmp_path: Path, ba
         sandbox_type = DockerSandbox if backend == "docker" else QemuSandbox
         sandbox = sandbox_type.__new__(sandbox_type)
         sandbox._client, sandbox._file_client = clients
+        sandbox._sealed = False
         sandbox.agent_user = "unused"
         sandbox.request = SimpleNamespace()
         ready = asyncio.Event()

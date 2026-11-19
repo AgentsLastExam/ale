@@ -434,7 +434,7 @@ class QemuSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
-        if identity is Identity.AGENT and self._sealed and self._relay:
+        if self._sealed and self._relay:
             env = relay.variables(self._relay, HOST_IP) | (env or {})
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -540,17 +540,19 @@ class QemuSandbox(Sandbox):
         self._sealed = False
 
     async def close_egress(self) -> None:
-        """Restore the runner firewall before the agent starts."""
+        """Restore the runner firewall for a sealed phase; a sealed VM keeps the rules it
+        has, which inserted again would outlast the next opening."""
         if self.request.network.mode is NetworkMode.OPEN:
             return
         if not self.host_ip:
             raise ProviderStartError("cannot seal a VM whose host address is unknown")
-        for rule in (
+        rules = (
             f"iptables -I FORWARD 1 -i {GUEST_BRIDGE} -j DROP",
             *(f"iptables -I FORWARD 1 {match} -j ACCEPT" for match in self._seal_rules()),
             f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -j DROP",
             f"iptables -I INPUT 1 -i {GUEST_BRIDGE} -p udp --dport 67 -j ACCEPT",
-        ):
+        )
+        for rule in () if self._sealed else rules:
             code, _, stderr = await _run(
                 "docker", "exec", self.container, "sh", "-c", rule, timeout=60
             )

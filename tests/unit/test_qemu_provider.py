@@ -278,6 +278,7 @@ async def test_a_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = client  # type: ignore[assignment]
     sandbox._file_client = Client()  # type: ignore[assignment]
+    sandbox._sealed = False
     sandbox.request = request(os=operating_system)
     sandbox.container = "ale-qemu-build"
     sandbox.storage = tmp_path / "storage"
@@ -410,6 +411,7 @@ def _snapshotting(
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = Client()  # type: ignore[assignment]
     sandbox._file_client = Client()  # type: ignore[assignment]
+    sandbox._sealed = False
     sandbox.volumes = ("/work",)
     sandbox.sandbox_id = sandbox_id
     sandbox.request = request(role="shared")
@@ -1414,7 +1416,8 @@ def test_open_mode_uses_only_the_runner_firewall(monkeypatch: pytest.MonkeyPatch
     assert sandbox._sealed is False  # type: ignore[attr-defined]
 
 
-def test_the_relay_is_injected_only_for_sealed_agent_commands() -> None:
+def test_the_relay_is_injected_into_every_command_while_sealed() -> None:
+    """The agent's, and a verifier's under its own allowlist: the framework runs it."""
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox.request = request(  # type: ignore[attr-defined]
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
@@ -1438,8 +1441,9 @@ def test_the_relay_is_injected_only_for_sealed_agent_commands() -> None:
         "https_proxy": f"http://{RELAY}",
         "NO_PROXY": "172.30.0.1,localhost,127.0.0.1",
     }
-    asyncio.run(sandbox.exec(["true"]))
-    assert sandbox._client.env is None  # type: ignore[attr-defined]
+    asyncio.run(sandbox.exec(["true"], env={"ALE_STAGE_DIR": "/opt/ale/tests"}))
+    assert sandbox._client.env["HTTPS_PROXY"] == f"http://{RELAY}"  # type: ignore[attr-defined]
+    assert sandbox._client.env["ALE_STAGE_DIR"] == "/opt/ale/tests"  # type: ignore[attr-defined]
 
 
 def test_allowlist_forwards_gateway_and_proxy_ports(
@@ -1587,7 +1591,7 @@ def test_a_relay_the_guest_cannot_start_fails_the_seal(
             raise failure
 
     sandbox = _sealing_sandbox(monkeypatch, Unanswered())
-    with pytest.raises(ProviderStartError, match="could not start the agent's egress relay"):
+    with pytest.raises(ProviderStartError, match="could not start the egress relay"):
         asyncio.run(sandbox.close_egress())
 
 

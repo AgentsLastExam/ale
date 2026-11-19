@@ -8,8 +8,9 @@ go, so the failure mode is closed.
 
 This is a raw TCP server rather than another route on the model gateway because
 ``CONNECT`` is not a path request — its target is ``host:port``, and an HTTP router
-never sees it. Sharing the gateway's session registry keeps the two halves consistent:
-one token, one episode, one allowlist.
+never sees it. It shares the gateway's session registry but accepts only an episode's
+egress session, whose hosts are those of the phase that runs, and which the gateway in turn
+refuses for model calls.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ class EgressProxy:
 
         session = self._authenticate(lines)
         if session is None:
-            await _refuse(writer, 407, "unknown or missing episode token")
+            await _refuse(writer, 407, "unknown, suspended or missing egress token")
             return
 
         host, _, port_text = parts[1].rpartition(":")
@@ -118,7 +119,7 @@ class EgressProxy:
                     token = credentials.partition(":")[0]
                 else:
                     token = authorization.removeprefix("Bearer ").strip()
-                return self.sessions.resolve(token)
+                return self.sessions.egress(token)
         return None
 
 

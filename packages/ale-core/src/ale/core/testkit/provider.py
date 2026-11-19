@@ -617,11 +617,12 @@ class ProviderConformance:
     async def test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else(self) -> None:
         """The isolation claim a ``block`` RunLock makes, across the phase transitions.
 
-        Framework phases have the network; the agent phase reaches only the episode's
-        Gateway, not the Internet and not any other service on the Host; verification
-        gets the network back. The Gateway's address never moves in between, and is at the
-        same port whatever port the Host serves it on. Reaching the Internet means
-        completing a TLS handshake with a public host: a backend's network may accept a
+        Framework phases have the network; a sealed phase, the agent's or a verifier's,
+        reaches only the episode's Gateway, not the Internet and not any other service on the
+        Host, and a verifier sealed after the agent stays so; an open phase gets the network
+        back, once opening an open Sandbox. The Gateway's address never moves in between,
+        and is at the same port whatever port the Host serves it on. Reaching the Internet
+        means completing a TLS handshake with a public host: a backend's network may accept a
         connection outside the sandbox and pass nothing on.
         """
         async with _host_services() as (gateway_port, other_port):
@@ -636,6 +637,8 @@ class ProviderConformance:
                 assert opened[f"tls={INTERNET}"], "framework phases must have the network"
 
                 await sandbox.close_egress()
+                # The agent's phase, then a verifier's sealed in the same Sandbox.
+                await sandbox.close_egress()
                 sealed = await _reach(
                     sandbox, f"http={gateway}", f"tls={INTERNET}", f"tcp={host}:{other_port}"
                 )
@@ -647,8 +650,9 @@ class ProviderConformance:
                 assert sandbox.gateway_url == gateway
 
                 await sandbox.open_egress()
+                await sandbox.open_egress()
                 reopened = await _reach(sandbox, f"tls={INTERNET}", identity=Identity.FRAMEWORK)
-                assert reopened[f"tls={INTERNET}"], "verification must get the network back"
+                assert reopened[f"tls={INTERNET}"], "an open phase must get the network back"
 
     @pytest.mark.asyncio
     async def test_a_task_that_declared_open_is_never_sealed(self) -> None:
