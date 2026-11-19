@@ -75,8 +75,9 @@ __all__ = [
     "verify_grant",
 ]
 
-#: Peers speaking another version refuse each other instead of guessing.
-PROTOCOL_VERSION = 6
+#: Peers speaking another version refuse each other instead of guessing. It stays 0.1.0 while
+#: the Fleet is developed, its control plane and Nodes running one checkout.
+PROTOCOL_VERSION = "0.1.0"
 
 #: A Node name: it appears in URLs, Sandbox records and operator commands.
 NODE_NAME = r"^[a-z0-9][a-z0-9-]{0,62}$"
@@ -173,7 +174,7 @@ class NodeDeclaration(BaseModel):
 
     model_config = _STRICT
 
-    protocol: int = PROTOCOL_VERSION
+    protocol: str = PROTOCOL_VERSION
     name: str = Field(pattern=NODE_NAME)
     boot_id: str = Field(min_length=1)
     """The machine's boot. It changes when the machine restarts, which ends every Sandbox on
