@@ -500,6 +500,7 @@ async def test_a_kept_microvm_driven_again_counts_what_its_snapshot_holds(
     storage = tmp_path / "storage"
     storage.mkdir()
     (storage / "guest-token").write_text("token")
+    (storage / "sandbox.json").write_text(json.dumps({"volumes": ["/work"]}))
     rootfs = tmp_path / "rootfs.ext4"
     record = {
         "Name": "/ale-fc-x",

@@ -97,10 +97,21 @@ class ArtifactSink(Protocol):
     """Collects files out of a sandbox into the episode's run directory."""
 
     enabled: bool
+    retained: bool
+    """Whether the Run keeps the copy, as ``artifacts.collect = "host"`` asks."""
 
     async def collect(
-        self, sandbox: Sandbox, source: str, name: str, exclude: tuple[str, ...] = ()
-    ) -> None: ...
+        self,
+        sandbox: Sandbox,
+        source: str,
+        name: str,
+        exclude: tuple[str, ...] = (),
+        *,
+        restored: bool = True,
+    ) -> None:
+        """Copy ``source`` out; one not ``restored`` reaches no separate verifier, which
+        mounts a view of it instead."""
+        ...
 
     async def restore(self, sandbox: Sandbox) -> None: ...
 

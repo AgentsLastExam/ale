@@ -286,11 +286,13 @@ def choose(
     for node in nodes:
         if not node.online or node.draining or node.name in refused:
             continue
-        if demand.snapshot is not None and demand.snapshot not in node.snapshots:
+        saved = demand.snapshot or demand.volumes_from
+        if saved is not None and saved not in node.snapshots:
             continue
-        # A Sandbox booted from a snapshot may need other resources than the one saved, which
-        # the Node's first leaf for them need not be; it boots on the leaf that saved it.
-        leaf = node.snapshots[demand.snapshot] if demand.snapshot is not None else None
+        # A Sandbox booted from a snapshot, or mounting views of its volumes, may need other
+        # resources than the one saved, which the Node's first leaf for them need not be; it
+        # starts on the leaf that saved it.
+        leaf = node.snapshots[saved] if saved is not None else None
         profile = _profile(node.declaration, demand, leaf=leaf)
         if profile is None:
             continue

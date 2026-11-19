@@ -55,7 +55,7 @@ Providers; a Node lends no scheduler, since it is itself where Sandboxes start.
 | Part | Holds |
 |---|---|
 | `resources` | CPUs, memory, disk, GPUs by model, and `macos_vm_slots` |
-| `profiles` | The **capability profiles** of each lent leaf, one per combination it can start (a leaf whose features exclude each other declares several), in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots and how many it saves in a row, GPUs, their models and memory and how it shares them, CPU and memory limits (never more than the Node lends in all), whether it holds a Sandbox to its `storage_mb`, and container features |
+| `profiles` | The **capability profiles** of each lent leaf, one per combination it can start (a leaf whose features exclude each other declares several), in the order the Node prefers its leaves: provider id, kind, operating system, architecture, desktop, network modes, snapshots and how many it saves in a row, GPUs, their models and memory and how it shares them, CPU and memory limits (never more than the Node lends in all), whether it holds a Sandbox to its `storage_mb`, container features, and whether it mounts volumes |
 | `framework` | The identity of the framework its engine installs into every Sandbox |
 | `boot_id` | The machine's boot: it changes when the machine restarts, which ends every Sandbox on it, and a restarted node agent keeps it |
 
@@ -73,26 +73,29 @@ it took, the snapshots it keeps, and its free disk. A Node silent for 30 seconds
 
 A Run asks for each Sandbox with a **demand**: kind, operating system, architecture, network
 mode, resources with their container features, the image's key, the Run's framework
-identity, the episode's retention, any snapshot it boots from, how many validation rounds
-save it, and, for the solver of a snapshot verifier or of a shared validation round's, the
-verifier's resources. A Sandbox runs the framework of the engine driving it, so only a Node
-with the same framework identity serves it. Every Node prepares the images it serves itself,
-and Nodes never copy images from one another; an image's **key** is the identity of what it
-is prepared from, which the Run knows before any Node prepares it, and a Node keeps each
-image it prepared under its key.
+identity, the episode's retention, any snapshot it boots from or whose
+[volumes](task-authoring.md#volumes) it mounts views of, how many validation rounds save it,
+and, for the solver of a snapshot verifier or of a shared validation round's, the verifier's
+resources. A Sandbox runs the framework of the engine driving it, so only a Node with the
+same framework identity serves it. Every Node prepares the images it serves itself, and
+Nodes never copy images from one another; an image's **key** is the identity of what it is
+prepared from, which the Run knows before any Node prepares it, and a Node keeps each image
+it prepared under its key.
 
 1. **Filter.** A Node is a candidate when it is online and not draining, has a profile that
    serves the demand, has not refused this Sandbox, and can be reached by its Run. Profiles
    serve demands by the one rule a Run uses to choose a Provider, and placement takes the
    Node's first that serves it, so a Node prefers its leaves in its own order. A boot from a
-   snapshot is served only by the Node that keeps the snapshot, with the leaf that saved it,
-   even when another of its Node's leaves would serve it first. The solver of a snapshot
-   verifier needs one profile that serves both and a Node whose whole capacity holds the
-   verifier, since the verifier boots there. A demand that no registered Node could serve
-   even when idle fails at once, naming what the closest profile misses in the words of a
-   Run's own selection, as does a boot from a snapshot whose leaf does not serve it, whose
-   Node could never hold it or its snapshot verifier, or whose Node refused it or cannot be
-   reached by its Run.
+   snapshot, and a Sandbox that mounts views of a snapshot's volumes, is served only by the
+   Node that keeps the snapshot, with the leaf that saved it, even when another of its
+   Node's leaves would serve it first. The solver of a snapshot verifier needs one profile
+   that serves both and a Node whose whole capacity holds the verifier, since the verifier
+   boots there. A demand that no registered Node could serve even when idle fails at once,
+   naming what the closest profile misses in the words of a Run's own selection, as does a
+   boot from a snapshot, or a view of one, whose leaf does not serve it, whose Node could
+   never hold it or its snapshot verifier, or whose Node refused it or cannot be reached by
+   its Run; a separate verifier refused so copies the volumes instead ([Episode
+   protocol](episode-protocol.md#verify)).
 2. **Score** each candidate by the estimated time to a ready Sandbox there, and take the
    lowest; ties go to a fixed per-image order of Nodes (rendezvous hashing), which keeps each
    image on the same few Nodes.
@@ -192,11 +195,11 @@ Sandbox objects a local Run would, so every guarantee of the
 Run's own machine; the agent only carries the calls.
 
 - **Creation.** The agent creates a Sandbox only on a grant that names this Node and whose
-  demand matches the request's kind, system, network mode, resources, snapshot and snapshot
-  verifier, only from the image this Node prepared for the grant's image key, and only when
-  its own count of what it holds has room. A refusal names the Node's reason, and the Run
-  asks the control plane for another Node. Asking again for the same Sandbox joins the
-  creation under way.
+  demand matches the request's kind, system, network mode, resources, snapshot, the snapshot
+  whose volumes it views, and snapshot verifier, only from the image this Node prepared for
+  the grant's image key, and only when its own count of what it holds has room. A refusal
+  names the Node's reason, and the Run asks the control plane for another Node. Asking again
+  for the same Sandbox joins the creation under way.
 - **The Sandbox API** mirrors the Sandbox contract. A command streams its output while it
   runs and is cancelled in the Sandbox when its caller goes away. A Run's directory arrives
   as a tar stream that keeps its links, and the Node's Sandbox uploads it, so upload

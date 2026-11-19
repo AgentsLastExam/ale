@@ -119,6 +119,7 @@ def demand(
     image: str = IMAGE,
     retention: str = "destroy",
     snapshot: str | None = None,
+    volumes_from: str | None = None,
 ) -> SandboxDemand:
     return SandboxDemand(
         kind=kind,
@@ -130,6 +131,7 @@ def demand(
         framework=FRAMEWORK,
         retention=retention,  # type: ignore[arg-type]
         snapshot=snapshot,
+        volumes_from=volumes_from,
     )
 
 
@@ -1049,6 +1051,31 @@ class TestRetention:
         )
         image = ask(control, 6, container(snapshot=source.sandbox_id, image=OTHER_IMAGE))
         assert image.status is SandboxStatus.FAILED and "another image" in image.reason
+
+    def test_a_verifier_views_a_snapshot_s_volumes_on_the_node_that_keeps_it(
+        self, control: ControlPlane, clock: Clock
+    ) -> None:
+        """A separate verifier, of another image, that mounts views of a snapshot's volumes
+        goes to the snapshot's Node, and fails at once where there is no such snapshot."""
+        control.register(saving("node-a"))
+        control.register(saving("node-b"))
+        source = ask(control, 1, container(retention="snapshot"))
+        node = source.node
+        assert node is not None
+        beat(control, node, (source.sandbox_id, "ready"))
+        control.snapshot(source.sandbox_id, KEPT)
+        control.release(source.sandbox_id)
+        keep_beat(control, node, snapshots=(holding(source.sandbox_id, clock()),))
+        viewers = [
+            ask(control, n, container(volumes_from=source.sandbox_id, image=OTHER_IMAGE))
+            for n in (2, 3)
+        ]
+        assert [placement.node for placement in viewers] == [node, node]
+        unknown = ask(control, 4, container(volumes_from="sandbox-9999"))
+        assert (unknown.status, unknown.reason) == (
+            SandboxStatus.FAILED,
+            "there is no snapshot sandbox-9999",
+        )
 
     def test_a_snapshot_boot_fails_when_its_node_refuses_it_or_its_run_cannot_reach_it(
         self, control: ControlPlane

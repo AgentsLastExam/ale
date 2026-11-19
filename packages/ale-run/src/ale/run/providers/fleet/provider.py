@@ -776,11 +776,10 @@ class FleetProvider(Provider):
     async def create(self, request: SandboxRequest) -> Sandbox:
         client = self.client
         await self.prepare_image(request.prepared_image)
-        if request.snapshot is not None:
-            # The Node that keeps the snapshot knows its Provider's name for it.
-            request = request.model_copy(
-                update={"snapshot": _named(request.snapshot, SNAPSHOT_PREFIX)}
-            )
+        # The Node that keeps a snapshot knows its Provider's name for it.
+        for name in ("snapshot", "volumes_from"):
+            if (handle := getattr(request, name)) is not None:
+                request = request.model_copy(update={name: _named(handle, SNAPSHOT_PREFIX)})
         demand = self._demand(
             request.prepared_image,
             request.os,
@@ -791,6 +790,7 @@ class FleetProvider(Provider):
             update={
                 "retention": request.retention,
                 "snapshot": request.snapshot,
+                "volumes_from": request.volumes_from,
                 "round_verifier": request.round_verifier,
                 "planned_saves": request.planned_saves,
             }
@@ -1020,6 +1020,7 @@ class FleetSandbox(Sandbox):
         self._client = client
         self.node = node
         self._gateway = description.gateway_url
+        self.volumes = description.volumes
         self._url = f"{node.address}/v1/sandboxes/{description.sandbox_id}"
         #: The context each command ran in, by the number the Node's notices name it by.
         self._contexts: list[contextvars.Context] = []

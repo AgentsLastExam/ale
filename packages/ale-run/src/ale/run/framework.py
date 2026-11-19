@@ -170,6 +170,24 @@ RestartSec=1
 [Install]
 WantedBy=multi-user.target
 """
+#: Mounts a VM's volumes as it boots, before the guest service, the display manager or any
+#: login starts, from what the Provider hands it in QEMU's firmware configuration.
+_VOLUMES_UNIT = f"""\
+[Unit]
+Description=ALE volumes
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=ale-guestd.service display-manager.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={guestd.PYTHON["linux"]} -I /opt/ale/volumes.py
+
+[Install]
+WantedBy=multi-user.target
+"""
+_VOLUMES_SCRIPT = Path(__file__).parent / "providers" / "qemu" / "guest_volumes.py"
 
 #: Run as root while the layer is built. POSIX sh, so it works in any Linux image.
 _SETUP = r"""set -eu
@@ -192,13 +210,15 @@ chown -R 0:0 /opt/ale
 chmod -R go-rwx /opt/ale
 chown 0:0 /usr/local/bin/cua-driver
 chmod 0755 /usr/local/bin/cua-driver
-if [ -f /etc/systemd/system/ale-guestd.service ]; then
-    chown 0:0 /etc/systemd/system/ale-guestd.service
-    chmod 0644 /etc/systemd/system/ale-guestd.service
-    mkdir -p /etc/systemd/system/multi-user.target.wants
-    ln -sf /etc/systemd/system/ale-guestd.service \
-        /etc/systemd/system/multi-user.target.wants/ale-guestd.service
-fi
+for unit in ale-guestd ale-volumes; do
+    if [ -f "/etc/systemd/system/$unit.service" ]; then
+        chown 0:0 "/etc/systemd/system/$unit.service"
+        chmod 0644 "/etc/systemd/system/$unit.service"
+        mkdir -p /etc/systemd/system/multi-user.target.wants
+        ln -sf "/etc/systemd/system/$unit.service" \
+            "/etc/systemd/system/multi-user.target.wants/$unit.service"
+    fi
+done
 # Only the program: the grant is made at every sandbox start. An image with neither sudo
 # nor a package manager can still serve a Task that does not ask for elevation.
 if ! command -v sudo >/dev/null 2>&1; then
@@ -226,6 +246,7 @@ def framework_identity(*, user: str, vm: bool) -> str:
             "python": _PYTHON["linux"][1],
             "setup": _SETUP,
             "unit": _GUEST_UNIT if vm else None,
+            "volumes": (_VOLUMES_UNIT, _VOLUMES_SCRIPT.read_text()) if vm else None,
             "user": user,
         }
     )
@@ -496,6 +517,8 @@ async def _frame_linux_disk(disk: Path, *, user: str, builder: str) -> None:
             "--upload", "/framework/setup.sh:/opt/ale/setup.sh",
             "--upload", "/framework/cua-driver:/usr/local/bin/cua-driver",
             "--upload", "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service",
+            "--upload", "/framework/ale-volumes.service:/etc/systemd/system/ale-volumes.service",
+            "--upload", "/framework/volumes.py:/opt/ale/volumes.py",
             "--copy-in", "/python:/tmp",
             "--run-command", setup,
             "--delete", "/tmp/python",
@@ -564,6 +587,8 @@ def _stage(context: Path, driver: Path, *, user: str, vm: bool) -> None:
     (context / "setup.sh").write_text(_SETUP)
     if vm:
         (context / "ale-guestd.service").write_text(_GUEST_UNIT.format(user=user))
+        (context / "ale-volumes.service").write_text(_VOLUMES_UNIT)
+        shutil.copy2(_VOLUMES_SCRIPT, context / "volumes.py")
 
 
 def _only(names: tuple[str, ...]):  # type: ignore[no-untyped-def]

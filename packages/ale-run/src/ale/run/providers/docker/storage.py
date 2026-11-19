@@ -5,7 +5,8 @@ store or under rootless Docker, so a leaf measures what each Sandbox that names
 ``storage_mb`` has written over its image instead, and ends it once that passes the limit,
 as Kubernetes holds a Pod to its ``ephemeral-storage``. What it has written is the disk its
 writable layer takes, ``SizeRw`` of ``docker container inspect --size``, which the daemon
-counts from outside the Sandbox. This module measures and decides; the Provider acts.
+counts from outside the Sandbox, and what it wrote to its volumes, which a helper outside it
+measures (volumes.py). This module measures and decides; the Provider acts.
 """
 
 from __future__ import annotations
@@ -57,12 +58,15 @@ class Watch:
         act: Callable[[int], Awaitable[None]],
         *,
         base: int = 0,
+        volumes: Callable[[], Awaitable[int]] | None = None,
     ):
         self.container = container
         #: What the Sandbox may write over its image, its Task's ``storage_mb``, in MiB.
         self.limit_mb = limit_mb
         #: What the snapshot it booted from holds over that image, in bytes, which counts too.
         self.base = base
+        #: What it has written to its volumes, measured with each measurement of its layer.
+        self._volumes = volumes
         self._act = act
         self._task = asyncio.get_running_loop().create_task(self._poll())
 
@@ -78,6 +82,8 @@ class Watch:
             await asyncio.sleep(WATCH_SEC)
             try:
                 size = await written(self.container)
+                if size is not None and self._volumes is not None:
+                    size += await self._volumes()
             except ProviderStartError:
                 if not failing:
                     _log.warning(

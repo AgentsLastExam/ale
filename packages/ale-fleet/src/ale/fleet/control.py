@@ -650,11 +650,12 @@ class ControlPlane:
     def _hopeless(self, record: SandboxRecord) -> str | None:
         """Why no Node the Sandbox may go to could ever serve it, or None when one could.
 
-        A boot from a snapshot has one Node and one leaf to go to, whose whole capacity
-        decides at once: it is never left waiting for room that Node cannot give.
+        A boot from a snapshot, or a Sandbox that mounts views of its volumes, has one Node and
+        one leaf to go to, whose whole capacity decides at once: it is never left waiting for
+        room that Node cannot give.
         """
         avoided = self._avoided(record)
-        if record.demand.snapshot is not None:
+        if record.demand.snapshot is not None or record.demand.volumes_from is not None:
             return self._unbootable(record.demand, avoided)
         return unservable(record.demand, [v for v in self.views() if v.name not in avoided])
 
@@ -688,18 +689,21 @@ class ControlPlane:
     # --- retention --------------------------------------------------------------------
 
     def _unbootable(self, demand: SandboxDemand, avoided: tuple[str, ...]) -> str | None:
-        """Why a demand cannot boot from the snapshot it names, if it names one, when it may
-        not go to the ``avoided`` Nodes."""
-        if demand.snapshot is None:
+        """Why a demand cannot boot from the snapshot it names, or mount views of its volumes,
+        if it names one, when it may not go to the ``avoided`` Nodes."""
+        saved = demand.snapshot or demand.volumes_from
+        if saved is None:
             return None
-        snapshot = self.snapshots.get(demand.snapshot)
+        snapshot = self.snapshots.get(saved)
         if snapshot is None or snapshot.released:
-            return f"there is no snapshot {demand.snapshot}"
-        if snapshot.demand.image != demand.image or snapshot.demand.kind is not demand.kind:
-            return f"snapshot {demand.snapshot} was taken from another image"
+            return f"there is no snapshot {saved}"
+        if demand.snapshot is not None and (
+            snapshot.demand.image != demand.image or snapshot.demand.kind is not demand.kind
+        ):
+            return f"snapshot {saved} was taken from another image"
         if snapshot.node in avoided:
             return (
-                f"snapshot {demand.snapshot} is on {snapshot.node}, which refused this Sandbox "
+                f"snapshot {saved} is on {snapshot.node}, which refused this Sandbox "
                 "or its Run cannot reach"
             )
         node = self.nodes.get(snapshot.node)
@@ -709,24 +713,21 @@ class ControlPlane:
         # within that Node's capacity.
         leaf = [p for p in node.declaration.profiles if p.provider == snapshot.provider]
         if node.declaration.framework != demand.framework:
-            return (
-                f"snapshot {demand.snapshot} is on {snapshot.node}, which runs another engine's "
-                "framework"
-            )
+            return f"snapshot {saved} is on {snapshot.node}, which runs another engine's framework"
         if why := closest(leaf, demand.needs):
             return (
-                f"snapshot {demand.snapshot} is {snapshot.provider}'s on {snapshot.node}, "
+                f"snapshot {saved} is {snapshot.provider}'s on {snapshot.node}, "
                 f"which does not serve this Sandbox: {'; '.join(why)}"
             )
         profile = next(p for p in leaf if not unmet(p, demand.needs))
         if why := short_in_all(node.declaration, demand.resources, profile):
-            return f"snapshot {demand.snapshot} is on {snapshot.node}, which cannot hold it: {why}"
+            return f"snapshot {saved} is on {snapshot.node}, which cannot hold it: {why}"
         # A snapshot verifier boots from what this Sandbox saves, on the same Node.
         if demand.verifier is not None and (
             why := short_in_all(node.declaration, demand.verifier, profile)
         ):
             return (
-                f"snapshot {demand.snapshot} is on {snapshot.node}, which cannot hold its "
+                f"snapshot {saved} is on {snapshot.node}, which cannot hold its "
                 f"snapshot verifier: {why}"
             )
         return None

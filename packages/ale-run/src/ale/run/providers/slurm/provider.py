@@ -1,9 +1,9 @@
 """Rootless gVisor Sandboxes in single-node Slurm allocations.
 
-A solver gets an allocation of its own, sized for it and for the verifier its request
-names, and every Sandbox booted from one of its snapshots boots in that allocation while it
-has room, from the node's own store: a snapshot is never copied for its episode. The
-allocation ends with the last Sandbox and snapshot in it.
+A solver gets an allocation of its own, sized for it and for the verifiers its request
+names, and every Sandbox booted from one of its snapshots, or mounting views of its volumes,
+starts in that allocation while it has room, from the node's own store: a snapshot is never
+copied for its episode. The allocation ends with the last Sandbox and snapshot in it.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import json
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model, unmet
@@ -43,7 +44,9 @@ from ale.run.images import resolve_container_image, resolve_prepared_container_i
 from ale.run.providers import memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import gvisor
+from ale.run.providers.docker import volumes as docker_volumes
 from ale.run.providers.privileges import set_and_prove_elevation
+from ale.run.providers.slurm import worker
 from ale.run.providers.slurm.job import (
     CACHE,
     SNAPSHOTS,
@@ -91,14 +94,14 @@ def _profiles(partition: SlurmPartition) -> tuple[CapabilityProfile, ...]:
             arch=Arch.X86_64,
             gui=True,
             network_modes=frozenset(NetworkMode),
-            # A container engine keeps its images in volumes, which a commit does not keep.
-            snapshot=feature is not ContainerFeature.NESTED_CONTAINERS,
-            max_saves=MAX_SAVES if feature is not ContainerFeature.NESTED_CONTAINERS else None,
+            snapshot=True,
+            max_saves=MAX_SAVES,
             gpus=partition.gpu_model is not None,
             gpu_models=(partition.gpu_model,) if partition.gpu_model else (),
             max_cpus=partition.max_cpus,
             max_memory_mb=_largest_memory_mb(partition),
             container_features=frozenset(common | {feature}),
+            volumes=True,
         )
         for feature in (ContainerFeature.RAW_SOCKETS, ContainerFeature.NESTED_CONTAINERS)
     )
@@ -118,9 +121,32 @@ def _runtime(features: Sequence[ContainerFeature]) -> tuple[str, list[str]]:
     args.extend("--cap-add=" + cap for cap in caps)
     if ContainerFeature.MOUNT in features and "SYS_ADMIN" not in caps:
         args.append("--cap-add=SYS_ADMIN")
-    if runtime == gvisor.NESTED:
-        args.extend("--volume=" + volume for volume in gvisor.ENGINE_STORAGE)
     return runtime, args
+
+
+def _engines(resources: Resources) -> tuple[str, ...]:
+    """A Sandbox's container engine's storage, which is volumes of its own."""
+    if ContainerFeature.NESTED_CONTAINERS in resources.container_features:
+        return gvisor.ENGINE_STORAGE
+    return ()
+
+
+def _volume_specs(
+    stacks: dict[str, dict[str, object]], engines: Sequence[str], *, viewing: bool
+) -> list[dict[str, object]]:
+    """The volumes of a Sandbox booted from a snapshot with ``stacks``, or ``viewing`` its
+    volumes from a Sandbox of another image: a view of each volume, and a copy of each of
+    ``engines`` the snapshot holds, never a view, as an engine's own layers need their
+    whiteouts; an engine path the snapshot lacks gets a volume of its own."""
+    specs: list[dict[str, object]] = []
+    for path, stack in stacks.items():
+        if not stack["copied"]:
+            specs.append(dict(path=path, kind="view", layers=stack["layers"], root=stack["root"]))
+        elif path in engines and not viewing:
+            specs.append(dict(path=path, kind="copy", layers=stack["layers"], copied=True))
+    held = {str(spec["path"]) for spec in specs}
+    specs.extend(dict(path=path, kind="fresh", copied=True) for path in engines if path not in held)
+    return specs
 
 
 def _size(resources: Resources) -> tuple[int, int, int]:
@@ -128,12 +154,16 @@ def _size(resources: Resources) -> tuple[int, int, int]:
     return resources.cpus, step_memory_mb(resources.memory_mb), resources.gpus
 
 
-def _capacity(needs: SandboxNeeds) -> tuple[int, int, int]:
-    """The allocation that holds a Sandbox and, one at a time, the verifier booted from its
-    snapshot."""
+def _capacity(needs: SandboxNeeds, separate: Resources | None = None) -> tuple[int, int, int]:
+    """The allocation that holds a Sandbox and, one at a time, each verifier booted from its
+    snapshot and the ``separate`` verifier that mounts views of its volumes."""
     sizes = [_size(needs.resources)]
-    if needs.verifier is not None:
-        sizes.append(_size(needs.verifier.resources))
+    verifier = needs.verifier
+    while verifier is not None:
+        sizes.append(_size(verifier.resources))
+        verifier = verifier.verifier
+    if separate is not None:
+        sizes.append(_size(separate))
     cpus, memory_mb, gpus = zip(*sizes, strict=True)
     return max(cpus), max(memory_mb), max(gpus)
 
@@ -160,8 +190,15 @@ class _Snapshot:
     reason: str
     boots: int
     """The Sandboxes its episode boots from it still, which keep its allocation."""
+    stacks: dict[str, dict[str, object]] = field(default_factory=dict)
+    """Each volume's layers in the allocation's store, topmost first, its root's owner and
+    mode, and whether it is an engine's storage, by path."""
     archive: str | None = None
     """Below the cache, once it was written for another allocation to boot from."""
+
+    @property
+    def layers(self) -> set[str]:
+        return {str(layer) for stack in self.stacks.values() for layer in stack["layers"]}
 
 
 @dataclass(eq=False)
@@ -177,6 +214,10 @@ class _Chain:
     gpus: int
     running: dict[str, tuple[int, int, int]] = field(default_factory=dict)
     snapshots: dict[str, _Snapshot] = field(default_factory=dict)
+    images: set[str] = field(default_factory=set)
+    """The images loaded since, a separate verifier's, by the ID Podman gives them."""
+    viewing: dict[str, set[str]] = field(default_factory=dict)
+    """The layers each running Sandbox's views stack, which stay while it runs."""
     count: int = 0
     closed: bool = False
 
@@ -276,6 +317,7 @@ class SlurmSandbox(TunneledSandbox):
         allocation: ResourceAllocation,
         home: str,
         gateway: str | None,
+        volumes: tuple[str, ...],
     ) -> None:
         super().__init__(
             sandbox_id=f"{chain.job.host}/{chain.job.id}.{steps.index}",
@@ -293,6 +335,7 @@ class SlurmSandbox(TunneledSandbox):
         self._local_gateway = gateway
         self._relay = None
         self._sealed = request.network.mode is not NetworkMode.OPEN
+        self.volumes = volumes
 
     async def open_egress(self) -> None:
         if self._sealed:
@@ -319,17 +362,14 @@ class SlurmSandbox(TunneledSandbox):
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
         """Stop the Sandbox and commit its disk to its allocation's store, which it keeps for
-        the Sandboxes its episode boots from it. A snapshot its Run keeps after the episode
-        is written to the cluster's shared file system too, as the allocation ends then."""
-        if self.allocation.runtime == gvisor.NESTED:
-            raise ProviderCapabilityError(
-                "a Sandbox that runs a container engine saves no snapshot"
-            )
+        the Sandboxes its episode boots from it, with its volumes' layers. A snapshot its Run
+        keeps after the episode is written to the cluster's shared file system too, as the
+        allocation ends then."""
         # The relay and the guest's sessions end with the container.
         await relay.stop(self._client, self.request)
         self._relay = None
         await self.connections.aclose()
-        image = await self.chain.job.save(self.steps.index)
+        image, stacks = await self.chain.job.save(self.steps.index)
         snapshot = _Snapshot(
             index=self.steps.index,
             image=image,
@@ -338,6 +378,7 @@ class SlurmSandbox(TunneledSandbox):
             roles=roles,
             reason=reason,
             boots=int(self.request.snapshot_verifier is not None),
+            stacks=stacks,
         )
         handle = _handle(self.chain.job, self.steps.index)
         self.chain.snapshots[snapshot.index] = snapshot
@@ -374,8 +415,14 @@ class SlurmProvider(Provider):
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
         return tuple(profile for p in self.config.partitions for profile in _profiles(p))
 
-    def _partition(self, needs: SandboxNeeds, *, host: str | None = None) -> SlurmPartition | None:
-        cpus, memory_mb, gpus = _capacity(needs)
+    def _partition(
+        self,
+        needs: SandboxNeeds,
+        *,
+        host: str | None = None,
+        separate: Resources | None = None,
+    ) -> SlurmPartition | None:
+        cpus, memory_mb, gpus = _capacity(needs, separate)
         for part in self.config.partitions:
             if (
                 (host is not None and part.host != host)
@@ -418,67 +465,122 @@ class SlurmProvider(Provider):
 
     async def create(self, request: SandboxRequest) -> SlurmSandbox:
         await self.accepts(request)
-        if request.snapshot is None:
-            resolved = await resolve_prepared_container_image(request.prepared_image)
-            image = await with_framework(resolved.observed_identity, user=request.user)
-            resolved = resolved.model_copy(
-                update={"observed_identity": image, "observed_ref": image}
-            )
-            chain = await self._allocate(request.needs, image=image)
+        engines = _engines(request.resources)
+        if request.snapshot is None and request.volumes_from is None:
+            resolved = await self._framed(request)
+            image = resolved.observed_identity
+            # A candidate is a volume only where the image has a directory, which the Host's
+            # Docker, which framed the image, finds.
+            fresh = await docker_volumes.directories(image, guestd.PYTHON["linux"], request.volumes)
+            # Room for the separate verifier only where a partition has it: nothing requires
+            # it to boot here.
+            separate = request.separate_verifier
+            if separate is not None and self._partition(request.needs, separate=separate) is None:
+                separate = None
+            chain = await self._allocate(request.needs, image=image, separate=separate)
             index = chain.reserve(request.resources)
             assert index is not None, "an allocation holds the Sandbox it was sized for"
             loaded = chain.seed
+            specs = [dict(path=path, kind="fresh") for path in fresh] + [
+                dict(path=path, kind="fresh", copied=True) for path in engines
+            ]
         else:
-            chain, index, resolved = await self._boot(request)
-            loaded = resolved.observed_identity
+            chain, index, resolved, loaded, specs = await self._boot(request, engines)
         try:
-            return await self._start(chain, index, request, resolved, loaded)
+            return await self._start(chain, index, request, resolved, loaded, specs)
         except BaseException:
             await asyncio.shield(self.release(chain, index))
             raise
 
-    async def _boot(self, request: SandboxRequest) -> tuple[_Chain, str, ResolvedImage]:
-        """Where a Sandbox booted from a snapshot runs: in the allocation that holds the
-        snapshot while it has room, else in one of its own that loads it."""
-        assert request.snapshot is not None
-        host, name, index = _parse(request.snapshot)
-        found = self.snapshots.get(request.snapshot)
+    async def _framed(self, request: SandboxRequest) -> ResolvedImage:
+        """The request's image with the framework, as the Host's Docker holds it."""
+        resolved = await resolve_prepared_container_image(request.prepared_image)
+        image = await with_framework(resolved.observed_identity, user=request.user)
+        return resolved.model_copy(update={"observed_identity": image, "observed_ref": image})
+
+    async def _boot(
+        self, request: SandboxRequest, engines: Sequence[str]
+    ) -> tuple[_Chain, str, ResolvedImage, str, list[dict[str, object]]]:
+        """Where a Sandbox booted from a snapshot, or one of another image that mounts views
+        of a snapshot's volumes, runs: in the allocation that holds the snapshot while it has
+        room, loading its image there if it is another's, else in one of its own that loads
+        the snapshot or that image, and the snapshot's volume layers."""
+        handle = request.snapshot or request.volumes_from
+        assert handle is not None
+        host, name, index = _parse(handle)
+        found = self.snapshots.get(handle)
         if found is not None:
             chain, snapshot = found
-            image, prepared = snapshot.image, snapshot.prepared_identity
+            image, prepared, stacks = snapshot.image, snapshot.prepared_identity, snapshot.stacks
         else:
             # Written out by an earlier process, whose allocation has ended.
             record = await Login(host).remote(
                 f"cat {CACHE}/{SNAPSHOTS}/{name}-{index}.json 2>/dev/null || true"
             )
             if not record:
-                raise ProviderCapabilityError(f"Slurm holds no snapshot {request.snapshot}")
+                raise ProviderCapabilityError(f"Slurm holds no snapshot {handle}")
             saved = json.loads(record)
             chain, snapshot = None, None
             image, prepared = saved["image"], saved["prepared_identity"]
-        if prepared != request.prepared_image.prepared_identity:
-            raise ProviderCapabilityError(
-                f"{request.snapshot!r} was not taken from the Task's prepared solver image"
+            stacks = dict(saved.get("stacks") or {})
+        viewing = request.volumes_from is not None
+        if viewing:
+            resolved = await self._framed(request)
+        else:
+            if prepared != request.prepared_image.prepared_identity:
+                raise ProviderCapabilityError(
+                    f"{handle!r} was not taken from the Task's prepared solver image"
+                )
+            resolved = ResolvedImage(
+                kind=ImageKind.CONTAINER,
+                prepared_identity=prepared,
+                observed_identity=image,
+                observed_ref=image,
             )
-        resolved = ResolvedImage(
-            kind=ImageKind.CONTAINER,
-            prepared_identity=prepared,
-            observed_identity=image,
-            observed_ref=image,
-        )
+        specs = _volume_specs(stacks, engines, viewing=viewing)
+        needed = {str(layer) for spec in specs for layer in spec.get("layers", ())}
         if chain is not None and snapshot is not None:
             served = any(not unmet(p, request.needs) for p in _profiles(chain.job.partition))
             booted = chain.reserve(request.resources) if served else None
             if booted is not None:
-                snapshot.boots = max(0, snapshot.boots - 1)
-                return chain, booted, resolved
+                try:
+                    loaded = (
+                        await self._load(chain, resolved.observed_identity) if viewing else image
+                    )
+                except BaseException:
+                    chain.running.pop(booted, None)
+                    raise
+                if not viewing:
+                    snapshot.boots = max(0, snapshot.boots - 1)
+                chain.viewing[booted] = needed
+                return chain, booted, resolved, loaded, specs
             archive = snapshot.archive or await self.write_out(chain, snapshot)
         else:
             archive = f"{SNAPSHOTS}/{name}-{index}.tar.gz"
-        own = await self._allocate(request.needs, image=image, archive=archive, host=host)
+        layers = {
+            layer: f"{SNAPSHOTS}/{worker.layer_archive(Path(archive).name, layer)}"
+            for layer in needed
+        }
+        own = await self._allocate(
+            request.needs,
+            image=resolved.observed_identity if viewing else image,
+            archive=None if viewing else archive,
+            host=host,
+            layers=layers,
+        )
         booted = own.reserve(request.resources)
         assert booted is not None, "an allocation holds the Sandbox it was sized for"
-        return own, booted, resolved
+        own.viewing[booted] = needed
+        return own, booted, resolved, own.seed, specs
+
+    async def _load(self, chain: _Chain, image: str) -> str:
+        """Load ``image``, from the Host's Docker, into an allocation that runs; return the
+        ID Podman gives it."""
+        archive, loaded = await chain.job.stage_image(image)
+        if loaded != chain.seed and loaded not in chain.images:
+            await chain.job.control("load", archive, loaded.removeprefix("sha256:"), timeout=3600)
+            chain.images.add(loaded)
+        return loaded
 
     async def _allocate(
         self,
@@ -487,18 +589,21 @@ class SlurmProvider(Provider):
         image: str,
         archive: str | None = None,
         host: str | None = None,
+        layers: dict[str, str] | None = None,
+        separate: Resources | None = None,
     ) -> _Chain:
-        """An allocation for ``needs``, seeded with ``image``: a Task image sent from the
-        Host, or a snapshot's ``archive`` already on the cluster at ``host``, which Podman
-        loads under the snapshot's own ID."""
-        part = self._partition(needs, host=host)
+        """An allocation for ``needs``, and the ``separate`` verifier, seeded with ``image``:
+        a Task image sent from the Host, or a snapshot's ``archive`` already on the cluster at
+        ``host``, which Podman loads under the snapshot's own ID, and a written-out snapshot's
+        volume ``layers``, by name, below the cache."""
+        part = self._partition(needs, host=host, separate=separate)
         if part is None:
             raise ProviderCapabilityError(
                 "no configured Slurm partition"
                 + (f" on {host}" if host else "")
                 + " serves that single-node allocation"
             )
-        cpus, memory_mb, gpus = _capacity(needs)
+        cpus, memory_mb, gpus = _capacity(needs, separate)
         job = Job(part)
         try:
             loaded = image
@@ -510,6 +615,7 @@ class SlurmProvider(Provider):
                     image=loaded.removeprefix("sha256:"),
                     version=gvisor.VERSION,
                     gpus=gpus,
+                    layers=layers or {},
                 )
             )
             await job.submit(
@@ -531,8 +637,10 @@ class SlurmProvider(Provider):
         request: SandboxRequest,
         resolved: ResolvedImage,
         loaded: str,
+        volumes: list[dict[str, object]],
     ) -> SlurmSandbox:
-        """Start a Sandbox in ``chain`` from the image Podman holds there as ``loaded``."""
+        """Start a Sandbox in ``chain`` from the image Podman holds there as ``loaded``, with
+        ``volumes`` made in the allocation's store."""
         gateway, listeners, targets = tunnel_plan(request)
         resources = request.resources
         env = dict(request.env)
@@ -554,6 +662,7 @@ class SlurmProvider(Provider):
                     memory_mb=step_memory_mb(resources.memory_mb),
                     env=env,
                     sealed=sealed,
+                    volumes=volumes,
                 ),
                 timeout=START_TIMEOUT_SEC,
             )
@@ -615,6 +724,7 @@ class SlurmProvider(Provider):
                 ),
                 home=home,
                 gateway=gateway,
+                volumes=tuple(str(v["path"]) for v in volumes if not v.get("copied")),
             )
             sandbox.state = SandboxState.READY
             if sealed:
@@ -631,6 +741,7 @@ class SlurmProvider(Provider):
                 await chain.job.end(index)
         finally:
             chain.running.pop(index, None)
+            chain.viewing.pop(index, None)
         await self._close_if_idle(chain)
 
     async def _close_if_idle(self, chain: _Chain) -> None:
@@ -648,7 +759,11 @@ class SlurmProvider(Provider):
         name = f"{chain.job.name}-{snapshot.index}"
         archive = f"{SNAPSHOTS}/{name}.tar.gz"
         await chain.job.control(
-            "export", snapshot.image.removeprefix("sha256:"), archive, timeout=3600
+            "export",
+            snapshot.image.removeprefix("sha256:"),
+            archive,
+            *sorted(snapshot.layers),
+            timeout=3600,
         )
         record = dict(
             handle=_handle(chain.job, snapshot.index),
@@ -657,6 +772,7 @@ class SlurmProvider(Provider):
             episode=snapshot.episode_id,
             roles=list(snapshot.roles),
             reason=snapshot.reason,
+            stacks=snapshot.stacks,
         )
         await chain.job.remote(
             f"umask 077 && cat > {CACHE}/{SNAPSHOTS}/{name}.json",
@@ -691,8 +807,14 @@ class SlurmProvider(Provider):
                 await chain.job.control("rmi", snapshot.index)
             del self.snapshots[handle]
             chain.snapshots.pop(index, None)
+            if not chain.closed:
+                # Its volumes' layers that no other snapshot and no running view stacks.
+                kept = {layer for other in chain.snapshots.values() for layer in other.layers}
+                kept.update(layer for held in chain.viewing.values() for layer in held)
+                if dropped := sorted(snapshot.layers - kept):
+                    await chain.job.control("drop", *dropped, timeout=600)
         stem = f"{CACHE}/{SNAPSHOTS}/{name}-{index}"
-        await Login(host).remote(f"rm -f {stem}.tar.gz {stem}.json")
+        await Login(host).remote(f"rm -f {stem}.tar.gz {stem}.*.tar {stem}.json")
         if found is not None:
             await self._close_if_idle(found[0])
 

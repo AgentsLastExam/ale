@@ -632,9 +632,11 @@ async def test_reverification_from_a_snapshot_keeps_the_agent_s_output_when_aske
     order: list[str] = []
     collect = _Artifacts.collect
 
-    async def collecting(self: _Artifacts, sandbox: Any, source: str, *args: Any) -> None:
+    async def collecting(
+        self: _Artifacts, sandbox: Any, source: str, *args: Any, **options: Any
+    ) -> None:
         order.append(f"collect {source}")
-        await collect(self, sandbox, source, *args)
+        await collect(self, sandbox, source, *args, **options)
 
     upload = MemorySandbox.upload_dir
 

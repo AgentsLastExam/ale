@@ -33,13 +33,29 @@ removes the stores on its node of this account's jobs that have ended, which eac
 names in its `job` file.
 
 A commit chain of 200, each booted from the one before, worked under rootless Podman 4.9.3
-on Linux 6.8, which is the declared `max_saves`. A container engine's storage is volumes,
-which a commit does not keep, so that profile saves no snapshot.
+on Linux 6.8, which is the declared `max_saves`.
+
+A volume must reach the Sandboxes a snapshot serves without a copy, a separate verifier of
+another image included, and a commit keeps no volume. A volume is therefore a layer in the
+allocation's store: a Podman volume, which Podman fills from the image, or a plain
+directory, an overlay's upper layer or a copy of an engine's storage. A view is a kernel
+overlay that the step mounts with `podman unshare` in the allocation's own rootless
+namespace, which every step and container of the job shares: measured on OpenRSI (Linux
+6.8), an unprivileged overlay mounts there with `userxattr`, gVisor's gofer serves it to a
+container as any bound directory, a deletion through it is a whiteout that a later view
+honours, and a container sees the mount because Podman's containers start in that namespace.
+Each layer is named by a short link below the store, `l/<layer>`, and the overlay is mounted
+from the store's root, so its options, which must fit in a page, name a chain of 200 layers;
+Docker's own overlay driver does the same. A container engine's storage is copied, never
+viewed, as on Docker. The Host's Docker, which framed the image, finds which candidates are
+directories, so the cluster needs no probe of the image. A snapshot written out for another
+allocation carries each layer as a tar that `tar --xattrs --xattrs-include=user.*` writes in
+the namespace, which keeps owners, whiteouts and the overlay's opaque directories; it is not
+compressed, as a volume's output often is already.
 
 Podman uses NVIDIA CDI devices by UUID. Setting NVIDIA_VISIBLE_DEVICES to void disables
 the duplicate NVIDIA hook. Register the injected libraries inside the sandbox. For nested
 Docker, Podman's default capability set omits capabilities the inner Docker expects.
-The restricted gVisor runtime and the engine's storage volumes remain per sandbox.
 
 The Slurm step carrying the host tunnel needs unbuffered binary I/O. Normal step
 output can wait for a newline in a protocol whose first frame contains none.

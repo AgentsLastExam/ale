@@ -782,6 +782,61 @@ class ProviderConformance:
         assert retained.handle not in listed
 
     @pytest.mark.asyncio
+    async def test_a_volume_is_kept_by_its_snapshot_and_seen_through_views(self) -> None:
+        """A Provider that mounts volumes mounts each candidate that is a directory in the
+        image: its snapshot keeps it, and a Sandbox booted from the snapshot, or one of its
+        own image that mounts the snapshot's volumes, sees it through a view of its own,
+        whose writes reach no other Sandbox. One that mounts none leaves them on the disk."""
+        path, absent = "/srv", "/ale-conformance-absent"
+        kept = f"{path}/kept.txt"
+        mounts = any(profile.volumes for profile in await self.provider.profiles())
+        saves = any(profile.snapshot for profile in await self.provider.profiles())
+        sandbox = await self.provider.create(
+            await self.request(volumes=(path, absent), retention="snapshot" if saves else "destroy")
+        )
+        try:
+            assert sandbox.volumes == ((path,) if mounts else ())
+            await sandbox.write_file(kept, b"kept")
+            if not (mounts and saves):
+                assert await sandbox.read_file(kept) == b"kept"
+                return
+            retained = await sandbox.snapshot(roles=("solver",), reason="conformance")
+        finally:
+            await sandbox.destroy()
+        try:
+            booted = await self.provider.create(
+                await self.request(volumes=(path, absent), snapshot=retained.handle)
+            )
+            try:
+                assert booted.volumes == (path,)
+                viewer = await self.provider.create(
+                    await self.request(
+                        volumes_from=retained.handle,
+                        role=SandboxRole.VERIFIER,
+                        network=NetworkPolicy(mode=NetworkMode.OPEN),
+                    )
+                )
+                try:
+                    assert viewer.volumes == (path,)
+                    assert await booted.read_file(kept) == b"kept"
+                    assert await viewer.read_file(kept) == b"kept"
+                    await booted.write_file(kept, b"the booted Sandbox's")
+                    await viewer.write_file(kept, b"the viewer's")
+                    assert await booted.read_file(kept) == b"the booted Sandbox's"
+                    assert await viewer.read_file(kept) == b"the viewer's"
+                finally:
+                    await viewer.destroy()
+            finally:
+                await booted.destroy()
+            # The snapshot holds what it saved, whatever its views wrote.
+            async with await self.provider.create(
+                await self.request(volumes=(path,), snapshot=retained.handle)
+            ) as again:
+                assert await again.read_file(kept) == b"kept"
+        finally:
+            await self.provider.destroy_retained(retained.handle)
+
+    @pytest.mark.asyncio
     async def test_one_process_past_the_sandboxs_memory_dies_alone(self) -> None:
         """The kernel ends the process that takes more than the memory the Task declares, and
         the Sandbox goes on, as its episode does."""

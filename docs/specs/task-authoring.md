@@ -134,6 +134,18 @@ gpus = 0                                    # default 0
 container_features = []                     # ALE; default none
 env = {}                                    # replaces [environment].env
 
+[validation]                                # ALE; where validation/ runs; default [verifier]'s
+environment_mode = "separate"               # shared | separate | snapshot
+
+[validation.environment]                    # a separate or snapshot validation verifier's size
+cpus = 1                                    # default [environment].cpus
+memory_mb = 4096                            # default [environment].memory_mb
+storage_mb = 8192                           # default the Provider's
+gpus = 0                                    # default 0
+# gpu_types = ["H100"]                      # default any
+# gpu_memory_mb = 4096                      # default whole GPUs
+container_features = []                     # default none
+
 [solution]
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 
@@ -207,13 +219,34 @@ as a Task error, because scoring part of an output gives a wrong score rather th
 Copying uses the framework's privileged identity on every supported OS; see
 [Permissions](sandbox-image.md#permissions).
 
-Separate verification always transfers the declared artifacts to its verifier through the
-Host, as in Harbor; a snapshot verifier needs none, as it has the solver's disk. Run-level
+Separate verification transfers the declared artifacts to its verifier through the Host, as
+in Harbor, but for those it [mounts views of](#volumes); a snapshot verifier needs none, as
+it has the solver's disk. Run-level
 `artifacts.collect` decides only whether the episode keeps a copy: the default `"none"`
 keeps none, and `"host"` keeps them in any mode. `run`, `calibrate`, and `reverify` use the
 same policy. Separate-verifier images must not contain prepopulated candidate answers. Tasks
 that grade original links should use shared or snapshot verification, and those that grade
 live state, such as a running service, shared verification.
+
+### Volumes
+
+An artifact named by an absolute path, without a glob, that is a directory in the solver's
+image, is a volume of its own from the solver's start on a Provider that mounts volumes
+(its profiles say so), so that output of tens of GB reaches a separate verifier without
+being copied; it holds what the image has there, and one such artifact inside another is
+part of the outer one's volume. The solver's snapshot keeps it, and every Sandbox that the
+snapshot serves mounts a view of it, what one writes reaching no other: a validation round's
+next solver, a snapshot or shared round's verifier booted from it, and a separate verifier
+of its own image, when the solver's leaf serves that verifier, which is then saved for it
+as for a snapshot verifier. A separate verifier's view holds what copying the artifact
+would have given it, no link, special file or `exclude` match, with no entry bound; nothing
+of it crosses the Host unless `artifacts.collect = "host"` keeps a copy. Where no view
+serves a separate verifier, as on a Provider that mounts no volumes, the artifact is copied
+as any other is. `storage_mb` counts what the Sandbox writes to its volumes.
+
+Being a mount changes what the agent can do there: it can empty the directory but not
+remove, rename or replace it, `rm -rf out && mkdir out` fails at the `rm`, a hard link
+across it fails and a move across it copies. A Task's instruction says so where it matters.
 
 ### Verification topology
 
@@ -225,7 +258,7 @@ live state, such as a running service, shared verification.
   of its own. It sees the solver's whole disk but none of its processes, and nothing it does
   reaches the solver.
 - `separate`: in a new Sandbox of the verifier's image, with resources of its own. It sees
-  only the declared artifacts.
+  only the declared artifacts, some as [views](#volumes) of the solver's snapshot.
 
 Verification is shared unless `environment_mode` or `[verifier.environment]` says otherwise,
 as in Harbor: the table alone means `separate`, so `snapshot` is always written out. A
@@ -587,16 +620,20 @@ Windows), conventionally `verify.py`, writes `reward.json` and optionally
 and Judges. It is staged only when it runs, in its own root-only stage directory,
 `/opt/ale/validation` (`C:\ProgramData\ALE\validation` on Windows), where its entry runs
 with `ALE_STAGE_DIR` set, as `tests/`'s does. It is absent during every turn of the agent,
-as `tests/` is. It runs under `tests/`'s `[verifier]` settings and
-[verification topology](#verification-topology): it has no table, Dockerfile or image of
-its own, and a separate verifier runs it on the image `tests/` runs on: a
-`validation/Dockerfile` is only a file there, since the verifier's image always comes from
-`tests/`. Under shared verification it runs in a Sandbox booted from a snapshot of the
-agent's, with the agent's resources and `[environment].env` and no sudo, since the agent
-goes on from that state. It receives no solver trajectory, which is converted once, after
-the agent's last turn. A copy of `tests/` therefore works unless it reads the trajectory:
-`judge(..., trajectory=True)` and the `checks.trajectory_*` checks raise there. Nothing
-requires the two to differ.
+as `tests/` is. It runs where ALE's `[validation]` places it, by `[verifier]`'s
+[verification topology](#verification-topology) rules, or else where `tests/` runs, with
+`[verifier]`'s budget and variables either way. It has no Dockerfile or image of its own: a
+separate verifier runs it on the image a separate verifier of `tests/` runs, or else the
+solver's, so a `validation/Dockerfile` is only a file there and `[validation.environment]`
+sets only the Sandbox's size and capabilities. Placed apart, a Task can, for example, score
+each round in a separate verifier that mounts views of the agent's output and the final
+state in the solver itself, where a running service can be checked; a validation score then
+predicts the final one less well where the two see different things. Run shared, it runs in
+a Sandbox booted from a snapshot of the agent's, with the agent's resources and
+`[environment].env` and no sudo, since the agent goes on from that state. It receives no
+solver trajectory, which is converted once, after the agent's last turn. A copy of `tests/`
+therefore works unless it reads the trajectory: `judge(..., trajectory=True)` and the
+`checks.trajectory_*` checks raise there. Nothing requires the two to differ.
 
 With `[agent].validation_rounds = N`, the agent works in up to `N + 1` turns: its first turn
 ends, `validation/` scores the state it left, the agent receives that result as its next

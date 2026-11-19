@@ -32,7 +32,7 @@ from ale.core.sandbox import (
     SandboxCheck,
     SandboxRequest,
     SandboxRole,
-    snapshot_verifier_needs,
+    verifiers_needs,
 )
 from ale.core.task import Task
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, VerificationMode
@@ -146,13 +146,15 @@ def _sandboxes(
     saves in a row as :func:`~ale.core.capability.solver_saves` counts."""
     spec = task.spec
     mode = spec.verify.environment_mode
-    resources = (
+    snapshot_verifier = (
         spec.verify.resources.as_resources()
         if mode is VerificationMode.SNAPSHOT and spec.verify.resources is not None
-        else round_verifier_resources(spec, task.validations)
+        else None
     )
-    verifier = (
-        None if resources is None else snapshot_verifier_needs(spec.image.kind, spec.os, resources)
+    verifier = verifiers_needs(
+        spec.image.kind,
+        spec.os,
+        (snapshot_verifier, round_verifier_resources(spec, task.validations)),
     )
     saves = solver_saves(
         task.validations,
@@ -177,9 +179,19 @@ def _sandboxes(
     if mode is VerificationMode.SNAPSHOT:
         assert verifier is not None
         yield SandboxRole.VERIFIER, spec.image.user, verifier
-    elif mode is VerificationMode.SEPARATE:
-        image = spec.verify.image or spec.image
-        assert spec.verify.resources is not None
+    separate = [spec.verify] if mode is VerificationMode.SEPARATE else []
+    validation = spec.validation
+    if (
+        task.validations
+        and validation is not None
+        and validation.environment_mode is VerificationMode.SEPARATE
+        and validation not in separate
+    ):
+        # A separate verifier of validation/ apart from tests/'s, on the verifier's Provider.
+        separate.append(validation)
+    for placed in separate:
+        image = placed.image or spec.image
+        assert placed.resources is not None
         yield (
             SandboxRole.VERIFIER,
             image.user,
@@ -188,7 +200,7 @@ def _sandboxes(
                 os=spec.os,
                 arch=Arch.of(spec.os),
                 network_mode=NetworkMode.OPEN,
-                resources=spec.verify.resources.as_resources(),
+                resources=placed.resources.as_resources(),
             ),
         )
 
@@ -281,7 +293,14 @@ class ProviderRegistry:
                 # One choice for both: only the leaf that saved the snapshot boots from it.
                 groups = [(sandboxes, order)]
             else:
-                groups = [([sandbox], order) for sandbox in sandboxes]
+                # Every separate verifier of a Task, of tests/ and of validation/, runs on
+                # the one Provider its Task names for verifiers.
+                verifiers = [each for each in sandboxes if each[0] is SandboxRole.VERIFIER]
+                groups = [
+                    ([sandbox], order)
+                    for sandbox in sandboxes
+                    if sandbox[0] is not SandboxRole.VERIFIER
+                ] + ([(verifiers, order)] if verifiers else [])
             for group, candidates in groups:
                 reasons: list[str] = []
                 label = " and ".join(_ROLE[role] for role, _, _ in group)

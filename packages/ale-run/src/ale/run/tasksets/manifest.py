@@ -335,7 +335,8 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             skills_dir=config.environment.skills_dir,
             mcp_servers=tuple(entry.server for entry in config.environment.mcp_servers),
         ),
-        verify=_verification(config, folder),
+        verify=(verify := _verification(config, folder)),
+        validation=_validation(config, verify),
         variables=TaskVariables(
             environment=config.environment.env,
             verifier=config.verifier.env,
@@ -447,6 +448,29 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
         gpu_memory_mb=sized.gpu_memory_mb,
         container_features=sized.container_features,
     )
+    return VerifySpec(environment_mode=mode, image=image, resources=resources)
+
+
+def _validation(config: TaskConfig, verify: VerifySpec) -> VerifySpec | None:
+    """Where ``[validation]`` puts ``validation/``, or None to run it as ``tests/``. A
+    separate one runs a separate verifier's image of ``tests/``, or else the solver's."""
+    table = config.validation
+    if table is None:
+        return None
+    mode = table.mode
+    if mode is VerificationMode.SHARED:
+        return VerifySpec()
+    sized = table.environment or config.environment
+    resources = VerifierResources(
+        cpus=sized.cpus or config.environment.cpus,
+        memory_mb=sized.memory_mb or config.environment.memory_mb,
+        storage_mb=sized.storage_mb,
+        gpus=sized.gpus,
+        gpu_types=sized.gpu_types or (),
+        gpu_memory_mb=sized.gpu_memory_mb,
+        container_features=sized.container_features,
+    )
+    image = verify.image if mode is VerificationMode.SEPARATE else None
     return VerifySpec(environment_mode=mode, image=image, resources=resources)
 
 

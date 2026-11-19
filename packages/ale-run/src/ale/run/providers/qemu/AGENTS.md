@@ -99,3 +99,39 @@ OOM killer acted there.
   Root in the guest can write to the console or quiet it (`dmesg -n`), which only hides an
   exhaustion behind a lost guest, as root ending guestd does.
 - No evidence is sought on Windows: none was seen to lose its guest to memory.
+
+## Volumes in a VM
+
+**Problem.** A volume must be its own mount from the agent's first moment, as a container's
+is, before the desktop session opens files in it, and a separate verifier of another image
+must see it as the solver's snapshot keeps it without a copy through the Host.
+
+**Context.** A VM boots on its own; guestd answers after the display manager has started.
+QEMU hands a guest data through its firmware configuration, which a Linux guest reads at
+`/sys/firmware/qemu_fw_cfg` once `qemu_fw_cfg` is loaded. Linux mounts an overlay over its
+own lower directory: unmounted, the directory is as it was. Windows has no union file
+system, and a disk whose signature matches one online is kept offline until brought online,
+which gives it a new one.
+
+**Solution.** On Linux, `ale-volumes.service`, ordered before guestd, the display manager
+and logins, mounts each volume as an overlay of the disk's own directory under a layer on
+the same disk, from what the runner passes with `-fw_cfg`. On Windows a volume stays a
+directory. A verifier that views a snapshot's volumes gets the snapshot's disk once the
+guest is up, hot-plugged through the runner's QEMU monitor onto a SCSI controller it booted
+with: a Linux guest mounts it read-only and overlays each volume's layer and directory under
+a layer of its own; a Windows guest brings a copy-on-write overlay of it online and makes
+each viewed path a junction into it.
+
+**Decisions.**
+- A boot unit rather than guestd for a Sandbox's own volumes: guestd starts after the
+  session would have opened the directory.
+- The viewed disk is attached after boot, not at it: a copy of a bootable disk of the same
+  image has the same partition identifiers, and Windows' boot manager, measured on base
+  0.1.2, booted the verifier from the copy and left its own disk offline as a duplicate. A
+  Linux guest that finds its root by UUID or label is open to the same. A verifier's own
+  desktop may meanwhile have opened files in the viewed path, which the view hides.
+- On the disk rather than a disk per volume: the snapshot keeps it with no file of its own
+  and `storage_mb` counts it.
+- Windows keeps the directory rather than a mounted volume: a mount point there would need
+  the image's content copied at every start, and Windows lets its owner remove a mount
+  point, so it would not keep the path either.
