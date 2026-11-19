@@ -33,7 +33,7 @@ async def test_calibration_checks_every_case_against_its_expectation(
         },
     )
     # Each oracle episode stages only its own case, where its verifier can still see it.
-    (task / "calibration/solution/only-in-solution.txt").write_text("only the solution holds this")
+    (task / "solution/only-in-solution.txt").write_text("only the solution holds this")
     (task / "tests" / "verify.py").write_text(
         "from pathlib import Path\n"
         "from ale_verify import write\n"
@@ -96,7 +96,7 @@ async def test_calibration_respects_artifact_policy_for_shared_verification(
     task_root = write_repo(
         root, config={"calibration": [{"name": "start-state", "expect": {"reward": 0}}]}
     )
-    (task_root / "calibration" / "start-state").mkdir()
+    (task_root / "calibration" / "start-state").mkdir(parents=True)
     (task_root / "calibration" / "start-state" / "solve.sh").write_text("true\n")
     script = (
         "import json, os\n"

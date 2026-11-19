@@ -107,7 +107,7 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
         "[environment].image",
         "environment/setup/",
         "tests/test.sh",
-        "calibration/solution/solve.sh",
+        "solution/solve.sh",
         "skills_dir",
         "[[environment.mcp_servers]]",
         'environment_mode = "separate"',

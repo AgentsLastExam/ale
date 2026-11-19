@@ -264,8 +264,8 @@ cannot write system paths, and cannot elevate unless its task asked; by
 
 ## 5. Answers are absent, not hidden
 
-`tests/`, `validation/` and `calibration/` are copied into a sandbox only for their own
-phases, and of `calibration/` only the case an oracle runs. While the evaluated agent works
+`tests/`, `validation/`, `solution/` and `calibration/` are copied into a sandbox only for
+their own phases, and of `solution/` and `calibration/` only the case an oracle runs. While the evaluated agent works
 they are not access-controlled — they are not there. In separate mode only the immutable
 declared artifact snapshot is restored; the solver filesystem is not transferred wholesale.
 A snapshot verifier boots from the solver's disk once every stage of the Task has been

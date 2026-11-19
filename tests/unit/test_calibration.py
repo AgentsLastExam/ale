@@ -191,7 +191,7 @@ def test_declared_cases_follow_the_solution_which_needs_no_entry(tmp_path: Path)
         ("nop", {"reward": 0.0}),
     ]
     assert loaded.folder.case_dir("partial") == task / "calibration/partial"
-    assert loaded.folder.case_dir("solution") == task / "calibration/solution"
+    assert loaded.folder.case_dir("solution") == task / "solution"
     assert lint_repository(task) == []
 
 
@@ -211,8 +211,8 @@ def test_declared_cases_follow_the_solution_which_needs_no_entry(tmp_path: Path)
             r"calibration/nop/ needs a \[\[calibration\]\] entry",
         ),
         (
-            lambda task: shutil.rmtree(task / "calibration/solution"),
-            r"missing required Task file\(s\): calibration/solution/solve\.sh",
+            lambda task: shutil.rmtree(task / "solution"),
+            r"missing required Task file\(s\): solution/solve\.sh",
         ),
     ],
     ids=(
@@ -232,15 +232,20 @@ def test_a_case_and_its_directory_come_together(
     assert any(re.search(problem, str(finding)) for finding in lint_repository(task))
 
 
-def test_the_reference_solution_is_not_where_harbor_keeps_it(tmp_path: Path) -> None:
+def test_the_reference_solution_is_where_harbor_keeps_it(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    (task / "calibration/solution").rename(task / "solution")
-    problem = "solution/ is not a Task directory; the reference solution lives in calibration/"
+    (task / "calibration").mkdir()
+    (task / "solution").rename(task / "calibration/solution")
+    problem = (
+        "calibration/solution/ is not a calibration case; the reference solution lives in solution/"
+    )
     with pytest.raises(TaskDefinitionError, match=problem):
         load_tasks(task)
     findings = {finding.path: finding.message for finding in lint_repository(task)}
-    assert findings[task / "solution"].startswith("unsupported top-level Task entry")
-    assert problem in findings[task / "task.toml"]
+    assert findings[task / "calibration/solution"].startswith(
+        "the reference solution lives in solution/"
+    )
+    assert any(message == "no solution/solve.sh" for message in findings.values())
 
 
 def _file_in_calibration(task: Path) -> None:
@@ -249,9 +254,7 @@ def _file_in_calibration(task: Path) -> None:
 
 def _linked_case(task: Path) -> None:
     _declare(task, "partial")
-    (task / "calibration/partial").symlink_to(
-        task / "calibration/solution", target_is_directory=True
-    )
+    (task / "calibration/partial").symlink_to(task / "solution", target_is_directory=True)
 
 
 def _linked_file(task: Path) -> None:
@@ -279,6 +282,7 @@ def test_calibration_holds_only_case_directories(
     tmp_path: Path, arrange: Callable[[Path], None], path: str
 ) -> None:
     task = scaffold_task(tmp_path / "demo")
+    (task / "calibration").mkdir()
     arrange(task)
     load_tasks(task)
     (finding,) = lint_repository(task)
@@ -288,7 +292,7 @@ def test_calibration_holds_only_case_directories(
 def test_a_windows_case_runs_solve_ps1(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     (task / "environment/Dockerfile").unlink()
-    (task / "calibration/solution/solve.sh").rename(task / "calibration/solution/solve.ps1")
+    (task / "solution/solve.sh").rename(task / "solution/solve.ps1")
     (task / "tests/test.sh").rename(task / "tests/test.ps1")
     edit_task_config(task, {"environment": {"os": "windows", "image": "/srv/windows.qcow2"}})
     _declare(task, "partial")
@@ -304,7 +308,7 @@ def test_each_case_keeps_assets_in_its_directory(tmp_path: Path) -> None:
     _declare(task, "partial")
     _with_case(task, "partial")
     before = load_tasks(task)[0]
-    assert {"calibration/partial/assets", "calibration/solution/assets"} <= set(asset_roots(task))
+    assert {"calibration/partial/assets", "solution/assets"} <= set(asset_roots(task))
     asset = task / "calibration/partial/assets/reference.bin"
     asset.parent.mkdir()
     asset.write_bytes(b"large")

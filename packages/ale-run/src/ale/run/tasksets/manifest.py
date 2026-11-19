@@ -13,7 +13,15 @@ from pydantic import ValidationError
 from ale.core.episode import EpisodeContext
 from ale.core.errors import TaskDefinitionError
 from ale.core.ids import content_hash
-from ale.core.task import CALIBRATION_DIR, Stage, Task, TaskSourceContext, case_entry
+from ale.core.task import (
+    CALIBRATION_DIR,
+    SOLUTION_DIR,
+    Stage,
+    Task,
+    TaskSourceContext,
+    case_entry,
+    case_path,
+)
 from ale.core.taskspec import (
     SOLUTION_CASE,
     ImageKind,
@@ -121,8 +129,9 @@ class TaskFolder:
         return _file(directory / stage.entry(operating_system)) if directory else None
 
     def case_dir(self, case: str) -> Path | None:
-        """The directory of the solution a calibration case runs, ``calibration/<case>/``."""
-        path = self.root / CALIBRATION_DIR / case
+        """The directory of the solution a calibration case runs: ``solution/`` for the
+        reference solution, ``calibration/<case>/`` for every further case."""
+        path = self.root / case_path(case)
         return path if path.is_dir() else None
 
     def image_source_digest(self, image: ImageSpec) -> str | None:
@@ -144,17 +153,18 @@ class TaskFolder:
         """Identity of everything an evaluated agent's episode depends on.
 
         Verification and the calibration cases, the reference solution among them, never reach
-        an evaluated agent, so ``tests/``, ``calibration/`` and ``task.toml``'s ``[solution]``
-        and ``[[calibration]]`` tables are left out: changing them keeps a retained solver
-        reverifiable. ``validation/`` stays in, since the agent receives its results. Asset
-        bytes are left to their own commit identity rather than hashed on every load;
-        reverification compares that commit separately.
+        an evaluated agent, so ``tests/``, ``solution/``, ``calibration/`` and ``task.toml``'s
+        ``[solution]`` and ``[[calibration]]`` tables are left out: changing them keeps a
+        retained solver reverifiable. ``validation/`` stays in, since the agent receives its
+        results. Asset bytes are left to their own commit identity rather than hashed on every
+        load; reverification compares that commit separately.
         """
         files = tree_digest(
             self.root,
             exclude=(
                 TASK_CONFIG,
                 Stage.TESTS,
+                SOLUTION_DIR,
                 CALIBRATION_DIR,
                 *asset_roots(self.root),
                 _CACHE_DIR,
@@ -475,19 +485,19 @@ def _validation(config: TaskConfig, verify: VerifySpec) -> VerifySpec | None:
 
 
 def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
-    """The stage entries a Task runs, and one ``calibration/`` directory per case.
+    """The stage entries a Task runs, and one directory per calibration case.
 
     A calibration case runs as the oracle, so its directory holds ``solve.sh``, or
-    ``solve.ps1`` on Windows. ``calibration/solution/`` is the reference solution every Task
-    has; any other directory there needs a ``[[calibration]]`` entry. ``validation/`` is
-    optional, and has the entry ``tests/`` has when it exists; validation rounds and a case's
-    ``expect_validation`` need it.
+    ``solve.ps1`` on Windows. ``solution/`` is the reference solution every Task has; every
+    further case is a directory of ``calibration/`` with a ``[[calibration]]`` entry.
+    ``validation/`` is optional, and has the entry ``tests/`` has when it exists; validation
+    rounds and a case's ``expect_validation`` need it.
     """
-    # Harbor's reference solution is solution/: say where ALE's is, not only that it is missing.
-    if (folder.root / "solution").is_dir():
+    # The reference solution is the Task root's solution/, never a calibration/ directory.
+    if (folder.root / CALIBRATION_DIR / SOLUTION_CASE).is_dir():
         raise TaskDefinitionError(
-            f"{folder.root}: solution/ is not a Task directory; the reference solution lives in "
-            f"{CALIBRATION_DIR}/{SOLUTION_CASE}/"
+            f"{folder.root}: {CALIBRATION_DIR}/{SOLUTION_CASE}/ is not a calibration case; the "
+            f"reference solution lives in {SOLUTION_DIR}/"
         )
     operating_system = config.environment.os
     solve = case_entry(operating_system)
@@ -502,7 +512,7 @@ def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
             if validation
             else ()
         ),
-        *(folder.root / CALIBRATION_DIR / name / solve for name in cases),
+        *(folder.root / case_path(name) / solve for name in cases),
     )
     missing = [path.relative_to(folder.root).as_posix() for path in required if not path.is_file()]
     if missing:

@@ -180,7 +180,7 @@ allowed, but a Task never inherits another Task's final image or an ALE domain i
 There is no Image Tree. Docker layer caching handles repeated installation without adding
 a cross-Task contract.
 
-`COPY .` cannot expose `setup/`, `tests/` or `calibration/`: the last two are outside the
+`COPY .` cannot expose `setup/`, `tests/`, `solution/` or `calibration/`: the last three are outside the
 build context, and ALE excludes `setup/` after the Task's own `.dockerignore`
 rules, so a Task cannot bring it back. Files in the context, its asset root included, use
 ordinary relative `COPY`; ALE creates no generated view or named BuildKit context.
@@ -255,7 +255,7 @@ top layer's.
 Image source identity describes the files of the build context, separately from the exact
 built image recorded in RunLock. It is not the decision to reuse a solver's answer.
 A Task run records `task.non_verifier_digest`: a content hash of every Task file outside
-`tests/` and `calibration/` (paths, executable bits and link targets), with `task.toml` read
+`tests/`, `solution/` and `calibration/` (paths, executable bits and link targets), with `task.toml` read
 without its `[solution]` and `[[calibration]]` tables, computed once per Task folder. None
 of these reaches an evaluated agent, so changing verification, the reference solution or
 another calibration case keeps a retained solver reverifiable. `validation/` is part of the

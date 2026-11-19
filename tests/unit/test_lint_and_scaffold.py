@@ -40,13 +40,13 @@ def test_new_task_folder_name_must_be_a_slug(tmp_path: Path) -> None:
 
 def test_stage_entries_are_executable(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    for entry in ("tests/test.sh", "calibration/solution/solve.sh"):
+    for entry in ("tests/test.sh", "solution/solve.sh"):
         assert (task / entry).stat().st_mode & 0o111
 
 
 def test_stage_entries_do_not_require_host_executable_bits(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
-    for entry in ("tests/test.sh", "calibration/solution/solve.sh"):
+    for entry in ("tests/test.sh", "solution/solve.sh"):
         (task / entry).chmod(0o644)
     assert lint_repository(task) == []
 
@@ -65,7 +65,7 @@ def test_refuses_to_clobber_without_force(tmp_path: Path) -> None:
         ("instruction.md", "instruction.md"),
         ("environment/Dockerfile", "environment/Dockerfile"),
         ("tests/test.sh", "tests/test.sh"),
-        ("calibration/solution/solve.sh", "calibration/solution/solve.sh"),
+        ("solution/solve.sh", "solution/solve.sh"),
     ],
 )
 def test_missing_required_file_is_reported(tmp_path: Path, relative: str, message: str) -> None:

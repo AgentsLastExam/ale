@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ale.core.errors import TaskDefinitionError
-from ale.core.task import CALIBRATION_DIR, Stage, case_entry
+from ale.core.task import CALIBRATION_DIR, SOLUTION_DIR, Stage, case_entry, case_path
 from ale.core.taskspec import (
     SOLUTION_CASE,
     OperatingSystem,
@@ -39,6 +39,7 @@ _TOP_LEVEL = {
     ENVIRONMENT_DIR,
     Stage.TESTS,
     Stage.VALIDATION,
+    SOLUTION_DIR,
     CALIBRATION_DIR,
     ".ale-cache",
 }
@@ -107,7 +108,13 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         findings.append(Finding(calibration, "calibration must be a directory, not a link or file"))
     elif calibration.is_dir():
         for entry in calibration.iterdir():
-            if entry.is_symlink() or not entry.is_dir():
+            if entry.name == SOLUTION_CASE:
+                findings.append(
+                    Finding(
+                        entry, f"the reference solution lives in {SOLUTION_DIR}/; move it there"
+                    )
+                )
+            elif entry.is_symlink() or not entry.is_dir():
                 findings.append(
                     Finding(
                         entry, "calibration/ holds only case directories; move it into its case"
@@ -133,7 +140,7 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         operating_system = OperatingSystem.LINUX
     for entry in (
         f"{Stage.TESTS}/{Stage.TESTS.entry(operating_system)}",
-        f"{CALIBRATION_DIR}/{SOLUTION_CASE}/{case_entry(operating_system)}",
+        f"{case_path(SOLUTION_CASE)}/{case_entry(operating_system)}",
     ):
         if not (folder.root / entry).is_file():
             findings.append(Finding(folder.root, f"no {entry}"))

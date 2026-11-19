@@ -86,7 +86,7 @@ def scaffold_task(path: Path, *, force: bool = False) -> Path:
         "environment/Dockerfile": DOCKERFILE,
         "tests/test.sh": TEST_SH,
         "tests/verify.py": VERIFY_PY,
-        "calibration/solution/solve.sh": SOLVE_SH,
+        "solution/solve.sh": SOLVE_SH,
     }
     for relative, content in files.items():
         destination = target / relative

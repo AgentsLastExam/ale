@@ -183,7 +183,7 @@ def calibrate(
 ) -> None:
     """Score every calibration case of every task and check it against its expectation.
 
-    The reference solution and each further case under calibration/ run as
+    The reference solution, solution/, and each further case under calibration/ run as
     fresh episodes. Verification uses the same run-level judge configuration as
     an ordinary episode.
     """

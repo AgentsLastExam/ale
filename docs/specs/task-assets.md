@@ -11,7 +11,8 @@ beside the files of the stage that reads them, at these roots of a
 | `environment/assets/` | the image build, container or VM, through its ordinary context |
 | `tests/assets/` | verification |
 | `validation/assets/` | the verifier of each [validation round](episode-protocol.md#validation-rounds) |
-| `calibration/<case>/assets/` | the oracle of that [case](task-authoring.md#calibration) |
+| `solution/assets/` | the oracle of the reference solution |
+| `calibration/<case>/assets/` | the oracle of that further [case](task-authoring.md#calibration) |
 
 To the runtime they are ordinary files of their stage, uploaded with it and read through
 relative paths such as `assets/reference.json` or `.\assets\seed.json`; `ALE_STAGE_DIR`

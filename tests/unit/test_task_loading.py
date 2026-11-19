@@ -284,8 +284,13 @@ def test_asset_roots_and_setup_are_excluded_where_they_must_be(tmp_path: Path) -
     (task / "validation/test.sh").write_text("true\n")
     loaded = load_tasks(task)[0]
     roots = asset_roots(task)
-    assert roots == (*ASSET_ROOTS, "calibration/partial/assets", "calibration/solution/assets")
-    assert ASSET_ROOTS == ("environment/assets", "tests/assets", "validation/assets")
+    assert roots == (*ASSET_ROOTS, "calibration/partial/assets")
+    assert ASSET_ROOTS == (
+        "environment/assets",
+        "tests/assets",
+        "validation/assets",
+        "solution/assets",
+    )
     for root in roots:
         asset = task / root / "large.bin"
         asset.parent.mkdir(parents=True, exist_ok=True)
@@ -406,7 +411,7 @@ def _windows_task(tmp_path: Path, *, build: bool = False) -> Path:
         },
     )
     (task / "tests/test.sh").rename(task / "tests/test.ps1")
-    (task / "calibration/solution/solve.sh").rename(task / "calibration/solution/solve.ps1")
+    (task / "solution/solve.sh").rename(task / "solution/solve.ps1")
     shutil.rmtree(task / "environment")
     if build:
         (task / "environment").mkdir()
@@ -425,8 +430,8 @@ def test_windows_task_uses_powershell_stage_entries(tmp_path: Path) -> None:
     # Windows runs only VMs, so a registry reference is one without asking the registry.
     edit(task, {"environment": {"image": "ghcr.io/acme/windows:1"}})
     assert load_tasks(task)[0].spec.image.kind is ImageKind.VM
-    (task / "calibration/solution/solve.ps1").unlink()
-    with pytest.raises(TaskDefinitionError, match=r"calibration/solution/solve\.ps1"):
+    (task / "solution/solve.ps1").unlink()
+    with pytest.raises(TaskDefinitionError, match=r"solution/solve\.ps1"):
         load_tasks(task)
 
 

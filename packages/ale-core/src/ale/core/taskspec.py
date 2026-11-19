@@ -541,7 +541,7 @@ Expectation = Annotated[float | tuple[float, float], BeforeValidator(_expectatio
 _CASE_NAME = r"^[a-z0-9][a-z0-9_-]*$"
 #: The precision of a stored reward.
 _CENT = Decimal("0.01")
-#: The case of the Task's reference solution, ``calibration/solution/``.
+#: The case of the Task's reference solution, the Task root's ``solution/``.
 SOLUTION_CASE = "solution"
 
 

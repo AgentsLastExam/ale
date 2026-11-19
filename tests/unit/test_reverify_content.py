@@ -44,7 +44,7 @@ def test_calibration_cases_preserve_source_identity(tmp_path: Path):
     case added while tests/ is fixed leaves the runs that exposed the cheat reverifiable."""
     root = scaffold_task(tmp_path / "task")
     before = load_tasks(root)[0].non_verifier_digest
-    (root / "calibration/solution/solve.sh").write_text("#!/usr/bin/env bash\ntrue\n")
+    (root / "solution/solve.sh").write_text("#!/usr/bin/env bash\ntrue\n")
     edit_task_config(
         root,
         {
@@ -65,7 +65,7 @@ def test_calibration_cases_preserve_source_identity(tmp_path: Path):
         "tests/test.sh",
         "tests/assets/input",
         "environment/assets/input",
-        "calibration/solution/assets/input",
+        "solution/assets/input",
     ],
 )
 def test_verifier_and_asset_changes_preserve_source_identity(tmp_path: Path, relative: str):

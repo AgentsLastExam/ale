@@ -485,7 +485,7 @@ async def test_calibration_projects_only_final_episode_attempts(
     task_cli = import_module("ale.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
     edit_task_config(task_path, {"calibration": [{"name": "start-state", "expect": {"reward": 0}}]})
-    (task_path / "calibration/start-state").mkdir()
+    (task_path / "calibration/start-state").mkdir(parents=True)
     (task_path / "calibration/start-state/solve.sh").write_text("#!/usr/bin/env bash\n")
     counts: Counter[str] = Counter()
     lock = make_lock()

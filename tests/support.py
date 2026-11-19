@@ -237,7 +237,7 @@ def write_task(
         target = task / "environment" / "Dockerfile"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(dockerfile, encoding="utf-8")
-    stages = {"tests/test.sh": test, "calibration/solution/solve.sh": solve}
+    stages = {"tests/test.sh": test, "solution/solve.sh": solve}
     for relative, body in stages.items():
         if body is not None:
             entry = task / relative

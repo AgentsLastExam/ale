@@ -103,7 +103,7 @@ def test_old_marker_without_inventory_is_dirty(write_task_repo) -> None:  # type
 
 def test_status_does_not_read_asset_bytes(write_task_repo, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
-    asset = repository / "tasks/one/calibration/solution/assets/reference.bin"
+    asset = repository / "tasks/one/solution/assets/reference.bin"
     asset.parent.mkdir()
     asset.write_bytes(b"large")
 
@@ -167,7 +167,7 @@ def test_pull_replaces_a_case_s_assets_only_with_force_and_only_for_its_cases(
     dataset = _Dataset(
         {
             "tasks/one/calibration/partial/assets/answer.txt": "remote",
-            "tasks/one/calibration/solution/assets/answer.txt": "reference",
+            "tasks/one/solution/assets/answer.txt": "reference",
             "tasks/one/calibration/gone/assets/answer.txt": "a case the Task no longer has",
         }
     )
@@ -182,11 +182,12 @@ def test_pull_replaces_a_case_s_assets_only_with_force_and_only_for_its_cases(
         "tasks/one/environment/assets/**",
         "tasks/one/tests/assets/**",
         "tasks/one/validation/assets/**",
+        "tasks/one/solution/assets/**",
         "tasks/one/calibration/*/assets/**",
     ]
     assert not local.exists()
     assert (task / "calibration/partial/assets/answer.txt").read_text() == "remote"
-    assert (task / "calibration/solution/assets/answer.txt").read_text() == "reference"
+    assert (task / "solution/assets/answer.txt").read_text() == "reference"
     assert not (task / "calibration/gone").exists()
     (status,) = asset_status([task])
     assert (status.commit, status.dirty) == (_Dataset.commit, False)

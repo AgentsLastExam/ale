@@ -49,7 +49,7 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
         test=None,
         solve=None,
     )
-    for stage in ("environment/setup", "calibration/solution", "tests"):
+    for stage in ("environment/setup", "solution", "tests"):
         (task / stage).mkdir(parents=True, exist_ok=True)
     (task / "environment/setup/setup.ps1").write_text(
         r"""$ErrorActionPreference = 'Stop'
@@ -67,12 +67,12 @@ Set-Content C:\Users\user\Documents\kept\note.txt 'kept' -NoNewline
 Set-Content C:\Users\user\Documents\kept\scratch.tmp 'left' -NoNewline
 """
     )
-    (task / "calibration/solution/solve.ps1").write_text(
+    (task / "solution/solve.ps1").write_text(
         'python.exe -c "import ctypes; assert not ctypes.windll.shell32.IsUserAnAdmin()"\n'
         "if ($LASTEXITCODE) { exit $LASTEXITCODE }\n"
         "python.exe .\\check.py\nexit $LASTEXITCODE\n"
     )
-    (task / "calibration/solution/check.py").write_text(
+    (task / "solution/check.py").write_text(
         "from pathlib import Path\n"
         "try: Path(r'C:\\ale-copy\\game.sgf').read_text()\n"
         "except PermissionError: pass\n"

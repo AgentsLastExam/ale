@@ -35,15 +35,15 @@ my-task/
 ├── validation/                # ALE; optional verifier whose results the agent receives
 │   ├── test.sh                # as tests/test.sh
 │   └── verify.py
-└── calibration/               # ALE; known final states and the scores they must receive
-    ├── solution/              # the reference solution, Harbor's solution/
-    │   └── solve.sh           # solve.ps1 on Windows
+├── solution/                  # the reference solution, as in Harbor
+│   └── solve.sh               # solve.ps1 on Windows
+└── calibration/               # ALE; optional further known final states and their scores
     └── missing-summary/       # one directory per further case
         └── solve.sh
 ```
 
 Required files are `task.toml`, `instruction.md`, and the tests and reference solution
-entries for the Task OS: `tests/test.sh` and `calibration/solution/solve.sh` on Linux and
+entries for the Task OS: `tests/test.sh` and `solution/solve.sh` on Linux and
 macOS, `test.ps1` and `solve.ps1` on Windows; every further
 [calibration case](#calibration)'s directory holds the same entry, and
 [`validation/`](#validation), when there is one, the tests entry. `[environment].image` and
@@ -191,9 +191,9 @@ These values differ from Harbor's:
 - `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
 - `environment_mode` also takes `snapshot`, ALE's: a verifier booted from a snapshot of the
   solver; see [Verification topology](#verification-topology).
-- The reference solution is `calibration/solution/`, one [calibration case](#calibration)
-  among the others, where Harbor's is `solution/`, so a Harbor conversion moves it; a Task
-  still holding `solution/` fails as it loads.
+- The reference solution, `solution/` as in Harbor, is also the [calibration case](#calibration)
+  `solution`; further cases live in `calibration/<name>/`, and a `calibration/solution/`
+  fails as the Task loads.
 - `gpu_types` holds at least one name and requires `gpus`, and every Provider honors it,
   where Harbor's Docker environment ignores it; see [GPUs](#gpus).
 - `allowed_hosts` refuses entries that reach the Host; see [Resources and network](#resources-and-network).
@@ -690,7 +690,7 @@ name = "solution"                           # replaces the default { reward = 1 
 expect = { reward = [0.0, 0.05], tflops = [600, 680] }
 ```
 
-Every Task has the case `solution`, its reference solution in `calibration/solution/`. It
+Every Task has the case `solution`, its reference solution in `solution/`. It
 expects `{ reward = 1 }`, and an entry of that name only replaces the expectation, so the
 directory needs none. An open-ended Task whose reference solution is its baseline rather
 than a full-marks answer declares what that baseline earns, as the last entry above does:
@@ -702,9 +702,9 @@ start state earns nothing, declare a case whose `solve.sh` does nothing and that
 In each case, its directory's `solve.sh` (`solve.ps1` on Windows) supplies the case's final
 state: it may execute a solution normally or write that state directly from reference data
 it carries. It runs as the oracle, with `[solution].env`, and like `tests/` it is absent
-while an evaluated agent works. `calibration/` holds only case directories, and `ale lint`
-refuses any other entry there, a link included. A directory there other than `solution`
-without an entry fails the Task as it loads, so a case cannot exist without its
+while an evaluated agent works. `calibration/` holds only the further case directories, and
+`ale lint` refuses any other entry there, a link or a `solution/` included. A directory
+there without an entry fails the Task as it loads, so a case cannot exist without its
 expectation.
 
 `expect` includes `reward`. Each value is a number the result must equal, or `[lo, hi]`, a
