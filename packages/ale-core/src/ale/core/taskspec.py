@@ -45,9 +45,11 @@ __all__ = [
     "NetworkPolicy",
     "OperatingSystem",
     "PhaseTimeouts",
+    "RemoteMcpServer",
     "Resources",
     "SkillSource",
     "SolutionTable",
+    "SseMcpServer",
     "StdioMcpServer",
     "StreamableHttpMcpServer",
     "TaskConfig",
@@ -349,10 +351,23 @@ class StreamableHttpMcpServer(BaseModel):
     url: str = Field(pattern=r"^https?://")
 
 
+class SseMcpServer(BaseModel):
+    """A remote server on MCP's HTTP+SSE transport, Harbor's default ``transport``."""
+
+    model_config = _FROZEN
+
+    schema_version: Literal[1] = 1
+    name: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
+    transport: Literal["sse"]
+    url: str = Field(pattern=r"^https?://")
+
+
 McpServer = Annotated[
-    StdioMcpServer | StreamableHttpMcpServer,
+    StdioMcpServer | StreamableHttpMcpServer | SseMcpServer,
     Field(discriminator="transport"),
 ]
+#: The servers an agent reaches over the network, by URL.
+RemoteMcpServer = StreamableHttpMcpServer | SseMcpServer
 
 
 class ToolProvision(BaseModel):
@@ -807,20 +822,23 @@ class McpServerTable(BaseModel):
     model_config = _FROZEN
 
     name: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
-    transport: Literal["stdio", "streamable-http"]
+    transport: Literal["stdio", "sse", "streamable-http"] = "sse"
+    """As in Harbor, ``sse`` unless written; ``http`` means ``streamable-http``."""
     command: str | None = Field(default=None, min_length=1)
     args: tuple[str, ...] = ()
     url: str | None = Field(default=None, pattern=r"^https?://")
     headers: McpHeaders = Field(default_factory=dict)
 
     @property
-    def server(self) -> StdioMcpServer | StreamableHttpMcpServer:
+    def server(self) -> StdioMcpServer | StreamableHttpMcpServer | SseMcpServer:
         if self.transport == "stdio":
             assert self.command is not None
             return StdioMcpServer(
                 name=self.name, transport="stdio", command=self.command, args=self.args
             )
         assert self.url is not None
+        if self.transport == "sse":
+            return SseMcpServer(name=self.name, transport="sse", url=self.url)
         return StreamableHttpMcpServer(name=self.name, transport="streamable-http", url=self.url)
 
     # --- validation ---
@@ -836,10 +854,10 @@ class McpServerTable(BaseModel):
             self.command is None or self.url is not None or self.headers
         ):
             raise ValueError("transport 'stdio' requires command and takes no url or headers")
-        if self.transport == "streamable-http" and (
+        if self.transport != "stdio" and (
             self.url is None or self.command is not None or self.args
         ):
-            raise ValueError("transport 'streamable-http' requires url and takes no command")
+            raise ValueError(f"transport {self.transport!r} requires url and takes no command")
         return self
 
     @model_validator(mode="after")

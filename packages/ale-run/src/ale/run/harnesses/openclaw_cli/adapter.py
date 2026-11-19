@@ -131,7 +131,7 @@ class OpenClawCliHarness(CliHarness):
             else:
                 native = {
                     "url": server.url,
-                    "transport": "streamable-http",
+                    "transport": server.transport,
                     **http_headers(resolved),
                 }
             config["mcp"]["servers"][resolved.name] = native

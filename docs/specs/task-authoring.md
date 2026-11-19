@@ -102,7 +102,7 @@ skills_dir = "/skills"                      # absolute; the Task's Skills in the
 
 [[environment.mcp_servers]]                 # one table per server
 name = "search"
-transport = "stdio"                         # required: stdio | streamable-http (or http)
+transport = "stdio"                         # stdio | sse | streamable-http (or http); default sse
 command = "/opt/search-mcp/server"          # stdio: a program in the image
 args = ["--index", "/srv/index"]            # stdio
 # url = "https://mcp.example.org/mcp"       # streamable-http
@@ -546,13 +546,15 @@ below `environment/` and have the Dockerfile, `build.ps1` or `build.sh` place th
 Skill. The Harness copies its contents to the agent's skills directory before the agent starts.
 
 `[[environment.mcp_servers]]` uses Harbor's `name`, `transport`, `command`, `args`, `url` and
-`headers`. `transport` is required because Harbor's default, `sse`, is not implemented; `http`
-means `streamable-http`, as in Harbor. A stdio server is a program in the image; one that needs
-its own directory or variables starts through a wrapper script there. A `streamable-http` URL
-must be reachable under `[agent]`'s network, which ALE checks before any Sandbox exists: under
-`allowlist` that means `https`.
+`headers`, with Harbor's default `transport`, `sse`; `http` means `streamable-http`, as in
+Harbor. A stdio server is a program in the image; one that needs its own directory or variables
+starts through a wrapper script there. An `sse` or `streamable-http` URL must be reachable under
+`[agent]`'s network, which ALE checks before any Sandbox exists: under `allowlist` that means
+`https`. Each Harness configures an SSE server as Harbor's adapter for its agent does, and one
+whose agent has no SSE transport is refused before any Sandbox exists
+([Harnesses](../../packages/ale-run/src/ale/run/harnesses/README.md#mcp-transports)).
 
-`headers` belongs to a `streamable-http` server. As in Harbor, and unlike an `env` value, a
+`headers` belongs to an `sse` or `streamable-http` server. As in Harbor, and unlike an `env` value, a
 header holds `${NAME}` or `${NAME:-default}` anywhere in its text, so `Bearer ${SEARCH_TOKEN}`
 works. References resolve as [Variables](#variables) describe, for an agent's run only: an
 oracle has no MCP client. A credential header (`Authorization`, `Cookie`, or a name that marks

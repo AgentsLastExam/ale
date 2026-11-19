@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 from ale.core.errors import AgentError, AgentRefusalError, ConfigError, HarnessLimitError
 from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
+from ale.core.taskspec import SseMcpServer, StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trajectory import AtifTrajectory
 from ale.run.harnesses._npm import agent_path, npm_env
 from ale.run.harnesses.base import (
@@ -91,6 +91,8 @@ class ClaudeCodeHarness(CliHarness):
                     }
             elif isinstance(server, StreamableHttpMcpServer):
                 native = {"type": "http", "url": server.url, **http_headers(resolved)}
+            elif isinstance(server, SseMcpServer):
+                native = {"type": "sse", "url": server.url, **http_headers(resolved)}
             else:  # pragma: no cover - the core discriminated union is exhaustive
                 raise ConfigError(f"unsupported MCP transport for {resolved.name}")
             mcp_servers[resolved.name] = native

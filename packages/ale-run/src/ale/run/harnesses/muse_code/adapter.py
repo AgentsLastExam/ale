@@ -45,6 +45,7 @@ class MuseCodeHarness(CliHarness):
     name = "muse-code"
     package = "lookaside.facebook.com/lookaside/muse"
     binary = "muse"
+    mcp_sse = False  # Muse Code has no SSE transport; Harbor's adapter refuses it too
     default_version = DEFAULT_CLI_VERSION
     # Meta's release manifest for this version.
     release_assets: ClassVar[ReleaseAssets] = {

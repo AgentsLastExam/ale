@@ -17,6 +17,7 @@ from ale.core.taskspec import (
     NetworkPolicy,
     OperatingSystem,
     SkillSource,
+    SseMcpServer,
     StdioMcpServer,
     StreamableHttpMcpServer,
     TaskConfig,
@@ -184,6 +185,30 @@ def test_task_config_rejects_unknown_keys() -> None:
             config(layer)
 
 
+def test_an_mcp_server_s_transport_is_sse_unless_written_as_in_harbor() -> None:
+    servers = config(
+        {
+            "environment": {
+                "mcp_servers": [
+                    {"name": "a", "url": "https://mcp.example.org/sse"},
+                    {"name": "b", "transport": "http", "url": "https://mcp.example.org/mcp"},
+                    {
+                        "name": "c",
+                        "transport": "sse",
+                        "url": "https://mcp.example.org/sse",
+                        "headers": {"Authorization": "Bearer ${SEARCH_TOKEN}"},
+                    },
+                ]
+            }
+        }
+    ).environment.mcp_servers
+    assert [type(entry.server) for entry in servers] == [
+        SseMcpServer,
+        StreamableHttpMcpServer,
+        SseMcpServer,
+    ]
+
+
 def test_docker_image_is_harbor_s_name_for_image() -> None:
     named = config(
         {"environment": {"docker_image": "ghcr.io/acme/task:v1"}},
@@ -259,14 +284,7 @@ def test_docker_image_is_harbor_s_name_for_image() -> None:
         ({"environment": {"gpus": 1, "gpu_types": []}}, "at least 1 item"),
         ({"environment": {"gpus": 1, "gpu_types": [" - "]}}, "should match pattern"),
         ({"agent": {"sudo": "yes"}}, "valid boolean"),
-        (
-            {
-                "environment": {
-                    "mcp_servers": [{"name": "s", "transport": "sse", "url": "http://x"}]
-                }
-            },
-            "stdio",
-        ),
+        ({"environment": {"mcp_servers": [{"name": "s"}]}}, "transport 'sse' requires url"),
         (
             {
                 "environment": {

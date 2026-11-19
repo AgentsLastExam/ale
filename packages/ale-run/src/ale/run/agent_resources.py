@@ -20,9 +20,9 @@ from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
     OperatingSystem,
+    RemoteMcpServer,
     SkillSource,
     StdioMcpServer,
-    StreamableHttpMcpServer,
     ToolProvision,
     host_allowed,
 )
@@ -193,10 +193,10 @@ def _resolve_task_server(
 ) -> ResolvedMcpServer:
     """A server of the Task's own: the image's identity covers what it runs."""
     _check_network(server, network)
-    external = isinstance(server, StreamableHttpMcpServer)
+    external = isinstance(server, RemoteMcpServer)
     reportable = task_source.is_reproducible and not external
     if external:
-        reason = "external Streamable HTTP service has no immutable identity"
+        reason = "external MCP service has no immutable identity"
     elif reportable:
         reason = None
     else:
@@ -264,8 +264,8 @@ def _resolve_mcp_source(
         source_version=None,
         reportable=False,
         reportability_reason=(
-            "external Streamable HTTP service has no immutable identity"
-            if isinstance(server, StreamableHttpMcpServer)
+            "external MCP service has no immutable identity"
+            if isinstance(server, RemoteMcpServer)
             else _operator_resource_reason(origin)
         ),
         staged_files=staged_files,
@@ -273,7 +273,7 @@ def _resolve_mcp_source(
 
 
 def _check_network(server: McpServer, network: NetworkPolicy) -> None:
-    if not isinstance(server, StreamableHttpMcpServer):
+    if not isinstance(server, RemoteMcpServer):
         return
     host = (urlparse(server.url).hostname or "").lower()
     if network.mode is NetworkMode.BLOCK:

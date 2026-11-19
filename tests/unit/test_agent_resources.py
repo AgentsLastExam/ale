@@ -15,6 +15,7 @@ from ale.core.taskspec import (
     NetworkPolicy,
     OperatingSystem,
     SkillSource,
+    SseMcpServer,
     StdioMcpServer,
     StreamableHttpMcpServer,
     ToolProvision,
@@ -247,12 +248,6 @@ url = "https://mcp.example.com/api"
         """
 schema_version = 1
 name = "bad"
-transport = "sse"
-url = "https://mcp.example.com"
-""",
-        """
-schema_version = 1
-name = "bad"
 transport = "stdio"
 command = "python3"
 url = "https://mcp.example.com"
@@ -293,6 +288,20 @@ def test_an_allowlisted_remote_server_needs_tls() -> None:
         task_source=source(),
         network=NetworkPolicy(mode=NetworkMode.OPEN),
     )
+
+
+def test_an_sse_server_meets_the_network_rules_a_streamable_http_one_does() -> None:
+    sse = SseMcpServer(name="events", transport="sse", url="http://mcp.example.com/sse")
+    task = ToolProvision(mcp_servers=(sse,))
+    with pytest.raises(AgentResourceError, match="blocked"):
+        resolve_agent_resources(task=task, task_source=source(), network=None)
+    allowlist = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("mcp.example.com",))
+    with pytest.raises(AgentResourceError, match="needs an https URL"):
+        resolve_agent_resources(task=task, task_source=source(), network=allowlist)
+    (resolved,) = resolve_agent_resources(
+        task=task, task_source=source(), network=NetworkPolicy(mode=NetworkMode.OPEN)
+    ).mcp_servers
+    assert (resolved.server, resolved.reportable) == (sse, False)
 
 
 def test_remote_mcp_obeys_network_policy() -> None:

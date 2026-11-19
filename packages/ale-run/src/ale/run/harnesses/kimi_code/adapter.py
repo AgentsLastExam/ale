@@ -146,6 +146,8 @@ class KimiCodeHarness(CliHarness):
             else:
                 # An entry with a URL and no transport is a Streamable HTTP server.
                 native = {"url": server.url, **http_headers(resolved)}
+                if server.transport == "sse":
+                    native["transport"] = "sse"
             servers[resolved.name] = native
         await sandbox.write_file(
             kimi_home / "mcp.json",

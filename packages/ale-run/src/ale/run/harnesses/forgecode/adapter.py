@@ -56,6 +56,7 @@ class ForgecodeHarness(CliHarness):
     name = "forgecode"
     package = "github:tailcallhq/forgecode"
     binary = "forge"
+    mcp_sse = False  # no SSE transport is documented for ForgeCode's configuration
     default_version = DEFAULT_CLI_VERSION
     release_assets: ClassVar[ReleaseAssets] = {
         (OperatingSystem.LINUX, "x86_64"): ReleaseAsset(
