@@ -162,6 +162,69 @@ How each counts what a snapshot holds against the `storage_mb` of a Sandbox boot
 | Firecracker | `snapshot.json` records `written_mb`, the writable disk's use as the guest's `df /` showed it before shutdown plus what the snapshot it booted from held; a microVM booted from it gets a writable disk of `storage_mb` less that, plus the overhead, and one whose `storage_mb` that already fills is refused before it boots, as the Task's error. Each save stacks one more layer, of eight at most, so the profile saves eight in a row (`max_saves`), and a Sandbox whose snapshot's layers and [planned saves](../../../../../../docs/specs/sandbox-image.md#provider-selection) together would exceed eight is refused before it boots |
 | Orchard | The clone is the snapshot's disk, at least `storage_mb`, with the solver's files on it |
 
+## Volumes
+
+A Provider whose profiles say `volumes` mounts each
+[volume](../../../../../../docs/specs/task-authoring.md#volumes) of a Sandbox as a
+filesystem of its own, which its snapshot keeps, and gives a separate verifier on the same
+leaf a view of it; Daytona and Orchard mount none, so a separate verifier there gets a copy
+of every artifact, as of any other.
+
+| Provider | A volume | What a snapshot keeps of it | A separate verifier's view | `storage_mb` |
+|---|---|---|---|---|
+| Docker | a named volume of its own, which Docker fills from the image | its top layer, in a stack of layers | an overlay volume of the stack under a layer of its own | counted by a helper that measures the volumes ([below](#docker-volumes)) |
+| Slurm | a Podman volume in the allocation's store, which Podman fills from the image | its top layer, in a stack of layers in the store | an overlay of the stack under a layer of its own, in the solver's allocation ([below](#slurm-volumes)) | not held |
+| Firecracker | an overlay of the image's directory and of each layer's, under a layer on the writable disk | the writable disk, with the root | the snapshot's disks attached read-only, and the same overlay under a layer of its own | counted with the writable disk |
+| QEMU, Linux | an overlay of the disk's own directory under `/opt/ale/volumes/<hash>` on the disk | the disk | the snapshot's disk attached read-only once the guest is up, and an overlay of what it holds there under a layer of its own | counted with the disk |
+| QEMU, Windows | the directory on the disk, which stays one | the disk | a junction to it on a copy-on-write overlay of the snapshot's disk, attached once the guest is up | counted with the disk |
+| Fleet | as on the Node's leaf | as on the Node's leaf | on the Node and leaf that keep the snapshot ([Placement](../../../../../../docs/specs/fleet.md#placement)) | as on the Node's leaf |
+
+### Docker volumes
+
+On Docker ([`docker/volumes.py`](docker/volumes.py)):
+
+| | What the Docker leaf does |
+|---|---|
+| A Sandbox of the image | finds which of its volume candidates are directories in the image, with no link on their way, by the image's own framework Python in a helper container of it, and mounts a named volume of its own at each, `ale-v-<12 hex>`, labelled `ale.volume=<sandbox id>`, which Docker fills with what the image holds there on the first mount |
+| Its snapshot | records each path's stack of layers, topmost first, in the image's `ale.volumes` label with the owner and mode of the volume's root, read before the container stops; the volume that held the Sandbox's writes is the top layer, which destroying the Sandbox leaves |
+| A Sandbox the snapshot serves | mounts, for each path, a view: a `local`-driver overlay volume of the stack under an empty upper and a work volume of its own, created by the daemon, with no copy of the image's content (`volume-nocopy`), so a verifier's own image adds nothing; it gives the view's root the recorded owner and mode, which an overlay takes from its upper layer; saving it puts that upper layer on top of the stack |
+| A stack of 60 layers | is copied into one layer of its own as the 60th save is taken, with `cp -a --reflink=auto` in a helper container, since an overlay's options, the layers' mount points among them, must fit in one page: a solver saved for each of many rounds keeps saving |
+| A container engine's storage | of a Sandbox that asks for `nested_containers`, `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers`, is a volume of its own too, which its snapshot keeps whole; a Sandbox booted from the snapshot that runs an engine gets a copy of it, as above, never a view, and one of another image, a separate verifier's, none |
+| `storage_mb` | counts what the Sandbox writes to its volumes as to its writable layer: a helper container of its own, `ale-meter-<sandbox id>`, mounts the volumes that hold its writes read-only and counts their blocks with `du`, less what they held as it started, at each measurement of the [storage watch](#docker-writable-storage); a snapshot's `ale.written` adds what they held. A measurement took 0.06 s with nothing written and 0.33 s with 100,000 files of 1 KiB, where the daemon's of the layer took 0.04 s and 0.54 s (Docker 29.1.3, NVMe) |
+| Destroying the snapshot | removes the image, then each of its layers that no other snapshot's label and no view's `ale.volume-lowers` label names: a later round's snapshot still stacks an earlier one's layers |
+
+Kata shares a view with its microVM through virtio-fs and gVisor through its gofer, as any
+volume. Measured on runc and Kata (Docker 29.1.3, containerd image store) and gVisor 0.1.4
+(Docker 26.1.5): an agent that works in its home, over two validation rounds, with a
+separate, snapshot or shared verifier, or a shared one with a separate verifier of
+`validation/`, each view seeing none of what an earlier verifier wrote and, under separate
+verification, none of the image's link, FIFO or excluded directory; a Sandbox writing
+300 MiB to its volume past a `storage_mb` of 256, stopped as `storage_exhausted`; and a
+gVisor Sandbox's Docker engine whose image, which deletes a file of its base, is still
+there and still deletes it once booted from its snapshot, where it deletes another.
+
+### Slurm volumes
+
+A Sandbox's volumes are layers in its allocation's Podman store on the node
+([`slurm/worker.py`](slurm/worker.py)): a Podman volume of its own for each candidate the
+Host's Docker finds a directory in the framed image, and for each engine path of a Sandbox
+that asks for `nested_containers`; a view, an overlay that the step mounts in the
+allocation's rootless Podman namespace with `userxattr`, of a snapshot's stack under an
+empty layer of its own, which gVisor's gofer serves as any directory; or a copy (`cp -a
+--reflink=auto`) of an engine's storage. Every layer has a short link below the store, by
+which an overlay's options name the 200 layers of [`MAX_SAVES`](#slurm) in one page. A
+snapshot records each path's stack, and a step unmounts its views before the Host hears of
+its snapshot, as a mounted upper layer is no other overlay's lower. A snapshot written out
+for an allocation of its own carries each of its layers beside its image as an uncompressed
+tar that keeps owners, whiteouts and the overlay's extended attributes, which that
+allocation unpacks before it starts anything. The allocation is sized for the separate
+verifier too where a partition holds both, and loads that verifier's image, from the Host,
+when it starts; destroying a snapshot removes its layers that no other snapshot and no
+running view stacks. Measured on OpenRSI (Linux 6.8, Podman, gVisor 0.1.4): a Podman volume
+filled from the image, a view of a stack of two layers, a deletion through it kept as a
+whiteout that the next view honours, and a container engine's images and deletions kept by a
+snapshot written out and loaded in another allocation.
+
 ## Reattaching by handle
 
 A Sandbox's `handle` names it to `reattach` and `discard`, by which another process on the
@@ -584,7 +647,7 @@ containerd image store on ext4, counted alike, and so did every runtime:
 | Empty files | their directories' blocks: 100,000 count 2.5 MiB |
 | A file deleted while a process holds it open | nothing, though it holds the Host's disk until it is closed |
 | `/dev/shm` or another tmpfs | nothing: it is memory, which `memory_mb` holds |
-| A volume, as the container engine's storage of a Sandbox that asks for `nested_containers` | nothing, so `docker:gvisor`'s profile for `nested_containers` holds no Sandbox to `storage_mb`, which goes to the next Provider listed that does: Docker sizes a volume only in `docker system df -v`, which sizes every volume and layer of the daemon, in 4 to 6 s with 80 volumes, and fails when a container goes meanwhile |
+| A [volume](#volumes), a volume artifact's or a container engine's storage | its blocks, at the same measurement, by a helper container that mounts the volume read-only, less what it held as the Sandbox started: Docker sizes a volume only in `docker system df -v`, which sizes every volume and layer of the daemon, in 4 to 6 s with 80 volumes, and fails when a container goes meanwhile |
 
 What ALE writes counts as the Sandbox's own, as on a disk of that size: a ready Sandbox of
 the container base has written 3.4 MiB, and 16 MiB 30 s later, the framework's Python
@@ -706,7 +769,7 @@ kernel log must say `Starting gVisor`, and `docker cp` must see what the Sandbox
 | `runsc` ignores the setuid bit of a program, `sudo` among them, unless it runs with `--allow-suid` | Every registration passes `--allow-suid`, so the agent elevates through `sudo` as under runc |
 | `perf_event_open`, `bpf` and `io_uring_setup` fail whatever is granted (`ENODEV`, `EPERM` or `EINVAL`, `ENOSYS`) | Its profiles give none of them |
 | netstack implements nf_tables only under `--TESTONLY-nftables`, without which the `iptables` of Debian, Ubuntu and Alpine, Docker and Podman fail (`Failed to initialize nft: Protocol not supported`); with it, the Sentry's netlink takes nf_tables messages from any process holding `CAP_NET_ADMIN` in a network namespace, as every process does in one it creates | A Sandbox that asks for `nested_containers` runs under `runsc-nested`, with `--cap-add NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE`, which stay in the Sentry: the engine's bridges and rules, its mounts and namespaces, and an init script's limits, such as Debian's raising open files. No other sandbox reaches nf_tables. netstack runs ALE's chains, which stay in its iptables tables, before the engine's nf_tables rules, as Linux runs both; unlike Linux, which tracks and NATs a connection once for both, each tracks and NATs it on its own (patch 0008) |
-| The sandbox's root is the Host's overlayfs, which refuses to create the whiteouts (a 0:0 character device) by which an engine's overlay layers mark what they delete: an engine that keeps its images there fails to start a container (`symlink /proc/mounts …/etc/mtab: file exists`) or to delete a file of its image | `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` each get a Docker volume of their own, which starts with what the image holds there and goes with the sandbox. A commit keeps no volume and the storage watch does not measure one, so the profile for container engines takes no snapshots and holds no Sandbox to `storage_mb` ([Docker writable storage](#docker-writable-storage)) |
+| The sandbox's root is the Host's overlayfs, which refuses to create the whiteouts (a 0:0 character device) by which an engine's overlay layers mark what they delete: an engine that keeps its images there fails to start a container (`symlink /proc/mounts …/etc/mtab: file exists`) or to delete a file of its image | `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` each get a Docker volume of their own, which starts with what the image holds there and goes with the sandbox. Its snapshot keeps each whole, and a Sandbox booted from it gets a copy, as an overlay view would hide the engine's whiteouts; the storage watch counts what is written there ([Volumes](#volumes)) |
 | A dockerd that can open a packet socket but not write one, as under `--net-raw`, fails to start a container (`failed to advertise addresses: operation not supported`, the `docker.io` 29.1.3 of Ubuntu 22.04 and 24.04); one that cannot open one only warns | `runsc-nested` passes no `--net-raw`, so a nested container has no raw socket, and a Sandbox has `raw_sockets` or `nested_containers`, in a profile each |
 
 Under `runsc-nested`, Ubuntu 22.04's and 24.04's `docker.io` 29.1.3 installed during the run
@@ -739,8 +802,9 @@ the preflight's check: about 15 s with that image.
 
 A Run can submit directly to Slurm over an SSH login alias. The login and compute nodes must
 share the submitting account's home. A Sandbox not booted from a snapshot, a separate
-verifier included, gets a single-node batch job of its own, its allocation, sized for it
-and for the verifier its request names, which boots from its snapshot after it. Each Sandbox
+verifier that copies included, gets a single-node batch job of its own, its allocation,
+sized for it and for the verifiers its request names, which boot from its snapshot or view
+its [volumes](#slurm-volumes) after it. Each Sandbox
 runs in its allocation as a job step of its own, which the batch step starts with `srun
 --exact` and Slurm holds to the Sandbox's CPUs, memory and GPUs; a step that asks for no GPU
 sees none of the job's. The allocation ends with the last Sandbox and snapshot in it.
@@ -791,26 +855,27 @@ records the compute node and runtime.
 
 A snapshot is the stopped container committed to the allocation's store on its node
 ([Snapshots](#snapshots)). The verifier booted from it, a [validation
-round](../../../../../../docs/specs/episode-protocol.md#validation-rounds)'s and the next
-turn's solver start there in steps of the same allocation, so nothing is copied and nothing
-waits in the queue again. The cost is that the allocation holds the larger of its solver and
-verifier for its whole life: a solver of one GPU for eight hours, verified on eight GPUs for
-one, holds eight for nine hours, 72 GPU-hours, where two allocations would hold 16. A
-Sandbox booted from a snapshot that does not fit beside what runs in its allocation gets an
-allocation of its own, which loads the snapshot written out with `podman save`; a snapshot
-the Run keeps (`sandbox_retention.solver = "snapshot"`) is written out as it is saved, as its
-allocation ends with the episode, and costs that copy. `ale sandbox destroy
-slurm:<host>/<job name>/<step>` removes one; `ale sandbox list` lists those of the hosts a
-Run configures, and finds none without one. A chain of 200 commits, each booted from the
-one before, over a one-layer image was measured, so the profile saves 200 in a row. The
-profile for container engines saves none, since the engine's storage is volumes that a
-commit does not keep. Slurm keeps no running Sandbox and limits no writable storage.
+round](../../../../../../docs/specs/episode-protocol.md#validation-rounds)'s, a separate
+verifier that views its volumes and the next turn's solver start there in steps of the same
+allocation, so nothing is copied and nothing waits in the queue again. The cost is that the
+allocation holds the larger of its solver and verifier for its whole life: a solver of one
+GPU for eight hours, verified on eight GPUs for one, holds eight for nine hours, 72
+GPU-hours, where two allocations would hold 16. A Sandbox booted from a snapshot that does
+not fit beside what runs in its allocation gets an allocation of its own, which loads the
+snapshot written out with `podman save`; a snapshot the Run keeps (`sandbox_retention.solver
+= "snapshot"`) is written out as it is saved, as its allocation ends with the episode, and
+costs that copy. `ale sandbox destroy slurm:<host>/<job name>/<step>` removes one; `ale
+sandbox list` lists those of the hosts a Run configures, and finds none without one. A chain
+of 200 commits, each booted from the one before, over a one-layer image was measured, so
+each profile saves 200 in a row; a container engine's storage is volumes, which a snapshot
+keeps as layers beside its commit. Slurm keeps no running Sandbox and limits no writable
+storage.
 
 `srun --overlap --unbuffered` opens guestd's command and file sessions and a separate
 tunnel. Blocking drops packets on the sandbox's private tap outside gVisor. Opening removes
 the filters while the container keeps running. The allowlist uses the same seal and the
 Host's authenticated proxy through the tunnel. The runtime modes grant nested Docker or raw
-sockets separately. Nested storage lasts for the Sandbox.
+sockets separately.
 
 A Sandbox's step gets the Task's memory plus what `docker:gvisor` adds for the Sentry
 ([Docker on gVisor](#docker-on-gvisor)) and 32 MiB for the step's own process and conmon;
@@ -996,6 +1061,30 @@ Docker CLI or daemon:
   LibreOffice, the ALE cache held 19.6 GiB; with the compressed base and an uncompressed
   copy of it beside the pull, it held 29.1 GiB, and the first build took 101 s, not 68 s.
 
+### Volumes in a VM
+
+A Linux disk's framework includes `ale-volumes.service`, which runs
+[`qemu/guest_volumes.py`](qemu/guest_volumes.py) as the guest boots, before guestd, the
+display manager and any login. The runner hands it, as QEMU firmware configuration
+(`-fw_cfg name=opt/ale/volumes`), the Sandbox's volume candidates, or a snapshot's volumes
+for a VM booted from it. It mounts an overlay at each that is a directory on the disk, with
+no link on its way, of that directory under `/opt/ale/volumes/<hash>/upper` on the same
+disk, giving the layer the directory's owner and mode, and records what it mounted in
+`/run/ale/volumes.json`, which the Provider reads once guestd answers. A Windows guest
+mounts no overlay: a volume stays a directory of its disk.
+
+A separate verifier that views a snapshot's volumes boots with an empty SCSI controller of
+its own. Once guestd answers, the Provider attaches the snapshot's disk to it through the
+runner's QEMU monitor (`serial=ale-view`): attached at boot, that copy of a bootable disk,
+often of the very image the verifier boots, has the same partition identifiers, and Windows'
+boot manager booted the verifier from it. A Linux guest gets the snapshot's disk read-only;
+`volumes.py views` mounts its file system that holds `/opt/ale/volumes` read-only, without
+replaying its journal, an overlay of each volume's layer and directory under a layer of its
+own, and unmounts the rest of the disk. A Windows guest gets a copy-on-write overlay of
+it, which it brings online, giving it a signature of its own, mounts its largest
+partition, the solver's system drive, under `C:\ProgramData\ALE\viewed`, and makes each
+viewed path a junction there in place of its own.
+
 ## Firecracker
 
 `FirecrackerProvider` runs a container Task's prepared image, the one Docker runs, as a
@@ -1016,6 +1105,12 @@ Firecracker 1.17.0, the guest kernel 6.1.155 its CI publishes, and the ALE conta
   `storage_mb` plus 512 MB or 32 GB, seeded with the Sandbox's settings and the runner's
   resolvers. The init lays it over the root with overlayfs, so a Sandbox costs what it
   writes: 27 MB once the container base's GNOME session was up.
+- **Volumes.** Before it makes the overlay `/`, the init mounts at each volume an overlay of
+  the image's directory and of what each read-only layer holds for it,
+  `volumes/<hash>/upper`, under a layer on the writable disk, apart from the root's own, so
+  a snapshot keeps it as it keeps the root and the writable disk counts it. A separate
+  verifier gets the snapshot's disks attached read-only after its own, mounts the same
+  layers under one of its own, and detaches the disks' mounts, out of sight.
 - **The init** is PID 1 on the framework's Python. It mounts `/proc`, `/sys`, `/dev`,
   `/dev/pts`, `/dev/shm` (half the guest's memory, a VM's default, where Docker gives
   64 MB), `/dev/mqueue` and cgroup2, writes `hostname`, `hosts` and `resolv.conf`, starts
