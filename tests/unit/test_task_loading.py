@@ -262,9 +262,7 @@ def test_load_errors_name_the_key(tmp_path: Path) -> None:
     with pytest.raises(TaskDefinitionError, match=r"agent\.shell is not a task\.toml key"):
         load_tasks(task)
     edit(task, {"agent": {"shell": None}, "environment": {"docker_image": "ghcr.io/a/b:1"}})
-    with pytest.raises(
-        TaskDefinitionError, match=r"environment\.docker_image is not a task\.toml key"
-    ):
+    with pytest.raises(TaskDefinitionError, match=r"remove \[environment\]\.image"):
         load_tasks(task)
     (task / "environment/Dockerfile").unlink()
     edit(task, {"environment": {"docker_image": None, "image": " "}})

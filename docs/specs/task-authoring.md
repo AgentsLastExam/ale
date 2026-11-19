@@ -88,7 +88,7 @@ network_justification = "the Task reads one publisher's live catalog"
 
 [environment]                               # the solver's machine
 os = "linux"                                # linux | windows | macos; default linux
-# image = "registry.example/image:tag"      # ALE; used directly, or a build script's base
+# image = "registry.example/image:tag"      # or docker_image; used directly, or a build's base
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
 cpus = 1                                    # whole CPUs; default 1
 memory_mb = 4096                            # default 4096
@@ -123,7 +123,7 @@ environment_mode = "separate"               # shared | separate | snapshot (ALE)
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 
 [verifier.environment]                      # a separate or snapshot verifier's own sandbox
-# image = "registry.example/verifier:tag"   # ALE; separate only; not with tests/Dockerfile
+# image = "registry.example/verifier:tag"   # or docker_image; separate only; no tests/Dockerfile
 build_timeout_sec = 3600                    # separate only; default 3600
 cpus = 1                                    # default [environment].cpus
 memory_mb = 4096                            # default [environment].memory_mb
@@ -165,8 +165,8 @@ timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
 Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
 an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
-covers the rest. `[environment].image` names every image, so `docker_image` is an unknown
-key. `environment/setup/` can wait for a service, so there is no `healthcheck`.
+covers the rest. `docker_image` is `image` under Harbor's name, in `[environment]` and
+`[verifier.environment]` alike: one field, so a table holds either, never both. `environment/setup/` can wait for a service, so there is no `healthcheck`.
 Stages run in fixed directories under the framework's identity, so there is no
 `[environment].workdir` or `[verifier].user`. `[agent].network_mode` is the one network setting.
 ALE keeps its copies in an inventory of its own, so an artifact has no `destination`. An origin

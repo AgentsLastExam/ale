@@ -61,8 +61,6 @@ def test_living_task_docs_do_not_recommend_removed_contracts(path: Path) -> None
         "image: {build: verify}",
         "image: {ref:",
         "1.4+ale.1",
-        "docker_image =",
-        ".docker_image",
         "vm_image",
         "vm_base",
         "vm = true",

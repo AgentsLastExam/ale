@@ -875,6 +875,15 @@ def _normal_host(host: str) -> str:
     return network.compressed if "/" in name else network.network_address.compressed
 
 
+def _harbor_image_key(data: Any) -> Any:
+    """Harbor's ``docker_image`` is ``image`` under its Harbor name: one field, written once."""
+    if not isinstance(data, dict) or "docker_image" not in data:
+        return data
+    if "image" in data:
+        raise ValueError("image and docker_image are one field; write only one of them")
+    return {("image" if key == "docker_image" else key): value for key, value in data.items()}
+
+
 class EnvironmentTable(BaseModel):
     """``[environment]``: the machine the agent starts on."""
 
@@ -882,7 +891,8 @@ class EnvironmentTable(BaseModel):
 
     os: OperatingSystem = OperatingSystem.LINUX
     image: str | None = Field(default=None, min_length=1)
-    """An image used directly, or the base ``environment/``'s build script builds on."""
+    """An image used directly, or the base ``environment/``'s build script builds on;
+    Harbor's ``docker_image`` names it too."""
     build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
     cpus: int = Field(default=1, ge=1, strict=True)
     memory_mb: int = Field(default=4096, ge=1, strict=True)
@@ -899,6 +909,11 @@ class EnvironmentTable(BaseModel):
     mcp_servers: tuple[McpServerTable, ...] = ()
 
     # --- validation ---
+
+    @model_validator(mode="before")
+    @classmethod
+    def _docker_image(cls, data: Any) -> Any:
+        return _harbor_image_key(data)
 
     @field_validator("os", mode="before")
     @classmethod
@@ -953,7 +968,8 @@ class VerifierEnvironmentTable(BaseModel):
     model_config = _FROZEN
 
     image: str | None = Field(default=None, min_length=1)
-    """An image used directly; ``tests/Dockerfile`` builds one otherwise."""
+    """An image used directly, also named ``docker_image`` as in Harbor; ``tests/Dockerfile``
+    builds one otherwise."""
     build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
     cpus: int | None = Field(default=None, ge=1, strict=True)
     memory_mb: int | None = Field(default=None, ge=1, strict=True)
@@ -963,6 +979,13 @@ class VerifierEnvironmentTable(BaseModel):
     gpu_memory_mb: int | None = Field(default=None, ge=1, strict=True)
     container_features: _ContainerFeatures = ()
     env: TaskEnv = Field(default_factory=dict)
+
+    # --- validation ---
+
+    @model_validator(mode="before")
+    @classmethod
+    def _docker_image(cls, data: Any) -> Any:
+        return _harbor_image_key(data)
 
 
 class VerifierTable(BaseModel):

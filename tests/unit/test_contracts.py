@@ -178,12 +178,25 @@ def test_task_config_rejects_unknown_keys() -> None:
         {"domain": "demo"},
         {"ale": {"sudo": True}},
         {"task": {"org": "x"}},
-        # Harbor's container reference; ALE names every image with [environment].image.
-        {"environment": {"docker_image": "ghcr.io/acme/task:v1"}},
         {"environment": {"vm": True}},
-        {"verifier": {"environment": {"docker_image": "ghcr.io/acme/verifier:v1"}}},
     ):
         with pytest.raises(ValidationError, match="Extra inputs"):
+            config(layer)
+
+
+def test_docker_image_is_harbor_s_name_for_image() -> None:
+    named = config(
+        {"environment": {"docker_image": "ghcr.io/acme/task:v1"}},
+        {"verifier": {"environment": {"docker_image": "ghcr.io/acme/verifier:v1"}}},
+    )
+    assert named.environment.image == "ghcr.io/acme/task:v1"
+    assert named.verifier.environment is not None
+    assert named.verifier.environment.image == "ghcr.io/acme/verifier:v1"
+    for layer in (
+        {"environment": {"image": "a:1", "docker_image": "a:1"}},
+        {"verifier": {"environment": {"image": "a:1", "docker_image": "b:1"}}},
+    ):
+        with pytest.raises(ValidationError, match="image and docker_image are one field"):
             config(layer)
 
 

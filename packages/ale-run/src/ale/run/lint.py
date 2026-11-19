@@ -212,7 +212,9 @@ def _check_image_versions(folder: TaskFolder, config: dict[str, object]) -> list
     verifier = config.get("verifier")
     nested = verifier.get("environment") if isinstance(verifier, dict) else None
     for table in (environment, nested):
-        image = table.get("image") if isinstance(table, dict) else None
+        if not isinstance(table, dict):
+            continue
+        image = table.get("image", table.get("docker_image"))
         if isinstance(image, str):
             named.append((folder.root / TASK_CONFIG, image))
     return [
