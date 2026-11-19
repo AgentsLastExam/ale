@@ -175,11 +175,9 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
         )
     findings.extend(_check_variables(folder.root / TASK_CONFIG, config))
     findings.extend(_check_image_versions(folder, config))
-    agent, metadata = config.get("agent"), config.get("metadata")
-    if (
-        isinstance(agent, dict)
-        and agent.get("network_mode") == "public"
-        and not (isinstance(metadata, dict) and metadata.get("network_justification"))
+    metadata = config.get("metadata")
+    if _agent_network_mode(config) == "public" and not (
+        isinstance(metadata, dict) and metadata.get("network_justification")
     ):
         findings.append(
             Finding(
@@ -188,6 +186,18 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             )
         )
     return findings
+
+
+def _agent_network_mode(config: dict[str, object]) -> object:
+    """The agent's network mode as Harbor resolves it: ``[agent]``'s, else ``[environment]``'s
+    baseline, ``allow_internet`` included."""
+    agent, environment = config.get("agent"), config.get("environment")
+    for table in (agent, environment):
+        if isinstance(table, dict) and table.get("network_mode") is not None:
+            return table["network_mode"]
+    if isinstance(environment, dict) and environment.get("allow_internet") is True:
+        return "public"
+    return None
 
 
 def _moves(image: str) -> bool:

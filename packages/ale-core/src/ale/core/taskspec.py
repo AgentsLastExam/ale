@@ -828,16 +828,7 @@ _NETWORK_MODES = {
     "public": NetworkMode.OPEN,
 }
 
-_HARBOR_ENVIRONMENT_ONLY = frozenset(
-    {
-        "allow_internet",
-        "allowed_hosts",
-        "memory",
-        "network_mode",
-        "storage",
-        "tpu",
-    }
-)
+_HARBOR_ENVIRONMENT_ONLY = frozenset({"memory", "storage", "tpu"})
 
 #: A ``gpu_types`` entry: a GPU model as Harbor names it, such as ``H100`` or ``RTX-PRO-6000``.
 _GpuType = Annotated[str, Field(pattern=r"[A-Za-z0-9]")]
@@ -850,7 +841,8 @@ _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
     ("verifier",): frozenset({"allowed_hosts", "collect", "network_mode"}),
     # Harbor runs a healthcheck in the agent's environment only.
     ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY
-    | {"healthcheck", "mcp_servers", "os", "skills_dir"},
+    | {"allow_internet", "allowed_hosts", "healthcheck", "mcp_servers", "network_mode", "os"}
+    | {"skills_dir"},
 }
 
 
@@ -950,6 +942,29 @@ def _normal_host(host: str) -> str:
     return network.compressed if "/" in name else network.network_address.compressed
 
 
+#: A ``task.toml`` network mode, as Harbor spells it.
+_HarborNetworkMode = Literal["no-network", "allowlist", "public"]
+
+
+def _table_network(
+    mode: str | None, hosts: tuple[str, ...] | None, allow_internet: bool | None = None
+) -> NetworkPolicy | None:
+    """The policy a table names, with Harbor's deprecated ``allow_internet`` read only when it
+    names no mode; ``None`` when it names none."""
+    if mode is None and allow_internet is not None:
+        mode = "public" if allow_internet else "no-network"
+    if mode is None:
+        return None
+    return NetworkPolicy(mode=_NETWORK_MODES[mode], allowed_hosts=hosts or ())
+
+
+def _check_table_network(mode: str | None, hosts: tuple[str, ...] | None) -> None:
+    if mode == "allowlist" and not hosts:
+        raise ValueError("network_mode 'allowlist' requires a non-empty allowed_hosts")
+    if mode != "allowlist" and hosts is not None:
+        raise ValueError("allowed_hosts requires network_mode 'allowlist'")
+
+
 def _harbor_image_key(data: Any) -> Any:
     """Harbor's ``docker_image`` is ``image`` under its Harbor name: one field, written once."""
     if not isinstance(data, dict) or "docker_image" not in data:
@@ -983,10 +998,21 @@ class EnvironmentTable(BaseModel):
     skills_dir: str | None = Field(default=None, min_length=1)
     mcp_servers: tuple[McpServerTable, ...] = ()
     healthcheck: Healthcheck | None = None
+    network_mode: _HarborNetworkMode | None = None
+    """Harbor's baseline: the agent's network unless ``[agent]`` names its own."""
+    allowed_hosts: tuple[str, ...] | None = None
+    allow_internet: bool | None = Field(default=None, strict=True)
+    """Harbor's deprecated switch, read only without ``network_mode``: ``true`` is
+    ``public``, ``false`` ``no-network``."""
     workdir: str | None = Field(default=None, min_length=1)
     """Harbor's working directory: where the agent starts unless ``[agent].workdir`` says
     otherwise, and where ``tests/`` and ``validation/`` run; below the agent's home when
     relative."""
+
+    @property
+    def network(self) -> NetworkPolicy | None:
+        """The baseline this table names, or ``None``."""
+        return _table_network(self.network_mode, self.allowed_hosts, self.allow_internet)
 
     # --- validation ---
 
@@ -994,6 +1020,16 @@ class EnvironmentTable(BaseModel):
     @classmethod
     def _docker_image(cls, data: Any) -> Any:
         return _harbor_image_key(data)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        return None if hosts is None else tuple(_normal_host(host) for host in hosts)
+
+    @model_validator(mode="after")
+    def _hosts_only_for_allowlist(self) -> Self:
+        _check_table_network(self.network_mode, self.allowed_hosts)
+        return self
 
     @field_validator("os", mode="before")
     @classmethod
@@ -1008,7 +1044,8 @@ class AgentTable(BaseModel):
 
     user: str = Field(default="user", pattern=_ACCOUNT)
     timeout_sec: float = Field(default=900, gt=0, allow_inf_nan=False, strict=True)
-    network_mode: Literal["no-network", "allowlist", "public"] = "no-network"
+    network_mode: _HarborNetworkMode | None = None
+    """Unset, ``[environment]``'s baseline applies, as in Harbor, and else no network."""
     allowed_hosts: tuple[str, ...] | None = None
     sudo: bool = Field(default=False, strict=True)
     workdir: str | None = Field(default=None, min_length=1)
@@ -1017,10 +1054,9 @@ class AgentTable(BaseModel):
     ``N`` gives it ``N + 1`` turns."""
 
     @property
-    def network(self) -> NetworkPolicy:
-        return NetworkPolicy(
-            mode=_NETWORK_MODES[self.network_mode], allowed_hosts=self.allowed_hosts or ()
-        )
+    def network(self) -> NetworkPolicy | None:
+        """The policy this table names, or ``None``."""
+        return _table_network(self.network_mode, self.allowed_hosts)
 
     # --- validation ---
 
@@ -1031,10 +1067,7 @@ class AgentTable(BaseModel):
 
     @model_validator(mode="after")
     def _hosts_only_for_allowlist(self) -> Self:
-        if self.network_mode == "allowlist" and not self.allowed_hosts:
-            raise ValueError("network_mode 'allowlist' requires a non-empty allowed_hosts")
-        if self.network_mode != "allowlist" and self.allowed_hosts is not None:
-            raise ValueError("allowed_hosts requires network_mode 'allowlist'")
+        _check_table_network(self.network_mode, self.allowed_hosts)
         return self
 
 
@@ -1182,6 +1215,12 @@ class TaskConfig(BaseModel):
     solution: SolutionTable = SolutionTable()
     calibration: tuple[CalibrationCase, ...] = ()
     """``[[calibration]]`` as written; ``calibration_cases`` adds the default ``solution``."""
+
+    @property
+    def agent_network(self) -> NetworkPolicy:
+        """Harbor's resolution for the agent and the oracle: ``[agent]``'s own policy, else
+        ``[environment]``'s baseline, else ALE's default, no network."""
+        return self.agent.network or self.environment.network or NetworkPolicy()
 
     @property
     def calibration_cases(self) -> tuple[CalibrationCase, ...]:

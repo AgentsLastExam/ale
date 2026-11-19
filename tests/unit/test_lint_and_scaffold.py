@@ -151,6 +151,16 @@ def test_a_public_network_needs_its_reason(tmp_path: Path) -> None:
     assert messages(task) == ""
 
 
+def test_a_public_harbor_baseline_needs_its_reason_too(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    edit(task, {"agent": {"network_mode": None}, "environment": {"allow_internet": True}})
+    assert "needs a reason" in messages(task)
+    edit(task, {"environment": {"allow_internet": None, "network_mode": "public"}})
+    assert "needs a reason" in messages(task)
+    edit(task, {"agent": {"network_mode": "no-network"}})
+    assert messages(task) == ""
+
+
 def test_assets_without_a_build_are_reported(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "fresh")
     (task / "environment" / "Dockerfile").unlink()

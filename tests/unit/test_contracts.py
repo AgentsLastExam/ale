@@ -136,7 +136,7 @@ def test_task_config_requires_only_its_version_and_name() -> None:
     assert (minimal.environment.cpus, minimal.environment.memory_mb) == (1, 4096)
     assert minimal.environment.build_timeout_sec == 3600
     assert (minimal.agent.user, minimal.agent.timeout_sec) == ("user", 900)
-    assert minimal.agent.network.mode is NetworkMode.BLOCK
+    assert minimal.agent_network.mode is NetworkMode.BLOCK
     assert minimal.verifier.timeout_sec == 600
     for table, key in (("", "schema_version"), ("task", "name")):
         payload = merged_config(MINIMAL_TASK_CONFIG, {table: {key: None}} if table else {key: None})
@@ -162,7 +162,6 @@ def test_task_config_requires_only_its_version_and_name() -> None:
             {"verifier": {"environment": {"healthcheck": {"command": "true"}}}},
             "verifier.environment.healthcheck",
         ),
-        ({"environment": {"network_mode": "public"}}, "environment.network_mode"),
         (
             {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},
             "verifier.environment.os",
@@ -401,12 +400,52 @@ def test_verification_mode_follows_harbor() -> None:
 
 
 def test_network_modes_map_onto_the_runtime_policy() -> None:
-    assert config().agent.network == NetworkPolicy(mode=NetworkMode.BLOCK)
+    assert config().agent_network == NetworkPolicy(mode=NetworkMode.BLOCK)
     allowlist = config({"agent": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]}})
-    assert allowlist.agent.network == NetworkPolicy(
+    assert allowlist.agent_network == NetworkPolicy(
         mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",)
     )
-    assert config({"agent": {"network_mode": "public"}}).agent.network.mode is NetworkMode.OPEN
+    assert config({"agent": {"network_mode": "public"}}).agent_network.mode is NetworkMode.OPEN
+
+
+@pytest.mark.parametrize(
+    ("agent", "environment", "expected"),
+    [
+        # Nothing named: ALE's default.
+        ({}, {}, NetworkPolicy(mode=NetworkMode.BLOCK)),
+        # [environment] is Harbor's baseline, which the agent gets unless it names its own.
+        ({}, {"network_mode": "public"}, NetworkPolicy(mode=NetworkMode.OPEN)),
+        (
+            {},
+            {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
+            NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",)),
+        ),
+        ({"network_mode": "no-network"}, {"network_mode": "public"}, NetworkPolicy()),
+        # Harbor's deprecated switch, read only without a mode.
+        ({}, {"allow_internet": True}, NetworkPolicy(mode=NetworkMode.OPEN)),
+        ({}, {"allow_internet": False}, NetworkPolicy(mode=NetworkMode.BLOCK)),
+        (
+            {},
+            {"allow_internet": True, "network_mode": "no-network"},
+            NetworkPolicy(mode=NetworkMode.BLOCK),
+        ),
+    ],
+)
+def test_the_agent_s_network_resolves_as_harbor_s_does(
+    agent: dict[str, object], environment: dict[str, object], expected: NetworkPolicy
+) -> None:
+    resolved = config({"agent": {"network_mode": None, **agent}, "environment": environment})
+    assert resolved.agent_network == expected
+
+
+def test_an_environment_baseline_obeys_the_agent_s_host_rules() -> None:
+    for environment, message in (
+        ({"network_mode": "allowlist"}, "non-empty allowed_hosts"),
+        ({"allowed_hosts": ["pypi.org"]}, "requires network_mode 'allowlist'"),
+        ({"network_mode": "allowlist", "allowed_hosts": ["127.0.0.1"]}, "reaches the Host"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            config({"environment": environment})
 
 
 def test_windows_artifacts_use_windows_path_rules() -> None:

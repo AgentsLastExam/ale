@@ -336,7 +336,7 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             "sudo": config.agent.sudo,
             "container_features": config.environment.container_features,
         },
-        network=config.agent.network,
+        network=config.agent_network,
         workdir=config.agent.workdir or config.environment.workdir,
         healthcheck=config.environment.healthcheck,
         timeouts={"agent": config.agent.timeout_sec, "verify": config.verifier.timeout_sec},

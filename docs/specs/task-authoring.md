@@ -100,6 +100,9 @@ container_features = []                     # ALE; such as ["perf", "mount"]; de
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 # workdir = "/app"                          # the agent's start and verification's directory
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
+# network_mode = "public"                   # Harbor's baseline: the agent's unless [agent] names one
+# allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
+# allow_internet = true                     # Harbor's deprecated switch, without network_mode
 
 [environment.healthcheck]                   # optional; Harbor's, run once setup is done
 command = "curl -sf localhost:8080/health"  # required; exit 0 is healthy
@@ -120,7 +123,7 @@ args = ["--index", "/srv/index"]            # stdio
 [agent]                                     # the evaluated agent and the oracle
 user = "user"                               # account in the image; root needs sudo; default user
 timeout_sec = 900                           # positive seconds; default 900
-network_mode = "allowlist"                  # no-network | allowlist | public; default no-network
+network_mode = "allowlist"                  # no-network | allowlist | public; default above, or no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
 # workdir = "project"                       # ALE; where the agent starts; default as above
@@ -187,11 +190,11 @@ timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
 
 Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step Tasks (`steps`,
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
-an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
+an artifact's `service`, `[[verifier.collect]]`), TPU selection (`tpu`), or the verifier's own
+network keys (`network_mode`, `allowed_hosts`, `allow_internet`). ALE's design
 covers the rest. `docker_image` is `image` under Harbor's name, in `[environment]` and
-`[verifier.environment]` alike: one field, so a table holds either, never both.
-`[agent].network_mode` is the one network setting.
-An origin belongs in `[metadata]`, so there is no `source`.
+`[verifier.environment]` alike: one field, so a table holds either, never both. An origin
+belongs in `[metadata]`, so there is no `source`.
 
 These values differ from Harbor's:
 
@@ -311,8 +314,12 @@ The Verification APIs and records are defined only in [Verification](verificatio
 ### Resources and network
 
 `[environment]` selects container or VM behavior; Tasks never name a Provider.
-`[agent].network_mode` applies to the evaluated agent and the oracle: `no-network` reaches
-only the Gateway, `allowlist` also the declared hosts, `public` everything. An
+The agent's network applies to the evaluated agent and the oracle: `no-network` reaches
+only the Gateway, `allowlist` also the declared hosts, `public` everything. It resolves as
+in Harbor: `[agent].network_mode` and `allowed_hosts` when `[agent]` names a mode, else
+`[environment]`'s, Harbor's baseline, where `allow_internet = true` or `false`, Harbor's
+deprecated switch, stands for `public` or `no-network` when no mode is named, and else
+`no-network`, ALE's default where Harbor's is `public`. An
 `allowed_hosts` entry `pypi.org` is that host alone, `*.pypi.org` that host and every name
 below it at any depth, which every Provider that offers `allowlist` can enforce, and an
 address or CIDR range a client connecting to that address, never a name that resolves into
@@ -324,7 +331,7 @@ which the framework points at the proxy for the agent and the oracle; raw TCP to
 address stays blocked. Setup and verification network is framework-controlled; its
 enforcement is specified in [Security](security.md). The quality standard owns resource
 feasibility and network-policy selection. `ale lint` requires
-`[metadata].network_justification` for `public`.
+`[metadata].network_justification` when the agent's network resolves to `public`.
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,
