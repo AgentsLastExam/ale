@@ -46,7 +46,16 @@ from ale.core.sandbox import (
 from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from ale.run import guestd, iptables
 from ale.run.providers import memory
-from ale.run.providers.docker import gpu_sharing, gvisor, kata, rootless, storage, subnets, tc
+from ale.run.providers.docker import (
+    gpu_sharing,
+    gvisor,
+    kata,
+    rootless,
+    storage,
+    subnets,
+    tc,
+    volumes,
+)
 from ale.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
@@ -194,6 +203,27 @@ PEERS = tc.Peers(host_ip="172.18.0.1", host_mac=BRIDGE_MAC, ip=SANDBOX_IP, mac=S
 RESOLV_CONF = "nameserver 192.0.2.53\n"
 #: The routes in the daemon's network namespace, as a helper there prints them.
 ROUTES = json.dumps([{"dst": "default"}, {"dst": "192.0.2.0/24"}])
+
+
+@pytest.fixture(autouse=True)
+def _volumes_of_no_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the Docker calls of the volumes module, which no test here wants made: what a
+    probe finds is no directory, and a meter measures nothing written."""
+
+    async def run(*argv: str, **_: object) -> tuple[int, str, str]:
+        assert argv[0] == "docker"
+        match argv[1:3]:
+            case ("volume", "create"):
+                return 0, argv[-1], ""
+            case ("volume", "inspect"):
+                return 0, f"/var/lib/docker/volumes/{argv[-1]}/_data", ""
+            case ("exec", _):
+                return 0, "0\n0\n", ""
+        if argv[1] == "run" and "-I" in argv:
+            return 0, "[]", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(volumes, "run", run)
 
 
 def _scripted_reply(argv: tuple[str, ...]) -> tuple[int, str, str]:
@@ -359,6 +389,9 @@ def _sandbox() -> DockerSandbox:
     sandbox._relay = None
     sandbox.written = 0
     sandbox._committing = False
+    sandbox.mounts = ()
+    sandbox._kept = frozenset()
+    sandbox._meter = None
     return sandbox
 
 
@@ -1650,8 +1683,8 @@ async def test_each_runtime_is_a_leaf_with_the_features_it_gives() -> None:
     assert (runc.provider, in_kata.provider) == ("docker:runc", "docker:kata")
     for in_gvisor in (raw, nested):
         assert in_gvisor.provider == "docker:gvisor" and in_gvisor.gui
-    # A commit keeps no volume, which a container engine's storage is on.
-    assert raw.snapshot and not nested.snapshot
+    # A snapshot keeps a container engine's storage, which is on volumes, as copies.
+    assert raw.snapshot and nested.snapshot
     common = {ContainerFeature.USER_NAMESPACES, ContainerFeature.FUSE, ContainerFeature.MOUNT}
     assert raw.container_features == {*common, ContainerFeature.RAW_SOCKETS}
     assert nested.container_features == {*common, ContainerFeature.NESTED_CONTAINERS}
@@ -1741,16 +1774,13 @@ async def test_a_leaf_offers_the_gpus_of_this_host_that_it_may_lease(
 async def test_every_leaf_holds_a_sandbox_to_storage_mb_but_on_an_engines_volumes(
     monkeypatch: pytest.MonkeyPatch, storage_mb: int | None
 ) -> None:
-    """Each runtime's writes land in the writable layer the storage watch measures, but a
-    container engine's, on volumes; Docker is asked for no size, which its containerd image
-    store ignores and rootless Docker refuses."""
+    """Each runtime's writes land in the writable layer the storage watch measures, a
+    container engine's on volumes it measures too; Docker is asked for no size, which its
+    containerd image store ignores and rootless Docker refuses."""
     sized = request(resources=Resources(storage_mb=1024))
     for runtime in RUNTIMES:
         leaf = DockerProvider(runtime=runtime)
-        assert [profile.storage_limit for profile in await leaf.profiles()] == [
-            ContainerFeature.NESTED_CONTAINERS not in profile.container_features
-            for profile in await leaf.profiles()
-        ]
+        assert all(profile.storage_limit for profile in await leaf.profiles())
         assert await leaf.unserved(sized.needs, user="user", role=SandboxRole.SHARED) == ()
     calls: list[tuple[str, ...]] = []
 
@@ -2349,7 +2379,8 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     (run,) = [call for call in calls if call[:2] == ("run", "-d")]
     assert [run[index + 1] for index, flag in enumerate(run) if flag == "--cap-add"] == granted
     engine = ContainerFeature.NESTED_CONTAINERS in features
-    assert [run[index + 1] for index, flag in enumerate(run) if flag == "--mount"] == [
+    mounted = [run[index + 1] for index, flag in enumerate(run) if flag == "--mount"]
+    assert [re.sub(r"src=[^,]+,", "", spec) for spec in mounted] == [
         f"type=volume,dst={path}" for path in sorted(gvisor.ENGINE_STORAGE) if engine
     ]
     # Named even for runc, so a Host's default runtime never stands in for the leaf's.

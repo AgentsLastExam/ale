@@ -364,11 +364,9 @@ its own.
   it does under runc. They stay in the Sentry and give nothing on the Host; `SYS_PTRACE`,
   which gVisor's own guide lists, was not needed.
 - Volumes rather than a tmpfs, which would charge every image layer to the Sandbox's memory.
-  A commit keeps no volume, so the profile for container engines takes no snapshots,
-  rather than lose the engine's images and containers in one: an engine's layers,
-  whiteouts among them, cannot be part of an image's layer, whose whiteouts would read as
-  the layer's own. Nor does it hold a Sandbox to `storage_mb`, since what is written to a
-  volume is not measured ([Writable storage](#writable-storage)).
+  A snapshot keeps them as volumes rather than in its image: an engine's layers, whiteouts
+  among them, cannot be part of an image's layer, whose whiteouts would read as the layer's
+  own ([Volumes](#volumes)).
 - gVisor's own gaps are closed as ALE patches that do what Linux does, rather than worked
   around in the Sandbox, so that a Task needs nothing for gVisor.
 - ALE's chains stay in iptables rather than move to nf_tables, whose gVisor implementation
@@ -655,8 +653,8 @@ under rootless Docker and off xfs mounted with `pquota`, so there such a Sandbox
 [`storage.py`](storage.py) reads its `SizeRw` every 5 s while this process drives it, and
 past `storage_mb` MiB the Sandbox kills the container, logs the stop to the execution trace
 as the GPU watchdog logs a kill, and has its sessions raise `StorageExhaustedError`, which
-the episode records as `storage_exhausted`. Only the profile for container engines, whose
-storage is on volumes, declares no `storage_limit`. What measuring leaves to the agent is
+the episode records as `storage_exhausted`. A Sandbox's volumes count too, measured by a
+helper ([Volumes](#volumes)). What measuring leaves to the agent is
 [issue #152](https://github.com/AgentsLastExam/ale/issues/152).
 
 **Decisions.**
@@ -676,9 +674,9 @@ storage is on volumes, declares no `storage_limit`. What measuring leaves to the
   one `inspect` naming all 51 took 3.1 s and `docker ps --size` 1.3 s.
 - Kill the container, as the GPU watchdog stops a gVisor Sandbox, rather than stop it
   gracefully: a Sandbox past its limit should write nothing more.
-- No measure of volumes: `docker system df -v`, Docker's only report of a volume's size,
-  sizes every volume and layer of the daemon (4 to 6 s with 80 volumes) and failed when a
-  container went meanwhile, so the profile for container engines declares no limit.
+- Volumes by a helper of the Sandbox's own, not by the daemon: `docker system df -v`,
+  Docker's only report of a volume's size, sizes every volume and layer of the daemon (4 to
+  6 s with 80 volumes) and failed when a container went meanwhile.
 - Alternatives measured and not taken:
   - gVisor's root overlay with a size (`dev.gvisor.flag.overlay2=root:self,size=N`): `df`
     shows the limit and a write past it fails with `ENOSPC`, rootful and rootless, but every
@@ -735,3 +733,51 @@ was handed back is left to its owner.
   cancellation itself.
 - No wait for the daemon's commit: once the container is gone, only an image the daemon
   finished can remain, and the removal that follows takes it.
+
+## Volumes
+
+**Problem.** A volume must reach every Sandbox its snapshot serves without a copy, and no
+Sandbox's writes may reach another's view. A `docker commit` keeps no volume. A Sandbox
+that runs a container engine lost its images with a commit, so its profile saved no
+snapshot, and what it wrote to a volume was not held to `storage_mb`.
+
+**Context, as measured.** Docker's `local` volume driver mounts an overlay whose `lowerdir`
+is other volumes' mount points, as root under rootful Docker, at the container's start; it
+works under runc, Kata (virtio-fs) and gVisor (gofer). An overlay's root takes its owner and
+mode from its upper directory, root's 0755 for an empty volume, so an agent account could
+no longer write to the root of a view of its own home. An overlay's options, which name
+each layer's mount point, must fit in one page: 60 layers of
+`/var/lib/docker/volumes/ale-v-<12 hex>/_data` do. Several episodes on one daemon remove
+snapshot images while another lists them. A Docker engine in a gVisor Sandbox whose storage
+is an overlay view (g2, Docker 26.1.5, gVisor 0.1.4) showed again files its images' layers
+had deleted, the view hiding their whiteouts, and failed to delete another (`Operation not
+permitted`).
+
+**Solution.** Each path is a stack of volumes: the Sandbox's own, then, for one booted from
+a snapshot, an empty upper and a work volume under an overlay volume that names the
+snapshot's stack. A snapshot labels its image with each stack and its root's owner and
+mode, read through guestd before the container stops, and keeps the top layer; a view
+restores the root's owner and mode as root before anything else runs in the Sandbox. A
+stack that would reach 60 layers is copied into one as the snapshot is taken. An engine's
+storage is a volume the snapshot keeps whole, which a Sandbox booted from it that runs an
+engine gets a copy of. A helper per Sandbox mounts the volumes that hold its writes and
+counts their blocks at each measurement of the storage watch. Destroying a snapshot
+removes the layers no remaining snapshot or view names, and the listing tolerates images
+and volumes that vanished since.
+
+**Decisions.**
+- A layer per save, as image layers are, rather than a copy: a view costs no time or disk
+  however large the volume. Copying into one layer every 59 saves keeps saving possible
+  past what an overlay stacks, at the price of one copy, reflinked where the filesystem
+  can.
+- An engine's storage is copied rather than viewed: its own layers need whiteouts, which
+  an overlay view hides and its upper refuses. A copy on a reflinking filesystem costs
+  little; on ext4 it copies the engine's images.
+- Volumes are measured by `du` in a helper container rather than on the Host: ALE need not
+  run as root, a rootless daemon's volumes are not ALE's to walk, and the helper's walk is
+  the walk the daemon makes of a writable layer. It runs beside the Sandbox, mounts nothing
+  writable and reaches no network, and its baseline is in the helper, so that a run that
+  reattaches the Sandbox measures alike.
+- A path is a volume only if it is a directory in the image, found by the image's own
+  framework Python before the container starts: a file cannot be a volume, and a path that
+  passes through a link would mount somewhere else than the image means.
