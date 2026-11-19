@@ -214,6 +214,28 @@ rm -rf -- "$verifier"
 mkdir -m 0700 -- "$verifier"
 """
 
+#: Gives ``[verifier].user`` its stage and the verifier directory, and lets it through the
+#: framework's root on Linux, below which everything else stays the framework's alone.
+_VERIFIER_USER_GRANT = """set -eu
+user="$1" framework="$2" stage="$3" verifier="$4"
+if [ "$(uname)" = Linux ]; then chmod -- o+x "$framework"; fi
+chown -R -- "$user" "$stage" "$verifier"
+"""
+
+#: Runs a command as ``[verifier].user``, by name or uid, as Harbor runs its verifier: the
+#: framework's own Python drops to the account, with its home, and replaces itself. Its
+#: library is the framework's alone, so everything is found before the drop.
+_RUN_AS = """import os, pwd, shutil, sys
+user, command = sys.argv[1], sys.argv[2:]
+entry = pwd.getpwuid(int(user)) if user.isdigit() else pwd.getpwnam(user)
+program = shutil.which(command[0]) or command[0]
+os.initgroups(entry.pw_name, entry.pw_gid)
+os.setgid(entry.pw_gid)
+os.setuid(entry.pw_uid)
+os.environ.update(HOME=entry.pw_dir, USER=entry.pw_name, LOGNAME=entry.pw_name)
+os.execv(program, command)
+"""
+
 #: Removes the verifier directory unless its parent is a link, which is the agent's own.
 _POSIX_VERIFIER_REMOVE = """set -eu
 if [ -d "$1" ] && [ ! -L "$1" ]; then rm -rf -- "$2"; fi
@@ -1575,6 +1597,25 @@ class EpisodeProtocol:
             str(Path(fastjsonschema.__file__).parent), f"{destination}/fastjsonschema"
         )
         await self._probe_package(sandbox, python, "ale-verify", "import ale_verify")
+        placed = ctx.spec.verify if stage is Stage.TESTS else ctx.spec.validation_spec
+        if (user := placed.user) is not None:
+            granted = await sandbox.exec(
+                [
+                    "sh",
+                    "-c",
+                    _VERIFIER_USER_GRANT,
+                    "grant",
+                    user,
+                    str(layout.root),
+                    str(root),
+                    str(_verifier_dir(ctx.spec.os)),
+                ]
+            )
+            if not granted.ok:
+                raise TaskError(
+                    f"could not give [verifier].user {user} what it verifies with: "
+                    + (granted.stderr.strip() or f"exit {granted.exit_code}")
+                )
         ctx.ale_verify_provenance = AleVerifyProvenance(
             version=framework_version,
             content_hash=framework_hash,
@@ -1588,6 +1629,9 @@ class EpisodeProtocol:
         finally:
             if ctx.open_judge_sessions is not None:
                 ctx.open_judge_sessions(False)
+            if placed.user is not None and ctx.spec.os is OperatingSystem.LINUX:
+                # A solver kept for continuation gets its framework root back closed.
+                await sandbox.exec(["chmod", "--", "o-x", str(layout.root)])
             # Keep Judge evidence even if the task exits, raises or times out.
             invocations = await self._collect_judge_logs(ctx, sandbox, stage, records)
             if stage is Stage.TESTS:
@@ -2141,6 +2185,8 @@ class EpisodeProtocol:
             if ctx.spec.os is OperatingSystem.WINDOWS
             else ["bash", script]
         )
+        if phase is not Phase.SETUP and (user := placed.user) is not None:
+            argv = [guestd.PYTHON[ctx.spec.os.value], "-c", _RUN_AS, user, *argv]
         recorder = CommandRecorder(
             execution=ctx.execution,
             blobs=cast(BlobStore, ctx.blobs),

@@ -130,6 +130,7 @@ validation_rounds = 0                       # ALE; validation/ results it gets; 
 timeout_sec = 600                           # positive seconds; default 600
 environment_mode = "separate"               # shared | separate | snapshot (ALE)
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
+# user = "grader"                           # Harbor's: its account, name or uid; Linux, macOS
 
 [verifier.environment]                      # a separate or snapshot verifier's own sandbox
 # image = "registry.example/verifier:tag"   # or docker_image; separate only; no tests/Dockerfile
@@ -172,6 +173,13 @@ working directory, follows the same rules: the agent starts there unless `[agent
 names another start, and `tests/` and `validation/` run there, their entries named by full
 path, so Harbor's verifiers find what they expect; `[verifier.environment].workdir` replaces it
 for a verifier with a Sandbox of its own. Setup and the oracle keep their stage directories.
+
+`[verifier].user`, as in Harbor, is the account, by name or uid, that `tests/` and
+`validation/` run as on Linux and macOS; Windows verification always runs as Administrator.
+ALE then gives that one account the stage directory and the verifier directory, which are
+otherwise the framework's alone, so a verifier running as an account the agent controls,
+such as `[agent].user`, can be changed by what the agent left: that is the Task's choice. Without
+it, verification runs as the framework, as setup does.
 `[agent].validation_rounds`, an integer from 0, is how many results of
 [`validation/`](#validation) the agent receives; above 0 it requires `validation/`. Run
 policy may replace it with `validation_rounds`, a non-negative integer, recorded as the
@@ -182,7 +190,7 @@ Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step T
 an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
 covers the rest. `docker_image` is `image` under Harbor's name, in `[environment]` and
 `[verifier.environment]` alike: one field, so a table holds either, never both.
-Stages run under the framework's identity, so there is no `[verifier].user`. `[agent].network_mode` is the one network setting.
+`[agent].network_mode` is the one network setting.
 An origin belongs in `[metadata]`, so there is no `source`.
 
 These values differ from Harbor's:

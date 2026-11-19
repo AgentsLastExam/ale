@@ -635,3 +635,15 @@ def test_harbor_s_healthcheck_loads_with_docker_s_defaults(tmp_path: Path):
         load_tasks(task)
     edit(task, {"environment": {"healthcheck": None}})
     assert load_tasks(task)[0].spec.spec_hash == unset.spec_hash
+
+
+def test_a_verifier_runs_as_the_framework_unless_harbor_s_user_names_an_account(
+    tmp_path: Path,
+) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    for verifier in ({}, {"environment_mode": "separate"}, {"environment_mode": "snapshot"}):
+        edit(task, {"verifier": {"environment_mode": None, **verifier}})
+        assert load_tasks(task)[0].spec.verify.user is None
+        edit(task, {"verifier": {"user": 1000}})
+        assert load_tasks(task)[0].spec.verify.user == "1000"
+        edit(task, {"verifier": {"user": None}})

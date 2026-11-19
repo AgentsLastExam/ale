@@ -268,3 +268,21 @@ async def test_the_healthcheck_follows_harbor_s_docker_semantics(
             await protocol._healthcheck(ctx, sandbox)  # type: ignore[arg-type]
     assert len(sandbox.calls) == attempts
     assert sandbox.calls[0] == (["bash", "-c", "curl -sf localhost:8080"], None)
+
+
+@pytest.mark.asyncio
+async def test_harbor_s_verifier_user_runs_verification_and_not_setup(tmp_path: Path) -> None:
+    ctx = context(tmp_path)
+    ctx.spec.verify = VerifySpec(user="1000")
+    sandbox = StageSandbox(ExecResult(exit_code=0))
+    protocol = EpisodeProtocol(NopHarness())
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY)  # type: ignore[arg-type]
+    python, flag, _drop, user, *command = sandbox.argv
+    assert (python, flag, user, command) == (
+        "/opt/ale/python/bin/python3",
+        "-c",
+        "1000",
+        ["bash", "test.sh"],
+    )
+    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/setup"), Phase.SETUP)  # type: ignore[arg-type]
+    assert sandbox.argv == ["bash", "setup.sh"]

@@ -163,7 +163,6 @@ def test_task_config_requires_only_its_version_and_name() -> None:
             "verifier.environment.healthcheck",
         ),
         ({"environment": {"network_mode": "public"}}, "environment.network_mode"),
-        ({"verifier": {"user": "root"}}, "verifier.user"),
         (
             {"verifier": {"environment": {"cpus": 1, "memory_mb": 512, "os": "linux"}}},
             "verifier.environment.os",
@@ -234,6 +233,16 @@ def test_an_artifact_destination_is_harbor_s_relative_host_path() -> None:
         ]
         with pytest.raises(ValidationError, match=message):
             config({"artifacts": artifacts})
+
+
+def test_the_verifier_s_account_is_harbor_s_name_or_uid() -> None:
+    assert config({"verifier": {"user": "grader"}}).verifier.user == "grader"
+    assert config({"verifier": {"user": 1000}}).verifier.user == 1000
+    for user in ("Grader", "a b", -1, True):
+        with pytest.raises(ValidationError):
+            config({"verifier": {"user": user}})
+    with pytest.raises(ValidationError, match="Windows verification runs as Administrator"):
+        config({"environment": {"os": "windows"}, "verifier": {"user": "grader"}})
 
 
 def test_docker_image_is_harbor_s_name_for_image() -> None:

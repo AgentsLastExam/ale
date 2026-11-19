@@ -473,6 +473,9 @@ class VerifySpec(BaseModel):
     workdir: str | None = Field(default=None, exclude_if=lambda value: value is None)
     """Harbor's working directory for ``tests/`` and ``validation/``, below the agent's home
     when relative; ``None`` runs each in its own stage directory."""
+    user: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """``[verifier].user``: the account, by name or uid, ``tests/`` and ``validation/`` run
+    as; ``None`` for the framework's identity."""
 
     @model_validator(mode="after")
     def _valid_topology(self) -> Self:
@@ -844,7 +847,7 @@ _GpuType = Annotated[str, Field(pattern=r"[A-Za-z0-9]")]
 _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
     (): frozenset({"multi_step_reward_strategy", "source", "steps"}),
     ("environment",): _HARBOR_ENVIRONMENT_ONLY,
-    ("verifier",): frozenset({"allowed_hosts", "collect", "network_mode", "user"}),
+    ("verifier",): frozenset({"allowed_hosts", "collect", "network_mode"}),
     # Harbor runs a healthcheck in the agent's environment only.
     ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY
     | {"healthcheck", "mcp_servers", "os", "skills_dir"},
@@ -1077,6 +1080,10 @@ class VerifierTable(BaseModel):
     env: TaskEnv = Field(default_factory=dict)
     environment_mode: VerificationMode | None = None
     environment: VerifierEnvironmentTable | None = None
+    user: (
+        Annotated[str, Field(pattern=_ACCOUNT)] | Annotated[int, Field(ge=0, strict=True)] | None
+    ) = None
+    """Harbor's account for the verifier, by name or uid; unset, the framework's identity."""
 
     @property
     def mode(self) -> VerificationMode:
@@ -1226,6 +1233,10 @@ class TaskConfig(BaseModel):
         skills_dir = environment.skills_dir
         if skills_dir is not None and not _task_path(skills_dir, environment.os).is_absolute():
             raise ValueError("[environment].skills_dir must be an absolute path")
+        if verifier.user is not None and environment.os is OperatingSystem.WINDOWS:
+            raise ValueError(
+                "[verifier].user is for Linux and macOS; Windows verification runs as Administrator"
+            )
         for table, sized in (
             ("environment", environment),
             ("verifier.environment", verifier.environment),

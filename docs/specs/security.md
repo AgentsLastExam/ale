@@ -422,7 +422,8 @@ Stating these plainly is part of the model. Treating an unlisted gap as covered 
 security claims rot.
 
 **A malicious task author.** A Task folder's setup and verification entries run as trusted
-framework-controlled code, and a Task may declare `[agent].sudo` for its agent. Tasks
+framework-controlled code, and a Task may declare `[agent].sudo` for its agent, or run its
+verifier as an account the agent controls with Harbor's `[verifier].user`. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
 *agent*, not a host from its Task. The gates that exist (`ale lint`, `ale calibrate`, CI,
 PR review) are aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host
