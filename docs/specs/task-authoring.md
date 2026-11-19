@@ -197,7 +197,8 @@ These values differ from Harbor's:
 - `gpu_types` holds at least one name and requires `gpus`, and every Provider honors it,
   where Harbor's Docker environment ignores it; see [GPUs](#gpus).
 - `allowed_hosts` refuses entries that reach the Host; see [Resources and network](#resources-and-network).
-- The verifier writes `reward.json` only, with `reward` between 0 and 1; see [tests/](#tests).
+- The verifier writes `reward.json`, or `reward.txt` holding one number, with `reward` between
+  0 and 1, and only `reward` is scored; see [Result](verification.md#result).
 
 When the instruction requires deliverable files, every instructed destination must equal or be
 contained by a declared `artifacts` path, or matched by a declared glob. Commands and examples in `instruction.md` must write to

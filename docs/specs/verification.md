@@ -11,6 +11,9 @@ The verifier writes Harbor's reward file, `/logs/verifier/reward.json`
 `/opt/ale/logs/verifier/reward.json`): a flat JSON object whose values are numbers.
 Its `reward` must be a finite number from 0 through 1; booleans and numeric strings are not
 numbers. ALE scores only `reward` and never averages or treats other values as rewards.
+Without `reward.json`, ALE reads Harbor's other reward file, `reward.txt` beside it, which
+holds that one number and nothing else, as a `reward.json` of `reward` alone; as in Harbor,
+`reward.json` wins when both exist.
 Beside it, `verification.json` may hold the complete result: any JSON object, nested values
 included, whose `reward` equals `reward.json`'s. NaN, infinity and duplicate object keys
 make either file invalid.

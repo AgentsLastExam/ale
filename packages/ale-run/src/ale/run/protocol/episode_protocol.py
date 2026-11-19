@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -384,6 +385,21 @@ def _separate_verifier(spec: TaskSpec, validations: int) -> Resources | None:
             "gpus": max(size.gpus for size in sizes),
         }
     )
+
+
+def _reward_from_text(content: bytes) -> str:
+    """Harbor's ``reward.txt``, one number and nothing else, as the ``reward.json`` holding
+    it, which then meets every rule of one."""
+    text = content.decode("utf-8").strip()
+    if not text:
+        raise ValueError("reward.txt is empty")
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(f"reward.txt must hold one number, not {text[:40]!r}") from None
+    if not math.isfinite(value):
+        raise ValueError("reward.txt must hold a finite number")
+    return json.dumps({"reward": value})
 
 
 class EpisodeProtocol:
@@ -1589,26 +1605,32 @@ class EpisodeProtocol:
         records: Path | None = None,
         stage: Stage = Stage.TESTS,
     ) -> dict[str, object]:
-        """The result ``stage`` wrote: ``reward.json``, completed by ``verification.json`` if
-        any, recorded in ``records``, the episode's directory unless a validation round's."""
+        """The result ``stage`` wrote: ``reward.json``, or else Harbor's ``reward.txt``,
+        completed by ``verification.json`` if any, recorded in ``records``, the episode's
+        directory unless a validation round's."""
         directory = _verifier_dir(ctx.spec.os)
         reward, record = str(directory / "reward.json"), str(directory / "verification.json")
+        text = str(directory / "reward.txt")
         try:
             written = {item.path for item in await sandbox.list_files(str(directory))}
             raw = {
-                path: await sandbox.read_file(path) for path in (reward, record) if path in written
+                path: await sandbox.read_file(path)
+                for path in (reward, text, record)
+                if path in written
             }
         except GuestUnreachableError:
             raise  # the Sandbox was lost, which is no defect of what the verifier wrote
         except Exception as exc:
             raise VerifierOutputError(f"{stage}/'s result could not be read: {exc}") from exc
-        if reward not in raw:
-            raise VerifierOutputError(f"{stage}/ wrote no result to {reward}")
+        if reward not in raw and text not in raw:
+            raise VerifierOutputError(f"{stage}/ wrote no result to {reward} or {text}")
         for value in raw.values():
             if any(secret.encode() in value for secret in ctx.verification_secrets if secret):
                 raise VerifierOutputError(f"{stage}/'s result contains a configured credential")
         try:
-            result = read_result(raw[reward], raw.get(record))
+            # As in Harbor, reward.json wins; reward.txt holds the one number alone.
+            rewards = raw[reward] if reward in raw else _reward_from_text(raw[text])
+            result = read_result(rewards, raw.get(record))
         except (ValueError, TypeError, UnicodeError) as exc:
             raise VerifierOutputError(f"{stage}/ wrote an invalid result: {exc}") from exc
         result = Redactor(ctx.secrets, patterns=False).json(result)
