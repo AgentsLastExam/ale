@@ -224,6 +224,18 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
     transport = read_jsonl(tmp_path / "trace.transport.jsonl").records
     calls_made = [record for record in transport if record["kind"] == "call"]
     assert len(calls_made) >= 6 and len(calls_made) == len(model.requests)
+    if case.factory is CodexCliHarness:
+        # The rollout times every step and reports each model call's usage; the rollout
+        # trace names its response, so each model step resolves to its Gateway call.
+        agent = [step for step in trajectory.steps if step.source == "agent"]
+        assert all(step.timestamp for step in trajectory.steps)
+        named = [native for step in agent for native in step.extra["ale"]["native_event_ids"]]
+        assert list(dict.fromkeys(named)) == [call["provider_response_id"] for call in calls_made]
+        assert [
+            (step.metrics.prompt_tokens, step.metrics.completion_tokens)
+            for step in agent
+            if step.metrics
+        ] == [(call["input_tokens"], call["output_tokens"]) for call in calls_made]
 
 
 #: CLIs whose delegation tool spawns subagent sessions: the tool, and the arguments that

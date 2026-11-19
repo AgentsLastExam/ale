@@ -15,6 +15,30 @@ tool, and arguments, and keep the rollout's result, which is what the model rece
 stdout serializes a result into one text block and cuts a long one, such as a
 screenshot, short.
 
+A step from a rollout line takes the time Codex recorded it, and a call a code-mode script
+made the time the trace recorded it starting. Stdout carries no times, so a turn rebuilt
+from it has none.
+
+A model call's response and usage come from the rollout trace (below). Its
+`inference_completed` event names the response, whose payload lists the items it output by
+the `call_id` and `id` the rollout's items carry, with the usage Codex took from it (`null`
+when the response reported none). An identity two calls name, such as an item id a provider
+reuses, names neither. Every step a call's items became lists the response ID in
+`extra.ale.native_event_ids`, and the first carries the usage as its metrics;
+`input_tokens` already include the cached ones, as the Gateway counts them, and
+`output_tokens` the reasoning ones. ALE then links the root thread's steps to their Gateway
+calls; a subagent's steps keep the IDs, unlinked.
+
+Items no traced call names take the rollout's usage: after each model call Codex records a
+`token_count` event whose `last_token_usage` is that call's own. One with no tokens, or one
+that repeats the session total with no call open, reports no new call. One that repeats it
+while a call is open, as Codex writes after a response that reported no usage, and a turn's
+start or abort end that call with no usage. A call the trace names takes none of the
+rollout's usage, and a call that produced no step, such as one whose only output is a
+reasoning item without a summary, keeps its usage only in the session's totals. Usage that
+cannot be read is reported as `invalid_token_usage` (rollout) or `invalid_trace_response`
+(trace).
+
 In code mode the model calls one `exec` tool, whose JavaScript calls the other tools
 through `tools.<name>(...)`. The rollout keeps each `exec` call and its output, but not
 the script's own calls: legacy history, which `codex exec` always writes, drops shell
@@ -36,11 +60,11 @@ being parsed. A thread that ran `exec` with no trace is reported as
 `rollout_trace_unavailable`, and a call whose preceding model call the rollout lacks as
 `unplaced_script_calls`.
 
-The trace also keeps every model request and response in full, which the parser never
-reads, so it grows with the square of the turn count; with `native_logs = "minimal"`
-ALE deletes it after a complete conversion. Tracing adds an `x-codex-inference-call-id`
-header to each model request, which the Gateway forwards and leaves out of the request
-digest.
+The trace also keeps every model request and response in full, of which the parser reads
+only each response's usage and the identities of its items. It grows with the square of the turn count, so with
+`native_logs = "minimal"` ALE deletes it after a complete conversion. Tracing adds an
+`x-codex-inference-call-id` header to each model request, which the Gateway forwards and
+leaves out of the request digest.
 
 A spawned thread's rollout names its parent in `session_meta.parent_thread_id`. Its
 spawning call is the parent's call whose result names the thread ID: `spawn_agent`, or a

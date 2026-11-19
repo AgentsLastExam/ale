@@ -6,6 +6,7 @@ import base64
 import json
 import re
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -15,6 +16,7 @@ from ale.core.trajectory import (
     AtifContentPart,
     AtifFinalMetrics,
     AtifImageSource,
+    AtifMetrics,
     AtifObservation,
     AtifObservationResult,
     AtifSubagentTrajectoryRef,
@@ -47,8 +49,15 @@ _Rollouts = dict[Path, tuple[list[dict[str, Any]], list[dict[str, Any]]]]
 #: How a code-mode script calls ``spawn_agent``.
 _SPAWN_TOOL = "multi_agent_v1__spawn_agent"
 _DATA_URL = re.compile(r"data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)")
-#: A thread's script calls as steps' calls and results, keyed by the model call each followed.
-_ScriptSteps = dict[str, list[tuple[AtifToolCall, AtifObservation | None]]]
+#: A thread's script calls as steps' calls, results and start times, keyed by the model call
+#: each followed.
+_ScriptSteps = dict[str, list[tuple[AtifToolCall, AtifObservation | None, str | None]]]
+#: The rollout events that end a turn's open model call: one without a ``token_count`` was
+#: cut short.
+_TURN_EDGES = frozenset(("task_started", "turn_aborted"))
+#: A model call: ``("response", <response ID>)`` when the trace names it, else
+#: ``("rollout", <n>)``, the n-th call between ``token_count`` events and turn edges.
+_Call = tuple[str, str | int]
 
 
 @dataclass
@@ -61,8 +70,30 @@ class _TracedCall:
     #: The ``exec`` call whose script made it.
     caller: str
     started: dict[str, Any]
+    #: When the trace recorded it starting.
+    time: str | None = None
     runtime: dict[str, Any] = field(default_factory=dict)
     ended: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _Response:
+    """A model call a rollout trace records: Codex's own ID for the call, the provider's
+    response ID, and the usage Codex reported."""
+
+    inference: str
+    response_id: str
+    usage: AtifMetrics | None
+
+
+@dataclass
+class _Traces:
+    """What the rollout traces record, keyed by thread: script calls, and each model call's
+    response keyed by the ``id`` and ``call_id`` of every item it output; ``None`` where two
+    calls name the same key."""
+
+    scripts: dict[str, _ScriptSteps] = field(default_factory=dict)
+    responses: dict[str, dict[str, _Response | None]] = field(default_factory=dict)
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -106,8 +137,8 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         path: native_events(context, path) for path in files if rollout and path not in consumed
     }
     traces = mirrored_files(context, TRACES)
-    scripted = _script_calls(context, expected, traces, issues) if rollout else {}
-    subagents, spawned = _subagents(context, expected, rollout, threads, scripted, issues, consumed)
+    traced = _read_traces(context, expected, traces, issues) if rollout else _Traces()
+    subagents, spawned = _subagents(context, expected, rollout, threads, traced, issues, consumed)
     issues.extend(unconverted(context, set(files) - consumed))
     builder = TrajectoryBuilder(
         trajectory_id=context.trajectory_id, session_id=expected, agent=_agent(context)
@@ -124,9 +155,13 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         and (event.get("item") or {}).get("type") == "mcp_tool_call"
     ]
     outputs = _outputs(rollout)
-    scripts = _scripts(scripted, expected, rollout, issues)
+    scripts = _scripts(traced, expected, rollout, issues)
     used_mcp: set[int] = set()
-    for event in rollout:
+    calls, call_usage, responses = _model_calls(
+        rollout, traced.responses.get(expected or "", {}), expected, issues
+    )
+    charged: set[_Call] = set()
+    for index, event in enumerate(rollout):
         payload = event.get("payload") or {}
         if event.get("type") != "response_item":
             continue
@@ -135,7 +170,11 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             if native_turns < len(prompts) and _text(payload) == prompts[native_turns]:
                 if native_turns:
                     _errors(builder, turns[native_turns - 1])
-                builder.add(source="user", message=recorded[native_turns].prompt)
+                builder.add(
+                    source="user",
+                    message=recorded[native_turns].prompt,
+                    timestamp=_timestamp(event),
+                )
                 native_turns += 1
             continue
         if kind not in _CALL_TYPES and kind != "reasoning" and payload.get("role") != "assistant":
@@ -145,7 +184,24 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             issues.append({"reason": "prompt_not_in_native_session", "invocation": 1})
             builder.add(source="user", message=recorded[0].prompt)
             native_turns = 1
-        _agent_item(builder, payload, outputs, spawned, scripts, transcript_mcp, used_mcp, context)
+        call = calls.get(index)
+        if (
+            _agent_item(
+                builder,
+                payload,
+                outputs,
+                spawned,
+                scripts,
+                transcript_mcp,
+                used_mcp,
+                context,
+                timestamp=_timestamp(event),
+                metrics=None if call is None or call in charged else call_usage.get(call),
+                response_id=responses.get(call) if call is not None else None,
+            )
+            and call is not None
+        ):
+            charged.add(call)
     _unplaced(scripts, expected, issues)
     if native_turns:
         _errors(builder, turns[native_turns - 1])
@@ -181,7 +237,7 @@ def _subagents(
     thread_id: str | None,
     rollout: list[dict[str, Any]],
     threads: _Rollouts,
-    scripted: dict[str, _ScriptSteps],
+    traced: _Traces,
     issues: list[dict[str, Any]],
     consumed: set[Path],
 ) -> tuple[list[AtifTrajectory], dict[str, list[AtifSubagentTrajectoryRef]]]:
@@ -218,7 +274,7 @@ def _subagents(
                 ),
                 events,
                 threads,
-                scripted,
+                traced,
                 issues,
                 consumed,
             )
@@ -242,7 +298,7 @@ def _thread_trajectory(
     context: TrajectoryParseContext,
     rollout: list[dict[str, Any]],
     threads: _Rollouts,
-    scripted: dict[str, _ScriptSteps],
+    traced: _Traces,
     issues: list[dict[str, Any]],
     consumed: set[Path],
 ) -> AtifTrajectory | None:
@@ -252,7 +308,7 @@ def _thread_trajectory(
     Codex injects into the conversation is not, so it stays out as it does for the root.
     """
     subagents, spawned = _subagents(
-        context, context.session_id, rollout, threads, scripted, issues, consumed
+        context, context.session_id, rollout, threads, traced, issues, consumed
     )
     builder = TrajectoryBuilder(
         trajectory_id=context.trajectory_id,
@@ -261,15 +317,40 @@ def _thread_trajectory(
         extra=_extra(context, []),
     )
     outputs = _outputs(rollout)
-    scripts = _scripts(scripted, context.session_id, rollout, issues)
-    for event in rollout:
+    scripts = _scripts(traced, context.session_id, rollout, issues)
+    calls, usage, responses = _model_calls(
+        rollout, traced.responses.get(context.session_id or "", {}), context.session_id, issues
+    )
+    charged: set[_Call] = set()
+    for index, event in enumerate(rollout):
         payload = event.get("payload") or {}
         if event.get("type") == "event_msg" and payload.get("type") == "user_message":
-            builder.add(source="user", message=str(payload.get("message") or ""))
+            builder.add(
+                source="user",
+                message=str(payload.get("message") or ""),
+                timestamp=_timestamp(event),
+            )
         elif event.get("type") == "response_item":
             # Only stdout carries the real server name of a model's MCP call, and only the
             # root's.
-            _agent_item(builder, payload, outputs, spawned, scripts, [], set(), context)
+            call = calls.get(index)
+            if (
+                _agent_item(
+                    builder,
+                    payload,
+                    outputs,
+                    spawned,
+                    scripts,
+                    [],
+                    set(),
+                    context,
+                    timestamp=_timestamp(event),
+                    metrics=None if call is None or call in charged else usage.get(call),
+                    response_id=responses.get(call) if call is not None else None,
+                )
+                and call is not None
+            ):
+                charged.add(call)
     _unplaced(scripts, context.session_id, issues)
     if not builder.steps:
         return None
@@ -310,18 +391,37 @@ def _agent_item(
     transcript_mcp: list[dict[str, Any]],
     used_mcp: set[int],
     context: TrajectoryParseContext,
-) -> None:
+    *,
+    timestamp: str | None,
+    metrics: AtifMetrics | None,
+    response_id: str | None,
+) -> bool:
     """An agent message, reasoning summary, or call from a rollout, as one step.
 
-    A call is followed by the calls code-mode scripts made before the model's next call.
+    The step takes the time Codex recorded the item, the response ID of the model call that
+    produced it and, when given, that call's usage. A call is followed by the calls
+    code-mode scripts made before the model's next call. Returns whether the item became a
+    step.
     """
     kind = payload.get("type")
+    extra = {"ale": {"native_event_ids": [response_id]}} if response_id else None
     if kind == "message":
         if payload.get("role") == "assistant" and (text := _text(payload)):
-            builder.add(source="agent", message=text)
+            builder.add(
+                source="agent", message=text, timestamp=timestamp, metrics=metrics, extra=extra
+            )
+            return True
     elif kind == "reasoning":
         if summary := _summary(payload):
-            builder.add(source="agent", message="", reasoning_content=summary)
+            builder.add(
+                source="agent",
+                message="",
+                reasoning_content=summary,
+                timestamp=timestamp,
+                metrics=metrics,
+                extra=extra,
+            )
+            return True
     elif kind in _CALL_TYPES:
         call, observation = _native_call(payload, outputs, transcript_mcp, used_mcp, context)
         if observation is not None and (refs := spawned.get(call.tool_call_id)):
@@ -329,16 +429,27 @@ def _agent_item(
             observation = AtifObservation(
                 results=[result.model_copy(update={"subagent_trajectory_ref": refs})]
             )
-        builder.add(source="agent", message="", tool_calls=[call], observation=observation)
-        for scripted_call, result in scripts.pop(call.tool_call_id, ()):
+        builder.add(
+            source="agent",
+            message="",
+            tool_calls=[call],
+            observation=observation,
+            timestamp=timestamp,
+            metrics=metrics,
+            extra=extra,
+        )
+        for scripted_call, result, started in scripts.pop(call.tool_call_id, ()):
             # A script, not a model inference, chose this call: ATIF's zero-LLM dispatch step.
             builder.add(
                 source="agent",
                 message="",
                 tool_calls=[scripted_call],
                 observation=result,
+                timestamp=started,
                 llm_call_count=0,
             )
+        return True
+    return False
 
 
 def _errors(builder: TrajectoryBuilder, events: list[dict[str, Any]]) -> None:
@@ -549,19 +660,22 @@ def _function_name(namespace: str, name: str) -> str:
     return f"{namespace}.{name}" if namespace else name
 
 
-def _script_calls(
+def _read_traces(
     context: TrajectoryParseContext,
     thread_id: str | None,
     traces: list[Path],
     issues: list[dict[str, Any]],
-) -> dict[str, _ScriptSteps]:
-    """The calls code-mode scripts made, for every thread the trace of ``thread_id`` covers.
+) -> _Traces:
+    """The calls code-mode scripts made and the model calls' responses, for every thread
+    the trace of ``thread_id`` covers.
 
-    The rollout keeps none of them but an MCP call's or a patch's end. Each ``codex exec``
-    process, a resume included, writes its own bundle, ``trace-<trace id>-<thread id>``,
-    shared by the threads it spawns. A traced thread is present even with no script call.
+    The rollout keeps none of the script calls but an MCP call's or a patch's end, and no
+    response ID. Each ``codex exec`` process, a resume included, writes its own bundle,
+    ``trace-<trace id>-<thread id>``, shared by the threads it spawns. A traced thread is
+    present even with no script call.
     """
     found: dict[str, _ScriptSteps] = {}
+    responses: dict[str, dict[str, _Response | None]] = {}
     for log in traces:
         bundle = log.parent
         if (
@@ -592,8 +706,33 @@ def _script_calls(
                 elif requester.get("type") == "code_cell":
                     cell = (thread, str(requester.get("runtime_cell_id")))
                     calls[str(payload.get("tool_call_id"))] = _TracedCall(
-                        thread, latest.get(thread, ""), cells.get(cell, ""), payload
+                        thread,
+                        latest.get(thread, ""),
+                        cells.get(cell, ""),
+                        payload,
+                        _wall_time(event),
                     )
+            elif kind == "inference_completed" and payload.get("response_id"):
+                # Of the response only its usage and its items' identities are read.
+                response_id = str(payload["response_id"])
+                body = _trace_payload(context, bundle, payload.get("response_payload"), issues)
+                usage = body.get("token_usage")
+                items = body.get("output_items")
+                metrics = _metrics(usage) if isinstance(usage, dict) else None
+                # A response that reported no usage has ``null``; other values are unreadable.
+                if body and (
+                    (usage is not None and metrics is None) or not isinstance(items, list)
+                ):
+                    issues.append({"reason": "invalid_trace_response", "response_id": response_id})
+                traced = _Response(
+                    str(payload.get("inference_call_id") or response_id), response_id, metrics
+                )
+                keys = responses.setdefault(thread, {})
+                for item in items if isinstance(items, list) else ():
+                    for key in _item_keys(item if isinstance(item, dict) else {}):
+                        known = keys.setdefault(key, traced)
+                        if known is not None and known.inference != traced.inference:
+                            keys[key] = None
             elif (call := calls.get(str(payload.get("tool_call_id")))) is not None:
                 if kind in {"tool_call_runtime_started", "tool_call_runtime_ended"}:
                     call.runtime = payload
@@ -601,20 +740,41 @@ def _script_calls(
                     call.ended = payload
         for call in calls.values():
             found.setdefault(call.thread, {}).setdefault(call.after, []).append(
-                _script_call(context, bundle, call, issues)
+                (*_script_call(context, bundle, call, issues), call.time)
             )
-    return found
+    return _Traces(found, responses)
+
+
+def _wall_time(event: dict[str, Any]) -> str | None:
+    """A trace event's wall-clock time, in the rollout's ISO 8601 form."""
+    value = event.get("wall_time_unix_ms")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    try:
+        moment = datetime.fromtimestamp(value / 1000, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _item_keys(payload: dict[str, Any]) -> list[str]:
+    """An output item's identities, its ``call_id`` first: a call's is unique to it."""
+    return [
+        value
+        for value in (payload.get("call_id"), payload.get("id"))
+        if isinstance(value, str) and value
+    ]
 
 
 def _scripts(
-    scripted: dict[str, _ScriptSteps],
+    traced: _Traces,
     thread_id: str | None,
     rollout: list[dict[str, Any]],
     issues: list[dict[str, Any]],
 ) -> _ScriptSteps:
     """``thread_id``'s script calls; a thread that ran scripts with no trace says so."""
-    if thread_id in scripted:
-        return scripted[thread_id]
+    if thread_id in traced.scripts:
+        return traced.scripts[thread_id]
     if any(
         event.get("type") == "response_item"
         and (payload := event.get("payload") or {}).get("type") == "custom_tool_call"
@@ -789,6 +949,110 @@ def _outputs(rollout: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if event.get("type") == "response_item"
         and (payload := event.get("payload") or {}).get("type") in _OUTPUT_TYPES
     }
+
+
+def _model_calls(
+    rollout: list[dict[str, Any]],
+    traced: dict[str, _Response | None],
+    thread_id: str | None,
+    issues: list[dict[str, Any]],
+) -> tuple[dict[int, _Call], dict[_Call, AtifMetrics], dict[_Call, str]]:
+    """The model call each item the model output belongs to, by rollout index, and each
+    call's usage and response ID.
+
+    The trace names the call that output an item by the item's ``call_id`` or ``id``, unless
+    two calls name the same one, with the usage Codex took from its response. Without it,
+    the rollout's ``token_count`` events delimit calls: Codex records a call's items as it
+    streams them, then one whose ``last_token_usage`` is that call's own usage. One with no
+    tokens, or one that repeats the session total with no call open, reports no new call; one
+    that repeats it while a call is open, as after a response that reported no usage, and a
+    turn's start or abort end that call with no usage. A call the trace names takes none of
+    the rollout's usage.
+    """
+    calls: dict[int, _Call] = {}
+    usage: dict[_Call, AtifMetrics] = {}
+    ids: dict[_Call, str] = {}
+    paired: set[int] = set()
+    call, total, open_call = 0, None, False
+    for index, event in enumerate(rollout):
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        if event.get("type") == "response_item" and _model_output(payload):
+            response = next(
+                (found for key in _item_keys(payload) if (found := traced.get(key)) is not None),
+                None,
+            )
+            if response is None:
+                calls[index] = ("rollout", call)
+            else:
+                calls[index] = key = ("response", response.inference)
+                ids[key] = response.response_id
+                if response.usage is not None:
+                    usage[key] = response.usage
+                paired.add(call)
+            open_call = True
+        elif event.get("type") != "event_msg":
+            continue
+        elif payload.get("type") in _TURN_EDGES and open_call:
+            call, open_call = call + 1, False
+        elif payload.get("type") == "token_count" and isinstance(info := payload.get("info"), dict):
+            # A ``token_count`` without ``info`` reports rate limits alone.
+            last, seen = info.get("last_token_usage"), info.get("total_token_usage")
+            if isinstance(seen, dict) and seen == total:
+                if open_call:
+                    call, open_call = call + 1, False
+                continue
+            metrics = _metrics(last) if isinstance(last, dict) else None
+            if metrics is None:
+                issues.append(
+                    {
+                        "reason": "invalid_token_usage",
+                        "session_id": thread_id,
+                        "timestamp": _timestamp(event),
+                    }
+                )
+            elif not (metrics.prompt_tokens or metrics.completion_tokens):
+                continue
+            elif call not in paired:
+                usage["rollout", call] = metrics
+            total = seen
+            call, open_call = call + 1, False
+    return calls, usage, ids
+
+
+def _model_output(payload: dict[str, Any]) -> bool:
+    """Whether a rollout item is one the model output: a message, reasoning, or a call."""
+    kind = payload.get("type")
+    return kind in _CALL_TYPES or kind == "reasoning" or payload.get("role") == "assistant"
+
+
+def _metrics(usage: dict[str, Any]) -> AtifMetrics | None:
+    """A ``last_token_usage``; its ``input_tokens`` already include the cached ones."""
+
+    def count(key: str) -> int | None:
+        value = usage.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    prompt, completion = count("input_tokens"), count("output_tokens")
+    if prompt is None or completion is None:
+        return None
+    return AtifMetrics(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        cached_tokens=count("cached_input_tokens"),
+    )
+
+
+def _timestamp(event: dict[str, Any]) -> str | None:
+    """When Codex recorded a rollout line, if it is an ISO 8601 time."""
+    value = event.get("timestamp")
+    if not isinstance(value, str):
+        return None
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value
 
 
 def _agent(context: TrajectoryParseContext) -> AtifAgent:
