@@ -77,9 +77,11 @@ from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
     OperatingSystem,
+    Resources,
     StdioMcpServer,
     TaskSpec,
     VerificationMode,
+    VerifySpec,
 )
 from ale.core.trace import (
     PhaseFinished,
@@ -97,7 +99,7 @@ from ale.core.trajectory import (
     TrajectoryBuilder,
 )
 from ale.core.verdict import Status, Verdict
-from ale.run import guestd
+from ale.run import artifact_files, guestd
 from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
 from ale.run.harnesses import credential_files
 from ale.run.harnesses.builtin import NopHarness, OracleHarness, solution_dir
@@ -356,6 +358,34 @@ class _AgentTime:
         return self.total - self.used
 
 
+#: A handle that stands for the snapshot a solver is yet to be saved as, in a request whose
+#: needs alone are asked.
+_PENDING = "pending"
+
+
+def _separate_verifier(spec: TaskSpec, validations: int) -> Resources | None:
+    """The resources of a separate verifier that may mount views of the volumes of a
+    solver of ``spec`` with ``validations`` rounds still to come: the larger in each
+    dimension of ``tests/``'s and ``validation/``'s separate verifiers."""
+    if not spec.volume_candidates:
+        return None
+    placed = [spec.verify] + ([spec.validation_spec] if validations else [])
+    sizes = [
+        each.resources.as_resources()
+        for each in placed
+        if each.environment_mode is VerificationMode.SEPARATE and each.resources is not None
+    ]
+    if not sizes:
+        return None
+    return sizes[0].model_copy(
+        update={
+            "cpus": max(size.cpus for size in sizes),
+            "memory_mb": max(size.memory_mb for size in sizes),
+            "gpus": max(size.gpus for size in sizes),
+        }
+    )
+
+
 class EpisodeProtocol:
     """Linear provision → setup → agent → verify flow; with validation rounds, each turn of
     the agent but the last is followed by a save, ``validation/`` and a new solver."""
@@ -434,9 +464,11 @@ class EpisodeProtocol:
                 await self._validation_rounds(task, ctx, solver, logs=logs, budget=budget)
             sandbox = solver.sandbox
             handle: str | None = None
+            viewed: tuple[str, ...] = ()
             try:
-                await self._capture_solver_evidence(ctx, sandbox, logs=logs)
-                if mode is VerificationMode.SNAPSHOT:
+                viewed = await self._viewed(ctx, sandbox, spec.verify, saved=False)
+                await self._capture_solver_evidence(ctx, sandbox, logs=logs, viewed=viewed)
+                if mode is VerificationMode.SNAPSHOT or viewed:
                     solver.saved = True
                     handle = await self._save_solver(ctx, sandbox)
             except BaseException as error:
@@ -452,11 +484,29 @@ class EpisodeProtocol:
                 if handle is None:
                     await self._sanitize_for_retention(ctx, sandbox)
                     await ctx.sandboxes.release(sandbox)
-                # A snapshot verifier has the agent's whole disk already: nothing is restored.
-                verifier = await self._provision_verifier(ctx, snapshot=handle)
+                separate = mode is VerificationMode.SEPARATE
+                views: tuple[str, ...] = ()
+                if viewed:
+                    assert handle is not None
+                    verifier, views = await self._viewing(
+                        ctx,
+                        handle,
+                        viewed,
+                        ctx.artifacts,
+                        lambda views: self._provision_verifier(
+                            ctx, volumes_from=handle if views else None, image=solver.image
+                        ),
+                    )
+                else:
+                    # A snapshot verifier has the agent's whole disk already: nothing is
+                    # restored.
+                    verifier = await self._provision_verifier(
+                        ctx, snapshot=None if separate else handle, image=solver.image
+                    )
                 try:
-                    if handle is None:
+                    if separate:
                         await ctx.artifacts.restore(verifier)
+                        await self._prune_views(ctx, verifier, views)
                     return await self._verify(task, ctx, verifier)
                 finally:
                     await self._sanitize_for_retention(ctx, verifier)
@@ -526,6 +576,8 @@ class EpisodeProtocol:
             else None,
             round_verifier=round_verifier_resources(spec, validations),
             planned_saves=validations,
+            volumes=spec.volume_candidates,
+            separate_verifier=_separate_verifier(spec, validations),
             resources=spec.resources,
             network=network,
             gateway_url=ctx.session.gateway_url or None,
@@ -576,19 +628,28 @@ class EpisodeProtocol:
         return sandbox
 
     def _verifier_request(
-        self, ctx: EpisodeContext, *, snapshot: str | None = None
+        self,
+        ctx: EpisodeContext,
+        *,
+        placed: VerifySpec | None = None,
+        snapshot: str | None = None,
+        volumes_from: str | None = None,
+        image: PreparedTaskImage | None = None,
     ) -> SandboxRequest:
-        """A verifier of its own: of its image, or booted from the solver's ``snapshot``, in
-        which case its image is the solver's."""
-        resources = ctx.spec.verify.resources
-        if resources is None or ctx.prepared_verifier_image is None:
+        """A verifier of its own, where ``placed`` puts it, as ``tests/``'s by default: of its
+        image, mounting views of the volumes of the solver's snapshot ``volumes_from`` if
+        given, or booted from the solver's ``snapshot`` with the solver's ``image``."""
+        resources = (placed or ctx.spec.verify).resources
+        prepared = (image or ctx.prepared_image) if snapshot else ctx.prepared_verifier_image
+        if resources is None or prepared is None:
             raise TaskError("the verifier's image and resources were not prepared")
         return SandboxRequest(
             episode_id=ctx.episode_id,
             os=ctx.spec.os,
             role=SandboxRole.VERIFIER,
-            prepared_image=ctx.prepared_verifier_image,
+            prepared_image=prepared,
             snapshot=snapshot,
+            volumes_from=volumes_from,
             resources=resources.as_resources(),
             network=NetworkPolicy(mode=NetworkMode.OPEN),
             gateway_url=ctx.session.gateway_url or None,
@@ -598,24 +659,53 @@ class EpisodeProtocol:
         )
 
     async def _provision_verifier(
-        self, ctx: EpisodeContext, *, snapshot: str | None = None
+        self,
+        ctx: EpisodeContext,
+        *,
+        snapshot: str | None = None,
+        volumes_from: str | None = None,
+        image: PreparedTaskImage | None = None,
     ) -> Sandbox:
         """The verifier of ``tests/``, recorded in the RunLock."""
-        sandbox = await ctx.sandboxes.acquire(self._verifier_request(ctx, snapshot=snapshot))
+        sandbox = await ctx.sandboxes.acquire(
+            self._verifier_request(ctx, snapshot=snapshot, volumes_from=volumes_from, image=image)
+        )
         ctx.prepared_verifier_image = sandbox.request.prepared_image
         ctx.verifier_resolved_image = sandbox.resolved_image
         ctx.verifier_resource_allocation = sandbox.allocation
         return sandbox
 
+    async def _viewed(
+        self, ctx: EpisodeContext, solver: Sandbox, placed: VerifySpec, *, saved: bool
+    ) -> tuple[str, ...]:
+        """The volumes a separate verifier, where ``placed`` puts it, mounts views of from the
+        solver's snapshot: those the solver mounted, when the solver's leaf serves that
+        verifier and, unless the solver is ``saved`` anyway, saves it once more, which a kept
+        solver is not. None otherwise, and they are copied as any artifact is."""
+        if placed.environment_mode is not VerificationMode.SEPARATE or not solver.volumes:
+            return ()
+        if not saved and solver.request.retention == "keep":
+            return ()
+        request = self._verifier_request(ctx, placed=placed, volumes_from=_PENDING)
+        if not await ctx.sandboxes.serves_views(solver, request, saved=saved):
+            return ()
+        return solver.volumes
+
     async def _provision_validation_verifier(
-        self, ctx: EpisodeContext, handle: str, image: PreparedTaskImage | None
+        self,
+        ctx: EpisodeContext,
+        handle: str,
+        image: PreparedTaskImage | None,
+        viewed: tuple[str, ...],
     ) -> Sandbox:
-        """A validation round's verifier, as the Task's verification topology places one:
-        booted from the round's snapshot, with the solver's resources and no sudo under
-        shared verification and the verifier's under snapshot verification, or of the
-        verifier's image under separate verification. Retention never keeps it."""
+        """A validation round's verifier, where ``[validation]``, or else ``[verifier]``,
+        places one: booted from the round's snapshot, with the solver's resources and no
+        sudo when shared and its own when a snapshot verifier, or of the verifier's image when
+        separate, mounting views of the snapshot's ``viewed`` volumes. Retention never keeps
+        it."""
         spec = ctx.spec
-        mode = spec.verify.environment_mode
+        validation = spec.validation_spec
+        mode = validation.environment_mode
         if mode is VerificationMode.SHARED:
             image = image or ctx.prepared_image
             assert image is not None, "the solver's image is prepared before the episode"
@@ -634,9 +724,11 @@ class EpisodeProtocol:
                 sudo=False,
                 user=spec.image.user,
             )
+        elif mode is VerificationMode.SNAPSHOT:
+            request = self._verifier_request(ctx, placed=validation, snapshot=handle, image=image)
         else:
             request = self._verifier_request(
-                ctx, snapshot=handle if mode is VerificationMode.SNAPSHOT else None
+                ctx, placed=validation, volumes_from=handle if viewed else None
             )
         return await ctx.sandboxes.acquire(request, validation=True)
 
@@ -919,7 +1011,7 @@ class EpisodeProtocol:
         setup again. Once the save succeeds nothing runs on the previous round's snapshot,
         which then goes, so at most one round's snapshot exists while ``validation/`` runs.
         """
-        mode = ctx.spec.verify.environment_mode
+        mode = ctx.spec.validation_spec.environment_mode
         logger = logging.getLogger("ale.execution")
         for index in range(1, self.validations + 1):
             if ctx.agent_stop is not None:
@@ -943,6 +1035,7 @@ class EpisodeProtocol:
                     return
             directory = ctx.run_dir / "validation" / str(index)
             artifacts: ArtifactSink | None = None
+            viewed: tuple[str, ...] = ()
             # The turn's end is the solver's, as its save for a snapshot verifier is.
             with self._traced(ctx, Phase.AGENT):
                 logger.info(
@@ -952,9 +1045,13 @@ class EpisodeProtocol:
                 if logs is not None and ctx.agent_started:
                     await self._copy_logs(logs)
                 if mode is VerificationMode.SEPARATE:
-                    # Captured before the save, as for a separate verifier of tests/.
+                    # Captured before the save, as for a separate verifier of tests/; volumes
+                    # it mounts views of, from the snapshot the round saves anyway, are not.
+                    viewed = await self._viewed(
+                        ctx, solver.sandbox, ctx.spec.validation_spec, saved=True
+                    )
                     artifacts = ctx.artifacts.for_validation(directory)
-                    await self._collect_artifacts(ctx, solver.sandbox, artifacts)
+                    await self._collect_artifacts(ctx, solver.sandbox, artifacts, viewed)
                 solver.saved = True
                 try:
                     handle = await self._save_solver(ctx, solver.sandbox, validation=True)
@@ -968,7 +1065,9 @@ class EpisodeProtocol:
                 )
                 await self._release_rounds(ctx, earlier)
             try:
-                feedback = await self._validate(task, ctx, index, handle, solver.image, artifacts)
+                feedback = await self._validate(
+                    task, ctx, index, handle, solver.image, artifacts, viewed
+                )
             finally:
                 if artifacts is not None:
                     artifacts.cleanup()
@@ -1050,6 +1149,7 @@ class EpisodeProtocol:
         handle: str,
         image: PreparedTaskImage | None,
         artifacts: ArtifactSink | None,
+        viewed: tuple[str, ...] = (),
     ) -> str | None:
         """Score the snapshot ``handle`` with ``validation/`` under the verifier's budget and
         record the round; return the feedback text the agent receives.
@@ -1065,9 +1165,21 @@ class EpisodeProtocol:
 
         async def run() -> tuple[float, str | None]:
             nonlocal verifier
-            verifier = await self._provision_validation_verifier(ctx, handle, image)
+            views: tuple[str, ...] = ()
+            if viewed:
+                assert artifacts is not None
+                verifier, views = await self._viewing(
+                    ctx,
+                    handle,
+                    viewed,
+                    artifacts,
+                    lambda views: self._provision_validation_verifier(ctx, handle, image, views),
+                )
+            else:
+                verifier = await self._provision_validation_verifier(ctx, handle, image, ())
             if artifacts is not None:
                 await artifacts.restore(verifier)
+                await self._prune_views(ctx, verifier, views)
             return await self._score(task, ctx, verifier, Stage.VALIDATION, directory)
 
         outcome: tuple[float, str | None] | Exception
@@ -1546,6 +1658,7 @@ class EpisodeProtocol:
         sandbox: Sandbox,
         *,
         logs: LogMirror | None = None,
+        viewed: tuple[str, ...] = (),
     ) -> None:
         if ctx.solver_evidence_captured:
             return
@@ -1574,20 +1687,87 @@ class EpisodeProtocol:
         if ctx.agent_started and not ctx.trajectory_written:
             self._parse_harness_trajectory(ctx, collection_failed=collection_failed)
 
-        await self._collect_artifacts(ctx, sandbox, ctx.artifacts)
+        await self._collect_artifacts(ctx, sandbox, ctx.artifacts, viewed)
         ctx.solver_evidence_captured = True
 
-    async def _collect_artifacts(
-        self, ctx: EpisodeContext, sandbox: Sandbox, sink: ArtifactSink
+    async def _viewing(
+        self,
+        ctx: EpisodeContext,
+        handle: str,
+        viewed: tuple[str, ...],
+        sink: ArtifactSink,
+        provision: Callable[[tuple[str, ...]], Awaitable[Sandbox]],
+    ) -> tuple[Sandbox, tuple[str, ...]]:
+        """A separate verifier that mounts views of the ``viewed`` volumes of the solver's
+        snapshot ``handle``, and those it mounts. Where the leaf that holds the snapshot
+        cannot start it after all, as a Fleet Node too small for it, they are copied into
+        ``sink`` from a Sandbox booted from the snapshot with the solver's resources, which
+        fit there, and a verifier that mounts none starts wherever one can."""
+        try:
+            return await provision(viewed), viewed
+        except ProviderCapabilityError as error:
+            logging.getLogger("ale.execution").warning(
+                "the verifier cannot mount views of the solver's volumes; they are copied",
+                extra={"ale_data": {"error": str(error)}},
+            )
+        reader = await ctx.sandboxes.acquire(
+            self._verifier_request(ctx, snapshot=handle).model_copy(
+                update={"resources": ctx.spec.resources.model_copy(update={"sudo": False})}
+            ),
+            validation=True,
+        )
+        try:
+            await self._collect_artifacts(ctx, reader, sink, only=viewed)
+        finally:
+            await ctx.sandboxes.release(reader)
+        return await provision(()), ()
+
+    async def _prune_views(
+        self, ctx: EpisodeContext, verifier: Sandbox, viewed: tuple[str, ...]
     ) -> None:
-        """Copy every declared artifact from ``sandbox`` into ``sink``, when it collects."""
+        """Make each ``viewed`` volume in a separate verifier what copying it would have
+        given: without links, special files and what its artifact's ``exclude`` leaves out."""
+        script = Path(artifact_files.__file__).read_text()
+        python = guestd.PYTHON[ctx.spec.os.value]
+        for artifact in ctx.spec.artifacts:
+            if artifact.source not in viewed:
+                continue
+            result = await verifier.exec(
+                [python, "-I", "-c", script, "prune", artifact.source, *artifact.exclude],
+                identity=Identity.FRAMEWORK,
+                # Within the verifier's own budget: one pass over the tree's entries.
+                timeout_sec=None,
+            )
+            if not result.ok:
+                raise TaskError(
+                    f"could not prepare {artifact.source} for the verifier: "
+                    f"{result.stderr.strip()[-2000:]}"
+                )
+
+    async def _collect_artifacts(
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        sink: ArtifactSink,
+        viewed: tuple[str, ...] = (),
+        *,
+        only: tuple[str, ...] | None = None,
+    ) -> None:
+        """Copy every declared artifact, or ``only`` those, from ``sandbox`` into ``sink``,
+        when it collects."""
         if not sink.enabled:
             return
         path_type = PureWindowsPath if ctx.spec.os is OperatingSystem.WINDOWS else PurePosixPath
         for index, artifact in enumerate(ctx.spec.artifacts):
+            if only is not None and artifact.source not in only:
+                continue
+            view = artifact.source in viewed
+            if view and not sink.retained:
+                # A separate verifier mounts a view of it: only a copy the Run keeps is made.
+                continue
             path = ctx.spec.artifact_path(artifact, ctx.home)
             name = path_type(path).name or f"artifact-{index}"
-            await sink.collect(sandbox, path, name, artifact.exclude)
+            await sink.collect(sandbox, path, name, artifact.exclude, restored=not view)
             logging.getLogger("ale.execution").info(
                 "artifact collection attempted",
                 extra={"ale_data": {"source": path, "name": name}},
@@ -2172,6 +2352,8 @@ class ReverificationProtocol(EpisodeProtocol):
         copy_trajectory(self.source_run_dir, ctx.run_dir)
 
         async def verify() -> dict[str, float]:
+            if ctx.spec.verify.environment_mode is VerificationMode.SEPARATE:
+                return await self._separate_from_snapshot(task, ctx, source)
             verifier = await self._provision_verifier(ctx, snapshot=source.handle)
             try:
                 await _require_snapshot_episode(
@@ -2189,6 +2371,40 @@ class ReverificationProtocol(EpisodeProtocol):
             ctx, Phase.VERIFY, self._verify_timeout(ctx), verify()
         )
         return Verdict.completed(await task.score(ctx), metrics=ctx.metrics)
+
+    async def _separate_from_snapshot(
+        self, task: Task, ctx: EpisodeContext, source: SolverSnapshot
+    ) -> dict[str, float]:
+        """A separate verifier of what a solver's snapshot holds: a Sandbox booted from it
+        gives the declared artifacts, but for the volumes the verifier mounts views of."""
+        # Not the verifier: the RunLock records the one of the verifier's image below.
+        reader = await ctx.sandboxes.acquire(self._verifier_request(ctx, snapshot=source.handle))
+        try:
+            await _require_snapshot_episode(reader, ctx.spec.os, source.handle, source.episode_id)
+            ctx.home = reader.agent_home
+            viewed = (
+                reader.volumes
+                if reader.volumes
+                and await ctx.sandboxes.serves_views(
+                    reader,
+                    self._verifier_request(ctx, volumes_from=source.handle),
+                    saved=True,
+                )
+                else ()
+            )
+            await self._capture_solver_evidence(ctx, reader, viewed=viewed)
+        finally:
+            await ctx.sandboxes.release(reader)
+        verifier = await self._provision_verifier(
+            ctx, volumes_from=source.handle if viewed else None
+        )
+        try:
+            await ctx.artifacts.restore(verifier)
+            await self._prune_views(ctx, verifier, viewed)
+            return await self._verify(task, ctx, verifier)
+        finally:
+            await self._sanitize_for_retention(ctx, verifier)
+            await ctx.sandboxes.release(verifier)
 
 
 def _agent_episode_path(operating_system: OperatingSystem) -> str:

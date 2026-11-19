@@ -291,7 +291,6 @@ async def test_reverify_fails_only_the_task_whose_image_no_registry_answers_for(
     ("mode", "kept", "refusal"),
     [
         ("snapshot", "retained", "kept its solver running instead"),
-        ("separate", "snapshotted", "kept only a snapshot of its solver"),
         ("snapshot", "unserved", "its verifier boots from the snapshot docker:runc keeps"),
         ("separate", "shared", "kept the Sandbox its shared verifier ran in"),
         ("snapshot", "shared-snapshot", "kept the Sandbox its shared verifier ran in"),
@@ -300,9 +299,10 @@ async def test_reverify_fails_only_the_task_whose_image_no_registry_answers_for(
 async def test_reverify_refuses_a_source_its_verification_cannot_use(
     tmp_path, monkeypatch, capsys, mode, kept, refusal
 ):
-    """A snapshot verifier needs its source's solver snapshot, on a Provider that serves it;
-    verification of another topology needs the solver running. A verifier of its own needs
-    the solver as its agent left it, not a Sandbox a shared verifier changed."""
+    """A snapshot verifier needs its source's solver snapshot, on a Provider that serves it,
+    and shared verification the solver running; a separate verifier takes either. A verifier
+    of its own needs the solver as its agent left it, not a Sandbox a shared verifier
+    changed."""
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 

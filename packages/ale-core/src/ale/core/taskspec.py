@@ -56,6 +56,7 @@ __all__ = [
     "TaskTable",
     "TaskVariables",
     "ToolProvision",
+    "ValidationTable",
     "VariableReference",
     "VerificationMode",
     "VerifierEnvironmentTable",
@@ -659,6 +660,9 @@ class TaskSpec(BaseModel):
     artifacts: tuple[Artifact, ...] = ()
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
+    validation: VerifySpec | None = None
+    """Where ``validation/`` runs, when ``[validation]`` places it apart from ``tests/``;
+    :attr:`validation_spec` resolves it."""
     variables: TaskVariables = TaskVariables()
     calibration: tuple[CalibrationCase, ...] = (DEFAULT_SOLUTION,)
     """Every calibration case, in the order ``ale calibrate`` runs them."""
@@ -673,6 +677,35 @@ class TaskSpec(BaseModel):
     def start_directory(self, home: str) -> str:
         """Where the agent starts, given the agent's ``home``."""
         return str(_task_path(home, self.os) / (self.workdir or ""))
+
+    @property
+    def validation_spec(self) -> VerifySpec:
+        """Where ``validation/`` runs: ``[validation]``'s, or ``tests/``'s."""
+        return self.validation or self.verify
+
+    @property
+    def volume_candidates(self) -> tuple[str, ...]:
+        """The artifacts a Provider may mount as volumes of their own: those named by an
+        absolute path, without a glob, that no other of them contains, as it decides before
+        the Sandbox starts, when the agent's home is not yet known. A Provider mounts those
+        that are directories in the image."""
+        path_type = PureWindowsPath if self.os is OperatingSystem.WINDOWS else PurePosixPath
+        named = [
+            artifact.source
+            for artifact in self.artifacts
+            if path_type(artifact.source).is_absolute()
+            and not any(char in artifact.source for char in "*?[")
+        ]
+        return tuple(
+            dict.fromkeys(
+                source
+                for source in named
+                if not any(
+                    other != source and path_type(other) in path_type(source).parents
+                    for other in named
+                )
+            )
+        )
 
     def artifact_path(self, artifact: Artifact, home: str) -> str:
         """Where ``artifact`` is, given the agent's ``home``."""
@@ -970,6 +1003,44 @@ class VerifierTable(BaseModel):
         return self
 
 
+class ValidationTable(BaseModel):
+    """``[validation]``, ALE's: where ``validation/`` runs, when not where ``[verifier]`` puts
+    ``tests/``. Its budget and variables are ``[verifier]``'s, and a separate one runs the
+    image a separate verifier of ``tests/`` would, as it has no image of its own."""
+
+    model_config = _FROZEN
+
+    environment_mode: VerificationMode | None = None
+    environment: VerifierEnvironmentTable | None = None
+
+    @property
+    def mode(self) -> VerificationMode:
+        """As ``[verifier]``'s: separate when an environment is declared."""
+        if self.environment_mode is not None:
+            return self.environment_mode
+        if self.environment is not None:
+            return VerificationMode.SEPARATE
+        return VerificationMode.SHARED
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _environment_fits_the_mode(self) -> Self:
+        if self.environment is None:
+            return self
+        if self.environment_mode is VerificationMode.SHARED:
+            raise ValueError("environment_mode 'shared' cannot declare [validation.environment]")
+        if keys := sorted(
+            {"image", "build_timeout_sec", "env"} & self.environment.model_fields_set
+        ):
+            raise ValueError(
+                f"[validation.environment] cannot set {' or '.join(keys)}: a validation "
+                "verifier runs the image a separate verifier of tests/ would, with "
+                "[verifier]'s variables"
+            )
+        return self
+
+
 class SolutionTable(BaseModel):
     """``[solution]``: what the oracle receives besides ``[environment].env``."""
 
@@ -996,6 +1067,8 @@ class TaskConfig(BaseModel):
     environment: EnvironmentTable = EnvironmentTable()
     agent: AgentTable = AgentTable()
     verifier: VerifierTable = VerifierTable()
+    validation: ValidationTable | None = None
+    """``[validation]``; without it ``validation/`` runs where ``[verifier]`` puts ``tests/``."""
     solution: SolutionTable = SolutionTable()
     calibration: tuple[CalibrationCase, ...] = ()
     """``[[calibration]]`` as written; ``calibration_cases`` adds the default ``solution``."""
@@ -1053,6 +1126,7 @@ class TaskConfig(BaseModel):
         for table, sized in (
             ("environment", environment),
             ("verifier.environment", verifier.environment),
+            ("validation.environment", self.validation and self.validation.environment),
         ):
             if sized is None or sized.gpus:
                 continue

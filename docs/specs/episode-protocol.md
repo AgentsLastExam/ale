@@ -56,7 +56,9 @@ started. Those observations, rather than the request alone, enter RunLock.
 Shared verification provisions one physical sandbox with role `shared`. Separate and
 snapshot verification provision a `solver` sandbox first and a `verifier` sandbox only after
 solver evidence capture; a snapshot verifier boots from a snapshot of the solver, on the
-leaf that saved it.
+leaf that saved it, and a separate one of its own image mounts views of the
+[volumes](task-authoring.md#volumes) the snapshot keeps, on that leaf, when it serves the
+verifier. A Sandbox mounts its volumes from its start.
 
 The image declares the agent account and home. ALE does not add a Task path prefix or
 pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and macOS
@@ -131,28 +133,39 @@ Conversion is a pure function of the copied bytes, so it runs once, after the fi
 copy. An interrupted run or an incomplete copy produces a trajectory marked incomplete.
 
 With separate verification, or when run policy sets `artifacts.collect = "host"`, every
-Task-declared artifact is captured as an immutable file or directory snapshot. Files and
-directories are selected directly by `artifacts`, including globs. Copying never follows
-links and skips links, missing and uncopyable entries, with bounded traversal; see
-[Artifact copying](task-authoring.md#artifact-copying). The verifier owns scoring.
+Task-declared artifact is captured as an immutable file or directory snapshot, but a volume
+artifact, which a separate verifier mounts a view of, only for a copy the Run keeps. Files
+and directories are selected directly by `artifacts`, including globs. Copying never follows
+links and skips links, missing and uncopyable entries, with bounded traversal; see [Artifact
+copying](task-authoring.md#artifact-copying). The verifier owns scoring.
 
-A separate verifier receives solver output only through the Host. With the default
+A separate verifier receives solver output through the Host, but for the volumes it mounts
+views of. With the default
 `artifacts.collect = "none"`, ALE discards that copy with the episode, and with shared or
 snapshot verification it inspects no artifact path and copies nothing.
 
-Under snapshot verification ALE then saves the solver, still the agent's: it sanitizes it as
-for retention and saves its disk as a snapshot, which stops it, within a framework bound of
-1800 s, as setup's, so that the verifier's budget covers only booting the verifier, any wait
-for room on the leaf that keeps the snapshot included, and its tests. A failure here, the
-Sandbox's loss to memory or storage included, is the solver's, as one of evidence capture
-is.
+Under snapshot verification, and under separate verification where the verifier mounts views
+of the solver's volumes, ALE then saves the solver, still the agent's: it sanitizes it as
+for retention and saves its disk, its volumes included, as a snapshot, which stops it,
+within a framework bound of 1800 s, as setup's, so that the verifier's budget covers only
+booting the verifier, any wait for room on the leaf that keeps the snapshot included, and
+its tests. A failure here, the Sandbox's loss to memory or storage included, is the
+solver's, as one of evidence capture is.
 
 ### Verify
 
 Shared verification uploads `tests/` into the completed solver sandbox. Separate
 verification first releases or retains the solver according to run policy, provisions a
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
-and uploads the same `tests/`. It never reruns setup or copies the solver filesystem.
+and uploads the same `tests/`. It never reruns setup or copies the solver filesystem. Before
+it captures them, ALE asks the solver's leaf whether it serves a verifier that mounts views
+of the solver's volumes and saves the solver once more, which a solver kept running is
+not: if so, the verifier mounts a view of each volume from the solver's snapshot, which ALE
+rids of what copying would have skipped, links, special files and `exclude` matches, and
+those are not copied. Where the leaf then refuses that verifier after all, as a Fleet Node
+too small for it does, ALE copies the volumes from a Sandbox booted from the snapshot with
+the solver's resources, which fit there, and starts a verifier that mounts none, wherever
+one can start: views spare a copy, and their absence never fails the episode.
 
 Snapshot verification boots a fresh verifier Sandbox from the solver's snapshot, on the leaf
 that saved it, with the verifier's resources and the solver's account, and uploads the same
@@ -224,11 +237,12 @@ verified as any stopped agent's is. Each round, whatever the verification mode:
    included, and saves it as a snapshot, which stops it and every process in it, under the
    framework bound the save for a snapshot verifier has; once the save succeeds, the
    previous round's snapshot is released, so at most one round's snapshot exists at a time;
-3. runs `validation/` in the round's verifier, a new Sandbox placed as the mode places
-   `tests/`'s: shared, booted from the snapshot with the solver's resources and no sudo,
-   since the agent goes on from the state the snapshot holds; snapshot, booted from it with
-   the verifier's resources; separate, of the verifier's image with the artifacts restored,
-   which are deleted when the round ends. It runs under the verify limit,
+3. runs `validation/` in the round's verifier, a new Sandbox placed as `[validation]`, or
+   else `[verifier]`, says: shared, booted from the snapshot with the solver's resources and
+   no sudo, since the agent goes on from the state the snapshot holds; snapshot, booted from
+   it with the verifier's resources; separate, of the verifier's image with the artifacts
+   restored, which are deleted when the round ends, and views of the snapshot's volumes
+   where the leaf serves it. It runs under the verify limit,
    `[verifier].timeout_sec` or the Run's `timeouts.verify`, which its Judge calls share, and
    Run retention never keeps it;
 4. boots the next turn's solver from the snapshot, with the solver's resources and network,
@@ -271,18 +285,20 @@ prepared; either can set `validation_rounds = 0`.
 
 `ale reverify TASK SOURCE_RUN` is an internal authoring optimization. Each source episode
 must have a complete RunLock, the same prepared solver-image identity as the current Task,
-and its solver kept as the current verification needs: running, for shared and separate
-verification, or as a snapshot, for snapshot verification. A source of the other kind is
-refused, and so is a kept shared Sandbox for separate or snapshot verification, since its
-disk holds what its shared verifier changed. An episode with validation rounds keeps no
-solver running, so it can be reverified only from a snapshot, under snapshot verification.
+and its solver kept as the current verification needs: running, for shared verification,
+as a snapshot, for snapshot verification, and either for separate verification. A source of
+another kind is refused, and so is a kept shared Sandbox for separate or snapshot
+verification, since its disk holds what its shared verifier changed. An episode with
+validation rounds keeps no solver running, so it can be reverified only from a snapshot.
 
 For shared verification, ALE reconnects to the retained shared Sandbox and runs the current
 `tests/` there. For separate verification, ALE captures the declared artifacts from the
-retained solver, detaches without destroying it, provisions a fresh verifier Sandbox, restores the
-artifacts, and runs the current `tests/` there. For snapshot verification, ALE boots a fresh
-verifier Sandbox from the source's snapshot, on the Provider that keeps it, captures the
-declared artifacts there when run policy collects them, and runs the current `tests/`,
+retained solver, detaches without destroying it, provisions a fresh verifier Sandbox,
+restores the artifacts, and runs the current `tests/` there; from a snapshot, it boots a
+Sandbox from the snapshot to capture them instead, but for the volumes the verifier mounts
+views of, as a separate verifier does in an episode. For snapshot verification, ALE boots a
+fresh verifier Sandbox from the source's snapshot, on the Provider that keeps it, captures
+the declared artifacts there when run policy collects them, and runs the current `tests/`,
 leaving the snapshot as it was. Before any path uploads `tests/`, ALE removes the previously
 staged verifier files so deleted files cannot survive a revision.
 

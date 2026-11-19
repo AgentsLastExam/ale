@@ -25,6 +25,7 @@ from functools import partial
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
+from ale.core.capability import unmet
 from ale.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
 from ale.core.episode import ArtifactSink, Budget, EpisodeContext, Phase
 from ale.core.errors import (
@@ -222,11 +223,13 @@ class _Lease:
         if validation:
             # A validation round's verifier: retention concerns the final verification only.
             policy = "destroy"
+        # A separate verifier mounts views of its solver's snapshot's volumes.
+        saved = request.snapshot or request.volumes_from
         origin = next(
             (
                 entry
                 for entry in self.live
-                if entry.saved is not None and entry.saved.handle == request.snapshot
+                if entry.saved is not None and entry.saved.handle == saved
             ),
             None,
         )
@@ -243,6 +246,30 @@ class _Lease:
         sandbox = await provider.create(self._configured(request, policy))
         self.live.append(_LeaseEntry(sandbox, provider, roles, policy, booted_from=origin))
         return sandbox
+
+    async def serves_views(
+        self, sandbox: Sandbox, verifier: SandboxRequest, *, saved: bool
+    ) -> bool:
+        """Whether the Provider of ``sandbox``, a solver, serves ``verifier``, which mounts
+        views of the volumes the solver's snapshot holds, and, unless the solver is ``saved``
+        anyway, saves it once more for it. Otherwise its volumes are copied."""
+        entry = self._find(sandbox)
+        if entry is None or not any(
+            profile.volumes and not unmet(profile, verifier.needs)
+            for profile in await entry.provider.profiles()
+        ):
+            return False
+        if not saved:
+            needs = sandbox.request.needs
+            if await entry.provider.unserved(
+                needs.model_copy(update={"snapshot": True, "saves": needs.saves + 1}),
+                user=sandbox.request.user,
+                role=sandbox.request.role,
+            ):
+                return False
+        return not await entry.provider.unserved(
+            verifier.needs, user=verifier.user, role=SandboxRole.VERIFIER
+        )
 
     async def adopt(
         self, request: SandboxRequest, attach: Callable[[SandboxRequest], Awaitable[Sandbox]]
@@ -628,7 +655,13 @@ class _Artifacts(ArtifactSink):
         return self.run_dir / "artifacts"
 
     async def collect(
-        self, sandbox: Sandbox, source: str, name: str, exclude: tuple[str, ...] = ()
+        self,
+        sandbox: Sandbox,
+        source: str,
+        name: str,
+        exclude: tuple[str, ...] = (),
+        *,
+        restored: bool = True,
     ) -> None:
         if not self.enabled:
             return
@@ -653,7 +686,7 @@ class _Artifacts(ArtifactSink):
             if not probe.ok:
                 raise OSError(probe.stderr or "artifact inspection failed")
             details = json.loads(probe.stdout)
-            if details["truncated"]:
+            if details["truncated"] and restored:
                 self.truncated.append(source)
             for reason in details["skipped"]:
                 logger.warning("artifact skipped: %s", reason)
@@ -702,6 +735,7 @@ class _Artifacts(ArtifactSink):
                             "mode": int(item["mode"]),
                             "content_identity": identity,
                             "size_bytes": size,
+                            "restored": restored,
                         }
                     )
                     captured.add(remote)
@@ -731,7 +765,8 @@ class _Artifacts(ArtifactSink):
             PureWindowsPath if sandbox.request.os is OperatingSystem.WINDOWS else PurePosixPath
         )
         for entry in sorted(
-            self.entries, key=lambda item: len(path_type(str(item["source"])).parts)
+            (item for item in self.entries if item.get("restored", True)),
+            key=lambda item: len(path_type(str(item["source"])).parts),
         ):
             source = str(entry["source"])
             target = self.root / str(entry["stored_path"])

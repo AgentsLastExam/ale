@@ -48,6 +48,7 @@ __all__ = [
     "SandboxRole",
     "SandboxState",
     "snapshot_verifier_needs",
+    "verifiers_needs",
 ]
 
 #: The port at which every Sandbox reaches its Gateway, whatever port the Host serves it on.
@@ -232,6 +233,18 @@ class SandboxRequest(BaseModel):
     planned_saves: int = Field(default=0, ge=0)
     """How many runs of ``validation/`` still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
+    volumes: tuple[str, ...] = ()
+    """The Task's volume candidates (:attr:`~ale.core.taskspec.TaskSpec.volume_candidates`).
+    A leaf that mounts volumes makes each that is a directory in the image a volume of its
+    own from the start, which holds what the image has there; booting from ``snapshot``, or
+    with ``volumes_from``, a view of what the snapshot holds there instead, whose writes stay
+    its own. :attr:`Sandbox.volumes` says which it mounted."""
+    volumes_from: str | None = None
+    """A snapshot whose volumes a Sandbox of another image mounts views of: a separate
+    verifier of a solver that mounted some."""
+    separate_verifier: Resources | None = None
+    """The resources of the separate verifier that may mount views of this solver's
+    volumes, for which a leaf that would host both reserves room; nothing requires it."""
     resources: Resources
     network: NetworkPolicy
     gateway_url: str | None = Field(
@@ -276,12 +289,37 @@ class SandboxRequest(BaseModel):
             # The elevation it gets, which an image builder's request grants beyond its
             # size.
             resources=self.resources.model_copy(update={"sudo": self.sudo}),
-            snapshot=self.saves > 0 or self.snapshot is not None,
+            snapshot=self.saves > 0 or self.snapshot is not None or self.volumes_from is not None,
             saves=self.saves,
-            verifier=None
-            if (verifier := self.snapshot_verifier or self.round_verifier) is None
-            else snapshot_verifier_needs(self.image_kind, self.os, verifier),
+            verifier=verifiers_needs(
+                self.image_kind, self.os, (self.snapshot_verifier, self.round_verifier)
+            ),
         )
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _volumes_from_a_snapshot(self) -> Self:
+        if self.volumes_from is not None and self.snapshot is not None:
+            raise ValueError("a Sandbox boots from a snapshot or mounts views of one's volumes")
+        return self
+
+
+def verifiers_needs(
+    kind: ImageKind, operating_system: OperatingSystem, verifiers: Sequence[Resources | None]
+) -> SandboxNeeds | None:
+    """What the verifiers that boot from a solver's snapshot need, a snapshot verifier's and
+    a validation round's, each of the ``verifiers`` given, the next nested in the one before,
+    so that every check of one profile holds it to all of them."""
+    distinct: list[Resources] = []
+    for each in verifiers:
+        if each is not None and each not in distinct:
+            distinct.append(each)
+    needs = None
+    for resources in reversed(distinct):
+        outer = snapshot_verifier_needs(kind, operating_system, resources)
+        needs = outer if needs is None else outer.model_copy(update={"verifier": needs})
+    return needs
 
 
 def snapshot_verifier_needs(
@@ -433,6 +471,9 @@ class Sandbox(ABC):
         self.agent_home = agent_home
         self._resource_lease = resource_lease
         self.state = SandboxState.CREATED
+        #: Which of its request's volume candidates it mounted as volumes of their own, or,
+        #: mounting views of a snapshot's, which it mounted views of.
+        self.volumes: tuple[str, ...] = ()
 
     def release_resources(self) -> None:
         """Release Provider allocations after the underlying sandbox has stopped."""

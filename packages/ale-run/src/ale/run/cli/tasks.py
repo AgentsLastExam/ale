@@ -631,8 +631,12 @@ async def _reverify(
                 typer.echo(f"{task.spec.name}: source RunLock has no solver allocation", err=True)
                 failures += 1
                 continue
-            snapshot = task.spec.verify.environment_mode is VerificationMode.SNAPSHOT
-            if snapshot != (retained.outcome == "snapshotted"):
+            mode = task.spec.verify.environment_mode
+            snapshot = mode is VerificationMode.SNAPSHOT
+            # A separate verifier takes its solver running or as a snapshot.
+            if mode is not VerificationMode.SEPARATE and snapshot != (
+                retained.outcome == "snapshotted"
+            ):
                 typer.echo(
                     f"{task.spec.name}: "
                     + (

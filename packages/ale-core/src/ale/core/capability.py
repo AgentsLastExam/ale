@@ -118,6 +118,11 @@ class CapabilityProfile(BaseModel):
     full disk, or by measuring what the Sandbox writes and ending it past the limit."""
     container_features: frozenset[ContainerFeature] = frozenset()
     """What it gives a container Sandbox that asks for it."""
+    volumes: bool = False
+    """Whether it mounts a Sandbox's volume candidates that are directories in its image as
+    volumes of their own, which its snapshots keep, and mounts views of a snapshot's volumes
+    in a Sandbox of another image that asks for them. One that does not leaves them on the
+    Sandbox's disk, from which they are copied."""
 
 
 class SandboxNeeds(BaseModel):
@@ -153,12 +158,16 @@ def solver_saves(validations: int, *, snapshot_verified: bool, kept_as_snapshot:
 
 def round_verifier_resources(spec: TaskSpec, validations: int = 1) -> Resources | None:
     """The resources of the verifier a validation round boots from a snapshot of a solver of
-    ``spec``, on the leaf that saved it, under shared verification with ``validations`` runs
-    of ``validation/`` still to come: the solver's, never elevated. None otherwise: a
-    snapshot verifier's are the Task's, and a separate one runs on a leaf of its own."""
-    if spec.verify.environment_mode is not VerificationMode.SHARED or validations <= 0:
+    ``spec``, on the leaf that saved it, with ``validations`` runs of ``validation/`` still to
+    come: the solver's, never elevated, where ``validation/`` runs shared, and its own where
+    it runs in a snapshot verifier. None otherwise: a separate one runs on a leaf of its own."""
+    validation = spec.validation_spec
+    if validations <= 0 or validation.environment_mode is VerificationMode.SEPARATE:
         return None
-    return spec.resources.model_copy(update={"sudo": False})
+    if validation.environment_mode is VerificationMode.SHARED:
+        return spec.resources.model_copy(update={"sudo": False})
+    assert validation.resources is not None, "a snapshot verifier has resources"
+    return validation.resources.as_resources()
 
 
 #: Harbor's names whose words are not the model's, by the model they stand for: GKE

@@ -530,27 +530,28 @@ their type and existence.
 
 A Task states what its Sandboxes need and never names a Provider or runtime, so it runs
 unchanged wherever a Provider serves it. A Provider is one of two classes. A
-[leaf](lexicon.md) starts and drives the Sandbox itself, locally or in an allocation, and declares each real
-combination it can start as a [capability profile](lexicon.md): kind, operating system,
-architecture, desktop, network modes, snapshots and how many it saves in a row, GPUs, their
-models and memory and how it shares them, CPU and memory limits, whether it holds a Sandbox
-to its `storage_mb`, and container features. A scheduler places Sandboxes on machines it
-manages, which start them with the leaves there, and offers what those leaves do: the Fleet
-those of the leaves its registered Nodes lend, Daytona the one of its own Sandboxes. Which
-leaves a scheduler uses, and in which order, is its own configuration, never a Run's.
+[leaf](lexicon.md) starts and drives the Sandbox itself, locally or in an allocation, and
+declares each real combination it can start as a [capability profile](lexicon.md): kind,
+operating system, architecture, desktop, network modes, snapshots and how many it saves in a
+row, GPUs, their models and memory and how it shares them, CPU and memory limits, whether it
+holds a Sandbox to its `storage_mb`, container features, and whether it mounts
+[volumes](task-authoring.md#volumes). A scheduler places Sandboxes on machines it manages,
+which start them with the leaves there, and offers what those leaves do: the Fleet those of
+the leaves its registered Nodes lend, Daytona the one of its own Sandboxes. Which leaves a
+scheduler uses, and in which order, is its own configuration, never a Run's.
 
 A Sandbox needs its image's kind and operating system, the architecture that system implies
 (arm64 for macOS, x86-64 otherwise), its network mode, its resources (CPUs, memory, the
 storage it may write, GPUs, the models it accepts and the memory it needs on each, container
-features), and snapshots, and how many in a row, when it saves or boots from one. One rule
-compares needs with a profile, naming each need the profile misses, wherever a Provider or
-Node is chosen: in a Run's selection, in every leaf's `create`, and in the Fleet's
-placement, so a Sandbox is accepted or refused the same way wherever it is asked for. A
-leaf may also refuse by rules no profile states
+features), snapshots, and how many in a row, when it saves or boots from one, and volume
+artifacts, when its Task has any. One rule compares needs with a profile, naming each need
+the profile misses, wherever a Provider or Node is chosen: in a Run's selection, in every
+leaf's `create`, and in the Fleet's placement, so a Sandbox is accepted or refused the same
+way wherever it is asked for. A leaf may also refuse by rules no profile states
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)
-lists them); they hold wherever it runs, so selection asks them of a leaf, and of the
-leaves a scheduler would use, by the method `create` asks. A request that `create` would
-refuse is thus refused before the Run starts.
+lists them); they hold wherever it runs, so selection asks them of a leaf, and of the leaves
+a scheduler would use, by the method `create` asks. A request that `create` would refuse is
+thus refused before the Run starts.
 
 The Run's `sandbox.providers` lists provider ids in order of preference. Each Sandbox, a
 Task's solver and a separate verifier by its own needs, goes to the first Provider with a
@@ -571,7 +572,11 @@ it is kept as a snapshot or saved for a snapshot verifier. A shared solver is ne
 its end for its verifier. Selection compares that count with how many snapshots in a row a
 profile saves (`max_saves`), and a leaf that saves fewer in a row is not chosen. Under
 shared verification a solver with rounds also carries the needs of the round's verifier,
-which boots from its snapshot with the solver's resources and no sudo.
+which boots from its snapshot with the solver's resources and no sudo, and of
+`[validation]`'s snapshot verifier when that places one. Volumes ask nothing of selection:
+a separate verifier mounts views of its solver's volumes only where, as the episode finds,
+the solver's leaf serves it and saves the solver once more for it, and a Sandbox's
+volumes are copied otherwise.
 
 Before any episode starts, the Run has each selected leaf run its preflight with the needs
 of the Sandboxes selected for it, which finds what the leaf runs those with, such as its

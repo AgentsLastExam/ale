@@ -2,14 +2,17 @@
 
 Only ordinary files and directories cross the boundary. No link is followed anywhere on a
 path, since one the agent made can point at anything the framework may read; links,
-special files and failed reads are skipped. Scoring remains the Task's responsibility.
+special files and failed reads are skipped, and removed from a verifier's view of a volume
+artifact, which is not copied. Scoring remains the Task's responsibility.
 """
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import json
 import os
+import shutil
 import stat
 import sys
 from collections.abc import Sequence
@@ -103,6 +106,48 @@ def read(path: str) -> None:
             sys.stdout.buffer.write(block)
 
 
+def prune(root: str, exclude: Sequence[str] = ()) -> None:
+    """Leave below ``root``, a verifier's view of a volume artifact, what copying it gives:
+    ordinary files and directories, none that ``exclude`` matches. Nothing below it is
+    followed; on Windows ``root`` itself may be the junction to the viewed disk that the
+    Provider made."""
+    top = Path(root)
+    made = os.name == "nt" and top.is_junction()
+    if (link := _link_on(top.parent if made else top)) is not None:
+        raise ValueError(f"{link} is a link")
+
+    # The verifier's own processes, its desktop's among them, may write there meanwhile: an
+    # entry that goes before it is reached needs nothing.
+    def remove(path: Path, directory: bool) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            if directory:
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+
+    def visit(directory: Path) -> None:
+        try:
+            with os.scandir(directory) as children:
+                entries = list(children)
+        except FileNotFoundError:
+            return
+        for child in entries:
+            path = Path(child.path)
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            is_directory = stat.S_ISDIR(info.st_mode) and not _is_link(info)
+            if _excluded(path.relative_to(top).parts, exclude):
+                remove(path, is_directory)
+            elif is_directory:
+                visit(path)
+            elif _is_link(info) or not stat.S_ISREG(info.st_mode):
+                remove(path, False)
+
+    visit(top)
+
+
 def _excluded(parts: tuple[str, ...], patterns: Sequence[str]) -> bool:
     """Whether a pattern matches ``parts``, or their tail: ``tar --exclude`` is unanchored."""
     tails = ["/".join(parts[index:]) for index in range(len(parts))]
@@ -132,5 +177,7 @@ def _link_on(path: Path) -> Path | None:
 if __name__ == "__main__":
     if sys.argv[1] == "inspect":
         print(json.dumps(inspect(sys.argv[2], sys.argv[3:])))
+    elif sys.argv[1] == "prune":
+        prune(sys.argv[2], sys.argv[3:])
     else:
         read(sys.argv[2])
