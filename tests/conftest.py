@@ -17,6 +17,15 @@ from tests.support import CONTAINER_BASE, write_task
 os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
 
 
+# A unit test drives fakes, which never time out, so one that waits for something its fake
+# never does would block the whole suite. It fails after a minute instead, with the stack it
+# was waiting in.
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if item.get_closest_marker("unit") and item.get_closest_marker("timeout") is None:
+            item.add_marker(pytest.mark.timeout(60))
+
+
 @pytest.fixture(autouse=True)
 def default_ale_repo_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
