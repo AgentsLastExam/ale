@@ -101,6 +101,14 @@ env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 # workdir = "/app"                          # the agent's start and verification's directory
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
 
+[environment.healthcheck]                   # optional; Harbor's, run once setup is done
+command = "curl -sf localhost:8080/health"  # required; exit 0 is healthy
+interval_sec = 5                            # between attempts; default 5
+timeout_sec = 30                            # one attempt's limit; default 30
+start_period_sec = 0                        # failures meanwhile do not count; default 0
+start_interval_sec = 5                      # between attempts meanwhile; default 5
+retries = 3                                 # failures in a row that fail the Task; default 3
+
 [[environment.mcp_servers]]                 # one table per server
 name = "search"
 transport = "stdio"                         # stdio | sse | streamable-http (or http); default sse
@@ -173,7 +181,7 @@ Harbor's other fields fall into two groups. Nothing in ALE replaces multi-step T
 `multi_step_reward_strategy`), compose sidecars (`docker-compose.yaml`, which `ale lint` refuses,
 an artifact's `service`, `[[verifier.collect]]`), or TPU selection (`tpu`). ALE's design
 covers the rest. `docker_image` is `image` under Harbor's name, in `[environment]` and
-`[verifier.environment]` alike: one field, so a table holds either, never both. `environment/setup/` can wait for a service, so there is no `healthcheck`.
+`[verifier.environment]` alike: one field, so a table holds either, never both.
 Stages run under the framework's identity, so there is no `[verifier].user`. `[agent].network_mode` is the one network setting.
 An origin belongs in `[metadata]`, so there is no `source`.
 
@@ -534,6 +542,13 @@ sandbox starts. It is never part of an image build. Use it only for state that m
 episode: reset mutable data, generate per-episode values, create writable copies, or start
 services that depend on dynamic state. Stable installation and configuration belong in the
 image.
+
+`[environment.healthcheck]`, Harbor's readiness check, runs right after setup, in the
+directory the agent starts in, under the framework's identity and setup's time limit. As in
+Harbor and Docker's `HEALTHCHECK`, its first success passes, a failure counts only once
+`start_period_sec` has passed, and `retries` failures in a row fail the Episode as a Task
+error: a service that never became ready is the Task's fault, not the agent's. Its command
+runs in `bash` (`cmd.exe` on Windows, as Harbor runs it) with `[environment].env`.
 
 Setup and verification use the framework's privileged identity; solver and oracle use
 the agent identity. See [Permissions](sandbox-image.md#permissions). Image/setup code must

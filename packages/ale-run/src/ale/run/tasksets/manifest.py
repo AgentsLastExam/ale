@@ -338,6 +338,7 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
         },
         network=config.agent.network,
         workdir=config.agent.workdir or config.environment.workdir,
+        healthcheck=config.environment.healthcheck,
         timeouts={"agent": config.agent.timeout_sec, "verify": config.verifier.timeout_sec},
         validation_rounds=config.agent.validation_rounds,
         artifacts=config.artifacts,

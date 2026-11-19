@@ -252,10 +252,10 @@ def test_a_vm_image_the_task_folder_decides_takes_no_container_features(
 
 def test_load_errors_name_the_key(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
-    edit(task, {"environment": {"healthcheck": {"command": "true"}}})
-    with pytest.raises(TaskDefinitionError, match=r"environment\.healthcheck is not supported"):
+    edit(task, {"environment": {"tpu": {"type": "v6e", "topology": "2x4"}}})
+    with pytest.raises(TaskDefinitionError, match=r"environment\.tpu is not supported"):
         load_tasks(task)
-    edit(task, {"environment": {"healthcheck": None}, "task": {"name": None}})
+    edit(task, {"environment": {"tpu": None}, "task": {"name": None}})
     with pytest.raises(TaskDefinitionError, match=r"task\.name is required"):
         load_tasks(task)
     edit(task, {"task": {"name": "agentslastexam/demo"}, "agent": {"shell": "bash"}})
@@ -618,4 +618,20 @@ def test_harbor_s_workdir_is_where_the_agent_starts_and_verification_runs(tmp_pa
             "verifier": {"environment": None},
         },
     )
+    assert load_tasks(task)[0].spec.spec_hash == unset.spec_hash
+
+
+def test_harbor_s_healthcheck_loads_with_docker_s_defaults(tmp_path: Path):
+    task = scaffold_task(tmp_path / "demo")
+    unset = load_tasks(task)[0].spec
+    assert unset.healthcheck is None
+    edit(task, {"environment": {"healthcheck": {"command": "curl -sf localhost:8080"}}})
+    check = load_tasks(task)[0].spec.healthcheck
+    assert check is not None
+    assert (check.interval_sec, check.timeout_sec, check.retries) == (5.0, 30.0, 3)
+    assert (check.start_period_sec, check.start_interval_sec) == (0.0, 5.0)
+    edit(task, {"environment": {"healthcheck": {"command": "true", "retries": 0}}})
+    with pytest.raises(TaskDefinitionError, match="retries"):
+        load_tasks(task)
+    edit(task, {"environment": {"healthcheck": None}})
     assert load_tasks(task)[0].spec.spec_hash == unset.spec_hash

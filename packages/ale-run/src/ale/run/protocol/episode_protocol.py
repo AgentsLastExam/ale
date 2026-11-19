@@ -835,14 +835,67 @@ class EpisodeProtocol:
         await sandbox.open_egress()
 
         folder = getattr(task, "folder", None)
-        if folder is None:
-            return
-
-        if setup_dir := folder.stage_dir(Stage.SETUP):
+        if folder is not None and (setup_dir := folder.stage_dir(Stage.SETUP)):
             target = _layout(ctx.spec.os).path(Stage.SETUP)
             await sandbox.upload_dir(str(setup_dir), str(target))
             if folder.stage_entry(Stage.SETUP, ctx.spec.os):
                 await self._run_stage(ctx, sandbox, target, Phase.SETUP)
+        await self._healthcheck(ctx, sandbox)
+
+    async def _healthcheck(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
+        """Harbor's ``[environment.healthcheck]``, once setup is done, under setup's deadline.
+
+        As in Harbor and Docker HEALTHCHECK, the first success passes, a failure counts only
+        after the start period, and ``retries`` failures in a row fail the Task: a service
+        that never became ready is the Task's fault, never the agent's.
+        """
+        check = ctx.spec.healthcheck
+        if check is None:
+            return
+        argv = (
+            ["cmd.exe", "/c", check.command]
+            if ctx.spec.os is OperatingSystem.WINDOWS
+            else ["bash", "-c", check.command]
+        )
+        cwd = None if ctx.spec.workdir is None else ctx.spec.start_directory(ctx.home)
+        assert ctx.execution is not None
+        assert ctx.blobs is not None
+        start_period_end = time.monotonic() + check.start_period_sec
+        failures = attempts = 0
+        while True:
+            in_start_period = time.monotonic() < start_period_end
+            attempts += 1
+            recorder = CommandRecorder(
+                execution=ctx.execution,
+                blobs=cast(BlobStore, ctx.blobs),
+                episode_id=ctx.episode_id,
+                phase=Phase.SETUP.value,
+                component="task-healthcheck",
+                execution_id=f"healthcheck-{attempts}",
+                actor="task",
+                argv=argv,
+                cwd=cwd,
+                secrets=ctx.secrets,
+            )
+            result = await sandbox.exec(
+                argv,
+                cwd=cwd,
+                env=dict(ctx.variables.values.environment),
+                timeout_sec=check.timeout_sec,
+                output_sink=recorder.write,
+            )
+            recorder.finish(result)
+            if result.exit_code == 0 and not result.timed_out:
+                return
+            if in_start_period:
+                await asyncio.sleep(check.start_interval_sec)
+                continue
+            failures += 1
+            if failures >= check.retries:
+                raise TaskError(
+                    f"healthcheck failed after {check.retries} consecutive retries: {check.command}"
+                )
+            await asyncio.sleep(check.interval_sec)
 
     async def _agent(
         self,

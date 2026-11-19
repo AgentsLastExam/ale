@@ -157,7 +157,11 @@ def test_task_config_requires_only_its_version_and_name() -> None:
     [
         ({"steps": [{"name": "one"}]}, "steps"),
         ({"source": "x"}, "source"),
-        ({"environment": {"healthcheck": {"command": "true"}}}, "environment.healthcheck"),
+        ({"environment": {"tpu": {"type": "v6e", "topology": "2x4"}}}, "environment.tpu"),
+        (
+            {"verifier": {"environment": {"healthcheck": {"command": "true"}}}},
+            "verifier.environment.healthcheck",
+        ),
         ({"environment": {"network_mode": "public"}}, "environment.network_mode"),
         ({"verifier": {"user": "root"}}, "verifier.user"),
         (

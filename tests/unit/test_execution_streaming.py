@@ -13,7 +13,7 @@ from ale.core.episode import Phase
 from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
 from ale.core.sandbox import ExecResult, SandboxFile
 from ale.core.task import ResolvedVariables
-from ale.core.taskspec import NetworkPolicy, OperatingSystem, VerifySpec
+from ale.core.taskspec import Healthcheck, NetworkPolicy, OperatingSystem, VerifySpec
 from ale.core.trace import read_jsonl
 from ale.run.harnesses.builtin import NopHarness
 from ale.run.protocol.episode_protocol import EpisodeProtocol
@@ -223,3 +223,48 @@ async def test_a_harbor_workdir_is_where_verification_runs(
     # verifier's.
     await protocol._run_stage(ctx, sandbox, Path("/opt/ale/setup"), Phase.SETUP)  # type: ignore[arg-type]
     assert sandbox.cwd == "/opt/ale/setup"
+
+
+class CheckedSandbox:
+    """Answers each healthcheck attempt with the next exit code."""
+
+    def __init__(self, *codes: int) -> None:
+        self.codes = list(codes)
+        self.calls: list[tuple[list[str], str | None]] = []
+
+    async def exec(self, argv, *, cwd=None, output_sink=None, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append((argv, cwd))
+        return ExecResult(exit_code=self.codes.pop(0))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("codes", "check", "attempts", "passes"),
+    [
+        ((0,), {}, 1, True),
+        ((1, 1, 0), {}, 3, True),
+        ((1, 1, 1), {}, 3, False),
+        ((1, 0), {"retries": 1}, 1, False),
+        # Failures during the start period count against nothing.
+        ((1, 1, 1, 1, 0), {"retries": 1, "start_period_sec": 3600}, 5, True),
+    ],
+)
+async def test_the_healthcheck_follows_harbor_s_docker_semantics(
+    tmp_path: Path, monkeypatch, codes, check, attempts: int, passes: bool
+) -> None:
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("ale.run.protocol.episode_protocol.asyncio.sleep", no_wait)
+    ctx = context(tmp_path)
+    ctx.spec.healthcheck = Healthcheck(command="curl -sf localhost:8080", **check)
+    ctx.spec.workdir = None
+    sandbox = CheckedSandbox(*codes)
+    protocol = EpisodeProtocol(NopHarness())
+    if passes:
+        await protocol._healthcheck(ctx, sandbox)  # type: ignore[arg-type]
+    else:
+        with pytest.raises(TaskError, match="healthcheck failed after"):
+            await protocol._healthcheck(ctx, sandbox)  # type: ignore[arg-type]
+    assert len(sandbox.calls) == attempts
+    assert sandbox.calls[0] == (["bash", "-c", "curl -sf localhost:8080"], None)

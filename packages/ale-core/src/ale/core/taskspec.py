@@ -35,6 +35,7 @@ __all__ = [
     "ContainerFeature",
     "EnvironmentTable",
     "Expectation",
+    "Healthcheck",
     "ImageKind",
     "ImageSpec",
     "McpHeaders",
@@ -403,6 +404,21 @@ McpServer = Annotated[
 RemoteMcpServer = StreamableHttpMcpServer | SseMcpServer
 
 
+class Healthcheck(BaseModel):
+    """``[environment.healthcheck]``: Harbor's readiness check, run once setup is done, with
+    Docker HEALTHCHECK's semantics. The first success passes; a failure counts only once
+    ``start_period_sec`` has passed, and ``retries`` failures in a row fail the Task."""
+
+    model_config = _FROZEN
+
+    command: str = Field(min_length=1)
+    interval_sec: float = Field(default=5.0, ge=0, allow_inf_nan=False)
+    timeout_sec: float = Field(default=30.0, gt=0, allow_inf_nan=False)
+    start_period_sec: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    start_interval_sec: float = Field(default=5.0, ge=0, allow_inf_nan=False)
+    retries: int = Field(default=3, ge=1, strict=True)
+
+
 class ToolProvision(BaseModel):
     """What a Task's image gives its agent, as ``[environment]`` declares it."""
 
@@ -708,6 +724,8 @@ class TaskSpec(BaseModel):
     validation_rounds: int = Field(default=0, ge=0)
     """``[agent].validation_rounds``: how many results of ``validation/`` the evaluated agent
     receives, each between two of its turns."""
+    healthcheck: Healthcheck | None = Field(default=None, exclude_if=lambda value: value is None)
+    """``[environment.healthcheck]``, run where the agent starts once setup is done."""
     artifacts: tuple[Artifact, ...] = ()
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
@@ -811,7 +829,6 @@ _HARBOR_ENVIRONMENT_ONLY = frozenset(
     {
         "allow_internet",
         "allowed_hosts",
-        "healthcheck",
         "memory",
         "network_mode",
         "storage",
@@ -828,7 +845,9 @@ _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
     (): frozenset({"multi_step_reward_strategy", "source", "steps"}),
     ("environment",): _HARBOR_ENVIRONMENT_ONLY,
     ("verifier",): frozenset({"allowed_hosts", "collect", "network_mode", "user"}),
-    ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY | {"mcp_servers", "os", "skills_dir"},
+    # Harbor runs a healthcheck in the agent's environment only.
+    ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY
+    | {"healthcheck", "mcp_servers", "os", "skills_dir"},
 }
 
 
@@ -960,6 +979,7 @@ class EnvironmentTable(BaseModel):
     env: TaskEnv = Field(default_factory=dict)
     skills_dir: str | None = Field(default=None, min_length=1)
     mcp_servers: tuple[McpServerTable, ...] = ()
+    healthcheck: Healthcheck | None = None
     workdir: str | None = Field(default=None, min_length=1)
     """Harbor's working directory: where the agent starts unless ``[agent].workdir`` says
     otherwise, and where ``tests/`` and ``validation/`` run; below the agent's home when
