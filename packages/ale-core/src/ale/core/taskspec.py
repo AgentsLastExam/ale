@@ -26,6 +26,7 @@ from ale.core.ids import TaskId, content_hash
 
 __all__ = [
     "DEFAULT_SOLUTION",
+    "HARBOR_ACCOUNT",
     "SCHEMA_VERSION",
     "SOLUTION_CASE",
     "AgentTable",
@@ -883,6 +884,8 @@ SCHEMA_VERSION = "0.2.0"
 #: Harbor's format versions, ``1.0`` through its current ``1.4``. A Task naming one, or none,
 #: which Harbor reads as its own current version, is Harbor's (``TaskConfig.harbor``).
 _HARBOR_SCHEMA = re.compile(r"1\.[0-9]+")
+#: The account Harbor's agent runs as in an image that names no other ``USER``.
+HARBOR_ACCOUNT = "root"
 
 #: ``task.toml`` network modes and what they mean for the agent, the oracle and the verifier.
 #: ``blocklist`` is ALE's; Harbor's format has the other three.
@@ -1118,7 +1121,11 @@ class EnvironmentTable(BaseModel):
 
 
 class AgentTable(BaseModel):
-    """``[agent]``: the evaluated agent's account, budget and network; the oracle's too."""
+    """``[agent]``: the evaluated agent's account, budget and network; the oracle's too.
+
+    A Harbor Task's account and elevation default to Harbor's (``TaskConfig.agent_user`` and
+    ``TaskConfig.agent_sudo``), so a field's own default holds only where it is ALE's.
+    """
 
     model_config = _FROZEN
 
@@ -1355,9 +1362,27 @@ class TaskConfig(BaseModel):
     @property
     def harbor(self) -> bool:
         """Whether this is a Harbor Task: one naming one of Harbor's format versions, or none,
-        which Harbor reads as its own."""
+        which Harbor reads as its own. Harbor's defaults apply where it sets nothing."""
         version = self.schema_version
         return version is None or _HARBOR_SCHEMA.fullmatch(version) is not None
+
+    @property
+    def agent_user(self) -> str:
+        """The agent's account: ``[agent].user``; unset, ``user``, or in a Harbor Linux Task
+        ``root``, the account Harbor runs its agent as in an image naming no other ``USER``."""
+        agent = self.agent
+        linux = self.environment.os is OperatingSystem.LINUX
+        if "user" in agent.model_fields_set or not (self.harbor and linux):
+            return agent.user
+        return HARBOR_ACCOUNT
+
+    @property
+    def agent_sudo(self) -> bool:
+        """Whether the agent can elevate: ``[agent].sudo``; unset, not, except in a Harbor
+        Task whose agent is ``root``, which can elevate under Harbor too."""
+        if "sudo" in self.agent.model_fields_set:
+            return self.agent.sudo
+        return self.harbor and self.agent_user == HARBOR_ACCOUNT
 
     @property
     def agent_network(self) -> NetworkPolicy:

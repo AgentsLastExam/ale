@@ -229,7 +229,10 @@ def test_task_config_requires_no_key() -> None:
     ],
 )
 def test_harbor_s_versions_or_none_make_a_harbor_task(version: str | None, harbor: bool) -> None:
-    assert config({"schema_version": version}).harbor is harbor
+    task = config({"schema_version": version, "agent": {"user": None}})
+    assert task.harbor is harbor
+    # As Harbor runs its agent, as root in an image naming no other USER, which can elevate.
+    assert (task.agent_user, task.agent_sudo) == (("root", True) if harbor else ("user", False))
 
 
 # ALE's earlier label among them: only ALE's current format and Harbor's are read.
@@ -237,6 +240,22 @@ def test_harbor_s_versions_or_none_make_a_harbor_task(version: str | None, harbo
 def test_any_other_format_is_refused(version: str) -> None:
     with pytest.raises(ValidationError, match=f'"{re.escape(version)}" is neither ALE'):
         config({"schema_version": version})
+
+
+def test_a_harbor_task_s_own_account_and_elevation_win() -> None:
+    harbor = {"schema_version": None, "agent": {"user": None}}
+    # A non-root account is how a Harbor Task keeps its agent from what grades it.
+    named = config(harbor, {"agent": {"user": "agent"}})
+    assert (named.agent_user, named.agent_sudo) == ("agent", False)
+    assert config(harbor, {"agent": {"user": "agent", "sudo": True}}).agent_sudo is True
+    # Root that may not elevate is refused when its Sandbox starts, as in an ALE Task.
+    refused = config(harbor, {"agent": {"sudo": False}})
+    assert (refused.agent_user, refused.agent_sudo) == ("root", False)
+    # Harbor has no macOS and runs Windows in containers, so ALE's defaults stay there.
+    windows = config(harbor, {"environment": {"os": "windows", "image": "/disk.qcow2"}})
+    assert (windows.agent_user, windows.agent_sudo) == ("user", False)
+    ale = config({"agent": {"user": "root", "sudo": True}})
+    assert (ale.harbor, ale.agent_user, ale.agent_sudo) == (False, "root", True)
 
 
 def test_harbor_s_original_version_key_is_the_schema_version() -> None:

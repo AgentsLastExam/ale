@@ -24,6 +24,7 @@ from ale.core.task import (
     case_path,
 )
 from ale.core.taskspec import (
+    HARBOR_ACCOUNT,
     SCHEMA_VERSION,
     SOLUTION_CASE,
     ImageKind,
@@ -74,6 +75,7 @@ _OS_LABELS = {
 _CACHE_DIR = ".ale-cache"
 #: A Dockerfile stage's base and its alias.
 _FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.I | re.M)
+_USER = re.compile(r"^\s*USER\s+(\S+)", re.I | re.M)
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -245,6 +247,7 @@ class ManifestTask(Task):
             spec,
             folder=folder,
             source=folder.source,
+            harbor=config.harbor,
             warnings=_warnings(config, folder, spec.name),
             task_digest=folder.content_digest,
             non_verifier_digest=folder.non_verifier_digest(config),
@@ -352,7 +355,7 @@ def _warnings(config: TaskConfig, folder: TaskFolder, name: TaskId) -> tuple[str
         )
         found.append(
             f"{TASK_CONFIG}: {written}, so it is read as a Harbor Task in ALE's format "
-            f'"{SCHEMA_VERSION}"'
+            f'"{SCHEMA_VERSION}"{_harbor_defaults(config)}'
         )
     if config.task.name is None:
         found.append(f"{TASK_CONFIG}: no [task].name, so this Task is {name}, after where it lives")
@@ -366,7 +369,25 @@ def _warnings(config: TaskConfig, folder: TaskFolder, name: TaskId) -> tuple[str
         "image is prepared and records its digest; name an exact version"
         for path, image in _moving_images(config, folder)
     )
+    account = _image_user(folder.dockerfile) if folder.dockerfile else None
+    defaulted = "user" not in config.agent.model_fields_set
+    if account is not None and defaulted and config.agent_user == HARBOR_ACCOUNT:
+        found.append(
+            f"{ENVIRONMENT_DIR}/Dockerfile: its image runs as USER {account}, which Harbor's "
+            f"agent runs as; ALE's runs as {HARBOR_ACCOUNT} unless [agent].user names {account}"
+        )
     return tuple(found)
+
+
+def _harbor_defaults(config: TaskConfig) -> str:
+    """What Harbor's defaults gave a Harbor Task, as the end of its warning."""
+    agent = config.agent
+    given = []
+    if "user" not in agent.model_fields_set and config.agent_user == HARBOR_ACCOUNT:
+        given.append(f"its agent runs as {HARBOR_ACCOUNT}")
+    if "sudo" not in agent.model_fields_set and config.agent_sudo:
+        given.append("with sudo")
+    return f"; as in Harbor, {', '.join(given)}" if given else ""
 
 
 def _moving_images(config: TaskConfig, folder: TaskFolder) -> list[tuple[str, str]]:
@@ -396,6 +417,16 @@ def _moves(image: str) -> bool:
     return image.rpartition("/")[2].partition(":")[2] in ("", "latest")
 
 
+def _image_user(dockerfile: Path) -> str | None:
+    """The account other than root a Dockerfile's last stage runs as, if it names one."""
+    text = dockerfile.read_text(encoding="utf-8", errors="replace")
+    stages = list(_FROM.finditer(text))
+    final = text[stages[-1].end() :] if stages else text
+    users = _USER.findall(final)
+    account = users[-1].partition(":")[0] if users else None
+    return None if account in (None, HARBOR_ACCOUNT, "0") else account
+
+
 def _spec(config: TaskConfig, folder: TaskFolder, name: TaskId) -> TaskSpec:
     """The runtime specification: ``task.toml`` with the folder's build definitions."""
     return TaskSpec(
@@ -410,7 +441,7 @@ def _spec(config: TaskConfig, folder: TaskFolder, name: TaskId) -> TaskSpec:
             "gpus": config.environment.gpus,
             "gpu_types": config.environment.gpu_types or (),
             "gpu_memory_mb": config.environment.gpu_memory_mb,
-            "sudo": config.agent.sudo,
+            "sudo": config.agent_sudo,
             "container_features": config.environment.container_features,
         },
         network=config.agent_network,
@@ -450,7 +481,7 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
     (``build.ps1`` on Windows, ``build.sh`` elsewhere) builds a VM on ``image``. ``image``
     alone is used directly.
     """
-    environment, user = config.environment, config.agent.user
+    environment, user = config.environment, config.agent_user
     operating_system, image = environment.os, environment.image
     linux = operating_system is OperatingSystem.LINUX
     label, script = _OS_LABELS[operating_system], BUILD_SCRIPTS[operating_system]
@@ -519,7 +550,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     # Without a verifier environment, the verifier gets the solver's resources.
     sized = environment or config.environment
     named = environment.image if environment is not None else None
-    user = config.agent.user
+    user = config.agent_user
     image: ImageSpec | None = None
     if dockerfile is not None:
         if named is not None:

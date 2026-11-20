@@ -131,11 +131,14 @@ class Task(ABC):
         image_source_digest: str | None,
         verifier_image_source_digest: str | None = None,
         non_verifier_digest: str | None = None,
+        harbor: bool = False,
         warnings: tuple[str, ...] = (),
     ) -> None:
         self.spec = spec
         self.folder = folder
         self.source = source or TaskSourceContext()
+        self.harbor = harbor
+        """Whether it was read as a Harbor Task, so Harbor's defaults apply where it sets none."""
         self.warnings = warnings
         """Where it departs from ALE's form, each naming the file it is about."""
         self.task_digest = task_digest

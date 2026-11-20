@@ -659,12 +659,15 @@ HARBOR_TASK: dict[str, object] = {
 }
 
 
-def test_a_harbor_task_loads_as_it_is(tmp_path: Path) -> None:
+def test_a_harbor_task_loads_as_it_is_with_harbor_s_account(tmp_path: Path) -> None:
     task = write_task(tmp_path / "hello-world", config=HARBOR_TASK, dockerfile="FROM python\n")
     loaded = load_tasks(task)[0]
+    assert loaded.harbor
     assert str(loaded.spec.name) == "local/hello-world"
+    assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("root", True)
     assert loaded.warnings == (
-        'task.toml: no schema_version, so it is read as a Harbor Task in ALE\'s format "0.2.0"',
+        'task.toml: no schema_version, so it is read as a Harbor Task in ALE\'s format "0.2.0"; '
+        "as in Harbor, its agent runs as root, with sudo",
         "task.toml: no [task].name, so this Task is local/hello-world, after where it lives",
         "environment/Dockerfile: python can change under the Task; ALE uses the version it "
         "names when the image is prepared and records its digest; name an exact version",
@@ -677,7 +680,7 @@ def test_a_harbor_task_loads_as_it_is(tmp_path: Path) -> None:
 
 def test_an_ale_task_loads_without_a_warning(tmp_path: Path) -> None:
     loaded = load_tasks(scaffold_task(tmp_path / "demo"))[0]
-    assert loaded.warnings == ()
+    assert (loaded.harbor, loaded.warnings) == (False, ())
     assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("user", False)
 
 
@@ -688,13 +691,31 @@ def test_another_format_fails_to_load(tmp_path: Path) -> None:
     assert "neither ALE's format \"0.2.0\" nor one of Harbor's" in str(raised.value)
 
 
-def test_a_harbor_version_is_named_in_its_warning(tmp_path: Path) -> None:
+def test_a_harbor_task_naming_its_account_keeps_it(tmp_path: Path) -> None:
     task = write_task(tmp_path / "demo", config={"schema_version": "1.4"})
     loaded = load_tasks(task)[0]
+    # It names its own account, so only the format is Harbor's.
+    assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("user", False)
     assert loaded.warnings == (
         "task.toml: Harbor's schema_version \"1.4\", so it is read as a Harbor Task in ALE's "
         'format "0.2.0"',
     )
+
+
+def test_a_harbor_image_s_own_user_is_named_in_a_warning(tmp_path: Path) -> None:
+    dockerfile = "FROM python:3.12 AS build\nUSER builder\nFROM python:3.12\nUSER agent:agent\n"
+    task = write_task(tmp_path / "demo", config=HARBOR_TASK, dockerfile=dockerfile)
+    assert (
+        "environment/Dockerfile: its image runs as USER agent, which Harbor's agent runs as; "
+        "ALE's runs as root unless [agent].user names agent"
+    ) in load_tasks(task)[0].warnings
+    edit(task, {"agent": {"user": "agent"}})
+    loaded = load_tasks(task)[0]
+    assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("agent", False)
+    assert not any("USER" in warning for warning in loaded.warnings)
+    (task / "environment/Dockerfile").write_text("FROM python:3.12\nUSER root\n")
+    edit(task, {"agent": {"user": None}})
+    assert not any("USER" in warning for warning in load_tasks(task)[0].warnings)
 
 
 def test_a_task_naming_none_is_named_after_its_repository_and_folder(

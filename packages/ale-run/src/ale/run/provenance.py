@@ -233,6 +233,7 @@ def build_lock(
     sandbox_outcomes: tuple[SandboxOutcome, ...] = (),
     resumed_from: ResumedFrom | None = None,
     variables: tuple[TaskVariableProvenance, ...] = (),
+    harbor: bool = False,
     warnings: tuple[str, ...] = (),
     seed: int = 0,
 ) -> RunLock:
@@ -245,6 +246,7 @@ def build_lock(
             non_verifier_digest=non_verifier_digest,
             source=inputs.source,
             variables=variables,
+            harbor=harbor,
             warnings=warnings,
         ),
         image=_image_provenance(spec.image, resolved_image, allocation, prepared_image),

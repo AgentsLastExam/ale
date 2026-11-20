@@ -732,9 +732,12 @@ with few edits. They are not part of ALE's format: a new Task uses the form the 
 describe.
 
 - `schema_version` may be left out, or name Harbor's `1.<n>`, or be Harbor's root-level
-  `version`: ALE reads the Task in its own format, with a warning. Any other version fails.
+  `version`: ALE reads the Task as a Harbor Task, in its own format with the defaults
+  below, with a warning and `task.harbor` in the RunLock. Any other version fails.
 - Without `[task].name`, a Task is named `<repository>/<folder>`; a name may use Harbor's
   characters, both cases and `.`.
+- A Harbor Task's agent runs as `root`, with sudo, on Linux unless `[agent].user` or
+  `[agent].sudo` says otherwise.
 - `docker_image`, in `[environment]` and `[verifier.environment]`, is `image`: one field, so a
   table holds either, never both.
 - `[environment].workdir` is where the agent starts, unless `[agent].workdir` names another
