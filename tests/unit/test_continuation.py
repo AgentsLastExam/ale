@@ -572,7 +572,7 @@ def test_a_snapshot_continues_in_a_new_solver_with_this_tasks_resources(tmp_path
         provider="docker",
         handle="docker:snapshot:kept",
     )
-    resources = make_lock().resources.model_copy(update={"requested": Resources(cpus=2)})
+    resources = make_lock().resources.model_copy(update={"requested": Resources(cpus=4)})
     episode, task = _source(
         tmp_path, record={"sandboxes": (snapshot,)}, lock={"resources": resources}
     )
@@ -603,7 +603,7 @@ def test_a_snapshot_continues_in_a_new_solver_with_this_tasks_resources(tmp_path
             {
                 "lock": {
                     "resources": make_lock().resources.model_copy(
-                        update={"requested": Resources(cpus=2)}
+                        update={"requested": Resources(cpus=4)}
                     )
                 }
             },

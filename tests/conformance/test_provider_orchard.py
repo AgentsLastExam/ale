@@ -61,7 +61,7 @@ class TestOrchardProvider(ProviderConformance):
         self.gui_image = self.image
 
     async def request(self, **overrides: object) -> SandboxRequest:
-        resources = overrides.get("resources", Resources())
+        resources = overrides.get("resources", Resources(cpus=2, memory_mb=4096))
         assert isinstance(resources, Resources)
         overrides["resources"] = resources.model_copy(
             update={"cpus": max(2, resources.cpus), "memory_mb": max(4096, resources.memory_mb)}

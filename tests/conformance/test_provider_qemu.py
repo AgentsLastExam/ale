@@ -62,7 +62,7 @@ class TestQemuProvider(ProviderConformance):
         self.provider = QemuProvider(image=vm_disk)
 
     async def request(self, **overrides: object) -> SandboxRequest:
-        resources = overrides.get("resources", Resources())
+        resources = overrides.get("resources", Resources(cpus=2, memory_mb=4096))
         assert isinstance(resources, Resources)
         if resources.gpus == 0:
             overrides["resources"] = resources.model_copy(

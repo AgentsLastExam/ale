@@ -116,9 +116,9 @@ def test_a_task_needs_only_its_version_and_name(tmp_path: Path) -> None:
         f'schema_version = "{SCHEMA_VERSION}"\n\n[task]\nname = "agentslastexam/demo"\n'
     )
     spec = load_tasks(task)[0].spec
-    assert (spec.resources.cpus, spec.resources.memory_mb) == (1, 4096)
+    assert (spec.resources.cpus, spec.resources.memory_mb) == (2, 8192)
     assert spec.image.user == "user"
-    assert (spec.timeouts.agent, spec.timeouts.verify) == (900, 600)
+    assert (spec.timeouts.agent, spec.timeouts.verify) == (1800, 600)
     assert spec.network.mode is NetworkMode.BLOCK
 
 

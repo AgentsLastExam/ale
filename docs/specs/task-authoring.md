@@ -90,8 +90,8 @@ network_justification = "the Task reads one publisher's live catalog"
 os = "linux"                                # linux | windows | macos; default linux
 # image = "registry.example/image:tag"      # or docker_image; used directly, or a build's base
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
-cpus = 1                                    # whole CPUs; default 1
-memory_mb = 4096                            # default 4096
+cpus = 2                                    # whole CPUs; default 2
+memory_mb = 8192                            # default 8192
 storage_mb = 8192                           # writable storage; default the Provider's
 gpus = 0                                    # GPU count, not indices; default 0
 # gpu_types = ["RTX-PRO-6000", "L40S"]      # models any of which will do; default any
@@ -123,7 +123,7 @@ args = ["--index", "/srv/index"]            # stdio
 
 [agent]                                     # the evaluated agent and the oracle
 user = "user"                               # account in the image; root needs sudo; default user
-timeout_sec = 900                           # positive seconds; default 900
+timeout_sec = 1800                          # positive seconds; default 1800
 network_mode = "allowlist"                  # no-network | allowlist | blocklist | public; default above, or no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 # blocked_hosts = ["github.com"]            # ALE; required, and only, for blocklist
@@ -208,10 +208,12 @@ These values differ from Harbor's:
 
 - `validation/` and `[agent].validation_rounds` are ALE's: a verifier whose results the
   agent receives between its turns; see [validation/](#validation).
-- A Sandbox always has a size and a time limit, and its network stays closed until a Task opens
-  it, so some defaults differ: `cpus` is 1, `memory_mb` 4096 and `[agent].timeout_sec` 900, where
-  Harbor sets no limit; `[agent].user` is `user`, not the image's `USER`;
+- A Sandbox always has a size and a time limit, the same on every Provider so that scores
+  compare, and its network stays closed until a Task opens it, so some defaults differ: `cpus`
+  is 2, `memory_mb` 8192 and `[agent].timeout_sec` 1800, where Harbor leaves the size to its
+  backend and sets no time limit; `[agent].user` is `user`, not the image's `USER`;
   `[agent].network_mode` is `no-network`, not `public`; `build_timeout_sec` is 3600, not 600.
+  The agent runs in its Sandbox, so the default size leaves it a CPU beside the Task's work.
 - `os = "windows"` is a VM with `.ps1` stage entries, because ALE runs Windows in VMs, where
   PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
 - `os = "macos"` is ALE's: a macOS VM with `.sh` stage entries, which Harbor does not run.
