@@ -2390,6 +2390,8 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     assert run[run.index("--memory") + 1] == memory
     # No swap on any runtime: the Task's memory is the same whatever swap the Host has.
     assert run[run.index("--memory-swap") + 1] == memory
+    # Half the Task's memory, not the Sentry's added to it, as a Linux VM of it has.
+    assert run[run.index("--shm-size") + 1] == "256m"
     # An application, not gVisor's Sentry, is what the OOM killer takes.
     assert ("--oom-score-adj" in run) is (runtime == "gvisor")
     created = _created(calls)

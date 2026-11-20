@@ -58,8 +58,8 @@ error and was retried, and ALE's teardown then failed with
   and `/proc/meminfo` shows Daytona's host.
 - One process allocating past the limit is killed alone. 400 forked 16 MiB processes, or a
   tmpfs that root mounts and writes full, end the whole sandbox within 1.4 to 2.8 s, the
-  OOM killer taking the desktop first and then Daytona's daemon, PID 1. `/dev/shm` is
-  64 MiB and fills without harm.
+  OOM killer taking the desktop first and then Daytona's daemon, PID 1. Daytona's own
+  `/dev/shm` is 64 MiB and fills without harm.
 - Daytona's record of a sandbox that died so says `stopped` with no `errorReason`; it then
   destroys it by itself within 10 to 25 s (`desiredState` `destroyed`), refusing a delete
   meanwhile with 409, and keeps none: a longer `autoDeleteInterval` is refused in the
@@ -82,3 +82,30 @@ Daytona already destroys as success, and waits for it to go.
 - ALE does not rank the agent's commands for the OOM killer here: 1000 kept the sandbox
   alive in both fatal cases, but the sandbox an agent's memory ends is the agent's result
   either way.
+
+## `/dev/shm` is 64 MiB
+
+**Problem.** Every Daytona sandbox has a 64 MiB `/dev/shm`, whatever its memory, where every
+other Linux Sandbox has half its `memory_mb`
+([Memory](../README.md#memory)). PyTorch's DataLoader with 8 workers dies at its first batch
+in 64 MiB.
+
+**Context.** Measured on Daytona's `us` region with the container base at 2 GiB (November
+2026):
+- Daytona's create request takes no size for it: `CreateSandbox` in its API client 0.233.0
+  has `cpu`, `memory`, `disk`, `gpu`, `labels`, `env` and the like, nothing for `/dev/shm`.
+- Root cannot remount it (`mount -o remount,size=1024m /dev/shm` fails with exit 32): the
+  mount belongs to the namespace outside the sandbox's user namespace.
+- Root can mount a tmpfs of its own over it. Its pages are charged to the sandbox's cgroup:
+  900 MiB written by the agent raised `memory.current` by 965 MiB.
+
+**Solution.** `_size_shared_memory` in [provider.py](provider.py) mounts a tmpfs of
+`memory.shm_mb` with mode 1777 over `/dev/shm`, as root, right after the framework is
+checked and before the image's command or the agent runs. A retained sandbox keeps the mount
+while it runs, so attaching to it mounts nothing. In a 2 GiB sandbox with it written full, a
+process allocating past the rest is killed alone and the sandbox answers, as on Docker; 400
+processes of 16 MiB end the sandbox, as they do with it empty, and ALE reports
+`MemoryExhaustedError`.
+
+**Decision.** `mount(2)` through the C library from the framework's Python, not the image's
+`mount`, which an image need not carry.

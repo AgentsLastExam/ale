@@ -660,6 +660,7 @@ class SlurmProvider(Provider):
                     gpus=resources.gpus,
                     cpus=resources.cpus,
                     memory_mb=step_memory_mb(resources.memory_mb),
+                    shm_mb=memory.shm_mb(resources.memory_mb),
                     env=env,
                     sealed=sealed,
                     volumes=volumes,

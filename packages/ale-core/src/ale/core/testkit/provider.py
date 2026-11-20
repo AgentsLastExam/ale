@@ -872,6 +872,36 @@ class ProviderConformance:
             assert (await sandbox.exec(["true"])).ok
 
     @pytest.mark.asyncio
+    async def test_dev_shm_holds_half_the_sandboxs_memory(self) -> None:
+        """A Linux Sandbox's ``/dev/shm`` is a tmpfs of about half its memory, as on a Linux
+        machine of that memory, where processes that share memory through it, such as
+        PyTorch's DataLoader workers, need more than a container engine's 64 MiB. What it
+        holds is the Sandbox's memory: a write past it fails as on a full disk, and with it
+        full, a process past the rest dies alone and the Sandbox goes on."""
+        request = await self.request(resources=Resources(cpus=1, memory_mb=2048))
+        # A backend's suite may give its Sandboxes more.
+        memory_mb = request.resources.memory_mb
+        if request.os is not OperatingSystem.LINUX:
+            pytest.skip("only a Linux Sandbox has /dev/shm")
+        async with await self.provider.create(request) as sandbox:
+            free = await sandbox.exec(["python3", "-c", _FREE, "/dev/shm"], identity=Identity.AGENT)
+            assert free.ok, free.stderr
+            assert 0.4 * memory_mb <= int(free.stdout) <= 0.6 * memory_mb, free.stdout
+            filled = await sandbox.exec(
+                ["python3", "-c", _FILL, "/dev/shm/fill", str(memory_mb)],
+                identity=Identity.AGENT,
+                timeout_sec=600,
+            )
+            assert filled.ok, filled.stderr
+            outcome, count = filled.stdout.split()
+            assert outcome == "full" and int(count) >= int(free.stdout) - 8, filled.stdout
+            allocated = await sandbox.exec(
+                ["python3", "-c", _ALLOCATE], identity=Identity.AGENT, timeout_sec=900
+            )
+            assert not allocated.ok and not allocated.timed_out
+            assert (await sandbox.exec(["true"])).ok
+
+    @pytest.mark.asyncio
     async def test_destroy_is_idempotent(self) -> None:
         """Teardown runs on failure paths too, sometimes more than once."""
         sandbox = await self.provider.create(await self.request())

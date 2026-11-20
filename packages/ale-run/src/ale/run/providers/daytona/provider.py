@@ -81,7 +81,7 @@ from ale.run.providers.daytona.image import (
 )
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import DockerProvider
-from ale.run.providers.memory import WATCHER, GuestEvents
+from ale.run.providers.memory import WATCHER, GuestEvents, shm_mb
 from ale.run.providers.privileges import set_and_prove_elevation
 from ale.run.providers.tunnel import PROXY_PORT, GatewayTunnel, TunneledSandbox, tunnel_plan
 from ale.run.sources import cache_root
@@ -249,6 +249,17 @@ if spec["workdir"]:
 environment = dict(os.environ)
 environment.update(spec["env"])
 os.execvpe(spec["argv"][0], spec["argv"], environment)
+"""
+
+#: Run as root with a size in MiB. Mounts a tmpfs of that size over Daytona's ``/dev/shm``,
+#: through the C library rather than the image's ``mount``.
+_SHM = r"""
+import ctypes, os, sys
+MS_NOSUID, MS_NODEV, MS_NOEXEC = 2, 4, 8
+libc = ctypes.CDLL(None, use_errno=True)
+options = f"size={sys.argv[1]}m,mode=1777".encode()
+if libc.mount(b"shm", b"/dev/shm", b"tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, options):
+    sys.exit(f"mount: {os.strerror(ctypes.get_errno())}")
 """
 
 #: Whether a TLS handshake with ``host:port``, naming ``name``, completes from the sandbox.
@@ -633,6 +644,7 @@ class DaytonaProvider(Provider):
             client = await _connect(ssh, request.user, environment, memory)
             agent_home, has_desktop = await _guest_contract(client)
             await _require_framework(client, request)
+            await _size_shared_memory(client, request.resources.memory_mb)
             await memory.watch(ssh)
             await set_and_prove_elevation(client, request, request.user)
             await _seal_daemon(client, request.user)
@@ -967,6 +979,20 @@ async def _start_image_command(
     )
     if code != 0:
         raise ProviderStartError(f"could not start the image's command: {stderr.strip()}")
+
+
+async def _size_shared_memory(client: GuestClient, memory_mb: int) -> None:
+    """Give ``/dev/shm`` half the sandbox's memory, as every other Linux Sandbox has.
+
+    Daytona mounts 64 MiB and its API takes no size. Root cannot remount that mount, which
+    belongs to the namespace outside the sandbox, but can mount a tmpfs of its own over it
+    before anything else runs; a retained sandbox keeps it while it runs.
+    """
+    code, _, stderr, _ = await client.exec(
+        [PYTHON, "-c", _SHM, str(shm_mb(memory_mb))], timeout_sec=30
+    )
+    if code != 0:
+        raise ProviderStartError(f"could not size /dev/shm: {stderr.strip()}")
 
 
 async def _await_desktop(client: GuestClient, timeout_sec: float = 120) -> None:

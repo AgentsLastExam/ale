@@ -1907,6 +1907,8 @@ class DockerProvider(Provider):
             "--cpus", str(resources.cpus),
             "--memory", memory_limit,
             "--memory-swap", memory_limit,
+            # Kata ignores it: its guest's own /dev/shm already holds half the microVM.
+            "--shm-size", f"{memory.shm_mb(resources.memory_mb)}m",
             "--runtime", registered,
             *runtime.flags,
         ]  # fmt: skip
