@@ -111,6 +111,8 @@ class TaskProvenance(BaseModel):
     non_verifier_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     variables: tuple[TaskVariableProvenance, ...] = ()
     """The variables this episode resolved, ``[solution].env`` only for the oracle."""
+    warnings: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    """Where the Task departs from ALE's form, as loading it said."""
 
 
 class ImageProvenance(BaseModel):

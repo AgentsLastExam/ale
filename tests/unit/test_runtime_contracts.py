@@ -149,6 +149,15 @@ class TestRunLock:
     def test_runlock_schema_version_is_pinned(self) -> None:
         assert make_lock().framework.schema_version == 3
 
+    def test_a_task_s_warnings_are_recorded_only_when_there(self) -> None:
+        """A Task in ALE's form keeps its record's shape; another's says where it departs."""
+        assert "warnings" not in make_lock().model_dump(mode="json")["task"]
+        task = make_lock().task.model_copy(
+            update={"warnings": ("task.toml: no schema_version, so ...",)}
+        )
+        recorded = RunLock.model_validate_json(make_lock(task=task).model_dump_json())
+        assert recorded.task.warnings == ("task.toml: no schema_version, so ...",)
+
     def test_vm_build_identity_survives_provenance_and_is_required(self) -> None:
         prepared = PreparedTaskImage(
             kind="vm",

@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from ale.core.errors import TaskDefinitionError
-from ale.core.ids import TaskId
+from ale.core.ids import in_ale_form
 from ale.core.taskspec import SCHEMA_VERSION
 from ale.run import ale_image
 
@@ -68,13 +68,12 @@ printf 'hello\\n' > /home/user/output/result.txt
 
 def scaffold_task(path: Path, *, force: bool = False) -> Path:
     target = path.resolve()
-    try:
-        name = TaskId(f"{DEFAULT_ORGANIZATION}/{target.name}")
-    except ValueError as exc:
+    name = f"{DEFAULT_ORGANIZATION}/{target.name}"
+    if not in_ale_form(name):
         raise TaskDefinitionError(
-            "Task folder name must be a lowercase slug, or task.toml must be written by hand: "
-            f"{exc}"
-        ) from exc
+            "Task folder name must be a lowercase slug of letters, digits, '-' and '_', or "
+            f"task.toml must be written by hand: {target.name!r}"
+        )
     if target.exists():
         if not force:
             raise TaskDefinitionError(f"{target} already exists; pass --force to overwrite it")

@@ -1289,6 +1289,7 @@ def _write_lock(
         sandbox_outcomes=ctx.sandbox_outcomes,
         resumed_from=ctx.resumed_from,
         variables=ctx.variables.provenance,
+        warnings=task.warnings,
         seed=seed,
     )
     return lock

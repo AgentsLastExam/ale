@@ -233,15 +233,18 @@ def lint(
     """Check tasks without starting a container.
 
     The cheap half of admission: everything answerable from the files alone. Run it on
-    every save; run `ale calibrate` when you want a task actually solved.
+    every save; run `ale calibrate` when you want a task actually solved. Only problems
+    fail it; warnings say where a task departs from ALE's form.
     """
     findings = lint_repository(reference)
     for finding in findings:
         typer.echo(str(finding), err=True)
-    if findings:
-        typer.echo(f"{len(findings)} problem(s)", err=True)
+    problems = sum(finding.severity == "error" for finding in findings)
+    warnings = f", {len(findings) - problems} warning(s)" if len(findings) > problems else ""
+    if problems:
+        typer.echo(f"{problems} problem(s){warnings}", err=True)
         raise typer.Exit(1)
-    typer.echo("ok")
+    typer.echo(f"ok{warnings}")
 
 
 @vm_image_app.command("push")

@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from typing import Literal
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import CALIBRATION_DIR, SOLUTION_DIR, Stage, case_entry, case_path
@@ -32,7 +33,6 @@ _FIXED_SETUP = re.compile(
     r"Invoke-WebRequest|Invoke-RestMethod)",
     re.IGNORECASE,
 )
-_FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.I | re.M)
 _TOP_LEVEL = {
     TASK_CONFIG,
     INSTRUCTION,
@@ -49,11 +49,16 @@ _COMPOSE_FILE = "docker-compose.yaml"
 
 @dataclass(frozen=True)
 class Finding:
+    """A problem, which fails ``ale lint``, or a warning: what the Task leaves to a default
+    ALE then chooses, or lets change under it, which never fails it."""
+
     path: Path
     message: str
+    severity: Literal["error", "warning"] = "error"
 
     def __str__(self) -> str:
-        return f"{self.path}: {self.message}"
+        warning = "warning: " if self.severity == "warning" else ""
+        return f"{self.path}: {warning}{self.message}"
 
 
 def lint_repository(path: Path) -> list[Finding]:
@@ -80,9 +85,15 @@ def lint_repository(path: Path) -> list[Finding]:
     for folder in folders:
         findings.extend(_check_folder(folder))
     try:
-        load_tasks(source)
+        tasks = load_tasks(source)
     except TaskDefinitionError as error:
         findings.append(Finding(source / TASK_CONFIG, str(error)))
+    else:
+        findings.extend(
+            Finding(task.folder.root, warning, "warning")
+            for task in tasks
+            for warning in task.warnings
+        )
     return findings
 
 
@@ -174,7 +185,6 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
             )
         )
     findings.extend(_check_variables(folder.root / TASK_CONFIG, config))
-    findings.extend(_check_image_versions(folder, config))
     metadata = config.get("metadata")
     # A blocklist gives the agent nearly what public does: every host but a few, mirrors of
     # those included, so a reviewer needs its reason as well.
@@ -200,40 +210,6 @@ def _agent_network_mode(config: dict[str, object]) -> object:
     if isinstance(environment, dict) and environment.get("allow_internet") is True:
         return "public"
     return None
-
-
-def _moves(image: str) -> bool:
-    """Whether ``image`` can change under a Task: no digest, and no tag or ``latest``."""
-    if "@" in image or "$" in image:  # a build argument names it elsewhere
-        return False
-    if PurePosixPath(image).is_absolute():  # a local disk, whose content is its identity
-        return False
-    return image.rpartition("/")[2].partition(":")[2] in ("", "latest")
-
-
-def _check_image_versions(folder: TaskFolder, config: dict[str, object]) -> list[Finding]:
-    """Every image a Task names, built on or used directly, at an exact version."""
-    named: list[tuple[Path, str]] = []
-    for dockerfile in (folder.dockerfile, folder.verifier_dockerfile):
-        if dockerfile is None:
-            continue
-        stages = _FROM.findall(dockerfile.read_text(encoding="utf-8", errors="replace"))
-        aliases = {alias.lower() for _, alias in stages} | {"scratch"}
-        named += [(dockerfile, base) for base, _ in stages if base.lower() not in aliases]
-    environment = config.get("environment")
-    verifier = config.get("verifier")
-    nested = verifier.get("environment") if isinstance(verifier, dict) else None
-    for table in (environment, nested):
-        if not isinstance(table, dict):
-            continue
-        image = table.get("image", table.get("docker_image"))
-        if isinstance(image, str):
-            named.append((folder.root / TASK_CONFIG, image))
-    return [
-        Finding(path, f"{image} can change under the Task; name an exact version")
-        for path, image in named
-        if _moves(image)
-    ]
 
 
 def _check_variables(path: Path, config: dict[str, object]) -> list[Finding]:

@@ -68,7 +68,9 @@ other key has a default, so a Task states what makes it different. An unknown ke
 Harbor key ALE does not implement fails with a message saying so. The annotated shape below
 describes every key of ALE's format, with `ALE` marking the ones Harbor does not have; the
 Harbor keys ALE also reads, so that a Harbor Task loads with few edits, are in
-[Harbor compatibility](#harbor-compatibility).
+[Harbor compatibility](#harbor-compatibility). A Task ALE can read but that departs from this
+form loads with a warning, which every command that loads it prints and the RunLock records
+in `task.warnings`; only an error fails `ale lint`.
 
 ```toml
 schema_version = "0.2.0"                    # required; exactly this
@@ -433,7 +435,7 @@ required by the Task. The Linux bases are:
   `[environment].image`.
 
 Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the container
-base's current version, and `ale lint` reports a registry `FROM` or `image` with no tag or
+base's current version, and `ale lint` warns about a registry `FROM` or `image` with no tag or
 `latest`. A Task keeps building from the version it names until its author moves it
 ([Sandbox image](sandbox-image.md#versions)).
 
@@ -729,6 +731,10 @@ ALE also reads these Harbor keys and files, with Harbor's meaning, so that a Har
 with few edits. They are not part of ALE's format: a new Task uses the form the sections above
 describe.
 
+- `schema_version` may be left out, or name Harbor's `1.<n>`, or be Harbor's root-level
+  `version`: ALE reads the Task in its own format, with a warning. Any other version fails.
+- Without `[task].name`, a Task is named `<repository>/<folder>`; a name may use Harbor's
+  characters, both cases and `.`.
 - `docker_image`, in `[environment]` and `[verifier.environment]`, is `image`: one field, so a
   table holds either, never both.
 - `[environment].workdir` is where the agent starts, unless `[agent].workdir` names another

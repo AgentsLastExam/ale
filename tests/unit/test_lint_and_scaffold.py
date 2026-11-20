@@ -126,14 +126,62 @@ def test_any_base_image_at_an_exact_version_is_accepted(tmp_path: Path, base: st
 
 
 @pytest.mark.parametrize("base", ["debian", "python:latest", "localhost:5000/base"])
-def test_an_image_that_can_change_under_a_task_is_reported(tmp_path: Path, base: str) -> None:
+def test_an_image_that_can_change_under_a_task_is_a_warning(tmp_path: Path, base: str) -> None:
     task = scaffold_task(tmp_path / "fresh")
     dockerfile = task / "environment" / "Dockerfile"
     dockerfile.write_text(f"FROM --platform=linux/amd64 {base} AS build\nFROM build\n")
-    assert f"{base} can change" in messages(task)
+    (finding,) = lint_repository(task)
+    assert finding.severity == "warning"
+    assert finding.message.startswith(f"environment/Dockerfile: {base} can change")
     dockerfile.unlink()
     edit(task, {"environment": {"image": base}})
-    assert f"{base} can change" in messages(task)
+    (finding,) = lint_repository(task)
+    assert (finding.severity, finding.message.startswith(f"task.toml: {base} can change")) == (
+        "warning",
+        True,
+    )
+    (task / "tests" / "Dockerfile").write_text(f"FROM {base}\n")
+    edit(task, {"verifier": {"environment": {"image": None, "cpus": 1, "memory_mb": 512}}})
+    assert f"tests/Dockerfile: {base} can change" in messages(task)
+
+
+def test_lint_fails_only_on_a_problem(tmp_path: Path) -> None:
+    task = scaffold_task(tmp_path / "fresh")
+    (task / "environment" / "Dockerfile").write_text("FROM debian\n")
+    result = CliRunner().invoke(app, ["lint", str(task)])
+    assert result.exit_code == 0, result.output
+    assert f"{task}: warning: environment/Dockerfile: debian can change" in result.stderr
+    assert result.stdout == "ok, 1 warning(s)\n"
+    (task / "notes.txt").write_text("not Task source\n")
+    result = CliRunner().invoke(app, ["lint", str(task)])
+    assert result.exit_code == 1
+    assert result.stderr.endswith("1 problem(s), 1 warning(s)\n")
+
+
+def test_preparation_says_where_a_task_departs_from_ale_s_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = importlib.import_module("ale.run.cli.tasks")
+    prepared: list[object] = []
+
+    async def prepare(tasks: list[object], *_: object) -> list[object]:
+        prepared.extend(tasks)
+        return []
+
+    monkeypatch.setattr(cli, "_prepare_images", prepare)
+    task = scaffold_task(tmp_path / "fresh")
+    (task / "environment" / "Dockerfile").write_text("FROM debian\n")
+    edit(task, {"schema_version": "1.4"})
+    result = CliRunner().invoke(app, ["prepare", str(task)])
+    assert result.exit_code == 0, result.output
+    assert len(prepared) == 1
+    assert result.stderr.splitlines() == [
+        'warning  agentslastexam/fresh: task.toml: Harbor\'s schema_version "1.4", so it is '
+        'read as a Harbor Task in ALE\'s format "0.2.0"',
+        "warning  agentslastexam/fresh: environment/Dockerfile: debian can change under the "
+        "Task; ALE uses the version it names when the image is prepared and records its "
+        "digest; name an exact version",
+    ]
 
 
 def test_a_local_disk_is_its_own_version(tmp_path: Path) -> None:

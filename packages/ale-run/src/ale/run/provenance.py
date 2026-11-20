@@ -233,6 +233,7 @@ def build_lock(
     sandbox_outcomes: tuple[SandboxOutcome, ...] = (),
     resumed_from: ResumedFrom | None = None,
     variables: tuple[TaskVariableProvenance, ...] = (),
+    warnings: tuple[str, ...] = (),
     seed: int = 0,
 ) -> RunLock:
     """Bind one episode's result to everything that produced it."""
@@ -244,6 +245,7 @@ def build_lock(
             non_verifier_digest=non_verifier_digest,
             source=inputs.source,
             variables=variables,
+            warnings=warnings,
         ),
         image=_image_provenance(spec.image, resolved_image, allocation, prepared_image),
         resources=ResourceProvenance(requested=spec.resources, effective=allocation),
