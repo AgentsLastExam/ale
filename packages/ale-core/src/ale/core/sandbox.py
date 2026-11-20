@@ -257,7 +257,8 @@ class SandboxRequest(BaseModel):
         default_factory=dict, description="Non-secret variables; credentials stay host side"
     )
     proxy_url: str = ""
-    """The Host's egress proxy, for ``allowlist`` mode; empty for any other."""
+    """The Host's egress proxy, for a proxied policy (``allowlist`` or ``blocklist``); empty
+    for any other."""
     proxy_token: str = Field(default="", repr=False)
     """The token of the episode's egress session, which the Sandbox's relay presents to the
     proxy: it reaches the hosts of the phase that runs, and nothing between phases."""
@@ -555,7 +556,7 @@ class Sandbox(ABC):
     @abstractmethod
     async def close_egress(self) -> None:
         """Seal the sandbox to its request's policy for a phase whose policy is not ``open``,
-        the agent's or a verifier's: it reaches the Gateway and, under ``allowlist``, the
+        the agent's or a verifier's: it reaches the Gateway and, under a proxied policy, the
         egress proxy through the relay with the request's ``proxy_token``. Sealing a sealed
         sandbox keeps it sealed and starts its relay again. Nothing on an ``open`` request.
 

@@ -90,13 +90,11 @@ print(json.dumps({
 
 
 @contextlib.asynccontextmanager
-async def _egress_proxy(*hosts: str) -> AsyncIterator[tuple[str, str]]:
-    """The Host's egress proxy, with a session for ``hosts``: its URL and the token."""
+async def _egress_proxy(policy: NetworkPolicy) -> AsyncIterator[tuple[str, str]]:
+    """The Host's egress proxy, with a session for ``policy``: its URL and the token."""
     sessions = SessionRegistry()
     session = sessions.open(
-        GatewaySession(
-            episode_id="conformance", model="", purpose="egress", allowed_hosts=frozenset(hosts)
-        )
+        GatewaySession(episode_id="conformance", model="", purpose="egress", policy=policy)
     )
     proxy = EgressProxy(sessions, host="127.0.0.1")
     await proxy.start()
@@ -185,9 +183,10 @@ class TestDaytonaProvider(ProviderConformance):
     ) -> None:
         """Sealed as ``block`` is, the sandbox reaches its hosts through the Host's proxy, which
         the tunnel carries in beside the Gateway; TLS is the host's own, end to end."""
-        async with _gateway() as port, _egress_proxy("example.com") as (proxy, token):
+        allowlist = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
+        async with _gateway() as port, _egress_proxy(allowlist) as (proxy, token):
             request = await self.request(
-                network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+                network=allowlist,
                 gateway_url=f"http://127.0.0.1:{port}",
                 proxy_url=proxy,
                 proxy_token=token,
@@ -218,11 +217,47 @@ class TestDaytonaProvider(ProviderConformance):
                 assert json.loads(reopened.stdout)["one.one.one.one at 1.1.1.1"] == "open"
 
     @pytest.mark.asyncio
+    async def test_blocklist_mode_reaches_all_but_its_hosts_through_the_proxy_alone(
+        self,
+    ) -> None:
+        """Sealed as an allowlist is, the sandbox reaches every host but the listed ones
+        through the Host's proxy, and nothing directly."""
+        blocklist = NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("www.example.com",))
+        async with _gateway() as port, _egress_proxy(blocklist) as (proxy, token):
+            request = await self.request(
+                network=blocklist,
+                gateway_url=f"http://127.0.0.1:{port}",
+                proxy_url=proxy,
+                proxy_token=token,
+            )
+            async with await self.provider.create(request) as sandbox:
+                await sandbox.open_egress()  # setup, as an episode runs it
+                await sandbox.close_egress()
+                agent = await sandbox.exec(
+                    ["python3", "-c", ALLOWLIST_PROBE, str(sandbox.gateway_url)],
+                    identity=Identity.AGENT,
+                    timeout_sec=120,
+                )
+                assert agent.ok, agent.stderr
+                seen = json.loads(agent.stdout)
+                issued = seen.pop("example.com")
+                assert issued.startswith("open, issued by ") and "netleash" not in issued
+                assert seen == {
+                    "www.example.com": "closed",  # blocked
+                    "one.one.one.one at 1.1.1.1": "closed",  # direct, not through the proxy
+                    "1.1.1.1 with no name": "closed",
+                    "github.com resolves": "closed",
+                    "gateway": "open",
+                    "proxy": "127.0.0.1",
+                }
+
+    @pytest.mark.asyncio
     async def test_a_pattern_reaches_its_name_and_the_names_below_it(self) -> None:
         """As ALE's own proxy matches it, so a Task gets the same hosts on every Provider."""
-        async with _gateway() as port, _egress_proxy("*.example.com") as (proxy, token):
+        pattern = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("*.example.com",))
+        async with _gateway() as port, _egress_proxy(pattern) as (proxy, token):
             request = await self.request(
-                network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("*.example.com",)),
+                network=pattern,
                 gateway_url=f"http://127.0.0.1:{port}",
                 proxy_url=proxy,
                 proxy_token=token,

@@ -17,7 +17,7 @@ An agent's command carries no `XDG_CURRENT_DESKTOP`, so Chrome started from one 
 variables, and Chromium drops credentials found there. Python's urllib drops them too when
 the password is empty.
 
-**Solution.** The [allowlist relay](../README.md#allowlist-relay): the variables name the
+**Solution.** The [allowlist relay](../README.md#egress-relay): the variables name the
 relay with no token in them, and `gsettings`, run as the agent in its desktop session
 (`gui.session()` finds the session's bus), points GNOME's settings at it as well.
 

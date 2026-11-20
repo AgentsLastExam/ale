@@ -102,6 +102,7 @@ env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
 # network_mode = "public"                   # Harbor's baseline for the agent and the verifier
 # allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
+# blocked_hosts = ["github.com"]            # ALE; with blocklist, as in [agent]
 # allow_internet = true                     # Harbor's deprecated switch, without network_mode
 
 [environment.healthcheck]                   # optional; Harbor's, run once setup is done
@@ -123,8 +124,9 @@ args = ["--index", "/srv/index"]            # stdio
 [agent]                                     # the evaluated agent and the oracle
 user = "user"                               # account in the image; root needs sudo; default user
 timeout_sec = 900                           # positive seconds; default 900
-network_mode = "allowlist"                  # no-network | allowlist | public; default above, or no-network
+network_mode = "allowlist"                  # no-network | allowlist | blocklist | public; default above, or no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
+# blocked_hosts = ["github.com"]            # ALE; required, and only, for blocklist
 sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
 # workdir = "project"                       # ALE; where the agent starts; default as above
 validation_rounds = 0                       # ALE; validation/ results it gets; default 0
@@ -136,6 +138,7 @@ env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 # user = "grader"                           # Harbor's: its account, name or uid; Linux, macOS
 # network_mode = "no-network"               # tests/ and validation/ alike; default below
 # allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
+# blocked_hosts = ["github.com"]            # ALE; with blocklist, as in [agent]
 
 [verifier.environment]                      # a separate or snapshot verifier's own sandbox
 # image = "registry.example/verifier:tag"   # or docker_image; separate only; no tests/Dockerfile
@@ -151,6 +154,7 @@ env = {}                                    # replaces [environment].env
 # workdir = "/grade"                        # verification's directory; default as above
 # network_mode = "allowlist"                # Harbor's baseline for this verifier; default public
 # allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
+# blocked_hosts = ["github.com"]            # ALE; with blocklist, as in [agent]
 # allow_internet = false                    # Harbor's deprecated switch, without network_mode
 
 [validation]                                # ALE; where validation/ runs; default [verifier]'s
@@ -224,7 +228,10 @@ These values differ from Harbor's:
   fails as the Task loads.
 - `gpu_types` holds at least one name and requires `gpus`, and every Provider honors it,
   where Harbor's Docker environment ignores it; see [GPUs](#gpus).
-- `allowed_hosts` refuses entries that reach the Host; see [Resources and network](#resources-and-network).
+- `network_mode = "blocklist"` with `blocked_hosts` is ALE's: every public host but those
+  listed; see [Resources and network](#resources-and-network).
+- `allowed_hosts` and `blocked_hosts` refuse entries that reach the Host; see
+  [Resources and network](#resources-and-network).
 - The verifier writes `reward.json`, or `reward.txt` holding one number, with `reward` between
   0 and 1, and only `reward` is scored; see [Result](verification.md#result).
 
@@ -319,26 +326,39 @@ The Verification APIs and records are defined only in [Verification](verificatio
 
 `[environment]` selects container or VM behavior; Tasks never name a Provider.
 The agent's network applies to the evaluated agent and the oracle: `no-network` reaches
-only the Gateway, `allowlist` also the declared hosts, `public` everything. It resolves as
-in Harbor: `[agent].network_mode` and `allowed_hosts` when `[agent]` names a mode, else
-`[environment]`'s, Harbor's baseline, where `allow_internet = true` or `false`, Harbor's
-deprecated switch, stands for `public` or `no-network` when no mode is named, and else
-`no-network`, ALE's default where Harbor's is `public`. An
-`allowed_hosts` entry `pypi.org` is that host alone, `*.pypi.org` that host and every name
-below it at any depth, which every Provider that offers `allowlist` can enforce, and an
-address or CIDR range a client connecting to that address, never a name that resolves into
-it. Entries reaching the Host itself (loopback, link-local, and ranges holding them) fail,
-because allowed traffic leaves from the Host. An allowlist carries TLS and needs a client
-that honors the proxy variables or, on a desktop, the agent account's system proxy (WinINet
-on Windows, GNOME's settings on Linux, the network services' web proxies on macOS), both of
-which the framework points at the proxy for whatever runs under an allowlist; raw TCP to an
-allowed address stays blocked.
+only the Gateway, `allowlist` also the declared hosts, `blocklist` every public host but the
+declared ones, `public` everything. `blocklist`, with `blocked_hosts`, is ALE's; Harbor's
+format has the other three. It resolves as in Harbor: `[agent].network_mode` with its
+hosts when `[agent]` names a mode, else `[environment]`'s, Harbor's baseline, where
+`allow_internet = true` or `false`, Harbor's deprecated switch, stands for `public` or
+`no-network` when no mode is named, and else `no-network`, ALE's default where Harbor's is
+`public`. An `allowed_hosts` or `blocked_hosts` entry `pypi.org` is that host alone,
+`*.pypi.org` that host and every name below it at any depth, which every Provider that
+offers the mode can enforce, and an address or CIDR range a client connecting to that
+address. Entries reaching the Host itself (loopback, link-local, and ranges holding them)
+fail, because the traffic of either list leaves from the Host.
+
+Both lists go through the Host's egress proxy, so they carry TLS and need a client that
+honors the proxy variables or, on a desktop, the agent account's system proxy (WinINet on
+Windows, GNOME's settings on Linux, the network services' web proxies on macOS), both of
+which the framework points at the proxy for whatever runs under either list. Plain HTTP, raw
+TCP, UDP and name resolution inside the Sandbox stay blocked, so beyond its hosts a
+blocklist is narrower than `public`: `pip`, `git` over HTTPS and a browser work, `apt` from an
+`http://` mirror, `ssh` and a program that ignores the proxy settings do not. An allowlist
+admits a name, never an address it resolves to. A blocklist also judges what a name
+resolves to and what the client's TLS handshake names: it refuses a name any of whose
+addresses is blocked, is not public or is the Host's own, and a tunnel whose handshake names
+a blocked host, whatever address the client asked for, so `github.com` blocked stays blocked
+when asked for by one of its addresses. A host on a private network therefore takes an
+allowlist. A blocklist keeps the agent from the hosts it names, not from what they serve: a
+mirror, a cache or another host with the same content stays reachable
+([Security](security.md#2-egress-is-a-decision-made-in-our-code)).
 
 The verifier's network applies to `tests/` and `validation/` alike, in every topology, with the
-same three modes and host rules. It resolves as in Harbor, with ALE's open default:
-`[verifier].network_mode` and `allowed_hosts` when `[verifier]` names a mode; else, for a
+same modes and host rules. It resolves as in Harbor, with ALE's open default:
+`[verifier].network_mode` with its hosts when `[verifier]` names a mode; else, for a
 verifier with a Sandbox of its own (`separate` or `snapshot`) that declares
-`[verifier.environment]`, that table's `network_mode`, `allowed_hosts` and `allow_internet`,
+`[verifier.environment]`, that table's `network_mode`, hosts and `allow_internet`,
 and `public` when it names none, as Harbor's separate environment is; else `[environment]`'s
 baseline; else `public`. So a shared verifier of a Task whose `[environment]` says `no-network`
 runs without network, as Harbor's does, while one that names nothing keeps the network a
@@ -348,7 +368,7 @@ the verifier's. Under `no-network` a verifier still reaches the Gateway, so its
 have the network, since they are the Task's trusted preparation and ours; enforcement is
 specified in [Security](security.md). The quality standard owns resource feasibility and
 network-policy selection. `ale lint` requires `[metadata].network_justification` when the
-agent's network resolves to `public`.
+agent's network resolves to `public` or `blocklist`.
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
 as the GUI base images' desktop, share it with the agent and every program the agent starts,
@@ -609,9 +629,9 @@ Skill. The Harness copies its contents to the agent's skills directory before th
 `headers`, with Harbor's default `transport`, `sse`; `http` means `streamable-http`, as in
 Harbor. A stdio server is a program in the image; one that needs its own directory or variables
 starts through a wrapper script there. An `sse` or `streamable-http` URL must be reachable under
-`[agent]`'s network, which ALE checks before any Sandbox exists: under `allowlist` that means
-`https`. Each Harness configures an SSE server as Harbor's adapter for its agent does, and one
-whose agent has no SSE transport is refused before any Sandbox exists
+`[agent]`'s network, which ALE checks before any Sandbox exists: under `allowlist` or
+`blocklist` that means `https`. Each Harness configures an SSE server as Harbor's adapter for
+its agent does, and one whose agent has no SSE transport is refused before any Sandbox exists
 ([Harnesses](../../packages/ale-run/src/ale/run/harnesses/README.md#mcp-transports)).
 
 `headers` belongs to an `sse` or `streamable-http` server. As in Harbor, and unlike an `env` value, a

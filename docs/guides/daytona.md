@@ -65,11 +65,11 @@ GPU sandboxes are billed per GPU while they exist, and a kept one runs until
 `retained_lifetime_hours`. The first GPU episode of an image also waits for Daytona to pull
 it into the GPU region, about a minute and a half for the desktop base.
 
-## Allowlisted Tasks
+## Tasks with an allowlist or a blocklist
 
-A Task with `[agent].network_mode = "allowlist"` reaches its declared hosts through the
-egress proxy on your machine, carried into the sandbox over SSH, as it does on Docker. Its
-downloads therefore pass through your machine's connection.
+A Task with `[agent].network_mode = "allowlist"` or `"blocklist"` reaches the hosts its list
+admits through the egress proxy on your machine, carried into the sandbox over SSH, as it
+does on Docker. Its downloads therefore pass through your machine's connection.
 
 ## Checking an organization
 

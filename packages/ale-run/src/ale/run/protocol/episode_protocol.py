@@ -411,13 +411,13 @@ def _separate_verifier(spec: TaskSpec, validations: int) -> Resources | None:
 
 def _network(ctx: EpisodeContext, network: NetworkPolicy) -> dict[str, Any]:
     """A request's ``network``, with the egress proxy and the episode's egress session under
-    ``allowlist``: the relay presents that session, whose hosts are those of the phase that
+    a proxied policy: the relay presents that session, whose policy is that of the phase that
     runs, never the agent's model session."""
-    allowlist = network.mode is NetworkMode.ALLOWLIST
+    proxied = network.proxied
     return {
         "network": network,
-        "proxy_url": ctx.proxy_url if allowlist else "",
-        "proxy_token": ctx.egress_token if allowlist else "",
+        "proxy_url": ctx.proxy_url if proxied else "",
+        "proxy_token": ctx.egress_token if proxied else "",
     }
 
 
@@ -957,7 +957,7 @@ class EpisodeProtocol:
             )
         finally:
             if ctx.open_egress_session is not None:
-                ctx.open_egress_session(())
+                ctx.open_egress_session(NetworkPolicy())
 
     async def _turn(
         self,
@@ -1490,7 +1490,7 @@ class EpisodeProtocol:
         self, ctx: EpisodeContext, sandbox: Sandbox, policy: NetworkPolicy, phase: Phase
     ) -> None:
         """Apply ``policy``, the agent's or the verifier's, for ``phase``, record what was
-        applied, and give the egress session its hosts.
+        applied, and give the egress session the policy.
 
         A sealed policy closes egress, an open one opens it, since a solver that serves a
         shared verifier was created able to apply either phase's. A failure here ends the
@@ -1523,7 +1523,7 @@ class EpisodeProtocol:
             raise
         record(True)
         if ctx.open_egress_session is not None:
-            ctx.open_egress_session(policy.allowed_hosts)
+            ctx.open_egress_session(policy)
 
     async def _validate_stdio_mcp(
         self, ctx: EpisodeContext, sandbox: Sandbox, resources: EffectiveAgentResources
@@ -1667,7 +1667,7 @@ class EpisodeProtocol:
             if ctx.open_judge_sessions is not None:
                 ctx.open_judge_sessions(False)
             if ctx.open_egress_session is not None:
-                ctx.open_egress_session(())
+                ctx.open_egress_session(NetworkPolicy())
             if placed.user is not None and ctx.spec.os is OperatingSystem.LINUX:
                 # A solver kept for continuation gets its framework root back closed.
                 await sandbox.exec(["chmod", "--", "o-x", str(layout.root)])

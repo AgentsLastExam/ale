@@ -90,24 +90,35 @@ class TestOrchardProvider(ProviderConformance):
             assert printed.ok and printed.stdout == "x" * (1 << 20)
 
     @pytest.mark.asyncio
-    async def test_a_sealed_allowlist_desktop_names_the_relay_in_its_system_proxy(self) -> None:
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            pytest.param(
+                NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+                id="allowlist",
+            ),
+            pytest.param(
+                NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("*.iana.org",)),
+                id="blocklist",
+            ),
+        ],
+    )
+    async def test_a_sealed_list_desktop_names_the_relay_in_its_system_proxy(
+        self, policy: NetworkPolicy
+    ) -> None:
         """While sealed, the network services' web proxies name guestd's relay, through which
-        a client of the system proxy (Python's urllib, reading it as Safari does) reaches the
-        declared host and nothing else; open, the system proxy is what it was."""
+        a client of the system proxy (Python's urllib, reading it as Safari does) reaches what
+        the list admits, example.com, and nothing else; open, the system proxy is what it
+        was."""
         sessions = SessionRegistry()
         session = sessions.open(
-            GatewaySession(
-                episode_id="allowlist",
-                model="",
-                purpose="egress",
-                allowed_hosts=frozenset({"example.com"}),
-            )
+            GatewaySession(episode_id="allowlist", model="", purpose="egress", policy=policy)
         )
         proxy = EgressProxy(sessions, host="0.0.0.0")
         await proxy.start()
         try:
             request = await self.request(
-                network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+                network=policy,
                 proxy_url=proxy.url,
                 proxy_token=session.token,
             )

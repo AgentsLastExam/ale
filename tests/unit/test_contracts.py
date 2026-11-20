@@ -26,7 +26,7 @@ from ale.core.taskspec import (
     VerificationMode,
     VerifierResources,
     VerifySpec,
-    host_allowed,
+    host_listed,
 )
 from ale.core.verdict import Status, Verdict
 
@@ -47,6 +47,8 @@ _OPEN = NetworkPolicy(mode=NetworkMode.OPEN)
 _BLOCK = NetworkPolicy(mode=NetworkMode.BLOCK)
 _PYPI = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",))
 _ALLOW_PYPI = {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]}
+_NO_GITHUB = NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("github.com",))
+_BLOCK_GITHUB = {"network_mode": "blocklist", "blocked_hosts": ["github.com"]}
 _OWN = {"cpus": 1, "memory_mb": 512}
 
 
@@ -129,6 +131,14 @@ def test_an_open_verifier_network_keeps_the_spec_hash() -> None:
         make_spec(verify={"network": _BLOCK}, validation={"network": _OPEN})
 
 
+def test_a_policy_without_a_blocklist_keeps_its_dump() -> None:
+    """``blocked_hosts`` is left out of a dump when empty, so the specs and RunLocks of every
+    Task without a blocklist hash as they did before blocklists existed."""
+    assert _PYPI.model_dump() == {"mode": "allowlist", "allowed_hosts": ("pypi.org",)}
+    assert _NO_GITHUB.model_dump()["blocked_hosts"] == ("github.com",)
+    assert NetworkPolicy.model_validate_json(_NO_GITHUB.model_dump_json()) == _NO_GITHUB
+
+
 @pytest.mark.parametrize(
     ("agent", "verifier", "mode", "expected"),
     [
@@ -143,9 +153,18 @@ def test_an_open_verifier_network_keeps_the_spec_hash() -> None:
             "shared",
             NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org", "example.org")),
         ),
+        # A blocklist needs the proxy as an allowlist does; with two lists, either Sandbox
+        # serves both phases, and the agent's is recorded.
+        (_NO_GITHUB, _OPEN, "shared", _NO_GITHUB),
+        (_BLOCK, _NO_GITHUB, "shared", _NO_GITHUB),
+        (_OPEN, _NO_GITHUB, "shared", _NO_GITHUB),
+        (_NO_GITHUB, _PYPI, "shared", _NO_GITHUB),
+        (_PYPI, _NO_GITHUB, "shared", _PYPI),
+        (_BLOCK, _PYPI, "shared", _PYPI),
         # A verifier of its own applies its network in its own Sandbox.
         (_OPEN, _BLOCK, "separate", _OPEN),
         (_BLOCK, _PYPI, "snapshot", _BLOCK),
+        (_NO_GITHUB, _PYPI, "separate", _NO_GITHUB),
     ],
 )
 def test_a_solver_can_apply_both_phases_networks(
@@ -454,6 +473,22 @@ def test_network_modes_map_onto_the_runtime_policy() -> None:
         mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",)
     )
     assert config({"agent": {"network_mode": "public"}}).agent_network.mode is NetworkMode.OPEN
+    assert config({"agent": _BLOCK_GITHUB}).agent_network == _NO_GITHUB
+
+
+def test_a_blocklist_admits_every_host_but_the_listed_ones() -> None:
+    policy = NetworkPolicy(
+        mode=NetworkMode.BLOCKLIST, blocked_hosts=("*.example.org", "10.0.0.0/8")
+    )
+    assert policy.proxied and _PYPI.proxied
+    assert not _BLOCK.proxied and not _OPEN.proxied
+    assert policy.admits("pypi.org")
+    assert policy.admits("11.0.0.1")
+    for refused in ("example.org", "files.example.org", "FILES.Example.org.", "10.1.2.3"):
+        assert not policy.admits(refused)
+    # A name pattern never matches an address, in either list.
+    assert NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("*.0.0.1",)).admits("127.0.0.1")
+    assert _OPEN.admits("anything.example") and not _BLOCK.admits("pypi.org")
 
 
 @pytest.mark.parametrize(
@@ -477,6 +512,10 @@ def test_network_modes_map_onto_the_runtime_policy() -> None:
             {"allow_internet": True, "network_mode": "no-network"},
             NetworkPolicy(mode=NetworkMode.BLOCK),
         ),
+        # ALE's blocklist resolves as Harbor's modes do.
+        ({}, {**_BLOCK_GITHUB}, _NO_GITHUB),
+        ({**_BLOCK_GITHUB}, {**_ALLOW_PYPI}, _NO_GITHUB),
+        ({**_ALLOW_PYPI}, {**_BLOCK_GITHUB}, _PYPI),
     ],
 )
 def test_the_agent_s_network_resolves_as_harbor_s_does(
@@ -528,6 +567,10 @@ def test_the_agent_s_network_resolves_as_harbor_s_does(
         # Without an environment of its own, [environment]'s baseline again.
         ({"environment_mode": "separate"}, {"network_mode": "no-network"}, _BLOCK),
         ({"environment_mode": "snapshot"}, {"allow_internet": False}, _BLOCK),
+        # A blocklist in each table that names a verifier's network.
+        ({**_BLOCK_GITHUB}, {"network_mode": "no-network"}, _NO_GITHUB),
+        ({}, {**_BLOCK_GITHUB}, _NO_GITHUB),
+        ({"environment": {**_OWN, **_BLOCK_GITHUB}}, {**_ALLOW_PYPI}, _NO_GITHUB),
     ],
 )
 def test_the_verifier_s_network_resolves_as_harbor_s_does(
@@ -555,11 +598,29 @@ def test_a_verifier_s_network_obeys_the_agent_s_host_rules() -> None:
             {"verifier": {"environment": {**_OWN, "allowed_hosts": ["pypi.org"]}}},
             "requires network_mode 'allowlist'",
         ),
+        ({"verifier": {"network_mode": "blocklist"}}, "non-empty blocked_hosts"),
+        ({"verifier": {"blocked_hosts": ["github.com"]}}, "requires network_mode 'blocklist'"),
+        (
+            {"verifier": {"network_mode": "allowlist", **{"blocked_hosts": ["github.com"]}}},
+            "non-empty allowed_hosts",
+        ),
+        (
+            {"verifier": {**_ALLOW_PYPI, "blocked_hosts": ["github.com"]}},
+            "requires network_mode 'blocklist'",
+        ),
+        (
+            {"verifier": {"environment": {**_OWN, "network_mode": "blocklist"}}},
+            "non-empty blocked_hosts",
+        ),
         ({"verifier": {"network_mode": "offline"}}, "network_mode"),
         ({"verifier": {"environment": {**_OWN, "allow_internet": "yes"}}}, "allow_internet"),
         # validation/ runs with the verifier's network.
         (
             {"validation": {"environment": {**_OWN, "network_mode": "public"}}},
+            "verifier's network",
+        ),
+        (
+            {"validation": {"environment": {**_OWN, **_BLOCK_GITHUB}}},
             "verifier's network",
         ),
     ):
@@ -574,6 +635,10 @@ def test_an_environment_baseline_obeys_the_agent_s_host_rules() -> None:
         ({"network_mode": "allowlist"}, "non-empty allowed_hosts"),
         ({"allowed_hosts": ["pypi.org"]}, "requires network_mode 'allowlist'"),
         ({"network_mode": "allowlist", "allowed_hosts": ["127.0.0.1"]}, "reaches the Host"),
+        ({"network_mode": "blocklist"}, "non-empty blocked_hosts"),
+        ({"blocked_hosts": ["github.com"]}, "requires network_mode 'blocklist'"),
+        ({"network_mode": "blocklist", "blocked_hosts": ["127.0.0.1"]}, "reaches the Host"),
+        ({"network_mode": "blocklist", "blocked_hosts": ["not a host"]}, "not a hostname"),
     ):
         with pytest.raises(ValidationError, match=message):
             config({"environment": environment})
@@ -596,16 +661,13 @@ def test_harbor_s_spellings_are_accepted() -> None:
     assert server.transport == "streamable-http"
 
 
-def test_allowed_hosts_take_harbor_s_normal_form() -> None:
+def test_listed_hosts_take_harbor_s_normal_form() -> None:
     hosts = ["PyPI.org.", " files.pythonhosted.org", "10.0.0.1", "10.0.0.0/8", "2001:0DB8::1"]
+    normal = ("pypi.org", "files.pythonhosted.org", "10.0.0.1", "10.0.0.0/8", "2001:db8::1")
     agent = config({"agent": {"network_mode": "allowlist", "allowed_hosts": hosts}}).agent
-    assert agent.allowed_hosts == (
-        "pypi.org",
-        "files.pythonhosted.org",
-        "10.0.0.1",
-        "10.0.0.0/8",
-        "2001:db8::1",
-    )
+    assert agent.allowed_hosts == normal
+    agent = config({"agent": {"network_mode": "blocklist", "blocked_hosts": hosts}}).agent
+    assert agent.blocked_hosts == normal
 
 
 @pytest.mark.parametrize(
@@ -625,7 +687,7 @@ def test_allowed_hosts_take_harbor_s_normal_form() -> None:
 def test_addresses_match_addresses_and_ranges(
     host: str, allowed: tuple[str, ...], admitted: bool
 ) -> None:
-    assert host_allowed(host, allowed) is admitted
+    assert host_listed(host, allowed) is admitted
 
 
 def test_a_credential_header_stays_off_plain_http_outside_the_sandbox() -> None:
@@ -655,6 +717,14 @@ def test_network_and_agent_resource_contracts_remain_strict() -> None:
         NetworkPolicy(mode=NetworkMode.ALLOWLIST)
     with pytest.raises(ValidationError):
         NetworkPolicy(mode=NetworkMode.BLOCK, allowed_hosts=("example.com",))
+    with pytest.raises(ValidationError, match="blocked_hosts"):
+        NetworkPolicy(mode=NetworkMode.BLOCKLIST)
+    with pytest.raises(ValidationError, match="blocked_hosts is meaningless"):
+        NetworkPolicy(mode=NetworkMode.OPEN, blocked_hosts=("example.com",))
+    with pytest.raises(ValidationError, match="allowed_hosts is meaningless"):
+        NetworkPolicy(
+            mode=NetworkMode.BLOCKLIST, blocked_hosts=("a.example",), allowed_hosts=("b.example",)
+        )
     assert SkillSource(path="/skills/reviewer").path == "/skills/reviewer"
     assert McpSource(builtin="cua-desktop").builtin == "cua-desktop"
     assert McpSource(builtin="cua-desktop", screenshot_max_dimension=768).screenshot_max_dimension

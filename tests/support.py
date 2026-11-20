@@ -29,6 +29,7 @@ from ale.core.harness import (
 )
 from ale.core.sandbox import (
     ExecResult,
+    Identity,
     ImageRef,
     PreparedTaskImage,
     Provider,
@@ -159,6 +160,57 @@ async def prepare_reference(
     kind: ImageKind = ImageKind.CONTAINER,
 ) -> PreparedTaskImage:
     return await provider.prepare_image(ImageRef(kind=kind, reference=reference))
+
+
+#: Each list admits example.com and refuses www.iana.org, so one check serves both.
+LIST_POLICIES = [
+    pytest.param(
+        NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)), id="allowlist"
+    ),
+    pytest.param(
+        NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("*.iana.org",)), id="blocklist"
+    ),
+]
+
+
+async def check_a_sealed_list(
+    provider: Provider,
+    request: Callable[..., Any],
+    policy: NetworkPolicy,
+) -> None:
+    """Sealed under ``policy``, one of :data:`LIST_POLICIES`, a Linux agent reaches
+    example.com through guestd's relay to the Host's egress proxy, is refused www.iana.org,
+    and reaches nothing directly. ``request`` is the suite's request factory."""
+    from ale.run.gateway.proxy import EgressProxy
+    from ale.run.gateway.session import GatewaySession, SessionRegistry
+
+    sessions = SessionRegistry()
+    session = sessions.open(
+        GatewaySession(episode_id="list", model="", purpose="egress", policy=policy)
+    )
+    proxy = EgressProxy(sessions, host="0.0.0.0")
+    await proxy.start()
+    curl = ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "30"]
+    try:
+        sandbox = await provider.create(
+            await request(network=policy, proxy_url=proxy.url, proxy_token=session.token)
+        )
+        async with sandbox:
+            await sandbox.close_egress()
+            fetched = [
+                await sandbox.exec([*curl, *argv], identity=Identity.AGENT, timeout_sec=60)
+                for argv in (
+                    ["https://example.com/"],
+                    ["https://www.iana.org/"],
+                    ["--noproxy", "*", "https://example.com/"],
+                )
+            ]
+    finally:
+        await proxy.stop()
+    admitted, refused, direct = fetched
+    assert admitted.ok and admitted.stdout == "200", admitted.stdout + admitted.stderr
+    assert refused.exit_code == 56 and "403" in refused.stderr, refused.stderr
+    assert not direct.ok, direct.stdout
 
 
 #: The smallest valid ``task.toml``: a container Task with no network.

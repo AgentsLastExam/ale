@@ -131,7 +131,7 @@ def allowlist(*hosts: str) -> NetworkPolicy:
     return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=hosts)
 
 
-def test_the_tunnel_carries_the_gateway_and_an_allowlists_proxy_never_a_wildcard() -> None:
+def test_the_tunnel_carries_the_gateway_and_a_lists_proxy_never_a_wildcard() -> None:
     """The sandbox dials fixed loopback ports whatever ports the Host serves them on."""
     local_gateway, listeners, targets = tunnel_plan(
         request(
@@ -146,6 +146,10 @@ def test_the_tunnel_carries_the_gateway_and_an_allowlists_proxy_never_a_wildcard
     # An oracle run calls no model, yet its allowlist needs the proxy.
     oracle = request(network=allowlist("example.com"), proxy_url="http://0.0.0.0:42000")
     assert tunnel_plan(oracle) == (None, [(PROXY_PORT, 0)], [("127.0.0.1", 42000)])
+    # A blocklist's hosts are reached through the proxy too.
+    no_github = NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("github.com",))
+    listed = request(network=no_github, proxy_url="http://0.0.0.0:42000")
+    assert tunnel_plan(listed) == (None, [(PROXY_PORT, 0)], [("127.0.0.1", 42000)])
     blocked = request(gateway_url="http://0.0.0.0:41000", proxy_url="http://0.0.0.0:42000")
     assert tunnel_plan(blocked)[1] == [(SANDBOX_GATEWAY_PORT, 0)]
     assert tunnel_plan(request()) == (None, [], [])

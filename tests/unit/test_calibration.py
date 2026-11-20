@@ -631,23 +631,28 @@ async def test_calibration_passes_artifact_policy_to_episodes(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "network",
+    [
+        {"network_mode": "allowlist", "allowed_hosts": ["example.com"]},
+        {"network_mode": "blocklist", "blocked_hosts": ["pypi.org"]},
+    ],
+)
 @pytest.mark.parametrize("table", ["agent", "verifier"])
 @pytest.mark.parametrize("command", ["calibrate", "run"])
-async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
+async def test_an_oracle_run_gives_a_listed_task_its_egress_proxy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     write_task_repo,  # type: ignore[no-untyped-def]
     host_checks: AsyncMock,
     command: str,
     table: str,
+    network: dict[str, object],
 ) -> None:
     """An oracle run calls no model, yet the oracle meets the agent's network, and the
-    verifier its own, allowlist included: the episode gets the proxy and a registry for its
-    egress session whichever of them has the allowlist."""
-    repository = write_task_repo(
-        "oracle-allowlist",
-        config={table: {"network_mode": "allowlist", "allowed_hosts": ["example.com"]}},
-    )
+    verifier its own, a list included: the episode gets the proxy and a registry for its
+    egress session whichever of them has the list."""
+    repository = write_task_repo("oracle-list", config={table: network})
     task_cli = import_module("ale.run.cli.tasks")
     digest = "sha256:" + "a" * 64
 
@@ -676,7 +681,7 @@ async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
                 episode_id=kwargs["episode_id"],
                 model="",
                 purpose="egress",
-                allowed_hosts=frozenset(network.allowed_hosts),
+                policy=network,
             )
         )
         port = int(kwargs["proxy_url"].rpartition(":")[2])
@@ -702,5 +707,5 @@ async def test_an_oracle_run_gives_an_allowlist_task_its_egress_proxy(
     ((checked,), _) = host_checks.await_args
     assert [task.spec.name for task in checked] == ["agentslastexam/demo"]
     assert host_checks.await_count == 1
-    # The proxy knows the episode's session, and holds it to the Task's allowlist.
+    # The proxy knows the episode's session, and holds it to the Task's list.
     assert str(seen["status"]).split()[1] == "403", seen["status"]

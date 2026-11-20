@@ -199,11 +199,11 @@ def _check_environment(env: dict[str, str]) -> None:
 
 def _sealed_policy(request: SandboxRequest) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The Softnet rules of a sealed VM: nothing in but Orchard's SSH from the Mac (``@host``,
-    the VM's gateway), and nothing out but the episode's Gateway and, for an allowlist, its
-    proxy, at their ports on the Mac. Gateway DNS and every other port of the Mac stay shut.
+    the VM's gateway), and nothing out but the episode's Gateway and, for a proxied policy,
+    its proxy, at their ports on the Mac. Gateway DNS and every other port of the Mac stay shut.
     """
     urls = [request.gateway_url]
-    if request.network.mode is NetworkMode.ALLOWLIST:
+    if request.network.proxied:
         urls.append(request.proxy_url)
     ports = sorted({port for url in urls if url and (port := urlsplit(url).port)})
     allow = ("in proto tcp @host port 22", *(f"out proto tcp @host port {port}" for port in ports))
@@ -483,7 +483,7 @@ class OrchardSandbox(Sandbox):
 
     async def close_egress(self) -> None:
         """Seal a restricted VM with Softnet on the Mac, outside the guest, before the agent
-        starts; an allowlist then reaches the proxy through guestd's relay."""
+        starts; a proxied policy then reaches the proxy through guestd's relay."""
         if self.request.network.mode is NetworkMode.OPEN:
             return
         await self._set_policy(*_sealed_policy(self.request))
@@ -710,7 +710,7 @@ class OrchardProvider(Provider):
         # A Fleet places Tasks by these; the versions are checked when a VM is made.
         with contextlib.suppress(ProviderCapabilityError):
             check_softnet()
-            modes |= {NetworkMode.BLOCK, NetworkMode.ALLOWLIST}
+            modes |= {NetworkMode.BLOCK, NetworkMode.ALLOWLIST, NetworkMode.BLOCKLIST}
         return (
             CapabilityProfile(
                 provider=self.id,
@@ -836,9 +836,7 @@ class OrchardProvider(Provider):
 
     async def _resolve_host(self, guest: GuestClient, request: SandboxRequest) -> str | None:
         """The Mac's address as the VM reaches it, when it reaches a Gateway or a proxy there."""
-        if not request.gateway_url and not (
-            request.network.mode is NetworkMode.ALLOWLIST and request.proxy_url
-        ):
+        if not request.gateway_url and not (request.network.proxied and request.proxy_url):
             return None
         # In Tart's NAT network, and in Softnet's, the guest's router is its Mac host.
         code, stdout, _, timed_out = await guest.exec(
@@ -921,8 +919,8 @@ class OrchardProvider(Provider):
         """A running ALE VM booted from ``source``, driven through new guest sessions;
         ``retarget`` points its Gateway relay at this request's Gateway.
 
-        Its Softnet rules, not this run's configuration, say whether it is sealed now: an
-        allowlist agent's commands need the egress relay only then, with this run's proxy and
+        Its Softnet rules, not this run's configuration, say whether it is sealed now: a
+        proxied agent's commands need the egress relay only then, with this run's proxy and
         token.
         """
         name, uid = _owned_vm(handle)

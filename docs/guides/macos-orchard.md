@@ -39,10 +39,10 @@ run that one program as root without a password. sudo asks for the account's pas
 first time and whenever the framer changes; ALE refuses to frame with an outdated copy.
 
 On macOS 26 or later, setup also installs Softnet, the packet filter that seals the VMs of
-`no-network` and `allowlist` Tasks on this Mac, as `/usr/local/libexec/ale/softnet`, owned
-by root and set-user-ID because it sets a VM's network up as root, and puts it on the
-worker's PATH; sudo asks for the password for that too. `--check` says whether the worker
-has it. Without it, as on macOS before 26, only `public` Tasks run. Softnet sets the DHCP
+`no-network`, `allowlist` and `blocklist` Tasks on this Mac, as
+`/usr/local/libexec/ale/softnet`, owned by root and set-user-ID because it sets a VM's network
+up as root, and puts it on the worker's PATH; sudo asks for the password for that too.
+`--check` says whether the worker has it. Without it, as on macOS before 26, only `public` Tasks run. Softnet sets the DHCP
 lease time for VM networks to 10 minutes, for every VM and Internet Sharing on the Mac, and
 that setting stays after cleanup
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#restricted-networking)).

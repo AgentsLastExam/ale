@@ -66,8 +66,8 @@ leaves its profiles name:
 | `daytona` (scheduler) | Linux containers on x86-64 | Daytona's, whole | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
 | `fleet` (scheduler) | what the leaves lent by its registered Nodes that run this engine's framework start, online or not, read once per Run | as those leaves | as those leaves | as those leaves | as those leaves |
 
-Every profile applies `open`, `block` and `allowlist`, apart from Orchard's, which applies
-`block` and `allowlist` only where setup's Softnet is the worker's; a macOS Sandbox refused
+Every profile applies `open`, `block`, `allowlist` and `blocklist`, apart from Orchard's,
+which applies the last three only where setup's Softnet is the worker's; a macOS Sandbox refused
 for that names the setup that installs it. A Linux Task's container is x86-64, so a Docker
 leaf on an arm64 machine serves none. A Docker leaf reads its GPUs' models and memory once,
 from nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose GPUs it does
@@ -94,7 +94,7 @@ serves it on.
 
 | Provider | Where the fixed port leads |
 |---|---|
-| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a second Slurm step to the Host, carrying only the Gateway and the episode's allowlist proxy |
+| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a second Slurm step to the Host, carrying only the Gateway and, under `allowlist` or `blocklist`, the episode's egress proxy |
 | Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)). Under rootless Docker, whose bridges are in a network namespace of rootlesskit's, the Provider listens at the Gateway's port there and relays each connection to the Host ([Docker runtimes](#docker-runtimes)) |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Firecracker | As QEMU, from the guest's tap device in the runner |
@@ -102,13 +102,14 @@ serves it on.
 | Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted, or until a later episode that continues in a retained VM stops it (through `lsof` on the port) and starts its own |
 | Fleet | The Node's Provider's own route, to the port where the node agent listens for the Run; the agent carries each connection over the Run's tunnel to its Gateway |
 
-## Allowlist relay
+## Egress relay
 
 The egress proxy knows an episode by its egress session's token, which many programs cannot
 present: Chrome, Edge, Firefox and PowerShell 5.1's `Invoke-WebRequest` send proxy
 credentials only in answer to a challenge, and the proxy's 407 carries none (Chrome reports
 `ERR_PROXY_AUTH_UNSUPPORTED`); Chromium also drops those in the proxy variables. So once
-Docker, QEMU, Firecracker, Daytona or Orchard has sealed an `allowlist` Sandbox, `relay.py`
+Docker, QEMU, Firecracker, Daytona, Orchard or Slurm has sealed an `allowlist` or `blocklist`
+Sandbox, `relay.py`
 has guestd (`guestd/egress.py`) listen on an ephemeral loopback port, add the token to the
 request that opens each tunnel, and forward it to the proxy. While the Sandbox is sealed,
 the proxy variables of every command, the agent's and a verifier's, name that port, with no
@@ -894,9 +895,9 @@ storage.
 
 `srun --overlap --unbuffered` opens guestd's command and file sessions and a separate
 tunnel. Blocking drops packets on the sandbox's private tap outside gVisor. Opening removes
-the filters while the container keeps running. The allowlist uses the same seal and the
-Host's authenticated proxy through the tunnel. The runtime modes grant nested Docker or raw
-sockets separately.
+the filters while the container keeps running. `allowlist` and `blocklist` use the same seal
+and the Host's authenticated proxy through the tunnel. The runtime modes grant nested Docker or
+raw sockets separately.
 
 A Sandbox's step gets the Task's memory plus what `docker:gvisor` adds for the Sentry
 ([Docker on gVisor](#docker-on-gvisor)) and 32 MiB for the step's own process and conmon;
@@ -922,8 +923,8 @@ live organization (daemon 0.225.2). Operating it is in
 | Runs its daemon, and every command sent through it, as the image's final `USER` | That layer's `USER root`, so guestd is root |
 | Replaces the image's entrypoint and command with its own daemon | Starts them itself, detached, as the image's `USER` with its `ENV` and working directory, then waits for the desktop as Docker does |
 | Its daemon listens inside the sandbox (2280, 22220, 22222, 33333, and any other port PID 1 opens) and runs commands for anyone, as root | `iptables` owner rules reject every non-root user, IPv4 and IPv6; a probe as the agent must fail on every local address, or the sandbox is destroyed |
-| Accepts no connection from the sandbox outward; its SSH gateway refuses `-R` | guestd runs over two SSH exec sessions, one for commands and one for file reads. A third carries `guestd/tunnel.py`, which delivers the Gateway on the sandbox's loopback at 7412 and, under `allowlist`, the egress proxy at 7413; the sandbox names an index into the Host's list, never an address |
-| Switches `networkBlockAll` and a domain allowlist at runtime (Tier 3 or 4 only), asynchronously | `block` and `allowlist` both seal with `networkBlockAll`; an allowlist reaches its hosts through the tunneled proxy and the [relay](#allowlist-relay), as on Docker. Daytona's domain allowlist is not used ([`daytona/AGENTS.md`](daytona/AGENTS.md)). Every switch waits for a TLS handshake with a public host to behave as the setting says |
+| Accepts no connection from the sandbox outward; its SSH gateway refuses `-R` | guestd runs over two SSH exec sessions, one for commands and one for file reads. A third carries `guestd/tunnel.py`, which delivers the Gateway on the sandbox's loopback at 7412 and, under `allowlist` or `blocklist`, the egress proxy at 7413; the sandbox names an index into the Host's list, never an address |
+| Switches `networkBlockAll` and a domain allowlist at runtime (Tier 3 or 4 only), asynchronously | `block`, `allowlist` and `blocklist` all seal with `networkBlockAll`; a list reaches its hosts through the tunneled proxy and the [relay](#egress-relay), as on Docker. Daytona's domain allowlist is not used ([`daytona/AGENTS.md`](daytona/AGENTS.md)). Every switch waits for a TLS handshake with a public host to behave as the setting says |
 | Accepts connections under `networkBlockAll` that it passes nothing on, and on a GPU runner names a proxy of its own in every process's environment (see below) | guestd starts without the runner's proxy variables, unless the image or Task sets them. The accepted connections are left as they are: the Provider and the conformance suite count the network as reached only when a TLS handshake with a public host completes |
 | Serves GPUs from its own region, in several models, optionally as spot capacity it may reclaim | Asks for those of the Task's models Daytona offers ([GPU models](#gpu-models)) and never spot. The GPUs are read with `nvidia-smi` as the agent and recorded; another count or model, or a GPU the agent cannot open, destroys the sandbox |
 | Mounts the Host driver's libraries without registering them with the linker (see [GPU driver capabilities](#gpu-driver-capabilities)) | Runs `ldconfig` as root before it reads the GPUs, as Docker's NVIDIA paths do with their linker-cache hook; a sandbox where it fails is destroyed |
@@ -1239,9 +1240,9 @@ are recorded separately from execution failures.
 
 ### Restricted networking
 
-An `open` Task's VM has Tart's own NAT network throughout. A `block` or `allowlist` VM runs
-on Softnet, Tart's packet filter, which sits on the Mac between the VM and the Mac's
-network, outside the guest, where the agent cannot lift it even as root. It needs:
+An `open` Task's VM has Tart's own NAT network throughout. A `block`, `allowlist` or
+`blocklist` VM runs on Softnet, Tart's packet filter, which sits on the Mac between the VM and
+the Mac's network, outside the guest, where the agent cannot lift it even as root. It needs:
 
 - Softnet 0.25.0 or later, for its protocol and port rules. `scripts/setup_macos.py`
   installs it on macOS 26 or later, which it requires, as `/usr/local/libexec/ale/softnet`,
@@ -1264,7 +1265,7 @@ the framework's phases. Softnet drops IPv6 in every phase. Sealed, the VM's rule
 ```text
 in proto tcp @host port 22            Orchard's SSH from the Mac, which exec rides on
 out proto tcp @host port <Gateway>    the Gateway's port on the Mac
-out proto tcp @host port <proxy>      for an allowlist, the egress proxy's port
+out proto tcp @host port <proxy>      for allowlist or blocklist, the egress proxy's port
 ```
 
 `@host` is the VM's gateway, the Mac's address on the VM's network. It also answers the

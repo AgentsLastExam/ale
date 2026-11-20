@@ -30,7 +30,8 @@ set-user-ID, and provisioning refuses a restricted Task on a Mac without it.
 - Softnet is set-user-ID, as Tart documents, not run through a sudoers rule like the
   framer: Tart starts it by name from the worker's PATH. Any local account may run it, and
   it is one file per Mac, so every checkout on a Mac must pin the same release.
-- The Provider declares `block` and `allowlist` only where setup's Softnet is the worker's,
+- The Provider declares `block`, `allowlist` and `blocklist` only where setup's Softnet is
+  the worker's,
   so a Fleet never places them on a Mac that would refuse them.
 
 ## A policy change strands Orchard's SSH connection

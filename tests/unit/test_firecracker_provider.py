@@ -275,14 +275,21 @@ async def test_an_open_task_is_never_sealed(
 
 
 @pytest.mark.asyncio
-async def test_a_sealed_allowlist_sandbox_gets_the_proxy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "network",
+    [
+        NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+        NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("example.com",)),
+    ],
+)
+async def test_a_sealed_sandbox_under_a_list_gets_the_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, network: NetworkPolicy
 ) -> None:
     recorder = _Recorder()
     monkeypatch.setattr("ale.run.providers.firecracker.provider._run", recorder)
     client = _Client()
     req = request(
-        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+        network=network,
         proxy_url="http://0.0.0.0:9000",
         proxy_token="t0ken",
     )
@@ -310,8 +317,15 @@ async def test_a_sealed_allowlist_sandbox_gets_the_proxy(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "network",
+    [
+        NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+        NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("example.com",)),
+    ],
+)
 async def test_the_gateway_and_proxy_are_routed_to_the_host(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, network: NetworkPolicy
 ) -> None:
     calls: list[str] = []
 
@@ -320,10 +334,7 @@ async def test_the_gateway_and_proxy_are_routed_to_the_host(
         return 0, "172.17.0.1\n" if "ip route" in argv[-1] else "", ""
 
     monkeypatch.setattr("ale.run.providers.firecracker.provider._run", fake)
-    req = request(
-        network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
-        proxy_url="http://0.0.0.0:9000",
-    )
+    req = request(network=network, proxy_url="http://0.0.0.0:9000")
     assert await FirecrackerProvider()._wire_network("ale-fc-x", req) == "172.17.0.1"
     rules = "\n".join(calls)
     assert (

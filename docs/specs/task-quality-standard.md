@@ -28,9 +28,9 @@ The initial context must admit at least one normal, solver-feasible route to com
 the declared resources, permissions, and time. Blocked agent network access is the default; all
 software, inputs, and local services required by that route must already be available. A runtime
 download or network workaround is not a feasible blocked-network route. Intrinsic external
-dependencies justify the narrowest practical allowlist. Open access is justified only when
-restriction would materially change the intended capability, with that reason recorded in Task
-metadata.
+dependencies justify the narrowest practical allowlist. Open access, or a blocklist, which is
+nearly as open, is justified only when restriction would materially change the intended
+capability, with that reason recorded in Task metadata.
 
 ## 2. Keep the contract aligned
 

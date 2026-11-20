@@ -1044,7 +1044,8 @@ class FirecrackerProvider(Provider):
         )
 
     async def _wire_network(self, container: str, request: SandboxRequest) -> str:
-        """Route the Gateway (and an allowlist's proxy) into the guest; return the Host's address.
+        """Route the Gateway (and a proxied policy's proxy) into the guest; return the Host's
+        address.
 
         The guest dials the runner's fixed address; the runner sends it to the Host at the
         port this run serves. Confinement waits for ``close_egress``.
@@ -1068,7 +1069,7 @@ class FirecrackerProvider(Provider):
                 f"-j MASQUERADE || iptables -w -t nat -A POSTROUTING -p tcp -d {host_ip} "
                 f"--dport {gateway_port} -j MASQUERADE",
             ]
-        if request.network.mode is NetworkMode.ALLOWLIST and (port := url_port(request.proxy_url)):
+        if request.network.proxied and (port := url_port(request.proxy_url)):
             rules += [
                 f"iptables -w -t nat -A PREROUTING -i {GUEST_TAP} -p tcp -d {HOST_IP} "
                 f"--dport {port} -j DNAT --to-destination {host_ip}:{port}",

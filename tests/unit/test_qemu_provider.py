@@ -1446,8 +1446,15 @@ def test_the_relay_is_injected_into_every_command_while_sealed() -> None:
     assert sandbox._client.env["ALE_STAGE_DIR"] == "/opt/ale/tests"  # type: ignore[attr-defined]
 
 
-def test_allowlist_forwards_gateway_and_proxy_ports(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "network",
+    [
+        NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
+        NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("example.com",)),
+    ],
+)
+def test_a_list_forwards_gateway_and_proxy_ports(
+    monkeypatch: pytest.MonkeyPatch, network: NetworkPolicy
 ) -> None:
     commands: list[str] = []
 
@@ -1463,13 +1470,7 @@ def test_allowlist_forwards_gateway_and_proxy_ports(
     host = asyncio.run(
         provider._wire_network(
             "runner",
-            request(
-                network=NetworkPolicy(
-                    mode=NetworkMode.ALLOWLIST,
-                    allowed_hosts=("example.com",),
-                ),
-                proxy_url="http://0.0.0.0:9443",
-            ),
+            request(network=network, proxy_url="http://0.0.0.0:9443"),
         )
     )
     assert host == "172.17.0.1"
@@ -1526,6 +1527,7 @@ def _sealing_sandbox(
         network=NetworkPolicy(
             mode=mode,
             allowed_hosts=("example.com",) if mode is NetworkMode.ALLOWLIST else (),
+            blocked_hosts=("example.com",) if mode is NetworkMode.BLOCKLIST else (),
         ),
         proxy_url="http://0.0.0.0:9443",
     )
@@ -1544,10 +1546,11 @@ def _sealing_sandbox(
         (OperatingSystem.WINDOWS, NetworkMode.ALLOWLIST, True),
         (OperatingSystem.LINUX, NetworkMode.ALLOWLIST, True),
         (OperatingSystem.LINUX, NetworkMode.ALLOWLIST, False),
+        (OperatingSystem.WINDOWS, NetworkMode.BLOCKLIST, True),
         (OperatingSystem.WINDOWS, NetworkMode.BLOCK, True),
     ],
 )
-def test_an_allowlist_seal_relays_the_agent_to_the_episode_proxy(
+def test_a_list_s_seal_relays_the_agent_to_the_episode_proxy(
     monkeypatch: pytest.MonkeyPatch, operating_system: OperatingSystem, mode: NetworkMode,
     desktop: bool,
 ) -> None:  # fmt: skip
@@ -1563,7 +1566,7 @@ def test_an_allowlist_seal_relays_the_agent_to_the_episode_proxy(
     asyncio.run(sandbox.open_egress())
     lifted = client.calls
 
-    if mode is NetworkMode.ALLOWLIST:
+    if mode is not NetworkMode.BLOCK:
         bypass = ["172.30.0.1", "localhost", "127.0.0.1"]
         assert all(isinstance(rule, str) for rule in sealed[:-1])
         assert sealed[-1] == (

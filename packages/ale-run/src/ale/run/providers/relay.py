@@ -1,4 +1,5 @@
-"""How a sealed ``allowlist`` Sandbox reaches the Host's egress proxy.
+"""How a sealed Sandbox under a proxied policy, ``allowlist`` or ``blocklist``, reaches the
+Host's egress proxy.
 
 The proxy knows an episode by its egress session's token, which many programs cannot
 present: a browser sends proxy credentials only in answer to a challenge, and Chromium
@@ -6,7 +7,7 @@ ignores those in the proxy variables. So every Provider that seals a Sandbox to 
 proxy has guestd relay a loopback port to it with the token (``guestd/egress.py``). While
 the Sandbox is sealed, the proxy variables of every command, the agent's and a verifier's,
 name the relay, and on a desktop so does the agent account's system proxy. The proxy admits
-the hosts of the phase that runs.
+what the policy of the phase that runs admits.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from urllib.parse import quote
 
 from ale.core.errors import GuestUnreachableError, ProviderStartError
 from ale.core.sandbox import ResourceAllocation, SandboxRequest
-from ale.core.taskspec import NetworkMode
 from ale.run.transport import GuestClient
 
 __all__ = ["start", "stop", "variables"]
@@ -34,7 +34,7 @@ async def start(
 
     Returns the relay's address, or None when the Sandbox has no proxy to reach.
     """
-    if request.network.mode is not NetworkMode.ALLOWLIST or not request.proxy_url:
+    if not request.network.proxied or not request.proxy_url:
         return None
     if request.proxy_token:
         proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
@@ -54,7 +54,7 @@ async def stop(client: GuestClient, request: SandboxRequest) -> None:
     is. A failure is logged rather than raised, since the agent may have broken its own
     desktop, and that must not keep the framework's phases from running.
     """
-    if request.network.mode is not NetworkMode.ALLOWLIST:
+    if not request.network.proxied:
         return
     try:
         await client.egress_relay(None)

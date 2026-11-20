@@ -141,7 +141,7 @@ async def test_malformed_verifier_and_network_failure_are_explicit(
         )
 
     ctx = context(tmp_path)
-    granted: list[tuple[str, ...]] = []
+    granted: list[NetworkPolicy] = []
     ctx.open_egress_session = granted.append
     with pytest.raises(RuntimeError, match="cannot seal"):
         await protocol._apply_network(
@@ -163,9 +163,9 @@ async def test_malformed_verifier_and_network_failure_are_explicit(
 @pytest.mark.asyncio
 async def test_each_phase_applies_and_records_its_own_network(tmp_path: Path) -> None:
     """A solver that serves a shared verifier applies each phase's policy in turn, records
-    the one it applied, and gives the egress session only that phase's hosts."""
+    the one it applied, and gives the egress session only that phase's policy."""
     ctx = context(tmp_path)
-    granted: list[tuple[str, ...]] = []
+    granted: list[NetworkPolicy] = []
     ctx.open_egress_session = granted.append
     sandbox = StageSandbox(ExecResult(exit_code=0))
     protocol = EpisodeProtocol(NopHarness())
@@ -177,7 +177,7 @@ async def test_each_phase_applies_and_records_its_own_network(tmp_path: Path) ->
     ):
         await protocol._apply_network(ctx, sandbox, policy, phase)  # type: ignore[arg-type]
     assert sandbox.egress == ["open", "close", "close"]
-    assert granted == [(), ("pypi.org",), ()]
+    assert granted == [NetworkPolicy(mode=NetworkMode.OPEN), pypi, NetworkPolicy()]
     applied = [
         (record["phase"], record["policy"], record["requested_mode"], record["succeeded"])
         for record in read_jsonl(tmp_path / "trace.execution.jsonl").records
