@@ -60,6 +60,7 @@ from ale.core.sandbox import (
 from ale.core.task import ResolvedVariables, Task
 from ale.core.taskspec import (
     NetworkMode,
+    NetworkPolicy,
     OperatingSystem,
     Resources,
     TaskSpec,
@@ -610,9 +611,9 @@ def _open_sessions(sessions: tuple[GatewaySession, ...], opened: bool) -> None:
         session.suspended = not opened
 
 
-def _open_egress(session: GatewaySession, hosts: tuple[str, ...]) -> None:
-    session.allowed_hosts = frozenset(hosts)
-    session.suspended = not hosts
+def _open_egress(session: GatewaySession, policy: NetworkPolicy) -> None:
+    session.policy = policy
+    session.suspended = not policy.proxied
 
 
 def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxOutcome:
@@ -990,14 +991,11 @@ async def run_episode(
     for opened in judge_sessions.values():
         # Usable only while a verifier runs: a token that reaches the agent is no use to it.
         opened.suspended = True
-    # The relays' credential at the egress proxy, when a phase of this episode has an
-    # allowlist, the agent's or the verifier's: its hosts are those of the phase that runs,
-    # and the agent's model token, which its CLI holds, is never one.
+    # The relays' credential at the egress proxy, when a phase of this episode has a proxied
+    # policy, the agent's or the verifier's: its policy is that of the phase that runs, and
+    # the agent's model token, which its CLI holds, is never one.
     egress: GatewaySession | None = None
-    if proxy_url and NetworkMode.ALLOWLIST in (
-        task.spec.network.mode,
-        task.spec.verify.network.mode,
-    ):
+    if proxy_url and (task.spec.network.proxied or task.spec.verify.network.proxied):
         candidate = GatewaySession(
             episode_id=episode_id, model="", purpose="egress", suspended=True
         )

@@ -1,4 +1,5 @@
-"""The relay a sealed ``allowlist`` Sandbox reaches the Host's egress proxy through.
+"""The relay a sealed ``allowlist`` or ``blocklist`` Sandbox reaches the Host's egress proxy
+through.
 
 The Host proxy knows an episode by its token, and many programs cannot present one: a
 browser sends proxy credentials only in answer to a challenge, and then asks whoever sits at

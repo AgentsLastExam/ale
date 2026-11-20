@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from tests.support import CONTAINER_BASE, slurm_config
+from tests.support import CONTAINER_BASE, LIST_POLICIES, check_a_sealed_list, slurm_config
 
 from ale.core.sandbox import Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import Resources
+from ale.core.taskspec import NetworkPolicy, Resources
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import framework_identity
 from ale.run.providers import missing_features
@@ -29,6 +29,13 @@ class TestSlurmProvider(ProviderConformance):
     @pytest.fixture(autouse=True)
     def cluster(self) -> None:
         self.provider = SlurmProvider(slurm_config())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("policy", LIST_POLICIES)
+    async def test_a_sealed_list_reaches_what_it_admits_through_the_relay(
+        self, policy: NetworkPolicy
+    ) -> None:
+        await check_a_sealed_list(self.provider, self.request, policy)
 
     @pytest.mark.asyncio
     async def test_the_agent_can_allocate_cuda_memory_on_every_assigned_gpu(self) -> None:

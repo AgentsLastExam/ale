@@ -19,7 +19,6 @@ from ale.core.sandbox import (
     SandboxFile,
     SandboxRequest,
 )
-from ale.core.taskspec import NetworkMode
 from ale.run import guestd
 from ale.run.guestd.tunnel import Mux
 from ale.run.providers import relay
@@ -133,7 +132,7 @@ def tunnel_plan(
     request: SandboxRequest,
 ) -> tuple[str | None, list[tuple[int, int]], list[tuple[str, int]]]:
     """What the tunnel carries onto the sandbox's loopback: the Gateway at its fixed port and,
-    under ``allowlist``, the Host's egress proxy at ``PROXY_PORT``.
+    under a proxied policy, the Host's egress proxy at ``PROXY_PORT``.
 
     Returns the Gateway's URL there, the ports to listen on with the index of the Host
     address behind each, and those addresses.
@@ -146,7 +145,7 @@ def tunnel_plan(
         local_gateway = parts._replace(netloc=f"127.0.0.1:{SANDBOX_GATEWAY_PORT}").geturl()
         listeners.append((SANDBOX_GATEWAY_PORT, len(targets)))
         targets.append((_host_end(parts), parts.port or 0))
-    if request.network.mode is NetworkMode.ALLOWLIST and request.proxy_url:
+    if request.network.proxied and request.proxy_url:
         parts = _tunneled(request.proxy_url)
         listeners.append((PROXY_PORT, len(targets)))
         targets.append((_host_end(parts), parts.port or 0))

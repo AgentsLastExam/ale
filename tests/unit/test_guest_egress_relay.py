@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from ale.core.taskspec import NetworkMode, NetworkPolicy
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.session import GatewaySession, SessionRegistry
 from ale.run.guestd import egress
@@ -51,7 +52,10 @@ async def test_the_relay_opens_tunnels_for_clients_that_carry_no_token() -> None
     sessions = SessionRegistry()
     session = sessions.open(
         GatewaySession(
-            episode_id="e", model="", purpose="egress", allowed_hosts=frozenset({"127.0.0.1"})
+            episode_id="e",
+            model="",
+            purpose="egress",
+            policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("127.0.0.1",)),
         )
     )
     proxy = EgressProxy(sessions, host="127.0.0.1")

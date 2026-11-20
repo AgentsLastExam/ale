@@ -41,7 +41,7 @@ from ale.core.sandbox import (
     SandboxRole,
 )
 from ale.core.task import Stage, TaskAssetObservation
-from ale.core.taskspec import CalibrationCase, Expectation, NetworkMode, VerificationMode
+from ale.core.taskspec import CalibrationCase, Expectation, VerificationMode
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Status, Verdict
 from ale.run.agent_resources import resolve_agent_resources
@@ -1265,18 +1265,16 @@ async def _judge_gateway(settings: RunConfig) -> Gateway | None:
 async def _egress_proxy(
     tasks: list[ManifestTask], gateway: Gateway | None
 ) -> tuple[EgressProxy | None, SessionRegistry | None]:
-    """The egress proxy when a Task's agent or verifier has an allowlist, and the sessions
-    only it serves.
+    """The egress proxy when a Task's agent or verifier has a proxied policy, an allowlist or
+    a blocklist, and the sessions only it serves.
 
-    The oracle meets the agent's network, allowlist included, and a verifier its own, so
+    The oracle meets the agent's network, a proxied one included, and a verifier its own, so
     the proxy starts whether or not anything calls a model. With a Gateway it shares the
     Gateway's registry, where each episode opens its egress session; without one, the
     episodes open theirs in a registry of the proxy's own.
     """
     if not any(
-        policy.mode is NetworkMode.ALLOWLIST
-        for task in tasks
-        for policy in (task.spec.network, task.spec.verify.network)
+        policy.proxied for task in tasks for policy in (task.spec.network, task.spec.verify.network)
     ):
         return None, None
     registry = gateway.sessions if gateway is not None else SessionRegistry()

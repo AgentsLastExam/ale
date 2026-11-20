@@ -143,10 +143,16 @@ def test_a_local_disk_is_its_own_version(tmp_path: Path) -> None:
     assert messages(task) == ""
 
 
-def test_a_public_network_needs_its_reason(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "network",
+    [{"network_mode": "public"}, {"network_mode": "blocklist", "blocked_hosts": ["github.com"]}],
+)
+def test_a_public_network_needs_its_reason(tmp_path: Path, network: dict[str, object]) -> None:
+    """A blocklist reaches every host but a few, mirrors of those included, as near public
+    as a reviewer needs to know why."""
     task = scaffold_task(tmp_path / "fresh")
-    edit(task, {"agent": {"network_mode": "public"}})
-    assert "needs a reason" in messages(task)
+    edit(task, {"agent": network})
+    assert f"network_mode {network['network_mode']!r} needs a reason" in messages(task)
     edit(task, {"metadata": {"network_justification": "reads a live catalog"}})
     assert messages(task) == ""
 

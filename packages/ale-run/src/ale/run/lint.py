@@ -176,13 +176,15 @@ def _check_folder(folder: TaskFolder) -> list[Finding]:
     findings.extend(_check_variables(folder.root / TASK_CONFIG, config))
     findings.extend(_check_image_versions(folder, config))
     metadata = config.get("metadata")
-    if _agent_network_mode(config) == "public" and not (
+    # A blocklist gives the agent nearly what public does: every host but a few, mirrors of
+    # those included, so a reviewer needs its reason as well.
+    if (mode := _agent_network_mode(config)) in ("public", "blocklist") and not (
         isinstance(metadata, dict) and metadata.get("network_justification")
     ):
         findings.append(
             Finding(
                 folder.root / TASK_CONFIG,
-                "network_mode 'public' needs a reason in [metadata].network_justification",
+                f"network_mode {mode!r} needs a reason in [metadata].network_justification",
             )
         )
     return findings

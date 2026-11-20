@@ -19,9 +19,10 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
-from tests.support import CONTAINER_BASE
+from tests.support import CONTAINER_BASE, LIST_POLICIES, check_a_sealed_list
 
 from ale.core.sandbox import ImageRef
+from ale.core.taskspec import NetworkPolicy
 from ale.core.testkit import ProviderConformance
 from ale.run.framework import framework_identity
 from ale.run.providers import missing_features
@@ -114,6 +115,13 @@ class TestFleetProvider(ProviderConformance):
     gui_image = ImageRef(kind="container", reference=CONTAINER_BASE)
     framework = framework_identity(user="user", vm=False)
     missing_features = staticmethod(missing_features)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("policy", LIST_POLICIES)
+    async def test_a_sealed_list_reaches_what_it_admits_through_the_relay(
+        self, policy: NetworkPolicy
+    ) -> None:
+        await check_a_sealed_list(self.provider, self.request, policy)
 
     @pytest.mark.asyncio
     async def test_ready_sandbox_reports_observed_image_and_resources(self) -> None:

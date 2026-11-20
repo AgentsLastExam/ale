@@ -1024,6 +1024,7 @@ async def test_a_solver_is_refused_by_its_snapshot_verifiers_own_rules(monkeypat
 
 BLOCK = NetworkPolicy(mode=NetworkMode.BLOCK)
 ALLOWLIST = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
+BLOCKLIST = NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("example.com",))
 OPEN_RULES = (["0.0.0.0/0"], [])
 
 
@@ -1069,14 +1070,17 @@ async def test_a_restricted_vm_starts_open_on_softnet_and_is_sealed_outside_it(b
 
 
 @pytest.mark.asyncio
-async def test_a_sealed_allowlist_agent_reaches_its_proxy_through_the_relay(backend, softnet):
+@pytest.mark.parametrize("network", [ALLOWLIST, BLOCKLIST])
+async def test_a_sealed_agent_under_a_list_reaches_its_proxy_through_the_relay(
+    backend, softnet, network: NetworkPolicy
+):
     provider, api, guest = backend
     host = "192.168.70.1"
     guest.route = (0, f"gateway: {host}\n", "", False)
     sandbox = await provider.create(
         await request(
             provider,
-            network=ALLOWLIST,
+            network=network,
             gateway_url="http://0.0.0.0:4567/v1",
             proxy_url="http://0.0.0.0:4568",
             proxy_token="token",

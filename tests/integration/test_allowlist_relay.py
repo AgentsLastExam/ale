@@ -1,5 +1,6 @@
-"""A sealed agent reaches its allowlist through guestd's relay, from its commands and from
-its desktop's system proxy alike, and the account gets its own settings back."""
+"""A sealed agent reaches what its allowlist or blocklist admits through guestd's relay, from
+its commands and from its desktop's system proxy alike, and the account gets its own settings
+back."""
 
 from __future__ import annotations
 
@@ -24,18 +25,20 @@ from tests.support import CONTAINER_BASE, VM_BASE, VM_RESOURCES, prepare_referen
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 POLICY = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
+#: Each list admits example.com and refuses www.iana.org, so one check serves both.
+POLICIES = [
+    pytest.param(POLICY, id="allowlist"),
+    pytest.param(
+        NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("*.iana.org",)), id="blocklist"
+    ),
+]
 
 
 @asynccontextmanager
-async def _proxy() -> AsyncIterator[tuple[EgressProxy, str]]:
+async def _proxy(policy: NetworkPolicy = POLICY) -> AsyncIterator[tuple[EgressProxy, str]]:
     sessions = SessionRegistry()
     session = sessions.open(
-        GatewaySession(
-            episode_id="allowlist",
-            model="",
-            purpose="egress",
-            allowed_hosts=frozenset({"example.com"}),
-        )
+        GatewaySession(episode_id="allowlist", model="", purpose="egress", policy=policy)
     )
     proxy = EgressProxy(sessions, host="0.0.0.0")
     await proxy.start()
@@ -74,14 +77,18 @@ URLLIB = (
 
 
 async def _check_linux_desktop(
-    provider: Provider, image: PreparedTaskImage, resources: Resources, host: str
+    provider: Provider,
+    image: PreparedTaskImage,
+    resources: Resources,
+    host: str,
+    policy: NetworkPolicy,
 ) -> None:
-    async with _proxy() as (proxy, token):
+    async with _proxy(policy) as (proxy, token):
         request = SandboxRequest(
             episode_id=f"allowlist-{uuid.uuid4().hex[:8]}",
             prepared_image=image,
             resources=resources,
-            network=POLICY,
+            network=policy,
             proxy_url=proxy.url,
             proxy_token=token,
         )
@@ -124,18 +131,22 @@ async def _check_linux_desktop(
 
 @pytest.mark.needs_gui
 @pytest.mark.asyncio
-async def test_a_sealed_container_desktop_names_the_relay_in_its_gnome_settings() -> None:
+@pytest.mark.parametrize("policy", POLICIES)
+async def test_a_sealed_container_desktop_names_the_relay_in_its_gnome_settings(
+    policy: NetworkPolicy,
+) -> None:
     provider = DockerProvider()
     image = await prepare_reference(provider, CONTAINER_BASE)
     await _check_linux_desktop(
-        provider, image, Resources(cpus=2, memory_mb=2048), "ale-gateway.internal"
+        provider, image, Resources(cpus=2, memory_mb=2048), "ale-gateway.internal", policy
     )
 
 
 @pytest.mark.needs_kvm
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy", POLICIES)
 async def test_a_sealed_vm_desktop_names_the_relay_in_its_gnome_settings(
-    tmp_path: Path, write_repo: Callable[..., Path], docker_buildx: None
+    tmp_path: Path, write_repo: Callable[..., Path], docker_buildx: None, policy: NetworkPolicy
 ) -> None:
     task = write_repo(
         tmp_path / "repo", config={"environment": {"image": VM_BASE}}, dockerfile=None
@@ -144,7 +155,7 @@ async def test_a_sealed_vm_desktop_names_the_relay_in_its_gnome_settings(
     await resolve_image_kinds(tasks)
     provider = QemuProvider(overlay_dir=tmp_path / "overlays")
     image = await prepare_task_image(tasks[0], provider)
-    await _check_linux_desktop(provider, image, Resources(**VM_RESOURCES), "172.30.0.1")
+    await _check_linux_desktop(provider, image, Resources(**VM_RESOURCES), "172.30.0.1", policy)
 
 
 POWERSHELL = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
@@ -169,15 +180,16 @@ def _fetch(url: str) -> list[str]:
 
 @pytest.mark.needs_kvm
 @pytest.mark.asyncio
-async def test_a_sealed_windows_agent_reaches_its_allowlist_through_the_system_proxy(
-    tmp_path: Path,
+@pytest.mark.parametrize("policy", POLICIES)
+async def test_a_sealed_windows_agent_reaches_its_list_through_the_system_proxy(
+    tmp_path: Path, policy: NetworkPolicy
 ) -> None:
     disk = os.environ.get("ALE_TEST_WINDOWS_IMAGE")
     if not disk or not Path(disk).is_file():
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
     provider = QemuProvider(image=Path(disk), overlay_dir=tmp_path / "overlays")
     settings = [*POWERSHELL, OWN_SETTINGS]
-    async with _proxy() as (proxy, token):
+    async with _proxy(policy) as (proxy, token):
         request = SandboxRequest(
             episode_id=f"allowlist-{uuid.uuid4().hex[:8]}",
             os=OperatingSystem.WINDOWS,
@@ -185,7 +197,7 @@ async def test_a_sealed_windows_agent_reaches_its_allowlist_through_the_system_p
             sudo=False,
             prepared_image=await provider.prepare_image(ImageRef(kind="vm", reference=disk)),
             resources=Resources(cpus=2, memory_mb=8192),
-            network=POLICY,
+            network=policy,
             proxy_url=proxy.url,
             proxy_token=token,
         )

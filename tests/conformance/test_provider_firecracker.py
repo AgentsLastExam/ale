@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-from tests.support import CONTAINER_BASE
+from tests.support import CONTAINER_BASE, LIST_POLICIES, check_a_sealed_list
 
 from ale.core.errors import GuestUnreachableError, ProviderCapabilityError
 from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, SandboxRequest
@@ -56,6 +56,13 @@ class TestFirecrackerProvider(ProviderConformance):
                 update={"memory_mb": max(resources.memory_mb, 2048)}
             )
         return await super().request(**overrides)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("policy", LIST_POLICIES)
+    async def test_a_sealed_list_reaches_what_it_admits_through_the_relay(
+        self, policy: NetworkPolicy
+    ) -> None:
+        await check_a_sealed_list(self.provider, self.request, policy)
 
 
 def _build(dockerfile: str) -> str:

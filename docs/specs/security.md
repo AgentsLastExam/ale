@@ -48,22 +48,23 @@ This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
 would look like a broken run rather than a broken guarantee.
 
-`allowlist` preserves that deny-all topology. Docker reaches the host proxy over its
-internal bridge. QEMU DNATs the episode Gateway and proxy ports through the runner. Once the
-sandbox is sealed, guestd relays a port on the guest's loopback to the proxy with the
+`allowlist` and `blocklist` preserve that deny-all topology. Docker reaches the host proxy
+over its internal bridge. QEMU DNATs the episode Gateway and proxy ports through the runner.
+Once the sandbox is sealed, guestd relays a port on the guest's loopback to the proxy with the
 episode's egress token, and every command, the agent's and a verifier's, receives proxy
 variables naming that relay; on a desktop the agent account's system proxy names it too, for
 the programs that take their proxy from there, a browser above all. The proxy still decides
 every connection, and direct traffic remains blocked
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#allowlist-relay)).
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#egress-relay)).
 
 Each phase applies its own policy: the agent's for its turns and the oracle, the verifier's
 for `tests/` and `validation/` ([Task authoring](task-authoring.md#resources-and-network)).
 A verifier of its own is created with the verifier's. A solver that a shared verifier runs
-in is created with the least open mode either phase needs, `allowlist` before `block`
-before `open`, with the proxy whenever that is `allowlist`, because a Provider fixes at
-creation what it can seal and relay to; each phase then seals or opens it, and the trace
-records the policy each phase applied. A Provider that cannot apply that mode refuses the
+in is created with the least open provisioning either phase needs, a list (`allowlist` or
+`blocklist`) before `block` before `open`, with the proxy whenever that is a list, because a
+Provider fixes at creation what it can seal and relay to; each phase then seals or opens it
+and gives the episode's egress session its own policy, and the trace records the policy
+each phase applied. A Provider that cannot apply that mode refuses the
 Task before any Sandbox exists, never running it open. Setup and the Harness's first
 installation have the network: they are the Task's trusted preparation and ours.
 
@@ -71,11 +72,11 @@ Every supported Harness mode reaches its model only through the Gateway. Subscri
 provider hosts are Host-side upstreams and never widen the Sandbox's Task-declared
 egress policy.
 
-Daytona has neither bridge nor runner. It seals both `block` and `allowlist` with its own
-switch outside the sandbox, where the agent cannot lift it. It refuses every connection from
+Daytona has neither bridge nor runner. It seals `block` and both lists with its own switch
+outside the sandbox, where the agent cannot lift it. It refuses every connection from
 the sandbox to the Host, so the Host carries the Gateway, and an allowlist's proxy, in over
-SSH, and the sandbox can name only those, never an address. An allowlist's hosts are
-reached through that proxy, as on every other Provider.
+SSH, and the sandbox can name only those, never an address. A list's hosts are reached through
+that proxy, as on every other Provider.
 
 Orchard seals a macOS VM outside the guest as well, with a packet filter on its Mac
 between the VM and the Mac's network, which admits only the episode's ports on the Mac's
@@ -90,11 +91,13 @@ declare it for its agent, while a verifier is open unless the Task seals it, as 
 the RunLock records both policies, `sandbox.network` and `verification.network`.
 
 Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
-sandbox reaches no other host port, by the QEMU Provider unit tests for the runner rules,
-by `tests/integration/test_allowlist_relay.py` for the relay and a desktop's system proxy,
-by `tests/integration/test_verifier_network.py` for a verifier's own policy in the agent's
-Sandbox, by `tests/unit/test_egress_proxy.py` for the egress session, by the Orchard
-conformance suite on a Mac, and by the `demo-netprobe` task, which attempts
+sandbox reaches no other host port and that a blocklist refuses its hosts by name, by
+address and by server name, by the QEMU Provider unit tests for the runner rules,
+by `tests/integration/test_allowlist_relay.py` for the relay and a desktop's system proxy
+under either list, by `tests/integration/test_verifier_network.py` for a verifier's own
+policy in the agent's Sandbox, by `tests/unit/test_egress_proxy.py` for the egress session
+and the proxy's decisions, by the Daytona, Firecracker, Orchard, Slurm and Fleet conformance
+suites, and by the `demo-netprobe` task, which attempts
 DNS resolution and a raw TCP connection from inside a sandbox and fails admission if either
 succeeds.
 
@@ -107,14 +110,16 @@ Two host-side services, each with its own per-episode sessions:
   call, and records every call including the ones that failed upstream. A `GET` for a
   model catalog, at any path ending in `/models`, lists only the imposed model, so a
   CLI that fetches one before its first call sees what its calls will receive.
-- **The egress proxy** serves `CONNECT` for hosts a task declared, and refuses
-  everything else with a 403 naming what was declared.
+- **The egress proxy** serves `CONNECT` for what the phase's list admits: under an
+  allowlist the declared hosts, refusing the rest with a 403 naming them; under a blocklist
+  every public host but the declared ones, refusing those with a 403 that does not name
+  them, since a Task may block a site because it holds the answer.
 
 They share one session registry, and neither accepts the other's sessions. The Gateway
 authenticates an episode's model sessions, the agent's and its Judges', wherever the
 dialect's clients send their key, such as a bearer header or the dialect's own key header.
 The proxy authenticates only the episode's egress session, which the Sandbox's relay sends
-through Basic proxy authentication and the Gateway refuses. Its hosts are those of the phase
+through Basic proxy authentication and the Gateway refuses. Its policy is that of the phase
 that runs, the agent's during its turns and the oracle's, the verifier's while `tests/` or
 `validation/` runs, and it is suspended at every other moment: what the agent left running
 reaches no host once its turn ends, the agent never reaches a verifier's hosts, and the
@@ -164,18 +169,42 @@ injects provider-required headers, and retains model enforcement, accounting, li
 retry coalescing, and Transport Trace. Provider billing and account quota remain
 provider-owned observations.
 
-Allowlisting is enforced here rather than with `iptables` on the host or a filtering tool
+Both lists are enforced here rather than with `iptables` on the host or a filtering tool
 inside the image, for two reasons: it needs no privilege we would otherwise not require,
 and it does not depend on tooling in an image we did not build. **Traffic that bypasses
 the proxy has nowhere to go**, so the failure mode is closed. Daytona's own
-allowlist takes this role there, for the same two reasons (section 1).
+allowlist takes this role there, for the same two reasons (section 1). A blocklist is not
+enforced by dropping its hosts' addresses at each Provider either: a name's addresses are
+neither stable nor its own, since one CDN address serves many sites and a name resolves to
+different addresses in different regions, so such a list would block bystanders and miss
+the host, and not every Provider can drop an address (Daytona has no such list). The proxy
+judges every connection the same way on every Provider.
 
 Matching is on the requested name: `pypi.org` is that host, and `*.pypi.org`
 that host and every name below it. An address or CIDR entry matches a client that asks for that address, and
 no name pattern admits an address. The proxy connects from the Host, so an entry reaching
-loopback or link-local addresses, cloud metadata included, fails when the Task loads. It is deliberately *not* on a resolved address: a task declares `pypi.org` because that is what
-it means, and pinning to whatever IP that resolved to once would break the task rather
-than tighten it.
+loopback or link-local addresses, cloud metadata included, fails when the Task loads. An
+allowlist is deliberately *not* matched on a resolved address: a task declares `pypi.org`
+because that is what it means, and pinning to whatever IP that resolved to once would break
+the task rather than tighten it.
+
+A blocklist admits what its author did not name, so the name alone would let a client
+through by another spelling of a blocked host: one of its addresses, or a name that a
+wildcard DNS service resolves into a blocked range. Under a blocklist the proxy therefore
+also:
+
+- resolves the name itself and refuses it when any of its addresses is blocked, or is not
+  public (loopback, link-local, private and shared ranges), and connects to an address it
+  checked rather than resolving again. The tunnel leaves from the Host, so without this a
+  blocklist would reach the Host's own networks, which `public` on Daytona or a Mac never
+  does; a Task that needs a private host names it in an allowlist;
+- closes a connection whose source and destination are one address, which reached the Host
+  itself, on any of its addresses;
+- reads the server names the client's TLS ClientHello asks for, reassembled from as many
+  records as carry it, before forwarding it, and closes the tunnel when any is blocked or the
+  ClientHello cannot be read. A client that validates `github.com`'s certificate at one of
+  its addresses names `github.com` there. The server's bytes flow meanwhile, so a protocol
+  whose server speaks first is not held up.
 
 ## 3. Provider credentials stay on the Host
 
@@ -461,9 +490,18 @@ the kernel its Sandbox runs on; no Provider widens a Sandbox for a feature it di
 name. On Daytona, Daytona itself sees everything in the sandbox and in the image pushed
 to its registry.
 
-**Traffic analysis, or what is said over an allowlisted tunnel.** Once `CONNECT`
-succeeds the tunnel is opaque by design — the point is to reach a declared host, not to
-inspect the conversation. An allowlisted host is a trusted host.
+**Traffic analysis, or what is said over an admitted tunnel.** Once `CONNECT`
+succeeds the tunnel is opaque by design, past a blocklist's look at the server name — the
+point is to reach an admitted host, not to inspect the conversation. An allowlisted host is
+a trusted host.
+
+**What a blocked host serves, from elsewhere.** A blocklist keeps the agent's programs from
+the hosts it names, by name, by address and by the server name of a TLS handshake. The same
+content on another host stays reachable: a mirror, an archive, a search engine's cache, a
+service that fetches a page on request. So does a blocked host reached at an address the
+list does not name by a client that hides its server name, with Encrypted Client Hello or
+none at all, or through a CDN whose handshake names another of its sites. A Task that must
+keep content from the agent withholds the network or allows only what it needs.
 
 **A provider-side network tool the Gateway does not name.** Each dialect refuses the
 tools and fields its README lists. A provider feature that reaches the network and is

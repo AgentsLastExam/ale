@@ -4,6 +4,7 @@ import base64
 
 import pytest
 
+from ale.core.taskspec import NetworkMode, NetworkPolicy
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.session import GatewaySession, SessionRegistry
 
@@ -18,7 +19,7 @@ def test_proxy_accepts_standard_basic_auth_for_the_episode_token() -> None:
             model="",
             purpose="egress",
             token="episode-token",
-            allowed_hosts=frozenset({"example.com"}),
+            policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",)),
         )
     )
     encoded = base64.b64encode(b"episode-token:").decode()

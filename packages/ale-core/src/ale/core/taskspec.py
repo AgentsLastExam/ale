@@ -66,7 +66,7 @@ __all__ = [
     "VerifierResources",
     "VerifierTable",
     "VerifySpec",
-    "host_allowed",
+    "host_listed",
     "is_credential_header",
     "is_credential_name",
 ]
@@ -270,6 +270,7 @@ class Resources(BaseModel):
 class NetworkMode(StrEnum):
     BLOCK = "block"
     ALLOWLIST = "allowlist"
+    BLOCKLIST = "blocklist"
     OPEN = "open"
 
 
@@ -280,8 +281,8 @@ def _address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
         return None
 
 
-def host_allowed(host: str, allowed_hosts: Iterable[str]) -> bool:
-    """Whether ``allowed_hosts`` admits ``host``.
+def host_listed(host: str, hosts: Iterable[str]) -> bool:
+    """Whether ``hosts``, an allowlist or a blocklist, names ``host``.
 
     A name matches itself; ``*.example.org`` matches ``example.org`` and every name below it,
     at any depth, which every Provider can enforce. An address matches itself and any range
@@ -289,13 +290,13 @@ def host_allowed(host: str, allowed_hosts: Iterable[str]) -> bool:
     """
     name = host.lower().rstrip(".")
     address = _address(name)
-    for allowed in (entry.lower() for entry in allowed_hosts):
+    for listed in (entry.lower() for entry in hosts):
         if address is None:
-            pattern = allowed.removeprefix("*.") if allowed.startswith("*.") else None
-            if name in (allowed, pattern) or (pattern and name.endswith("." + pattern)):
+            pattern = listed.removeprefix("*.") if listed.startswith("*.") else None
+            if name in (listed, pattern) or (pattern and name.endswith("." + pattern)):
                 return True
-        elif allowed == address.compressed or (
-            "/" in allowed and address in ipaddress.ip_network(allowed)
+        elif listed == address.compressed or (
+            "/" in listed and address in ipaddress.ip_network(listed)
         ):
             return True
     return False
@@ -306,13 +307,35 @@ class NetworkPolicy(BaseModel):
 
     mode: NetworkMode = NetworkMode.BLOCK
     allowed_hosts: tuple[str, ...] = ()
+    blocked_hosts: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    """Left out of a dump when empty, so a policy without a blocklist keeps its hash."""
+
+    @property
+    def proxied(self) -> bool:
+        """Whether a Sandbox under it is sealed and reaches hosts only through the Host's
+        egress proxy, which decides each connection by the policy."""
+        return self.mode in (NetworkMode.ALLOWLIST, NetworkMode.BLOCKLIST)
+
+    def admits(self, host: str) -> bool:
+        """Whether a client asking for ``host``, a name or an address, may reach it."""
+        if self.mode is NetworkMode.ALLOWLIST:
+            return host_listed(host, self.allowed_hosts)
+        if self.mode is NetworkMode.BLOCKLIST:
+            return not host_listed(host, self.blocked_hosts)
+        return self.mode is NetworkMode.OPEN
+
+    # --- validation ---
 
     @model_validator(mode="after")
     def _check_hosts(self) -> Self:
-        if self.mode is NetworkMode.ALLOWLIST and not self.allowed_hosts:
-            raise ValueError("allowlist mode requires at least one allowed host")
-        if self.mode is not NetworkMode.ALLOWLIST and self.allowed_hosts:
-            raise ValueError(f"allowed_hosts is meaningless in {self.mode} mode")
+        for mode, hosts, field in (
+            (NetworkMode.ALLOWLIST, self.allowed_hosts, "allowed_hosts"),
+            (NetworkMode.BLOCKLIST, self.blocked_hosts, "blocked_hosts"),
+        ):
+            if self.mode is mode and not hosts:
+                raise ValueError(f"{mode} mode requires at least one host in {field}")
+            if self.mode is not mode and hosts:
+                raise ValueError(f"{field} is meaningless in {self.mode} mode")
         return self
 
 
@@ -768,17 +791,20 @@ class TaskSpec(BaseModel):
         """The network a solver Sandbox is created with: the agent's, and when ``tests/`` or
         ``validation/`` runs in it, one that can also apply the verifier's. A Provider fixes
         at creation whether it can seal a Sandbox and relay it to the egress proxy, so this
-        is the least open mode either phase needs, with every host either allowlist names;
-        each phase then applies its own policy."""
+        is the least open provisioning either phase needs: a proxied policy (``allowlist`` or
+        ``blocklist``), with every host when both are allowlists and else the agent's or, when
+        the agent's is not proxied, the verifier's; then ``block``; then ``open``. Each phase
+        then applies its own policy."""
         placements = (self.verify.environment_mode, self.validation_spec.environment_mode)
         if VerificationMode.SHARED not in placements:
             return self.network
         policies = (self.network, self.verify.network)
-        modes = {policy.mode for policy in policies}
-        if NetworkMode.ALLOWLIST in modes:
+        if all(policy.mode is NetworkMode.ALLOWLIST for policy in policies):
             hosts = dict.fromkeys(host for policy in policies for host in policy.allowed_hosts)
             return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=tuple(hosts))
-        if NetworkMode.BLOCK in modes:
+        if proxied := next((policy for policy in policies if policy.proxied), None):
+            return proxied
+        if any(policy.mode is NetworkMode.BLOCK for policy in policies):
             return NetworkPolicy(mode=NetworkMode.BLOCK)
         return NetworkPolicy(mode=NetworkMode.OPEN)
 
@@ -855,9 +881,11 @@ class TaskSpec(BaseModel):
 SCHEMA_VERSION = "0.2.0"
 
 #: ``task.toml`` network modes and what they mean for the agent, the oracle and the verifier.
+#: ``blocklist`` is ALE's; Harbor's format has the other three.
 _NETWORK_MODES = {
     "no-network": NetworkMode.BLOCK,
     "allowlist": NetworkMode.ALLOWLIST,
+    "blocklist": NetworkMode.BLOCKLIST,
     "public": NetworkMode.OPEN,
 }
 
@@ -956,7 +984,7 @@ def _is_loopback(host: str) -> bool:
 
 
 def _normal_host(host: str) -> str:
-    """An ``allowed_hosts`` entry in Harbor's normal form."""
+    """An ``allowed_hosts`` or ``blocked_hosts`` entry in Harbor's normal form."""
     name = host.strip().lower().rstrip(".")
     try:
         network = ipaddress.ip_network(name)
@@ -974,12 +1002,15 @@ def _normal_host(host: str) -> str:
     return network.compressed if "/" in name else network.network_address.compressed
 
 
-#: A ``task.toml`` network mode, as Harbor spells it.
-_HarborNetworkMode = Literal["no-network", "allowlist", "public"]
+#: A ``task.toml`` network mode, as Harbor spells its three, and ALE's ``blocklist``.
+_NetworkModeName = Literal["no-network", "allowlist", "blocklist", "public"]
 
 
 def _table_network(
-    mode: str | None, hosts: tuple[str, ...] | None, allow_internet: bool | None = None
+    mode: str | None,
+    allowed: tuple[str, ...] | None,
+    blocked: tuple[str, ...] | None,
+    allow_internet: bool | None = None,
 ) -> NetworkPolicy | None:
     """The policy a table names, with Harbor's deprecated ``allow_internet`` read only when it
     names no mode; ``None`` when it names none."""
@@ -987,14 +1018,22 @@ def _table_network(
         mode = "public" if allow_internet else "no-network"
     if mode is None:
         return None
-    return NetworkPolicy(mode=_NETWORK_MODES[mode], allowed_hosts=hosts or ())
+    return NetworkPolicy(
+        mode=_NETWORK_MODES[mode], allowed_hosts=allowed or (), blocked_hosts=blocked or ()
+    )
 
 
-def _check_table_network(mode: str | None, hosts: tuple[str, ...] | None) -> None:
-    if mode == "allowlist" and not hosts:
-        raise ValueError("network_mode 'allowlist' requires a non-empty allowed_hosts")
-    if mode != "allowlist" and hosts is not None:
-        raise ValueError("allowed_hosts requires network_mode 'allowlist'")
+def _check_table_network(
+    mode: str | None, allowed: tuple[str, ...] | None, blocked: tuple[str, ...] | None
+) -> None:
+    for name, hosts, field in (
+        ("allowlist", allowed, "allowed_hosts"),
+        ("blocklist", blocked, "blocked_hosts"),
+    ):
+        if mode == name and not hosts:
+            raise ValueError(f"network_mode {name!r} requires a non-empty {field}")
+        if mode != name and hosts is not None:
+            raise ValueError(f"{field} requires network_mode {name!r}")
 
 
 def _harbor_image_key(data: Any) -> Any:
@@ -1030,10 +1069,11 @@ class EnvironmentTable(BaseModel):
     skills_dir: str | None = Field(default=None, min_length=1)
     mcp_servers: tuple[McpServerTable, ...] = ()
     healthcheck: Healthcheck | None = None
-    network_mode: _HarborNetworkMode | None = None
+    network_mode: _NetworkModeName | None = None
     """Harbor's baseline: the agent's network unless ``[agent]`` names its own, and the
     verifier's unless ``[verifier]``, or a verifier of its own's environment, names one."""
     allowed_hosts: tuple[str, ...] | None = None
+    blocked_hosts: tuple[str, ...] | None = None
     allow_internet: bool | None = Field(default=None, strict=True)
     """Harbor's deprecated switch, read only without ``network_mode``: ``true`` is
     ``public``, ``false`` ``no-network``."""
@@ -1045,7 +1085,9 @@ class EnvironmentTable(BaseModel):
     @property
     def network(self) -> NetworkPolicy | None:
         """The baseline this table names, or ``None``."""
-        return _table_network(self.network_mode, self.allowed_hosts, self.allow_internet)
+        return _table_network(
+            self.network_mode, self.allowed_hosts, self.blocked_hosts, self.allow_internet
+        )
 
     # --- validation ---
 
@@ -1054,14 +1096,14 @@ class EnvironmentTable(BaseModel):
     def _docker_image(cls, data: Any) -> Any:
         return _harbor_image_key(data)
 
-    @field_validator("allowed_hosts")
+    @field_validator("allowed_hosts", "blocked_hosts")
     @classmethod
     def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
         return None if hosts is None else tuple(_normal_host(host) for host in hosts)
 
     @model_validator(mode="after")
-    def _hosts_only_for_allowlist(self) -> Self:
-        _check_table_network(self.network_mode, self.allowed_hosts)
+    def _hosts_only_for_their_mode(self) -> Self:
+        _check_table_network(self.network_mode, self.allowed_hosts, self.blocked_hosts)
         return self
 
     @field_validator("os", mode="before")
@@ -1077,9 +1119,10 @@ class AgentTable(BaseModel):
 
     user: str = Field(default="user", pattern=_ACCOUNT)
     timeout_sec: float = Field(default=900, gt=0, allow_inf_nan=False, strict=True)
-    network_mode: _HarborNetworkMode | None = None
+    network_mode: _NetworkModeName | None = None
     """Unset, ``[environment]``'s baseline applies, as in Harbor, and else no network."""
     allowed_hosts: tuple[str, ...] | None = None
+    blocked_hosts: tuple[str, ...] | None = None
     sudo: bool = Field(default=False, strict=True)
     workdir: str | None = Field(default=None, min_length=1)
     validation_rounds: int = Field(default=0, ge=0, strict=True)
@@ -1089,18 +1132,18 @@ class AgentTable(BaseModel):
     @property
     def network(self) -> NetworkPolicy | None:
         """The policy this table names, or ``None``."""
-        return _table_network(self.network_mode, self.allowed_hosts)
+        return _table_network(self.network_mode, self.allowed_hosts, self.blocked_hosts)
 
     # --- validation ---
 
-    @field_validator("allowed_hosts")
+    @field_validator("allowed_hosts", "blocked_hosts")
     @classmethod
     def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
         return None if hosts is None else tuple(_normal_host(host) for host in hosts)
 
     @model_validator(mode="after")
-    def _hosts_only_for_allowlist(self) -> Self:
-        _check_table_network(self.network_mode, self.allowed_hosts)
+    def _hosts_only_for_their_mode(self) -> Self:
+        _check_table_network(self.network_mode, self.allowed_hosts, self.blocked_hosts)
         return self
 
 
@@ -1128,17 +1171,20 @@ class VerifierEnvironmentTable(BaseModel):
     workdir: str | None = Field(default=None, min_length=1)
     """Where a verifier of its own runs ``tests/`` and ``validation/``, instead of
     ``[environment].workdir``."""
-    network_mode: _HarborNetworkMode | None = None
+    network_mode: _NetworkModeName | None = None
     """Harbor's baseline for a verifier of its own: its network unless ``[verifier]`` names
     one."""
     allowed_hosts: tuple[str, ...] | None = None
+    blocked_hosts: tuple[str, ...] | None = None
     allow_internet: bool | None = Field(default=None, strict=True)
     """Harbor's deprecated switch, read only without ``network_mode``."""
 
     @property
     def network(self) -> NetworkPolicy | None:
         """The baseline this table names, or ``None``."""
-        return _table_network(self.network_mode, self.allowed_hosts, self.allow_internet)
+        return _table_network(
+            self.network_mode, self.allowed_hosts, self.blocked_hosts, self.allow_internet
+        )
 
     # --- validation ---
 
@@ -1147,14 +1193,14 @@ class VerifierEnvironmentTable(BaseModel):
     def _docker_image(cls, data: Any) -> Any:
         return _harbor_image_key(data)
 
-    @field_validator("allowed_hosts")
+    @field_validator("allowed_hosts", "blocked_hosts")
     @classmethod
     def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
         return None if hosts is None else tuple(_normal_host(host) for host in hosts)
 
     @model_validator(mode="after")
-    def _hosts_only_for_allowlist(self) -> Self:
-        _check_table_network(self.network_mode, self.allowed_hosts)
+    def _hosts_only_for_their_mode(self) -> Self:
+        _check_table_network(self.network_mode, self.allowed_hosts, self.blocked_hosts)
         return self
 
 
@@ -1171,10 +1217,11 @@ class VerifierTable(BaseModel):
         Annotated[str, Field(pattern=_ACCOUNT)] | Annotated[int, Field(ge=0, strict=True)] | None
     ) = None
     """Harbor's account for the verifier, by name or uid; unset, the framework's identity."""
-    network_mode: _HarborNetworkMode | None = None
+    network_mode: _NetworkModeName | None = None
     """The verifier's own network, for ``tests/`` and ``validation/`` alike; unset, Harbor's
     baseline applies (``TaskConfig.verifier_network``)."""
     allowed_hosts: tuple[str, ...] | None = None
+    blocked_hosts: tuple[str, ...] | None = None
 
     @property
     def mode(self) -> VerificationMode:
@@ -1189,18 +1236,18 @@ class VerifierTable(BaseModel):
     @property
     def network(self) -> NetworkPolicy | None:
         """The policy this table names, or ``None``."""
-        return _table_network(self.network_mode, self.allowed_hosts)
+        return _table_network(self.network_mode, self.allowed_hosts, self.blocked_hosts)
 
     # --- validation ---
 
-    @field_validator("allowed_hosts")
+    @field_validator("allowed_hosts", "blocked_hosts")
     @classmethod
     def _normal_hosts(cls, hosts: tuple[str, ...] | None) -> tuple[str, ...] | None:
         return None if hosts is None else tuple(_normal_host(host) for host in hosts)
 
     @model_validator(mode="after")
-    def _hosts_only_for_allowlist(self) -> Self:
-        _check_table_network(self.network_mode, self.allowed_hosts)
+    def _hosts_only_for_their_mode(self) -> Self:
+        _check_table_network(self.network_mode, self.allowed_hosts, self.blocked_hosts)
         return self
 
     @model_validator(mode="after")
@@ -1255,7 +1302,8 @@ class ValidationTable(BaseModel):
                 "[verifier]'s variables"
             )
         if keys := sorted(
-            {"network_mode", "allowed_hosts", "allow_internet"} & self.environment.model_fields_set
+            {"network_mode", "allowed_hosts", "blocked_hosts", "allow_internet"}
+            & self.environment.model_fields_set
         ):
             raise ValueError(
                 f"[validation.environment] cannot set {' or '.join(keys)}: validation/ runs "

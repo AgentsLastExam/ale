@@ -14,7 +14,7 @@ WinINet settings, not `HTTPS_PROXY`. Pointed at the egress proxy, Chrome fails w
 WinINet settings hold no credentials, and Chrome ignores credentials in manual proxy
 settings. Windows guestd runs elevated as the agent's own account, in its session.
 
-**Solution.** The [allowlist relay](../README.md#allowlist-relay). `guestd/egress.py` sets
+**Solution.** The [allowlist relay](../README.md#egress-relay). `guestd/egress.py` sets
 the default connection's WinINet per-connection options (flags, proxy, bypass) with
 `InternetSetOptionW` and announces the change, so a browser already running switches as
 well. It reads the flags as `INTERNET_PER_CONN_FLAGS_UI`: the plain flags lose automatic

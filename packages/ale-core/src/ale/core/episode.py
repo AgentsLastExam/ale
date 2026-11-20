@@ -29,7 +29,7 @@ from ale.core.sandbox import (
     SandboxRequest,
 )
 from ale.core.task import ResolvedVariables, TaskSourceContext
-from ale.core.taskspec import TaskSpec
+from ale.core.taskspec import NetworkPolicy, TaskSpec
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Rewards
 
@@ -215,14 +215,14 @@ class EpisodeContext:
     """Filled in as each phase exits; copied into the terminal result."""
 
     proxy_url: str = ""
-    """Egress proxy for allowlist tasks; empty when none was started."""
+    """Egress proxy for ``allowlist`` and ``blocklist`` Tasks; empty when none was started."""
     egress_token: str = ""
     """The token of this episode's egress session, which a Sandbox's relay presents to the
     egress proxy; empty when the episode has none."""
-    open_egress_session: Callable[[tuple[str, ...]], None] | None = None
-    """Opens the egress session for the hosts of a phase's ``allowlist`` policy, the agent's
-    while its turn runs or the verifier's while ``validation/`` or ``tests/`` runs, or
-    suspends it, given none: the proxy refuses it between phases, so nothing the agent left
+    open_egress_session: Callable[[NetworkPolicy], None] | None = None
+    """Opens the egress session with a phase's proxied policy, the agent's while its turn
+    runs or the verifier's while ``validation/`` or ``tests/`` runs, or suspends it, given
+    one that is not proxied: the proxy refuses it between phases, so nothing the agent left
     running reaches a host outside the phase that declared it."""
 
     sandbox_identity: SandboxProvenance | None = None

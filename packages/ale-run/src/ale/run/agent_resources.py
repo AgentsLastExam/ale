@@ -24,7 +24,6 @@ from ale.core.taskspec import (
     SkillSource,
     StdioMcpServer,
     ToolProvision,
-    host_allowed,
 )
 
 __all__ = ["resolve_agent_resources"]
@@ -278,14 +277,13 @@ def _check_network(server: McpServer, network: NetworkPolicy) -> None:
     host = (urlparse(server.url).hostname or "").lower()
     if network.mode is NetworkMode.BLOCK:
         raise AgentResourceError(f"remote MCP {server.name!r} is blocked by task network policy")
-    if network.mode is NetworkMode.ALLOWLIST:
-        if not host_allowed(host, network.allowed_hosts):
-            raise AgentResourceError(
-                f"remote MCP {server.name!r} host {host!r} is not in task allowed_hosts"
-            )
+    if network.proxied:
+        if not network.admits(host):
+            where = "not in task allowed_hosts" if network.allowed_hosts else "in blocked_hosts"
+            raise AgentResourceError(f"remote MCP {server.name!r} host {host!r} is {where}")
         if urlparse(server.url).scheme != "https":
             raise AgentResourceError(
-                f"remote MCP {server.name!r} needs an https URL: an allowlist carries TLS only"
+                f"remote MCP {server.name!r} needs an https URL: the egress proxy carries TLS only"
             )
 
 

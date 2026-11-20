@@ -13,7 +13,7 @@ writes the Transport Trace.
 | `gemini.py` | Gemini `generateContent` normalization and request policy |
 | `openai_responses.py` | OpenAI Responses normalization |
 | `openai_chat_completions.py` | Chat Completions normalization |
-| `proxy.py` | allowlisted non-model egress for Sandbox processes, authenticated by the episode's egress session |
+| `proxy.py` | non-model egress for Sandbox processes under an allowlist or a blocklist, authenticated by the episode's egress session |
 
 API-key and subscription modes share the same Sandbox-side protocol. Subscription
 credential loading and refresh live in `ale.run.subscription`; configuration is covered

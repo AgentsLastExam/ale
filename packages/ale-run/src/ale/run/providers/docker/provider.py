@@ -494,11 +494,11 @@ class _RuncConfinement:
     async def start(cls, sandbox_id: str, request: SandboxRequest, networks: _Networks) -> Self:
         """The per-episode network.
 
-        ``block`` and ``allowlist`` both use ``--internal``: the bridge has no route off
-        the host, so the only reachable thing is the gateway. They differ in what the
-        gateway will then forward, not in what the sandbox can dial — which is why
-        allowlisting needs no privileged host rules and no tooling inside an image we do
-        not control. ``open`` uses the default bridge.
+        ``block``, ``allowlist`` and ``blocklist`` all use ``--internal``: the bridge has no
+        route off the host, so the only reachable thing is the gateway. They differ in what
+        the gateway will then forward, not in what the sandbox can dial — which is why
+        either list needs no privileged host rules and no tooling inside an image we do not
+        control. ``open`` uses the default bridge.
         """
         if request.network.mode is NetworkMode.OPEN:
             return cls(None, await networks.host_ip())
@@ -2494,7 +2494,7 @@ class DockerProvider(Provider):
         if len(networks) > 1:
             raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
         # The container, not this run's configuration, says how it was isolated, and whether
-        # it is sealed now: an allowlist agent's commands need the proxy only then.
+        # it is sealed now: a proxied agent's commands need the proxy only then.
         try:
             mode = NetworkMode(labels.get(NETWORK_LABEL, ""))
         except ValueError:

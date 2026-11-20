@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ale.core.taskspec import host_allowed
+from ale.core.taskspec import NetworkPolicy
 
 __all__ = [
     "CallUsage",
@@ -121,7 +121,7 @@ class GatewaySession:
     suspended: bool = False
     """Whether its calls are refused for now: an agent's from the end of its first turn, or
     of its policy rollout, except while a later turn runs; a Judge's except while a verifier
-    runs; an egress session's except while a phase with an allowlist runs. Nothing run
+    runs; an egress session's except while a phase with a proxied policy runs. Nothing run
     between the agent's turns or after its last then spends either model session."""
 
     purpose: Literal["agent", "judge", "egress"] = "agent"
@@ -131,10 +131,9 @@ class GatewaySession:
     upstream: Upstream | None = field(default=None, repr=False)
     """The session's own upstream, or ``None`` for the Gateway's."""
 
-    allowed_hosts: frozenset[str] = frozenset()
-    """The hosts an egress session reaches through the proxy: those of the phase that runs.
-
-    Empty means none, which is the default: a task that declared no additional access
+    policy: NetworkPolicy = field(default_factory=NetworkPolicy)
+    """The policy of the phase that runs, for an egress session: what it reaches through the
+    proxy. The default, ``block``, reaches nothing: a task that declared no additional access
     gets none, and cannot acquire any by asking.
     """
     provider_web_tools: bool = False
@@ -145,14 +144,16 @@ class GatewaySession:
     """
 
     def may_reach(self, host: str) -> bool:
-        """Whether ``host`` is allowlisted.
+        """Whether the phase's policy admits ``host``, as the client asked for it.
 
         Matching is on the name the client asked for, not on a resolved address: a task
         declares ``pypi.org`` because that is what it means, and pinning to whatever IP
-        that resolved to once would break the task rather than tighten it.
+        that resolved to once would break the task rather than tighten it. Under a
+        blocklist the proxy also judges the address it connects to and the name the TLS
+        handshake asks for (``proxy.py``).
         """
         name = host.partition(":")[0] if host.count(":") == 1 else host
-        return host_allowed(name, self.allowed_hosts)
+        return self.policy.admits(name)
 
     _replay: dict[str, Any] = field(default_factory=dict, repr=False)
     _inflight: dict[str, asyncio.Future[Any]] = field(default_factory=dict, repr=False)

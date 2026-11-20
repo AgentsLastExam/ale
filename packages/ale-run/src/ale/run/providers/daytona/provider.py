@@ -8,12 +8,12 @@ works within that:
   and built from there by digest, with the requested CPU, memory and disk.
 * **Channel.** guestd runs over an SSH exec session, the way it runs over ``docker exec``.
   A second SSH session carries a stream tunnel (``guestd/tunnel.py``) so that the agent can
-  reach the Host's Gateway, and under ``allowlist`` the Host's egress proxy, on the
-  sandbox's own loopback.
+  reach the Host's Gateway, and under ``allowlist`` or ``blocklist`` the Host's egress
+  proxy, on the sandbox's own loopback.
 * **Network.** Daytona's ``networkBlockAll`` applies outside the sandbox, where the agent
-  cannot lift it, in place of Docker's internal bridge. ``block`` and ``allowlist`` both
-  seal with it; an allowlist then reaches its hosts through the tunneled proxy and guestd's
-  relay, as on Docker. A GPU runner also names a proxy of its own in every process's
+  cannot lift it, in place of Docker's internal bridge. ``block``, ``allowlist`` and
+  ``blocklist`` all seal with it; a list then reaches its hosts through the tunneled proxy
+  and guestd's relay, as on Docker. A GPU runner also names a proxy of its own in every process's
   environment, which nothing needs, so guestd starts without it.
 * **Daemon.** Daytona's daemon listens, without authentication, on a few local ports and
   runs what it is asked as root. The Provider rejects connections to them from every
@@ -443,8 +443,8 @@ class DaytonaSandbox(TunneledSandbox):
     async def close_egress(self) -> None:
         """Seal the sandbox for the agent; Daytona enforces it outside the sandbox.
 
-        ``block`` and ``allowlist`` both block all outbound traffic. An allowlist's hosts
-        are then reached through the egress proxy the tunnel carries in, and the relay
+        ``block``, ``allowlist`` and ``blocklist`` all block all outbound traffic. A list's
+        hosts are then reached through the egress proxy the tunnel carries in, and the relay
         guestd puts in front of it. Daytona's own domain allowlist is not used: it
         terminates TLS and re-signs with a CA that only some clients are told to trust.
         """

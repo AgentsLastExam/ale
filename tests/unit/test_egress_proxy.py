@@ -1,17 +1,23 @@
-"""The allowlist, tested where it is actually decided.
+"""The allowlist and the blocklist, tested where they are actually decided.
 
-``network.mode: allowlist`` is enforced here rather than by rules on the host or tools
-inside an image, so these are the assertions that matter: a declared host gets through,
-everything else does not, and neither outcome depends on what the sandbox chose to run.
+Both lists are enforced here rather than by rules on the host or tools inside an image, so
+these are the assertions that matter: an admitted host gets through, everything else does
+not, and neither outcome depends on what the sandbox chose to run.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import socket
+import ssl
+from collections.abc import AsyncIterator
 
 import pytest
 from aiohttp import ClientSession
 
+from ale.core.taskspec import NetworkMode, NetworkPolicy
+from ale.run.gateway import proxy as proxy_module
 from ale.run.gateway.proxy import EgressProxy
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession, SessionRegistry
@@ -19,11 +25,17 @@ from ale.run.gateway.session import GatewaySession, SessionRegistry
 pytestmark = pytest.mark.unit
 
 
+def allowlist(*hosts: str) -> NetworkPolicy:
+    return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=hosts)
+
+
+def blocklist(*hosts: str) -> NetworkPolicy:
+    return NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=hosts)
+
+
 def egress(*hosts: str) -> GatewaySession:
     """An episode's egress session, open for ``hosts``."""
-    return GatewaySession(
-        episode_id="e", model="", purpose="egress", allowed_hosts=frozenset(hosts)
-    )
+    return GatewaySession(episode_id="e", model="", purpose="egress", policy=allowlist(*hosts))
 
 
 class TestAllowlistMatching:
@@ -65,7 +77,9 @@ class TestAllowlistMatching:
 
     def test_declaring_nothing_allows_nothing(self) -> None:
         """The default is no additional egress, and it cannot be acquired by asking."""
-        assert not self.session().may_reach("example.com")
+        assert not GatewaySession(episode_id="e", model="", purpose="egress").may_reach(
+            "example.com"
+        )
 
 
 class TestProxyEnforcement:
@@ -156,7 +170,7 @@ class TestProxyEnforcement:
         session.suspended = True
         assert (await self.connect(server, "example.com:443", session.token))[0] == 407
         # The verifier's phase: its hosts, not the agent's.
-        session.allowed_hosts, session.suspended = frozenset({"localhost"}), False
+        session.policy, session.suspended = allowlist("localhost"), False
         assert (await self.connect(server, "example.com:443", session.token))[0] == 403
         assert (await self.connect(server, "localhost:1", session.token))[0] == 502
 
@@ -171,7 +185,7 @@ class TestProxyEnforcement:
                 episode_id="e",
                 model="m",
                 purpose=purpose,  # type: ignore[arg-type]
-                allowed_hosts=frozenset({"example.com"}),
+                policy=allowlist("example.com"),
             )
         )
         status, _ = await self.connect(server, "example.com:443", model.token)
@@ -205,3 +219,253 @@ async def test_the_gateway_refuses_an_egress_session_for_model_calls() -> None:
         assert gateway.sessions.egress(session.token) is session
     finally:
         await gateway.stop()
+
+
+def client_hello(server_name: str) -> bytes:
+    """The first record a real TLS client sends for ``server_name``."""
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = ssl.create_default_context().wrap_bio(incoming, outgoing, server_hostname=server_name)
+    with contextlib.suppress(ssl.SSLWantReadError):
+        tls.do_handshake()
+    return outgoing.read()
+
+
+def in_two_records(record: bytes) -> bytes:
+    """``record``'s handshake split across two TLS records, which servers accept."""
+    body = record[5:]
+    return b"".join(
+        record[:3] + len(part).to_bytes(2, "big") + part for part in (body[:60], body[60:])
+    )
+
+
+class _Upstream:
+    """A server the proxy tunnels to, recording what reaches it; with ``banner``, it speaks
+    first. On 127.0.0.2, so that the proxy's connection to it comes from another address."""
+
+    def __init__(self, banner: bytes = b"") -> None:
+        self.banner = banner
+        self.received = b""
+        self.connected = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.connected.set()
+        writer.write(self.banner)
+        with contextlib.suppress(ConnectionError):
+            while chunk := await reader.read(65536):
+                self.received += chunk
+        self.closed.set()
+        writer.close()
+
+
+class TestBlocklist:
+    """A blocklist admits every public host but the listed ones, judged by the name asked
+    for, every address it resolves to, and the server name its TLS handshake asks for."""
+
+    @pytest.fixture
+    async def proxy(self) -> AsyncIterator[tuple[EgressProxy, GatewaySession]]:
+        registry = SessionRegistry()
+        session = registry.open(
+            GatewaySession(
+                episode_id="e",
+                model="",
+                purpose="egress",
+                policy=blocklist("*.blocked.test", "1.2.3.0/24"),
+            )
+        )
+        server = EgressProxy(registry, host="127.0.0.1")
+        await server.start()
+        try:
+            yield server, session
+        finally:
+            await server.stop()
+
+    @pytest.fixture
+    def loopback_is_public(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Lets the tunnel reach a server on this machine's loopback, as it would a public
+        host, so the rest of the path can be tested without the Internet."""
+
+        def unreachable(address: str, policy: NetworkPolicy) -> str | None:
+            if address.startswith("127."):
+                return None if policy.admits(address) else "is blocked"
+            return original(address, policy)
+
+        original = proxy_module._unreachable
+        monkeypatch.setattr(proxy_module, "_unreachable", unreachable)
+
+    @staticmethod
+    async def open(
+        server: EgressProxy, target: str, token: str
+    ) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        writer.write(
+            f"CONNECT {target} HTTP/1.1\r\nProxy-Authorization: Bearer {token}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        head = (await reader.readuntil(b"\r\n\r\n")).decode()
+        if " 200 " not in head.split("\r\n")[0]:
+            head += (await reader.read()).decode()
+        return head, reader, writer
+
+    @staticmethod
+    @contextlib.asynccontextmanager
+    async def upstream(banner: bytes = b"") -> AsyncIterator[tuple[_Upstream, int]]:
+        server = _Upstream(banner)
+        try:
+            listener = await asyncio.start_server(server.serve, "127.0.0.2", 0)
+        except OSError:
+            pytest.skip("127.0.0.2 is not a loopback address here")
+        try:
+            yield server, listener.sockets[0].getsockname()[1]
+        finally:
+            listener.close()
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_host_is_refused_without_naming_the_list(self, proxy) -> None:  # type: ignore[no-untyped-def]
+        """A Task may block a site because it holds the answer: the refusal names neither it
+        nor the rest of the list."""
+        server, session = proxy
+        for target in ("blocked.test:443", "www.Blocked.test.:443", "1.2.3.9:443"):
+            head, _, writer = await self.open(server, target, session.token)
+            writer.close()
+            assert head.startswith("HTTP/1.1 403"), target
+            assert "blocked by this task's network policy" in head
+            assert "*.blocked.test" not in head and "1.2.3.0/24" not in head
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "127.0.0.1:22",
+            "[::1]:22",
+            "localhost:22",
+            "10.0.0.1:443",
+            "169.254.169.254:80",
+            "[::ffff:169.254.169.254]:80",
+            "[64:ff9b::a9fe:a9fe]:80",
+        ],
+    )
+    async def test_the_host_s_own_networks_are_refused(self, proxy, target: str) -> None:  # type: ignore[no-untyped-def]
+        """The tunnel leaves from the Host, so a host that is not public would reach its
+        loopback, its networks or its cloud metadata, which no Sandbox reaches."""
+        server, session = proxy
+        head, _, writer = await self.open(server, target, session.token)
+        writer.close()
+        assert head.startswith("HTTP/1.1 403")
+        assert "is not a public address" in head
+
+    @pytest.mark.asyncio
+    async def test_a_name_is_judged_by_every_address_it_resolves_to(  # type: ignore[no-untyped-def]
+        self, proxy, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wildcard DNS name spells a blocked address differently; a name that resolves
+        to a public and a private address alike is the private host too."""
+        resolve = socket.getaddrinfo
+
+        def getaddrinfo(host, port, *args, **kwargs):  # type: ignore[no-untyped-def]
+            fake = {"mirror.test": ["8.8.8.8", "1.2.3.5"], "split.test": ["8.8.8.8", "10.9.9.9"]}
+            if host in fake:
+                return [
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))
+                    for address in fake[host]
+                ]
+            return resolve(host, port, *args, **kwargs)
+
+        monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+        server, session = proxy
+        for target, reason in (
+            ("mirror.test:443", "(1.2.3.5) is blocked"),
+            ("split.test:443", "(10.9.9.9) is not a public address"),
+        ):
+            head, _, writer = await self.open(server, target, session.token)
+            writer.close()
+            assert head.startswith("HTTP/1.1 403"), target
+            assert reason in head
+
+    @pytest.mark.asyncio
+    async def test_a_connection_that_reaches_the_host_itself_is_closed(  # type: ignore[no-untyped-def]
+        self, proxy, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An address of the Host's own may be public; a connection to it comes from that
+        same address, so it is told apart without listing the Host's addresses."""
+        monkeypatch.setattr(proxy_module, "_unreachable", lambda address, policy: None)
+        server, session = proxy
+        upstream = _Upstream()
+        listener = await asyncio.start_server(upstream.serve, "127.0.0.1", 0)
+        try:
+            port = listener.sockets[0].getsockname()[1]
+            head, _, writer = await self.open(server, f"127.0.0.1:{port}", session.token)
+            writer.close()
+        finally:
+            listener.close()
+        assert head.startswith("HTTP/1.1 403")
+        assert "is the Host itself" in head
+        assert upstream.received == b""
+
+    @pytest.mark.asyncio
+    async def test_an_admitted_server_name_is_tunneled_unchanged(  # type: ignore[no-untyped-def]
+        self, proxy, loopback_is_public: None
+    ) -> None:
+        server, session = proxy
+        hello = client_hello("example.org")
+        async with self.upstream() as (upstream, port):
+            head, _, writer = await self.open(server, f"127.0.0.2:{port}", session.token)
+            assert head.startswith("HTTP/1.1 200")
+            writer.write(hello + b"and then the rest")
+            await writer.drain()
+            writer.write_eof()
+            await asyncio.wait_for(upstream.closed.wait(), 5)
+            writer.close()
+        assert upstream.received == hello + b"and then the rest"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("split", [False, True])
+    async def test_a_handshake_naming_a_blocked_host_is_closed(  # type: ignore[no-untyped-def]
+        self, proxy, loopback_is_public: None, split: bool
+    ) -> None:
+        """At an address the list does not name, a client that validates the blocked host's
+        certificate asks for it by name, in one record or several."""
+        server, session = proxy
+        hello = client_hello("www.blocked.test")
+        async with self.upstream() as (upstream, port):
+            head, reader, writer = await self.open(server, f"127.0.0.2:{port}", session.token)
+            assert head.startswith("HTTP/1.1 200")
+            writer.write(in_two_records(hello) if split else hello)
+            await writer.drain()
+            assert await asyncio.wait_for(reader.read(), 5) == b""
+            await asyncio.wait_for(upstream.closed.wait(), 5)
+            writer.close()
+        assert upstream.received == b""
+
+    @pytest.mark.asyncio
+    async def test_a_handshake_that_cannot_be_read_is_closed(  # type: ignore[no-untyped-def]
+        self, proxy, loopback_is_public: None
+    ) -> None:
+        """Unjudged is not admitted."""
+        server, session = proxy
+        async with self.upstream() as (upstream, port):
+            head, reader, writer = await self.open(server, f"127.0.0.2:{port}", session.token)
+            assert head.startswith("HTTP/1.1 200")
+            writer.write(b"\x16\x03\x01\x00\x06\x01\x00\x00\x02\x03\x03")
+            await writer.drain()
+            assert await asyncio.wait_for(reader.read(), 5) == b""
+            writer.close()
+        assert upstream.received == b""
+
+    @pytest.mark.asyncio
+    async def test_a_server_that_speaks_first_is_not_held_up(  # type: ignore[no-untyped-def]
+        self, proxy, loopback_is_public: None
+    ) -> None:
+        """SSH and SMTP servers speak before their clients; waiting for a ClientHello must
+        not stall them."""
+        server, session = proxy
+        async with self.upstream(banner=b"SSH-2.0-test\r\n") as (upstream, port):
+            head, reader, writer = await self.open(server, f"127.0.0.2:{port}", session.token)
+            assert head.startswith("HTTP/1.1 200")
+            assert await asyncio.wait_for(reader.readline(), 5) == b"SSH-2.0-test\r\n"
+            writer.write(b"SSH-2.0-client\r\n")
+            await writer.drain()
+            writer.write_eof()
+            await asyncio.wait_for(upstream.closed.wait(), 5)
+            writer.close()
+        assert upstream.received == b"SSH-2.0-client\r\n"

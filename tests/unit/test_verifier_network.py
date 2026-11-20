@@ -38,12 +38,16 @@ pytestmark = pytest.mark.unit
 PROXY = "http://127.0.0.1:9"
 EXAMPLE = {"network_mode": "allowlist", "allowed_hosts": ["example.com"]}
 PYPI = {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]}
+NO_GITHUB = {"network_mode": "blocklist", "blocked_hosts": ["github.com"]}
+EXAMPLE_POLICY = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
+PYPI_POLICY = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",))
+NO_GITHUB_POLICY = NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("github.com",))
 #: Where the episodes open their egress sessions, as the proxy's own registry.
 REGISTRY = SessionRegistry()
 
-#: What one phase saw: where it ran, whether the Sandbox was sealed, and the hosts the
-#: egress session reached then, or None while it was suspended or absent.
-Seen = tuple[str, bool, tuple[str, ...] | None]
+#: What one phase saw: where it ran, whether the Sandbox was sealed, and the policy the
+#: egress session held then, or None while it was suspended or absent.
+Seen = tuple[str, bool, NetworkPolicy | None]
 
 
 def _task(
@@ -63,8 +67,8 @@ def _watch(
 
     def state(name: str, sandbox: Any) -> Seen:
         session = registry.egress(sandbox.request.proxy_token)
-        hosts = None if session is None else tuple(sorted(session.allowed_hosts))
-        return name, not sandbox.egress_open, hosts
+        policy = None if session is None else session.policy
+        return name, not sandbox.egress_open, policy
 
     exec_ = MemorySandbox.exec
 
@@ -117,16 +121,15 @@ async def test_every_phase_has_its_own_allowlist_through_one_egress_session(
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
 
     # The agent's turns reach its hosts, and validation/ and tests/ the verifier's, sealed.
+    example, pypi = EXAMPLE_POLICY, PYPI_POLICY
     assert seen == [
-        ("agent", True, ("example.com",)),
-        ("validation", True, ("pypi.org",)),
-        ("agent", True, ("example.com",)),
-        ("tests", True, ("pypi.org",)),
+        ("agent", True, example),
+        ("validation", True, pypi),
+        ("agent", True, example),
+        ("tests", True, pypi),
     ]
     solvers = [item for item in provider.requests if item.role is not SandboxRole.VERIFIER]
     verifiers_ = [item for item in provider.requests if item.role is SandboxRole.VERIFIER]
-    example = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
-    pypi = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",))
     both = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com", "pypi.org"))
     # A shared solver is created able to apply both; a verifier of its own has its own.
     assert {item.network for item in solvers} == {both if mode == "shared" else example}
@@ -146,6 +149,40 @@ async def test_every_phase_has_its_own_allowlist_through_one_egress_session(
     assert result.lock is not None
     assert result.lock.sandbox is not None and result.lock.sandbox.network == example
     assert result.lock.verification.network == pypi
+
+
+@pytest.mark.asyncio
+async def test_a_blocklist_and_an_allowlist_share_one_solver_and_one_egress_session(
+    tmp_path: Any, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocklist is proxied as an allowlist is, so a shared solver created with the agent's
+    blocklist applies the verifier's allowlist, each phase's policy held by one egress
+    session in turn."""
+    seen: list[Seen] = []
+    harness = _watch(monkeypatch, REGISTRY, seen)()
+    provider = RoundsProvider()
+    result = await _run(tmp_path, provider, _task(tmp_path, "shared", NO_GITHUB, PYPI), harness)
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert seen == [
+        ("agent", True, NO_GITHUB_POLICY),
+        ("validation", True, PYPI_POLICY),
+        ("agent", True, NO_GITHUB_POLICY),
+        ("tests", True, PYPI_POLICY),
+    ]
+    solvers = [item for item in provider.requests if item.role is not SandboxRole.VERIFIER]
+    assert {item.network for item in solvers} == {NO_GITHUB_POLICY}
+    assert {item.proxy_url for item in provider.requests} == {PROXY}
+    assert {needs.network_mode for _, needs in provider.asked} == {NetworkMode.BLOCKLIST}
+    assert {item.verifier_network_mode for item in solvers} == {NetworkMode.ALLOWLIST}
+    applied = [
+        (record["policy"], record["requested_mode"])
+        for record in _trace(result)
+        if record["kind"] == "policy_applied"
+    ]
+    assert applied == [("sealed", "blocklist"), ("sealed", "allowlist")] * 2
+    assert result.lock is not None and result.lock.sandbox is not None
+    assert result.lock.sandbox.network == NO_GITHUB_POLICY
+    assert result.lock.verification.network == PYPI_POLICY
 
 
 @pytest.mark.asyncio
@@ -204,6 +241,7 @@ async def test_a_shared_solver_applies_each_phase_s_network(
     [
         ({"network_mode": "public"}, {"network_mode": "no-network"}, NetworkMode.BLOCK),
         ({"network_mode": "no-network"}, EXAMPLE, NetworkMode.ALLOWLIST),
+        ({"network_mode": "public"}, NO_GITHUB, NetworkMode.BLOCKLIST),
     ],
 )
 def test_a_solver_that_runs_validation_can_apply_the_verifiers_network(
@@ -266,6 +304,6 @@ async def test_reverification_reconnects_a_kept_solver_with_its_own_egress_sessi
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     (request,) = attached
-    assert request.network == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("pypi.org",))
+    assert request.network == PYPI_POLICY
     assert request.proxy_url == PROXY and request.proxy_token
-    assert seen == [("tests", True, ("pypi.org",))]
+    assert seen == [("tests", True, PYPI_POLICY)]

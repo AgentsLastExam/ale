@@ -1303,7 +1303,7 @@ class QemuProvider(Provider):
                 f"iptables -t nat -A POSTROUTING -p tcp -d {host_ip} --dport {gateway_port} "
                 "-j MASQUERADE",
             ]
-        if request.network.mode is NetworkMode.ALLOWLIST and (port := url_port(request.proxy_url)):
+        if request.network.proxied and (port := url_port(request.proxy_url)):
             rules += [
                 f"iptables -t nat -A PREROUTING -i {GUEST_BRIDGE} -p tcp -d {HOST_IP} "
                 f"--dport {port} -j DNAT --to-destination {host_ip}:{port}",
@@ -1668,8 +1668,8 @@ class QemuProvider(Provider):
             agent_user, agent_home, _ = await self._read_guest_contract(client, attached_request)
             # A later run reaches its own Gateway, so its port is routed in as well.
             host_ip = await self._wire_network(container, attached_request)
-            # The runner, not this run's configuration, says whether the VM is sealed now: an
-            # allowlist agent's commands need the proxy only then.
+            # The runner, not this run's configuration, says whether the VM is sealed now: a
+            # proxied agent's commands need the proxy only then.
             isolated = request.network.mode is not NetworkMode.OPEN
             sealed = isolated and await _runner_sealed(container)
             mounted = await self._mounted_volumes(

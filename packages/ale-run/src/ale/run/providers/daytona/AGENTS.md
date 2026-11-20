@@ -20,7 +20,7 @@ only domain names, at most 100, and passed plain HTTP and other ports of an allo
 
 **Solution.** `close_egress` seals `allowlist` with `networkBlockAll`, as `block`. The SSH
 tunnel that carries the Gateway also carries the Host's egress proxy to the sandbox's
-loopback (`PROXY_PORT`), and guestd's [relay](../README.md#allowlist-relay) fronts it, so
+loopback (`PROXY_PORT`), and guestd's [relay](../README.md#egress-relay) fronts it, so
 the agent's commands and its desktop reach allowed hosts exactly as on Docker.
 
 **Decisions.**

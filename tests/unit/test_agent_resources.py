@@ -323,6 +323,12 @@ def test_remote_mcp_obeys_network_policy() -> None:
             resolved(allowlist(*hosts))
     assert resolved(allowlist("mcp.example.com")).mcp_servers
     assert resolved(allowlist("*.example.com")).mcp_servers
+    # A blocklist refuses the hosts it names, and admits the rest through the proxy.
+    blocklist = NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("*.example.com",))
+    with pytest.raises(AgentResourceError, match="blocked_hosts"):
+        resolved(blocklist)
+    other = NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("github.com",))
+    assert resolved(other).mcp_servers
 
 
 @pytest.mark.parametrize("operating_system", list(OperatingSystem))

@@ -8,6 +8,9 @@ container and a real gateway process.
 
 from __future__ import annotations
 
+import asyncio
+import socket
+
 import pytest
 from aiohttp import web
 
@@ -165,7 +168,7 @@ async def test_sandbox_reaches_https_through_the_episode_proxy(
             episode_id="proxy",
             model="",
             purpose="egress",
-            allowed_hosts=frozenset({"api.anthropic.com"}),
+            policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("api.anthropic.com",)),
         )
     )
     prepared = await prepare_reference(provider, IMAGE)
@@ -201,3 +204,55 @@ async def test_sandbox_reaches_https_through_the_episode_proxy(
         assert result.stdout.strip().isdigit()
     finally:
         await proxy.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_blocklisted_sandbox_reaches_every_public_host_but_its_own(
+    sandboxes: tuple[DockerProvider, Resources],
+) -> None:
+    """Sealed under a blocklist, the agent reaches an unlisted host through the relay, and
+    never a listed one: by name, by one of its addresses, whose TLS handshake still names
+    it, or by an address that is not public. Direct traffic stays blocked."""
+    provider, resources = sandboxes
+    blocked = NetworkPolicy(mode=NetworkMode.BLOCKLIST, blocked_hosts=("*.iana.org",))
+    registry = SessionRegistry()
+    proxy = EgressProxy(registry, host="0.0.0.0")
+    proxy_url = await proxy.start()
+    session = registry.open(
+        GatewaySession(episode_id="blocklist", model="", purpose="egress", policy=blocked)
+    )
+    request = SandboxRequest(
+        episode_id="blocklist",
+        prepared_image=await prepare_reference(provider, IMAGE),
+        resources=resources,
+        network=blocked,
+        proxy_url=proxy_url,
+        proxy_token=session.token,
+    )
+    loop = asyncio.get_running_loop()
+    iana = (await loop.getaddrinfo("www.iana.org", 443, family=socket.AF_INET))[0][4][0]
+    curl = ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "30"]
+
+    async def fetch(sandbox: Sandbox, *argv: str) -> tuple[int, str]:
+        result = await sandbox.exec([*curl, *argv], identity=Identity.AGENT, timeout_sec=60)
+        return result.exit_code, result.stdout.strip() + result.stderr
+
+    try:
+        async with await provider.create(request) as sandbox:
+            await sandbox.close_egress()
+            unlisted = await fetch(sandbox, "https://example.com/")
+            listed = await fetch(sandbox, "https://www.iana.org/")
+            by_address = await fetch(
+                sandbox, "--connect-to", f"www.iana.org:443:{iana}:443", "https://www.iana.org/"
+            )
+            metadata = await fetch(sandbox, "--noproxy", "", "https://169.254.169.254/")
+            direct = await fetch(sandbox, "--noproxy", "*", "https://example.com/")
+    finally:
+        await proxy.stop()
+    assert unlisted[0] == 0 and unlisted[1].startswith("200"), unlisted
+    # Refused when the tunnel is asked for, as curl reports a proxy's 403.
+    assert listed[0] == 56 and "403" in listed[1], listed
+    assert metadata[0] == 56 and "403" in metadata[1], metadata
+    # Admitted by address, then closed when the handshake names the blocked host.
+    assert by_address[0] == 35, by_address
+    assert direct[0] != 0, direct
