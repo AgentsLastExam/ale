@@ -120,7 +120,7 @@ allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 # blocked_hosts = ["github.com"]            # ALE; required, and only, for blocklist
 sudo = false                                # ALE; sudo works exactly when true, always for root (Administrator on Windows)
 # workdir = "project"                       # ALE; where the agent starts; default its home
-validation_rounds = 0                       # ALE; validation/ results it gets; default 0
+validation_rounds = 0                       # ALE; validation results it gets; default 0
 
 [verifier]
 timeout_sec = 600                           # positive seconds; default 600
@@ -142,7 +142,7 @@ gpus = 0                                    # default 0
 container_features = []                     # ALE; default none
 env = {}                                    # replaces [environment].env
 
-[validation]                                # ALE; where validation/ runs; default [verifier]'s
+[validation]                                # ALE; where rounds validate; default [verifier]'s
 environment_mode = "separate"               # shared | separate | snapshot
 
 [validation.environment]                    # a separate or snapshot validation verifier's size
@@ -166,7 +166,7 @@ expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or
 `[agent].workdir` is below the agent's home when relative, so a Task need not spell its home
 per OS. It must be a directory when the agent starts; stages keep their fixed directories.
 `[agent].validation_rounds`, an integer from 0, is how many results of
-[`validation/`](#validation) the agent receives; above 0 it requires `validation/`. Run
+[`validation/`](#validation), or of `tests/` for a Task without it, the agent receives. Run
 policy may replace it with `validation_rounds`, a non-negative integer, recorded as the
 timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
 
@@ -605,11 +605,11 @@ APIs, scoring, and record behavior are defined in [Verification](verification.md
 ## validation/
 
 Research-style Tasks split their data as machine learning does. What `environment/` gives
-the agent is its training data, to use as it likes. `validation/` is the validation set:
-its results reach the agent between turns. `tests/` is the test set, run once at the end
-and never shown to the agent. An agent that sees the score it is finally ranked by can
-overfit to it, round after round; one that sees only a validation set's cannot overfit to
-the test set except through what the validation set shares with it.
+the agent is its training data, to use as it likes. `validation/` is the validation set: its
+results reach the agent between turns. `tests/` is the test set, run once at the end and,
+beside a validation set, never shown to the agent. An agent that sees the score it is
+finally ranked by can overfit to it, round after round; one that sees only a validation
+set's cannot overfit to the test set except through what the validation set shares with it.
 
 `validation/` has the contract of [`tests/`](#tests): the entry `test.sh` (`test.ps1` on
 Windows), conventionally `verify.py`, writes `reward.json` and optionally
@@ -628,20 +628,30 @@ state in the solver itself, where a running service can be checked; a validation
 predicts the final one less well where the two see different things. Run shared, it runs in
 a Sandbox booted from a snapshot of the agent's, with the agent's resources and
 `[environment].env` and no sudo, since the agent goes on from that state. It receives no
-solver trajectory, which is converted once, after the agent's last turn. A copy of `tests/`
-therefore works unless it reads the trajectory: `judge(..., trajectory=True)` and the
-`checks.trajectory_*` checks raise there. Nothing requires the two to differ.
+solver trajectory, which is converted once, after the agent's last turn, so
+`judge(..., trajectory=True)` and the `checks.trajectory_*` checks raise there.
+
+A Task without `validation/` validates with `tests/` instead: its rounds run `tests/` in the
+verifier `[validation]`, or else `[verifier]`, places, without a trajectory, so a Task whose
+data cannot be split still gives its agent results between turns. The reward that agent
+sees is the score it is ranked by, so it can overfit to the test set. It receives that
+reward, the round's status and the feedback `tests/` writes, if any, as if `tests/` were
+copied into `validation/`, and its RunLock records that `tests/` graded the rounds
+([Trace](trace.md#verification-result)), setting such a score apart from one earned against
+a held-out validation set. Run policy can give rounds to any Task, so a Task whose test set
+must stay unseen has `validation/`. A `tests/` that reads the trajectory fails every round,
+which the agent then receives unscored.
 
 With `[agent].validation_rounds = N`, the agent works in up to `N + 1` turns: its first turn
-ends, `validation/` scores the state it left, the agent receives that result as its next
-turn begins, and so on until `tests/` scores the state its last turn left, once. A turn ends
-when the agent's program finishes normally, so the agent submits its work by ending its
-turn; there is nothing else to call. A turn that a timeout, a limit or a failure ends is the
-last. `[agent].timeout_sec` covers all turns together. Between turns the agent's Sandbox is
-saved and a new one booted from what it saved, without setup: files on its disk survive the
-end of a turn; files in memory, such as a tmpfs, and its desktop session do not, nor does
-any process, the agent's or a service setup started. `validation/` therefore never sees a
-process the agent or setup left running. How the rounds run is in the
+ends, `validation/`, or else `tests/`, scores the state it left, the agent receives that
+result as its next turn begins, and so on until `tests/` scores the state its last turn
+left, once. A turn ends when the agent's program finishes normally, so the agent submits its
+work by ending its turn; there is nothing else to call. A turn that a timeout, a limit or a
+failure ends is the last. `[agent].timeout_sec` covers all turns together. Between turns the
+agent's Sandbox is saved and a new one booted from what it saved, without setup: files on
+its disk survive the end of a turn; files in memory, such as a tmpfs, and its desktop
+session do not, nor does any process, the agent's or a service setup started. A round
+therefore never sees a process the agent or setup left running. How the rounds run is in the
 [Episode protocol](episode-protocol.md#validation-rounds).
 
 Rounds need a Harness that resumes its native session, since every turn after the first
@@ -649,16 +659,17 @@ resumes it: a Run that gives rounds to one that cannot, such as the `computer-us
 Harness, is refused before provisioning, and can set `validation_rounds = 0` instead. Each
 round costs a save of the agent's Sandbox, a verifier run under the verify limit
 (`[verifier].timeout_sec`, or the Run's `timeouts.verify`) that its Judge calls share, and a
-boot; none of them spends the agent's time. Since every calibration case checks
-`validation/` too, a Task with `validation/` cannot [calibrate](#calibration) on a Provider
-without snapshots.
+boot; none of them spends the agent's time. Since every calibration case checks the stage
+that validates too, a Task with `validation/`, or with `[agent].validation_rounds` above 0,
+cannot [calibrate](#calibration) on a Provider without snapshots.
 
 The agent's model session is closed between turns, and no credential file stays on the
 disk a round saves. The round's verifier has verification's open egress and, under shared or
 snapshot verification, runs on the agent's disk, so a `validation/` that runs the agent's
 program runs it with that network; with `[agent].sudo`, what the agent left there can write
-the round's feedback and reward. The round's reward, status and feedback text are all that
-reaches the agent ([Security](security.md#5-answers-are-absent-not-hidden)).
+the round's feedback and reward. The round's reward and status, and the feedback text of
+the stage that validated, are all that reaches the agent
+([Security](security.md#5-answers-are-absent-not-hidden)).
 
 What the feedback text reveals is the author's decision: a score alone, the cases that
 fail, or a diagnosis. Whatever it says, the agent can use, so it must not hold what `tests/`
@@ -713,14 +724,16 @@ Any other key names a top-level number of the Episode's
 [Verification Result](verification.md#result), compared as written, so a measured value
 takes an interval; a missing key, or a value that is not a number, fails the case.
 
-A Task with `validation/` checks it in every case too, with a validation check rather than a
-round: `ale calibrate` runs `validation/` once on the case's final state, before `tests/`,
-with no turn after it. `expect` applies to both, unless an entry's `expect_validation`, by
-the same rules, says what `validation/`'s result must be; it is refused without
-`validation/`. The check saves the oracle's Sandbox, as a round saves the agent's, so a Task
-with `validation/` needs a Provider that saves snapshots for calibration too, and under
-shared verification `tests/` then runs in a Sandbox booted from that snapshot: like
-`validation/`, it sees no process the oracle left running.
+A Task with `validation/` checks it in every case too, and a Task without it whose
+`[agent].validation_rounds` is above 0 checks `tests/` as a round runs it, with a validation
+check rather than a round: `ale calibrate` runs the stage that validates, `validation/` or
+else `tests/`, once on the case's final state, before `tests/` scores it, with no turn after
+it. `expect` applies to both, unless an entry's `expect_validation`, by the same rules, says
+what `validation/`'s result must be; it is refused without `validation/`, where `expect`
+already says what `tests/` gives. The check saves the oracle's Sandbox, as a round saves the
+agent's, so such a Task needs a Provider that saves snapshots for calibration too, and under
+shared verification `tests/` then runs in a Sandbox booted from that snapshot: like a round,
+it sees no process the oracle left running.
 
 How `ale calibrate` runs the cases is defined in
 [the episode protocol](episode-protocol.md#calibration).

@@ -257,15 +257,17 @@ built image recorded in RunLock. It is not the decision to reuse a solver's answ
 A Task run records `task.non_verifier_digest`: a content hash of every Task file outside
 `tests/`, `solution/` and `calibration/` (paths, executable bits and link targets), with `task.toml` read
 without its `[solution]` and `[[calibration]]` tables, computed once per Task folder. None
-of these reaches an evaluated agent, so changing verification, the reference solution or
-another calibration case keeps a retained solver reverifiable. `validation/` is part of the
-digest, because the agent receives its results. The asset roots and engine-owned
-`.ale-cache` are excluded, so loading a Task never reads asset bytes. File timestamps do not
-enter this hash. Reverification requires this digest to match the source episode and the
-Task's asset observation to equal the source RunLock's: the same repository, Task path and
-commit, clean on both sides. Any outside change, any asset change (asset commits do not
-distinguish `tests/assets` from the other roots), or missing source evidence requires a
-fresh solver run. This also protects direct CLI use.
+of these reaches an evaluated agent unless `tests/` validated its rounds, so changing
+verification, the reference solution or another calibration case keeps a retained solver
+reverifiable. `validation/` is part of the digest, because the agent receives its results.
+The asset roots and engine-owned `.ale-cache` are excluded, so loading a Task never reads
+asset bytes. File timestamps do not enter this hash. Reverification requires this digest to
+match the source episode and the Task's asset observation to equal the source RunLock's: the
+same repository, Task path and commit, clean on both sides. Any outside change, any asset
+change (asset commits do not distinguish `tests/assets` from the other roots), or missing
+source evidence requires a fresh solver run, and so does a source whose rounds `tests/`
+validated once the Task has changed at all, since its agent received `tests/`'s results.
+This also protects direct CLI use.
 
 When only verification changed, ALE does not build or resolve the solver image again.
 It attaches the retained solver using the source RunLock's exact image identity, takes the

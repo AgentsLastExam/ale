@@ -36,8 +36,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 #: One verifier for validation/ and tests/ alike, as a Task may have: a third of the reward
 #: per line of work, the lines themselves, how many of the agent's processes outlived a turn
-#: and what of validation/ a turn saw; validation/'s feedback tells the agent how far it got,
-#: and tests/'s is never read.
+#: and what of validation/ or tests/ a turn saw; validation/'s feedback tells the agent how far
+#: it got, and tests/'s is never read.
 VERIFY = """\
 import os
 from pathlib import Path
@@ -60,7 +60,12 @@ INSTRUCTION = "Complete the task described here.\n"
 
 
 def _task(
-    root: Path, mode: str, rounds: int = 2, environment: dict[str, Any] | None = None
+    root: Path,
+    mode: str,
+    rounds: int = 2,
+    environment: dict[str, Any] | None = None,
+    *,
+    validation: bool = True,
 ) -> Path:
     scaffold_task(root)
     verifier: dict[str, Any] = {"environment_mode": mode, "timeout_sec": 600}
@@ -75,13 +80,13 @@ def _task(
             "verifier": verifier,
         },
     )
-    _stages(root, TEST, "test.sh")
+    _stages(root, TEST, "test.sh", validation=validation)
     (root / "instruction.md").write_text(INSTRUCTION)
     return root
 
 
-def _stages(root: Path, entry: str, name: str) -> None:
-    for stage in ("tests", "validation"):
+def _stages(root: Path, entry: str, name: str, *, validation: bool = True) -> None:
+    for stage in ("tests", "validation") if validation else ("tests",):
         (root / stage).mkdir(exist_ok=True)
         (root / stage / name).write_text(entry)
         (root / stage / "verify.py").write_text(VERIFY)
@@ -97,8 +102,8 @@ async def _episode(tmp_path: Path, root: Path, provider: Provider) -> Any:
     )
 
 
-def _check(result: Any, rounds: int = 2) -> None:
-    """``rounds + 1`` turns, a scored validation round between each two, tests/ once on the
+def _check(result: Any, rounds: int = 2, *, stage: str = "validation") -> None:
+    """``rounds + 1`` turns, a round ``stage`` scored between each two, tests/ once on the
     final state."""
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": round(min(1.0, (rounds + 1) / 3), 2)}
@@ -106,22 +111,25 @@ def _check(result: Any, rounds: int = 2) -> None:
     assert [(item.index, item.status, item.reward) for item in result.record.validation_rounds] == [
         (index, Status.COMPLETED, score) for index, score in enumerate(scores, start=1)
     ]
+    # Each round's feedback, of tests/ too where it validated; the final run's is not read.
     feedback = (result.run_dir / "validation/1/feedback.md").read_text()
     assert feedback.startswith("1 of 3 lines; the last: ")
-    # tests/ wrote feedback too, which is never read.
-    assert not (result.run_dir / "feedback.md").exists()
+    assert sorted(path.parent.name for path in result.run_dir.rglob("feedback.md")) == [
+        str(index) for index in range(1, rounds + 1)
+    ]
     verification = json.loads((result.run_dir / "verification.json").read_text())
     # Each turn read its prompt back from its native session: the instruction first, then
     # each round's result.
+    name = "Validation round" if stage == "validation" else "Round"
     assert verification["lines"] == [
         INSTRUCTION.strip(),
         *(
-            f"Validation round {index} of {rounds}: reward {score:.2f}."
+            f"{name} {index} of {rounds}: reward {score:.2f}."
             for index, score in enumerate(scores, start=1)
         ),
     ]
-    # No process the agent started outlived the turn it started in, and no later turn saw
-    # validation/ or what it wrote.
+    # No process the agent started outlived the turn it started in, and no turn saw
+    # validation/, tests/ or what they wrote.
     assert verification["survivors"] == 0
     assert verification["leaks"] == []
     trajectory = AtifTrajectory.model_validate_json(
@@ -160,6 +168,22 @@ async def test_an_agent_improves_over_validation_rounds_in_docker(
         check=True,
     ).stdout.split()
     assert containers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["shared", "separate", "snapshot"])
+async def test_an_agent_improves_over_rounds_tests_scores_without_validation_in_docker(
+    tmp_path: Path, mode: str
+) -> None:
+    """A Task without validation/ loops on tests/ as on a copy of it: each round runs it in a
+    verifier of its own, and the agent receives its result."""
+    root = _task(tmp_path / f"rounds-tests-{mode}", mode, validation=False)
+    result = await _episode(tmp_path, root, DockerProvider())
+    _check(result, stage="tests")
+    assert sorted(path.name for path in (result.run_dir / "validation/1").iterdir()) == [
+        "feedback.md",
+        "verification.json",
+    ]
 
 
 @pytest.mark.needs_slurm

@@ -28,7 +28,7 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxRequest,
 )
-from ale.core.task import ResolvedVariables, TaskSourceContext
+from ale.core.task import ResolvedVariables, Stage, TaskSourceContext
 from ale.core.taskspec import NetworkPolicy, TaskSpec
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Rewards
@@ -161,6 +161,8 @@ class EpisodeContext:
     spec: TaskSpec
     task_dir: Path
     """Host-side task folder: configuration, environment, tests and calibration cases."""
+    validation_stage: Stage
+    """The stage that validates: ``validation/``, or ``tests/`` for a Task without one."""
 
     run_dir: Path
     """Host-side output directory for this episode."""

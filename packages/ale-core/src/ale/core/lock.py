@@ -239,7 +239,7 @@ class JudgeProvenance(BaseModel):
     adapter: Literal["codex-cli", "claude-code"] | None = None
     adapter_version: str | None = None
     placement: Literal["verify", "validate"] = "verify"
-    """Whether it ran in ``tests/``, or in a validation round's ``validation/``."""
+    """Whether it ran in ``tests/`` scoring the final state, or in a validation round."""
     attempts: int = Field(default=0, ge=0)
 
 
@@ -338,6 +338,12 @@ class RunLock(BaseModel):
     validation_rounds: int = Field(default=0, ge=0)
     """How many validation rounds the agent was to receive: the Task's, or the Run's override;
     0 for the oracle, which never receives one."""
+    validation_stage: Literal["validation", "tests"] = Field(
+        default="validation", exclude_if=lambda value: value == "validation"
+    )
+    """The stage that validated, in the agent's rounds or calibration's validation check:
+    ``tests/`` for a Task without ``validation/``, whose agent then received the results of
+    the set that scores it; left out where ``validation/`` validated or nothing did."""
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     termination: LimitTermination | None = None
     resumed_from: ResumedFrom | None = None

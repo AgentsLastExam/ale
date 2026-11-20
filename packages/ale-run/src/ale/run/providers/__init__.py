@@ -189,7 +189,7 @@ def _sandboxes(
         and validation.environment_mode is VerificationMode.SEPARATE
         and validation not in separate
     ):
-        # A separate verifier of validation/ apart from tests/'s, on the verifier's Provider.
+        # A separate round verifier apart from tests/'s, on the verifier's Provider.
         separate.append(validation)
     for placed in separate:
         image = placed.image or spec.image
@@ -295,7 +295,7 @@ class ProviderRegistry:
                 # One choice for both: only the leaf that saved the snapshot boots from it.
                 groups = [(sandboxes, order)]
             else:
-                # Every separate verifier of a Task, of tests/ and of validation/, runs on
+                # Every separate verifier of a Task, of tests/ and of its rounds, runs on
                 # the one Provider its Task names for verifiers.
                 verifiers = [each for each in sandboxes if each[0] is SandboxRole.VERIFIER]
                 groups = [

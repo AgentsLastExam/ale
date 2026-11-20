@@ -41,12 +41,13 @@ result was written.
 Beside the result, a verifier may write a feedback text for the agent, `feedback.md` in the
 verifier directory: UTF-8, at most 64 KiB (`ale_verify.MAX_FEEDBACK_BYTES`). `write(result,
 feedback=text)` writes it beside the result, each file atomically, and refuses a longer text
-before it writes anything; `write(result)` removes one an earlier call wrote. Only
-[`validation/`](task-authoring.md#validation)'s feedback is read: it reaches the agent,
-verbatim below its reward, as its next turn begins. `tests/`'s is ignored, so a `verify.py`
-both stages run may write it. A validation feedback text that is larger, is not UTF-8 or
-holds a Judge's token fails that run of `validation/` as a Task error, as a malformed result
-does, and other credentials in it are redacted.
+before it writes anything; `write(result)` removes one an earlier call wrote. Only a
+[validation round](task-authoring.md#validation)'s feedback is read, `validation/`'s or
+`tests/`'s where `tests/` validates: it reaches the agent, verbatim below its reward, as its
+next turn begins. The final run of `tests/` has its feedback ignored, so a `verify.py` both
+stages run may write it. A round's feedback text that is larger, is not UTF-8 or holds a
+Judge's token fails that round as a Task error, as a malformed result does, and other
+credentials in it are redacted.
 
 Before every attempt the engine clears the verification staging directory and empties the
 verifier directory, which only the framework can then write

@@ -161,7 +161,8 @@ class TaskFolder:
         Verification and the calibration cases, the reference solution among them, never reach
         an evaluated agent, so ``tests/``, ``solution/``, ``calibration/`` and ``task.toml``'s
         ``[solution]`` and ``[[calibration]]`` tables are left out: changing them keeps a
-        retained solver reverifiable. ``validation/`` stays in, since the agent receives its
+        retained solver reverifiable, unless ``tests/`` validated its agent's rounds, which
+        reverification checks itself. ``validation/`` stays in, since the agent receives its
         results. Asset bytes are left to their own commit identity rather than hashed on every
         load; reverification compares that commit separately.
         """
@@ -599,8 +600,8 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
 
 
 def _validation(config: TaskConfig, verify: VerifySpec) -> VerifySpec | None:
-    """Where ``[validation]`` puts ``validation/``, or None to run it as ``tests/``. A
-    separate one runs a separate verifier's image of ``tests/``, or else the solver's."""
+    """Where ``[validation]`` places the rounds' verifier, or None to place it as ``tests/``'s.
+    A separate one runs a separate verifier's image of ``tests/``, or else the solver's."""
     table = config.validation
     if table is None:
         return None
@@ -631,8 +632,9 @@ def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
     A calibration case runs as the oracle, so its directory holds ``solve.sh``, or
     ``solve.ps1`` on Windows. ``solution/`` is the reference solution every Task has; every
     further case is a directory of ``calibration/`` with a ``[[calibration]]`` entry.
-    ``validation/`` is optional, and has the entry ``tests/`` has when it exists; validation
-    rounds and a case's ``expect_validation`` need it.
+    ``validation/`` is optional, and has the entry ``tests/`` has when it exists; a case's
+    ``expect_validation`` needs it, since without it only ``tests/`` can validate, and
+    ``expect`` already says what ``tests/`` must give.
     """
     # The reference solution is the Task root's solution/, never a calibration/ directory.
     if (folder.root / CALIBRATION_DIR / SOLUTION_CASE).is_dir():
@@ -660,17 +662,13 @@ def _require_files(folder: TaskFolder, config: TaskConfig) -> None:
         raise TaskDefinitionError(
             f"{folder.root} is missing required Task file(s): {', '.join(missing)}"
         )
-    if not validation:
-        if config.agent.validation_rounds:
-            raise TaskDefinitionError(
-                f"{folder.root}: [agent].validation_rounds needs validation/, the verifier "
-                "whose results the agent receives"
-            )
-        if unchecked := [case.name for case in config.calibration if case.expect_validation]:
-            raise TaskDefinitionError(
-                f"{folder.root}: expect_validation of [[calibration]] {', '.join(unchecked)} "
-                "needs validation/"
-            )
+    if not validation and (
+        unchecked := [case.name for case in config.calibration if case.expect_validation]
+    ):
+        raise TaskDefinitionError(
+            f"{folder.root}: expect_validation of [[calibration]] {', '.join(unchecked)} "
+            "needs validation/"
+        )
     for name in sorted(path.name for path in (folder.root / CALIBRATION_DIR).glob("*/")):
         if name not in cases:
             raise TaskDefinitionError(

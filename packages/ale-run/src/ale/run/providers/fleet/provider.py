@@ -767,7 +767,7 @@ class FleetProvider(Provider):
         """One Task's line of the Run's plan, ``network`` its solver's; ``verifier`` the
         resources of its snapshot verifier and ``round_verifier`` those of a shared validation
         round's, whose Node and leaf are its solver's, both with ``verifier_network``, and
-        ``planned_saves`` how many runs of ``validation/`` save its first solver."""
+        ``planned_saves`` how many validations save its first solver."""
         demand = self._demand(image, operating_system, network.mode, resources, verifier)
         demand = demand.model_copy(
             update={

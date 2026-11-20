@@ -65,9 +65,9 @@ class CalibrationAttempt(BaseModel):
 
 
 class CalibrationCheck(BaseModel):
-    """What ``validation/`` gave a case's final state: what the case expects of it, each
-    expected key's value, ``None`` where its Verification Result has no number by that name,
-    and how it differs."""
+    """What the stage that validates, ``validation/`` or else ``tests/``, gave a case's final
+    state: what the case expects of it, each expected key's value, ``None`` where its
+    Verification Result has no number by that name, and how it differs."""
 
     model_config = _FROZEN
 
@@ -92,7 +92,7 @@ class CaseCalibrationObservation(BaseModel):
 
     ``observed`` holds each expected key's value from a completed episode, ``None`` where
     the Verification Result has no number by that name. ``validation`` checks the same final
-    state with ``validation/``, when the Task has one.
+    state with the stage that validates, when the Task has a validation check.
     """
 
     model_config = _FROZEN

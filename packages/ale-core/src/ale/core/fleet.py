@@ -303,7 +303,7 @@ class SandboxDemand(BaseModel):
     verifier_network_mode: NetworkMode = NetworkMode.OPEN
     """The network mode of ``verifier`` and ``round_verifier``, which that leaf applies too."""
     planned_saves: int = Field(default=0, ge=0)
-    """How many runs of ``validation/`` still to come save this solver, each the one booted
+    """How many validations still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
 
     @property

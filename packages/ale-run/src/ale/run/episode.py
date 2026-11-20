@@ -57,7 +57,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.task import ResolvedVariables, Task
+from ale.core.task import ResolvedVariables, Stage, Task
 from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
@@ -842,13 +842,13 @@ def check_retention(
     spec: TaskSpec, retention: SandboxRetentionConfig, *, validates: bool = False
 ) -> None:
     """Refuse, before anything is prepared, a retention that cannot hold for ``spec``, whose
-    episodes run ``validation/`` when it ``validates``.
+    episodes validate when it ``validates``.
 
     A snapshot verifier boots from a snapshot of the solver, and saving the snapshot stops
     the solver, so it cannot be kept; a kept verifier still runs on the snapshot, which no
-    Provider destroys under it, so the snapshot must be kept too. A solver that runs
-    ``validation/`` boots its next turn's solver from a snapshot of its own, which is never
-    kept and which a kept solver would still run on, whichever setting keeps it.
+    Provider destroys under it, so the snapshot must be kept too. A solver that validates
+    boots its next turn's solver from a snapshot of its own, which is never kept and which a
+    kept solver would still run on, whichever setting keeps it.
     """
     shared = spec.verify.environment_mode is VerificationMode.SHARED
     # The Sandbox that holds the solver: under shared verification the verifier's policy
@@ -861,7 +861,7 @@ def check_retention(
             else ("sandbox_retention.verifier, which under shared verification is the solver's,")
         )
         raise ConfigError(
-            f"{spec.name} runs validation/ from a snapshot of its solver, from which the "
+            f"{spec.name} validates on a snapshot of its solver, from which the "
             f"solver after it boots, and which a kept solver would still run on: {setting} "
             "cannot be 'keep'; sandbox_retention.solver = 'snapshot' keeps its disk"
         )
@@ -1021,6 +1021,7 @@ async def run_episode(
         episode_id=episode_id,
         spec=task.spec,
         task_dir=task.folder.root if task.folder is not None else run_dir,
+        validation_stage=task.validation_stage,
         run_dir=episode_dir,
         sandboxes=lease,
         artifacts=sink,
@@ -1292,6 +1293,11 @@ def _write_lock(
         harbor=task.harbor,
         warnings=task.warnings,
         seed=seed,
+        # The agent was to receive rounds, or calibration's validation check ran.
+        validation_stage="tests"
+        if ctx.validation_stage is Stage.TESTS
+        and (inputs.validation_rounds > 0 or bool(ctx.validation_rounds))
+        else "validation",
     )
     return lock
 

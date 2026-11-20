@@ -289,9 +289,11 @@ its sanitized native stdout/stderr are retained as response events in
 projected into episode rewards. `llm-judge.jsonl` and `agent-judge.jsonl` sit alongside it
 and are collected independently, including after failure. Each validation round keeps the
 same files in `validation/<round>/`, with `feedback.md`, the feedback text the agent was
-shown. A separate verifier's copy of the round's artifacts is deleted when the round ends,
-even with `artifacts.collect = "host"`. The RunLock records the effective
-`validation_rounds` and each Judge's `placement`, `verify` or `validate`.
+shown when the stage that validated wrote one. A separate verifier's copy of the round's artifacts is
+deleted when the round ends, even with `artifacts.collect = "host"`. The RunLock records the
+effective `validation_rounds`, `validation_stage` as `tests` only where `tests/` validated,
+in rounds or calibration's validation check, and each Judge's `placement`, `verify` or
+`validate`.
 See [Verification](verification.md) for the result and tool contracts.
 
 ## Interoperability

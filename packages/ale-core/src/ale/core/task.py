@@ -155,10 +155,10 @@ class Task(ABC):
         self.asset_observation: TaskAssetObservation | None = None
         self.variables: ResolvedVariables | None = None
         self.validations: int = 0
-        """How many times the Run's episodes of it run ``validation/`` before ``tests/``: once
-        for each validation round its agent receives, or once for calibration's validation
-        check of each case's final state. Each saves the solver as a snapshot, so selection
-        gives it a Provider that saves that many in a row."""
+        """How many times the Run's episodes of it validate before ``tests/`` scores the final
+        state: once for each validation round its agent receives, or once for calibration's
+        validation check of each case's final state. Each saves the solver as a snapshot, so
+        selection gives it a Provider that saves that many in a row."""
 
     @property
     def id(self) -> str:
@@ -166,8 +166,16 @@ class Task(ABC):
 
     @property
     def validates(self) -> bool:
-        """Whether the Run's episodes of it run ``validation/``."""
+        """Whether the Run's episodes of it validate."""
         return self.validations > 0
+
+    @property
+    def validation_stage(self) -> Stage:
+        """The stage that validates: ``validation/``, or ``tests/`` for a Task without one."""
+        folder = self.folder
+        if folder is not None and folder.stage_dir(Stage.VALIDATION) is not None:
+            return Stage.VALIDATION
+        return Stage.TESTS
 
     async def setup(self, ctx: EpisodeContext) -> None:
         return None

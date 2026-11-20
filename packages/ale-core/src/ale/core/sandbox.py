@@ -234,7 +234,7 @@ class SandboxRequest(BaseModel):
     """The network mode of ``snapshot_verifier`` and ``round_verifier``, the Task's verifier
     network's (:attr:`~ale.core.taskspec.VerifySpec.network`)."""
     planned_saves: int = Field(default=0, ge=0)
-    """How many runs of ``validation/`` still to come save this solver, each the one booted
+    """How many validations still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
     volumes: tuple[str, ...] = ()
     """The Task's volume candidates (:attr:`~ale.core.taskspec.TaskSpec.volume_candidates`).

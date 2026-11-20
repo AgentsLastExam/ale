@@ -149,18 +149,17 @@ class SandboxNeeds(BaseModel):
 
 def solver_saves(validations: int, *, snapshot_verified: bool, kept_as_snapshot: bool) -> int:
     """How many snapshots in a row a solver's episode saves, of it and of each solver booted
-    from the snapshot before: one for each of the ``validations`` runs of ``validation/``
-    still to come, and one at its end when it is saved for a snapshot verifier or kept as a
-    snapshot, which is then the same save. A shared solver is never saved at its end for its
-    verifier, which runs in it."""
+    from the snapshot before: one for each of the ``validations`` still to come, and one at
+    its end when it is saved for a snapshot verifier or kept as a snapshot, which is then the
+    same save. A shared solver is never saved at its end for its verifier, which runs in it."""
     return validations + int(snapshot_verified or kept_as_snapshot)
 
 
 def round_verifier_resources(spec: TaskSpec, validations: int = 1) -> Resources | None:
     """The resources of the verifier a validation round boots from a snapshot of a solver of
-    ``spec``, on the leaf that saved it, with ``validations`` runs of ``validation/`` still to
-    come: the solver's, never elevated, where ``validation/`` runs shared, and its own where
-    it runs in a snapshot verifier. None otherwise: a separate one runs on a leaf of its own."""
+    ``spec``, on the leaf that saved it, with ``validations`` still to come: the solver's,
+    never elevated, where rounds validate shared, and its own where they validate in a
+    snapshot verifier. None otherwise: a separate one runs on a leaf of its own."""
     validation = spec.validation_spec
     if validations <= 0 or validation.environment_mode is VerificationMode.SEPARATE:
         return None

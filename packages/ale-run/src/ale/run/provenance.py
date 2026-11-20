@@ -236,6 +236,7 @@ def build_lock(
     harbor: bool = False,
     warnings: tuple[str, ...] = (),
     seed: int = 0,
+    validation_stage: Literal["validation", "tests"] = "validation",
 ) -> RunLock:
     """Bind one episode's result to everything that produced it."""
     return RunLock(
@@ -258,6 +259,7 @@ def build_lock(
         config_hash=inputs.config_hash,
         timeouts=inputs.timeouts,
         validation_rounds=inputs.validation_rounds,
+        validation_stage=validation_stage,
         seed=seed,
         ale_verify=ale_verify,
         judges=inputs.judges,

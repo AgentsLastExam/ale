@@ -9,7 +9,7 @@ beside the files of the stage that reads them, at these roots of a
 | Root | Read by |
 |---|---|
 | `environment/assets/` | the image build, container or VM, through its ordinary context |
-| `tests/assets/` | verification |
+| `tests/assets/` | verification, and each validation round's verifier where `tests/` validates |
 | `validation/assets/` | the verifier of each [validation round](episode-protocol.md#validation-rounds) |
 | `solution/assets/` | the oracle of the reference solution |
 | `calibration/<case>/assets/` | the oracle of that further [case](task-authoring.md#calibration) |

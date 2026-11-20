@@ -10,7 +10,7 @@ verifier directory a result is written to.
 
 An agent that receives validation rounds works in turns, each after the first in a solver
 booted from the snapshot the turn before it left, with the result of ``validation/`` on
-that snapshot as its prompt.
+that snapshot, or of ``tests/`` for a Task without it, as its prompt.
 """
 
 from __future__ import annotations
@@ -143,8 +143,8 @@ _AGENT_STOPS = (PhaseTimeoutError, BudgetExceededError, AgentError)
 SETUP_TIMEOUT_SEC = 1800.0
 
 #: Upper bound on waiting for room for the solver a validation round boots, such as GPUs
-#: another Run took while validation/ ran, and how long it waits between tries; a framework
-#: guard outside the agent's time.
+#: another Run took while the round's verifier ran, and how long it waits between tries; a
+#: framework guard outside the agent's time.
 BOOT_WAIT_SEC = 1800.0
 BOOT_RETRY_SEC = 10.0
 
@@ -152,8 +152,9 @@ BOOT_RETRY_SEC = 10.0
 #: validation round, boots from: a guard against a hung save, outside the verifier's budget.
 SNAPSHOT_TIMEOUT_SEC = 1800.0
 
-#: Below the instruction, verbatim above it, when the agent receives validation rounds.
-#: Framework-owned and neutral: it says how the episode goes on, never how to do the Task.
+#: Below the instruction, verbatim above it, when the agent receives validation rounds, by
+#: the stage that validates. Framework-owned and neutral: it says how the episode goes on,
+#: never how to do the Task.
 VALIDATION_PREAMBLE = (
     "\n\n---\n\n"
     "How your work is evaluated: each time you end your turn, your work is scored on a "
@@ -161,6 +162,14 @@ VALIDATION_PREAMBLE = (
     "happens at most {rounds}. After that, your final state is scored once, on a separate "
     "hidden test set. Your time limit of {minutes} minutes covers all of your turns. "
     "Processes you leave running do not survive into your next turn.\n"
+)
+TESTS_PREAMBLE = (
+    "\n\n---\n\n"
+    "How your work is evaluated: each time you end your turn, your work is scored on the "
+    "test set that scores your final state and you receive the result, after which you "
+    "continue working. This happens at most {rounds}. After that, your final state is scored "
+    "once more, on the same test set. Your time limit of {minutes} minutes covers all of "
+    "your turns. Processes you leave running do not survive into your next turn.\n"
 )
 
 
@@ -389,7 +398,7 @@ _PENDING = "pending"
 def _separate_verifier(spec: TaskSpec, validations: int) -> Resources | None:
     """The resources of a separate verifier that may mount views of the volumes of a
     solver of ``spec`` with ``validations`` rounds still to come: the larger in each
-    dimension of ``tests/``'s and ``validation/``'s separate verifiers."""
+    dimension of ``tests/``'s separate verifier and the rounds'."""
     if not spec.volume_candidates:
         return None
     placed = [spec.verify] + ([spec.validation_spec] if validations else [])
@@ -438,7 +447,8 @@ def _reward_from_text(content: bytes) -> str:
 
 class EpisodeProtocol:
     """Linear provision → setup → agent → verify flow; with validation rounds, each turn of
-    the agent but the last is followed by a save, ``validation/`` and a new solver."""
+    the agent but the last is followed by a save, ``validation/``, or ``tests/`` for a Task
+    without it, and a new solver."""
 
     component = "episode-protocol"
 
@@ -461,21 +471,21 @@ class EpisodeProtocol:
         self.timeouts = timeouts or RunTimeouts()
         self.resume = resume
         self.validation_rounds = validation_rounds
-        """How many results of ``validation/`` the agent receives, each between two turns."""
+        """How many validation results the agent receives, each between two turns."""
         self.check_validation = check_validation
-        """Run ``validation/`` once on the final state, before ``tests/``, with no turn
-        after it, as calibration checks it."""
+        """Validate once on the final state, before ``tests/`` scores it, with no turn after
+        it, as calibration checks the stage that validates."""
 
     @property
     def validations(self) -> int:
-        """How many times its episodes run ``validation/`` before ``tests/``: once for each of
-        the agent's validation rounds, or once for calibration's validation check; each saves
-        the solver as a snapshot."""
+        """How many times its episodes validate before ``tests/`` scores the final state: once
+        for each of the agent's validation rounds, or once for calibration's validation check;
+        each saves the solver as a snapshot."""
         return self.validation_rounds or int(self.check_validation)
 
     @property
     def validates(self) -> bool:
-        """Whether its episodes run ``validation/``."""
+        """Whether its episodes validate."""
         return self.validations > 0
 
     async def run(self, task: Task, ctx: EpisodeContext) -> Verdict:
@@ -484,12 +494,10 @@ class EpisodeProtocol:
         if self.agent_enabled:
             self.harness.validate_os(spec.os)
             self.harness.validate_resources(ctx.agent_resources)
-        if self.validates:
-            _require_validation(
-                task, self.harness if self.validation_rounds and self.agent_enabled else None
-            )
-            if self.validation_rounds and not self.agent_enabled:
+        if self.validation_rounds:
+            if not self.agent_enabled:
                 raise ConfigError("validation rounds need an agent to receive them")
+            _require_resume(self.harness)
         image = ctx.prepared_image
         solver = _Solver(await self._timed(ctx, Phase.PROVISION, self._provision(ctx)), image)
         logs = (
@@ -604,8 +612,8 @@ class EpisodeProtocol:
     def _solver_request(
         self, ctx: EpisodeContext, *, validations: int, image: PreparedTaskImage | None = None
     ) -> SandboxRequest:
-        """The solver's request; one that ``validations`` runs of ``validation/`` still to come
-        save asks for a leaf that saves that many snapshots in a row, and more
+        """The solver's request; one that ``validations`` still to come save asks for a leaf
+        that saves that many snapshots in a row, and more
         (:func:`~ale.core.capability.solver_saves`), and that serves the verifier that boots
         from its snapshot too."""
         spec = ctx.spec
@@ -801,7 +809,7 @@ class EpisodeProtocol:
         validations: int,
     ) -> Sandbox:
         """Boot the next turn's solver, waiting, up to ``BOOT_WAIT_SEC``, while what it
-        needs is in use: another Run may take its GPUs while ``validation/`` runs."""
+        needs is in use: another Run may take its GPUs while the round's verifier runs."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + BOOT_WAIT_SEC
         while True:
@@ -869,7 +877,7 @@ class EpisodeProtocol:
             target = _layout(ctx.spec.os).path(Stage.SETUP)
             await sandbox.upload_dir(str(setup_dir), str(target))
             if folder.stage_entry(Stage.SETUP, ctx.spec.os):
-                await self._run_stage(ctx, sandbox, target, Phase.SETUP)
+                await self._run_stage(ctx, sandbox, target, Phase.SETUP, stage=Stage.SETUP)
         await self._healthcheck(ctx, sandbox)
 
     async def _healthcheck(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
@@ -977,7 +985,7 @@ class EpisodeProtocol:
         timeout = budget.remaining
         first = prompt is None
         if first:
-            prompt = self._instruction(spec)
+            prompt = self._instruction(ctx)
             if self.resume is not None:
                 continuation = self.resume.source.continuation
 
@@ -1109,14 +1117,16 @@ class EpisodeProtocol:
                     extra={"ale_data": {"error": type(exc).__name__}},
                 )
 
-    def _instruction(self, spec: TaskSpec) -> str:
+    def _instruction(self, ctx: EpisodeContext) -> str:
         """The first prompt: the instruction, verbatim, and, when the agent receives
         validation rounds, the preamble that says how its turns go."""
+        spec = ctx.spec
         if not self.validation_rounds:
             return spec.instruction
         rounds = "once" if self.validation_rounds == 1 else f"{self.validation_rounds} times"
         total = self.timeouts.agent or spec.timeouts.agent
-        return spec.instruction + VALIDATION_PREAMBLE.format(rounds=rounds, minutes=_minutes(total))
+        preamble = TESTS_PREAMBLE if ctx.validation_stage is Stage.TESTS else VALIDATION_PREAMBLE
+        return spec.instruction + preamble.format(rounds=rounds, minutes=_minutes(total))
 
     async def _validation_rounds(
         self,
@@ -1127,16 +1137,17 @@ class EpisodeProtocol:
         logs: LogMirror | None,
         budget: _AgentTime,
     ) -> None:
-        """Run ``validation/`` each time a turn of the agent ends normally, and give the
-        agent each result as its next turn, in a solver booted from the snapshot the round
-        saved; a turn that something else ended, a Gateway limit included, is the last.
-        ``check_validation`` runs it once, with no turn after it.
+        """Validate each time a turn of the agent ends normally, and give the agent each
+        result as its next turn, in a solver booted from the snapshot the round saved; a turn
+        that something else ended, a Gateway limit included, is the last.
+        ``check_validation`` validates once, with no turn after it.
 
         Each round copies the agent's logs, saves the solver, which stops it and every
-        process in it, scores the snapshot with ``validation/`` as the Task's verification
-        topology places a verifier, and boots the next solver from it without running
-        setup again. Once the save succeeds nothing runs on the previous round's snapshot,
-        which then goes, so at most one round's snapshot exists while ``validation/`` runs.
+        process in it, scores the snapshot with the stage that validates, ``validation/`` or
+        else ``tests/``, as the Task's verification topology places a verifier, and boots
+        the next solver from it without running setup again. Once the save succeeds nothing
+        runs on the previous round's snapshot, which then goes, so at most one round's
+        snapshot exists while the round's verifier runs.
         """
         mode = ctx.spec.validation_spec.environment_mode
         logger = logging.getLogger("ale.execution")
@@ -1220,7 +1231,11 @@ class EpisodeProtocol:
             )
             assert ctx.agent_run is not None and ctx.agent_run.continuation is not None
             prompt = _round_prompt(
-                ctx.validation_rounds[-1], self.validation_rounds, feedback, budget.remaining
+                ctx.validation_rounds[-1],
+                self.validation_rounds,
+                feedback,
+                budget.remaining,
+                ctx.validation_stage,
             )
             await self._agent(
                 task,
@@ -1278,8 +1293,8 @@ class EpisodeProtocol:
         artifacts: ArtifactSink | None,
         viewed: tuple[str, ...] = (),
     ) -> str | None:
-        """Score the snapshot ``handle`` with ``validation/`` under the verifier's budget and
-        record the round; return the feedback text the agent receives.
+        """Score the snapshot ``handle`` with the stage that validates under the verifier's
+        budget and record the round; return the feedback text the agent receives.
 
         A round that produces no score is recorded with its failure, and the agent receives
         it as such: the round counts, and the episode goes on.
@@ -1307,7 +1322,9 @@ class EpisodeProtocol:
             if artifacts is not None:
                 await artifacts.restore(verifier)
                 await self._prune_views(ctx, verifier, views)
-            return await self._score(task, ctx, verifier, Stage.VALIDATION, directory)
+            return await self._score(
+                task, ctx, verifier, ctx.validation_stage, directory, phase=Phase.VALIDATE
+            )
 
         outcome: tuple[float, str | None] | Exception
         try:
@@ -1582,10 +1599,19 @@ class EpisodeProtocol:
         return {"reward": reward}
 
     async def _score(
-        self, task: Task, ctx: EpisodeContext, sandbox: Sandbox, stage: Stage, records: Path
+        self,
+        task: Task,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        stage: Stage,
+        records: Path,
+        *,
+        phase: Phase = Phase.VERIFY,
     ) -> tuple[float, str | None]:
         """Run a verifier stage, ``tests/`` or ``validation/``, in ``sandbox`` and return its
-        reward and feedback text, recording its result and Judge logs in ``records``."""
+        reward and the feedback text the agent receives, recording its result and Judge logs
+        in ``records``: in ``phase`` verify, ``tests/`` scoring the final state, or in a
+        validation round's, the stage that validates."""
         folder = getattr(task, "folder", None)
         stage_dir = folder.stage_dir(stage) if folder else None
         if stage_dir is None:
@@ -1609,7 +1635,7 @@ class EpisodeProtocol:
         await sandbox.upload_dir(str(stage_dir), str(root))
         # Converted once, after the agent's last turn: a validation round has none yet.
         trajectory = ctx.run_dir / "trajectory.json"
-        if stage is Stage.TESTS and trajectory.is_file():
+        if phase is Phase.VERIFY and trajectory.is_file():
             await sandbox.write_file(
                 str(layout.path(stage, "trajectory.json")), trajectory.read_bytes()
             )
@@ -1631,7 +1657,7 @@ class EpisodeProtocol:
             str(Path(fastjsonschema.__file__).parent), f"{destination}/fastjsonschema"
         )
         await self._probe_package(sandbox, python, "ale-verify", "import ale_verify")
-        placed = ctx.spec.verify if stage is Stage.TESTS else ctx.spec.validation_spec
+        placed = ctx.spec.verify if phase is Phase.VERIFY else ctx.spec.validation_spec
         if (user := placed.user) is not None:
             granted = await sandbox.exec(
                 [
@@ -1654,7 +1680,6 @@ class EpisodeProtocol:
             version=framework_version,
             content_hash=framework_hash,
         )
-        phase = Phase.VERIFY if stage is Stage.TESTS else Phase.VALIDATE
         invocations: tuple[JudgeInvocation, ...] = ()
         # The verifier's own network, applied just before its code runs: in a shared solver
         # it replaces the agent's, and its Judges reach the Gateway under any policy.
@@ -1662,7 +1687,9 @@ class EpisodeProtocol:
         if ctx.open_judge_sessions is not None:
             ctx.open_judge_sessions(True)
         try:
-            exit_code = await self._run_stage(ctx, sandbox, root, phase, verify_python=python)
+            exit_code = await self._run_stage(
+                ctx, sandbox, root, phase, stage=stage, verify_python=python
+            )
         finally:
             if ctx.open_judge_sessions is not None:
                 ctx.open_judge_sessions(False)
@@ -1673,7 +1700,7 @@ class EpisodeProtocol:
                 await sandbox.exec(["chmod", "--", "o-x", str(layout.root)])
             # Keep Judge evidence even if the task exits, raises or times out.
             invocations = await self._collect_judge_logs(ctx, sandbox, stage, records)
-            if stage is Stage.TESTS:
+            if phase is Phase.VERIFY:
                 ctx.judge_invocations = invocations
             else:
                 ctx.validation_judge_invocations += invocations
@@ -1684,9 +1711,10 @@ class EpisodeProtocol:
                 )
             raise TaskError(f"{stage}/ failed with exit code {exit_code}")
         result = await self._read_result(ctx, sandbox, records, stage)
-        # Only a validation round shows feedback; tests/'s is never read.
+        # A round's feedback reaches the agent, of tests/ too where it validates; the final
+        # run's reaches no one.
         feedback = (
-            await self._read_feedback(ctx, sandbox, records) if stage is Stage.VALIDATION else None
+            await self._read_feedback(ctx, sandbox, records) if phase is Phase.VALIDATE else None
         )
         return float(result["reward"]), feedback
 
@@ -1793,13 +1821,13 @@ class EpisodeProtocol:
         except GuestUnreachableError:
             raise
         except Exception as exc:
-            raise VerifierOutputError(f"validation/'s feedback could not be read: {exc}") from exc
+            raise VerifierOutputError(f"the round's feedback could not be read: {exc}") from exc
         if len(raw) > MAX_FEEDBACK_BYTES:
             raise VerifierOutputError(
                 f"{path} holds {len(raw)} bytes, more than the {MAX_FEEDBACK_BYTES} it may"
             )
         if any(secret.encode() in raw for secret in ctx.verification_secrets if secret):
-            raise VerifierOutputError("validation/'s feedback contains a configured credential")
+            raise VerifierOutputError("the round's feedback contains a configured credential")
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -2069,7 +2097,7 @@ class EpisodeProtocol:
             episode_id=ctx.episode_id,
             trajectory_id=ctx.trajectory_id,
             # The first prompt as sent, the preamble of validation rounds included.
-            instruction=self._instruction(ctx.spec),
+            instruction=self._instruction(ctx),
             logs_dir=ctx.run_dir / "logs" / self.harness.name,
             model=ctx.session.model,
             agent_version=ctx.agent_version or self.harness.version(),
@@ -2166,10 +2194,10 @@ class EpisodeProtocol:
         directory: PurePath,
         phase: Phase,
         *,
+        stage: Stage,
         verify_python: str | None = None,
     ) -> int:
         layout = _layout(ctx.spec.os)
-        stage = {Phase.SETUP: Stage.SETUP, Phase.VALIDATE: Stage.VALIDATION}.get(phase, Stage.TESTS)
         entry = directory / stage.entry(ctx.spec.os)
         variables = ctx.variables.values
         env = {
@@ -2194,7 +2222,7 @@ class EpisodeProtocol:
             )
             if verify_python is not None:
                 env["ALE_VERIFY_PYTHON"] = verify_python
-            if stage is Stage.TESTS and (ctx.run_dir / "trajectory.json").is_file():
+            if phase is Phase.VERIFY and (ctx.run_dir / "trajectory.json").is_file():
                 env["ALE_TRAJECTORY_PATH"] = str(layout.path(stage, "trajectory.json"))
             # Judges retry provider failures until this budget runs out, so a verdict is
             # recorded as failed before the phase deadline kills the verifier.
@@ -2655,24 +2683,13 @@ def validation_rounds(task: Task, harness: Harness, override: int | None) -> int
             if override is None
             else f"the Run's validation_rounds = {rounds}"
         )
-        _require_validation(task, harness, asked=asked)
+        _require_resume(harness, asked=asked)
     return rounds
 
 
-def _require_validation(
-    task: Task, harness: Harness | None, *, asked: str = "validation_rounds"
-) -> None:
-    """Refuse validation that cannot run: a Task without ``validation/``, or rounds for a
-    ``harness`` that cannot resume its native session, which is how every turn after the
-    first begins; ``asked`` names the setting that asked for them."""
-    folder = task.folder
-    if folder is None or folder.stage_dir(Stage.VALIDATION) is None:
-        raise ConfigError(
-            f"{task.spec.name} has no validation/, so its agent can receive none of the "
-            f"validation rounds {asked} asks for; set validation_rounds = 0"
-        )
-    if harness is None:
-        return
+def _require_resume(harness: Harness, *, asked: str = "validation_rounds") -> None:
+    """Refuse rounds for a ``harness`` that cannot resume its native session, which is how
+    every turn after the first begins; ``asked`` names the setting that asked for them."""
     if (
         not isinstance(harness, AutonomousHarness)
         or isinstance(harness, (OracleHarness, NopHarness))
@@ -2701,32 +2718,37 @@ def _minutes(seconds: float) -> str:
 
 
 def _round_prompt(
-    record: ValidationRound, rounds: int, feedback: str | None, seconds_left: float
+    record: ValidationRound, rounds: int, feedback: str | None, seconds_left: float, stage: Stage
 ) -> str:
     """The prompt that gives the agent one validation round's result: framework-owned and
-    neutral, with the verifier's feedback verbatim."""
+    neutral, with the feedback of the stage that validates verbatim, in the words of the
+    preamble, which names no validation set when ``tests/`` validates."""
     result = (
         f"reward {record.reward:.2f}"
         if record.reward is not None
         else f"no score ({record.status.value})"
     )
-    lines = [f"Validation round {record.index} of {rounds}: {result}.", ""]
+    validation = stage is Stage.VALIDATION
+    name = "Validation round" if validation else "Round"
+    lines = [f"{name} {record.index} of {rounds}: {result}.", ""]
+    stage_set = "validation set" if validation else "test set"
     if feedback is None:
-        lines.append("The validation set gave no feedback.")
+        lines.append(f"The {stage_set} gave no feedback.")
     else:
-        lines += ["Feedback from the validation set:", "<feedback>"]
+        lines += [f"Feedback from the {stage_set}:", "<feedback>"]
         lines += [feedback.rstrip("\n"), "</feedback>"]
+    lines.append("")
     left = rounds - record.index
-    lines += [
-        "",
-        f"Validation rounds left: {left or 'none'}. Time left: {_minutes(seconds_left)} "
-        "minutes. When you end this turn, "
-        + (
-            "your work is validated again."
-            if left
-            else "your final state is scored once, on the hidden test set."
-        ),
-    ]
+    if left:
+        then = "your work is validated again." if validation else "your work is scored again."
+    elif validation:
+        then = "your final state is scored once, on the hidden test set."
+    else:
+        then = "your final state is scored once more, on the same test set."
+    lines.append(
+        f"{name}s left: {left or 'none'}. Time left: {_minutes(seconds_left)} "
+        f"minutes. When you end this turn, {then}"
+    )
     return "\n".join(lines)
 
 

@@ -666,11 +666,12 @@ class CalibrationCase(BaseModel):
 
     @property
     def validation_expect(self) -> dict[str, float | tuple[float, float]]:
-        """What ``validation/``'s result must be: ``expect_validation``, else ``expect``."""
+        """What the validation check's result must be: ``expect_validation``, else
+        ``expect``."""
         return self.expect if self.expect_validation is None else self.expect_validation
 
     def admits(self, key: str, value: float, *, validation: bool = False) -> bool:
-        """Whether ``value`` is what this case expects of ``key``, of ``validation/``'s
+        """Whether ``value`` is what this case expects of ``key``, of the validation check's
         result when ``validation``."""
         expected = (self.validation_expect if validation else self.expect)[key]
         if isinstance(expected, tuple):
@@ -761,15 +762,15 @@ class TaskSpec(BaseModel):
     ``None`` for its home."""
     timeouts: PhaseTimeouts = PhaseTimeouts()
     validation_rounds: int = Field(default=0, ge=0)
-    """``[agent].validation_rounds``: how many results of ``validation/`` the evaluated agent
-    receives, each between two of its turns."""
+    """``[agent].validation_rounds``: how many results of ``validation/``, or else ``tests/``,
+    the evaluated agent receives, each between two of its turns."""
     healthcheck: Healthcheck | None = Field(default=None, exclude_if=lambda value: value is None)
     """``[environment.healthcheck]``, run where the agent starts once setup is done."""
     artifacts: tuple[Artifact, ...] = ()
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
     validation: VerifySpec | None = None
-    """Where ``validation/`` runs, when ``[validation]`` places it apart from ``tests/``;
+    """Where rounds validate, when ``[validation]`` places them apart from ``tests/``;
     :attr:`validation_spec` resolves it."""
     variables: TaskVariables = TaskVariables()
     calibration: tuple[CalibrationCase, ...] = (DEFAULT_SOLUTION,)
@@ -788,7 +789,7 @@ class TaskSpec(BaseModel):
 
     @property
     def validation_spec(self) -> VerifySpec:
-        """Where ``validation/`` runs: ``[validation]``'s, or ``tests/``'s."""
+        """Where rounds validate: ``[validation]``'s, or ``tests/``'s."""
         return self.validation or self.verify
 
     @property
@@ -1143,8 +1144,8 @@ class AgentTable(BaseModel):
     sudo: bool = Field(default=False, strict=True)
     workdir: str | None = Field(default=None, min_length=1)
     validation_rounds: int = Field(default=0, ge=0, strict=True)
-    """How many results of ``validation/`` the agent receives, each between two of its turns;
-    ``N`` gives it ``N + 1`` turns."""
+    """How many results of ``validation/``, or else ``tests/``, the agent receives, each
+    between two of its turns; ``N`` gives it ``N + 1`` turns."""
 
     @property
     def network(self) -> NetworkPolicy | None:
@@ -1284,7 +1285,7 @@ class VerifierTable(BaseModel):
 
 
 class ValidationTable(BaseModel):
-    """``[validation]``, ALE's: where ``validation/`` runs, when not where ``[verifier]`` puts
+    """``[validation]``, ALE's: where rounds validate, when not where ``[verifier]`` puts
     ``tests/``. Its budget and variables are ``[verifier]``'s, and a separate one runs the
     image a separate verifier of ``tests/`` would, as it has no image of its own."""
 
@@ -1323,8 +1324,8 @@ class ValidationTable(BaseModel):
             & self.environment.model_fields_set
         ):
             raise ValueError(
-                f"[validation.environment] cannot set {' or '.join(keys)}: validation/ runs "
-                "with the verifier's network, as tests/ does"
+                f"[validation.environment] cannot set {' or '.join(keys)}: a validation "
+                "verifier runs with the verifier's network, as tests/ does"
             )
         return self
 
@@ -1359,7 +1360,7 @@ class TaskConfig(BaseModel):
     agent: AgentTable = AgentTable()
     verifier: VerifierTable = VerifierTable()
     validation: ValidationTable | None = None
-    """``[validation]``; without it ``validation/`` runs where ``[verifier]`` puts ``tests/``."""
+    """``[validation]``; without it rounds validate where ``[verifier]`` puts ``tests/``."""
     solution: SolutionTable = SolutionTable()
     calibration: tuple[CalibrationCase, ...] = ()
     """``[[calibration]]`` as written; ``calibration_cases`` adds the default ``solution``."""

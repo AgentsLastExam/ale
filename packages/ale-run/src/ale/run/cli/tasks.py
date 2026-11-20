@@ -604,6 +604,19 @@ async def _reverify(
                 )
                 failures += 1
                 continue
+            if (
+                source_lock.validation_rounds
+                and source_lock.validation_stage == "tests"
+                and task.task_digest != source_lock.task.content_digest
+            ):
+                # Its agent received tests/'s results, so tests/ is part of what it did.
+                typer.echo(
+                    f"{task.spec.name}: tests/ validated the source agent's rounds and the Task "
+                    "changed since; run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
             if task.spec.image != source_lock.image.declaration:
                 typer.echo(
                     f"{task.spec.name}: its image differs from the source run's; "
@@ -1060,8 +1073,11 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
         resolved = resolve(reference)
         tasks = _load(resolved.task_dir)
         for task in tasks:
-            # Every case checks validation/ too, on a snapshot of the same final state.
-            task.validations = int(task.folder.stage_dir(Stage.VALIDATION) is not None)
+            # Every case checks validation/ too, or tests/ where it validates the agent's
+            # rounds, on a snapshot of the same final state.
+            task.validations = int(
+                task.validation_stage is Stage.VALIDATION or task.spec.validation_rounds > 0
+            )
         _resolve_variables(tasks, settings, oracle=True)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
@@ -1162,7 +1178,9 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                         case, result.verdict, result.run_dir
                     )
                     validation = (
-                        _validation_check(case, result.record, result.run_dir)
+                        _validation_check(
+                            case, result.record, result.run_dir, task.validation_stage
+                        )
                         if task.validates
                         else None
                     )
@@ -1177,7 +1195,7 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                             passed=not case_failures and (validation is None or validation.passed),
                         )
                     )
-                    typer.echo(_case_line(str(spec.name), cases[-1]))
+                    typer.echo(_case_line(str(spec.name), cases[-1], task.validation_stage))
 
                 passed = all(case.passed for case in cases)
                 observations.append(
@@ -1296,11 +1314,13 @@ def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
-    """The verifier stages the Run runs: ``tests/``, and ``validation/`` where it runs."""
+    """The verifier stages the Run runs: ``tests/``, and ``validation/`` where it validates."""
     return [
         task.folder.root / stage
         for task in tasks
-        for stage in ((Stage.TESTS, Stage.VALIDATION) if task.validates else (Stage.TESTS,))
+        for stage in dict.fromkeys(
+            (Stage.TESTS, task.validation_stage) if task.validates else (Stage.TESTS,)
+        )
     ]
 
 
@@ -1440,22 +1460,23 @@ def _calibration_check(
 
 
 def _validation_check(
-    case: CalibrationCase, record: ResultRecord, episode_dir: Path
+    case: CalibrationCase, record: ResultRecord, episode_dir: Path, stage: Stage
 ) -> CalibrationCheck:
-    """What ``validation/`` gave a case's final state, which its episode ran once before
-    ``tests/``, against ``expect_validation``, or ``expect`` without one."""
+    """What ``stage``, the one that validates, gave a case's final state, which its episode
+    ran once before ``tests/`` scored it, against ``expect_validation``, or ``expect``
+    without one."""
     expect = case.validation_expect
     scored = next(iter(record.validation_rounds), None)
     observed: dict[str, float | None] = {}
     if scored is None:
-        message = f"the episode ended with {record.status.value} before validation/ ran"
+        message = f"the episode ended with {record.status.value} before {stage}/ validated"
         failures: tuple[CalibrationNotice, ...] = (
             CalibrationNotice(code="not_completed", message=message),
         )
     elif scored.status is not Status.COMPLETED:
         failure = scored.failure
         detail = f" ({failure.error_type}: {failure.message})" if failure is not None else ""
-        message = f"validation/ ended with {scored.status.value}{detail}"
+        message = f"{stage}/ ended with {scored.status.value}{detail}"
         failures = (CalibrationNotice(code="not_completed", message=message),)
     else:
         path = episode_dir / "validation" / str(scored.index) / "verification.json"
@@ -1515,8 +1536,9 @@ def _calibration_attempt(result: EpisodeResult, run_dir: Path) -> CalibrationAtt
     )
 
 
-def _case_line(task: str, case: CaseCalibrationObservation) -> str:
-    """One case: the values it observed when it passed, or each way it failed."""
+def _case_line(task: str, case: CaseCalibrationObservation, stage: Stage) -> str:
+    """One case: the values it observed when it passed, or each way it failed, and those of
+    its validation check by ``stage``."""
 
     def outcome(observed: dict[str, float | None], failures: tuple[CalibrationNotice, ...]) -> str:
         if failures:
@@ -1525,7 +1547,7 @@ def _case_line(task: str, case: CaseCalibrationObservation) -> str:
 
     line = outcome(case.observed, case.failures)
     if case.validation is not None:
-        line += "; validation/: " + outcome(case.validation.observed, case.validation.failures)
+        line += f"; {stage}/: " + outcome(case.validation.observed, case.validation.failures)
     return f"{'ok  ' if case.passed else 'FAIL'}  {task} {case.name}: {line}"
 
 
