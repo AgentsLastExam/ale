@@ -1,4 +1,5 @@
-"""The OOM kills in a Sandbox that nothing outside it records.
+"""A container Sandbox's ``/dev/shm``, and the OOM kills in a Sandbox that nothing outside it
+records.
 
 A cgroup counts in ``memory.events``, from its creation on, each time its memory reached its
 limit (``oom``) and each of its processes an OOM killer ended (``oom_kill``), whichever
@@ -17,7 +18,16 @@ import contextlib
 
 from ale.core.errors import ProviderStartError
 
-__all__ = ["WATCHER", "GuestEvents"]
+__all__ = ["WATCHER", "GuestEvents", "shm_mb"]
+
+
+def shm_mb(memory_mb: int) -> int:
+    """The size of the ``/dev/shm`` a container Sandbox of ``memory_mb`` gets: half its memory,
+    as Linux sizes a tmpfs by default and so every Linux VM's ``/dev/shm``, where Docker and
+    Podman give 64 MiB whatever the memory. Its files are the Sandbox's memory, which
+    ``memory_mb`` holds."""
+    return memory_mb // 2
+
 
 #: Writes the file of counts it is given on one line at every change, until its standard
 #: input closes; run as root on the framework's Python, isolated. It reads again at every

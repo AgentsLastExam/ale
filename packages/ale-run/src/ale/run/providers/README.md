@@ -373,7 +373,7 @@ whose message gives what showed the kill.
 
 | Provider | Where the limit is | One process past it | What loses the Sandbox | How ALE tells |
 |---|---|---|---|---|
-| `docker:runc` | its cgroup on the Host | killed alone | many processes: the OOM killer reaches supervisord; `/dev/shm` is too small to | Docker's `OOMKilled`, which it sets at any OOM kill in the container and keeps after it stops ([Docker](docker/AGENTS.md#a-sandbox-that-runs-out-of-its-memory)) |
+| `docker:runc` | its cgroup on the Host | killed alone | many processes: the OOM killer reaches supervisord; `/dev/shm`, half its memory, is too small to | Docker's `OOMKilled`, which it sets at any OOM kill in the container and keeps after it stops ([Docker](docker/AGENTS.md#a-sandbox-that-runs-out-of-its-memory)) |
 | `docker:gvisor` | its cgroup on the Host, the Sentry's memory included, which the Sentry keeps 16 MiB below | killed alone, by the Sentry | a mounted tmpfs written full: the Sentry ends every process it may choose, guestd among them; many processes are killed one by one | `oom_kill` in the Sentry's `memory.oom_control`, which a watcher in the sandbox writes to a `docker exec` session, since Docker records none of the Sentry's kills; and Docker's `OOMKilled` as under runc, for the Host's OOM killer, which still acts on memory the Sentry does not see ([gVisor](../../../../../../images/runtimes/gvisor/README.md#out-of-memory)) |
 | `docker:kata` | the microVM's memory | killed alone | a mounted tmpfs written full; many processes are killed one by one | `oom_kill` or `oom` in the container's `memory.events` in the guest, which a watcher there writes to a `docker exec` session: Docker records no OOM kill in the guest |
 | `firecracker` | the microVM's memory | killed alone | a tmpfs written full; many processes are killed one by one, guestd at times among them | the kernel's OOM-killer lines on the guest's serial console since it booted, the runner's log ([QEMU](qemu/AGENTS.md#a-vm-that-runs-out-of-its-memory)) |
@@ -391,6 +391,24 @@ Docker's `OOMKilled` does not say. A hypervisor the Host's OOM killer ends leave
 in its guest, so a Kata, QEMU or Firecracker Sandbox lost so is a lost guest. guestd's
 systemd unit in a Linux VM sets `OOMPolicy=continue`, so that one of its commands the OOM
 killer ends goes alone.
+
+A Linux Sandbox's `/dev/shm` holds half its `memory_mb` ([`memory.shm_mb`](memory.py)), as a
+Linux kernel sizes a tmpfs by default and so every Linux VM's. Docker and Podman give 64 MiB
+whatever the memory, in which PyTorch's DataLoader with 8 workers of 64 images each ended at
+its first batch (`DataLoader worker (pid(s) ...) exited unexpectedly`, a bus error in the
+worker) under runc and gVisor. Its files are the Sandbox's memory: with it full, a write
+fails as on a full disk, and a process past what is left is killed alone.
+
+| Provider | `/dev/shm` |
+|---|---|
+| `docker:runc` | `--shm-size`, a tmpfs charged to the container's cgroup |
+| `docker:gvisor` | `--shm-size`, which runsc mounts as a tmpfs of the Sentry |
+| `docker:kata` | half the microVM, its guest's own: Kata ignores `--shm-size` ([Docker](docker/AGENTS.md#the-size-of-devshm)) |
+| `slurm` | Podman's `--shm-size`, a tmpfs on the node that runsc reaches through its gofer, charged to the step's cgroup ([Slurm](slurm/AGENTS.md)) |
+| `firecracker`, `qemu`, Linux | half the guest's memory, its kernel's default |
+| `daytona` | a tmpfs that root mounts over Daytona's 64 MiB one at start, charged to the sandbox's cgroup ([Daytona](daytona/AGENTS.md#devshm-is-64-mib)) |
+| `qemu`, Windows; `orchard` | none: Windows and macOS have no `/dev/shm` |
+| `fleet` | as on its Node's leaf |
 
 No Sandbox swaps to the Host. Every Docker leaf starts a Sandbox with `--memory-swap` equal
 to `--memory`, under every runtime. Docker's default, twice `--memory`, let one process of a
@@ -911,6 +929,7 @@ live organization (daemon 0.225.2). Operating it is in
 | Mounts the Host driver's libraries without registering them with the linker (see [GPU driver capabilities](#gpu-driver-capabilities)) | Runs `ldconfig` as root before it reads the GPUs, as Docker's NVIDIA paths do with their linker-cache hook; a sandbox where it fails is destroyed |
 | Rate-limits creates | A create answered 429 made nothing and is retried, honoring `Retry-After`, for up to five minutes. No other failed create is repeated, since it may have made a sandbox |
 | Creates a sandbox even when the caller is cancelled mid-request | Every way out of a start deletes what Daytona made; a create whose reply was lost is found by its unique name |
+| Gives every sandbox a 64 MiB `/dev/shm`, which the create request takes no size for and root cannot remount ([`daytona/AGENTS.md`](daytona/AGENTS.md#devshm-is-64-mib)) | Mounts a tmpfs of half the sandbox's memory over it as root, before anything else in the sandbox runs ([Memory](#memory)) |
 | Organizations are shared between tools | Labels live under `ale.run.*`, and listing and destroying act only on those. Every sandbox has a lifetime (`ttlMinutes`), so one a crashed run leaves behind is deleted by Daytona |
 
 Under `networkBlockAll` every runner accepts TCP connections to ports 80 and 443 of any
@@ -1115,8 +1134,8 @@ Firecracker 1.17.0, the guest kernel 6.1.155 its CI publishes, and the ALE conta
   verifier gets the snapshot's disks attached read-only after its own, mounts the same
   layers under one of its own, and detaches the disks' mounts, out of sight.
 - **The init** is PID 1 on the framework's Python. It mounts `/proc`, `/sys`, `/dev`,
-  `/dev/pts`, `/dev/shm` (half the guest's memory, a VM's default, where Docker gives
-  64 MB), `/dev/mqueue` and cgroup2, writes `hostname`, `hosts` and `resolv.conf`, starts
+  `/dev/pts`, `/dev/shm` (half the guest's memory, a VM's default and every Linux
+  Sandbox's), `/dev/mqueue` and cgroup2, writes `hostname`, `hosts` and `resolv.conf`, starts
   guestd as root with its token on a private tmpfs, and runs the image's command as Docker
   would, with the request's variables. When the command exits, the microVM stops. On
   SIGINT, which the Provider sends through guestd before a snapshot, it stops every

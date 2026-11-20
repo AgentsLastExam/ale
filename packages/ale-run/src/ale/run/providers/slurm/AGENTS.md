@@ -53,6 +53,27 @@ allocation carries each layer as a tar that `tar --xattrs --xattrs-include=user.
 the namespace, which keeps owners, whiteouts and the overlay's opaque directories; it is not
 compressed, as a volume's output often is already.
 
+A Sandbox's `/dev/shm` is Podman's `--shm-size` of half its Task's memory
+([`memory.shm_mb`](../memory.py)). Podman makes it a tmpfs on the node and binds it into the
+container, so runsc reaches it through its gofer (`9p`), where it mounts Docker's as a tmpfs
+of the Sentry; its pages are charged to the step's cgroup all the same. A `--tmpfs` at
+`/dev/shm`, which replaces Podman's with a tmpfs of the Sentry as under Docker, was slower.
+Measured on OpenRSI (Podman 4.9.3, ALE's runsc 0.1.4, November 2026), with PyTorch's
+DataLoader of 8 workers and batches of 64 images of 3×224×224 float32 on one H100, in a
+Sandbox of 16 CPUs and 16 GiB, three passes each, in both orders:
+
+| `/dev/shm` | Samples per second |
+|---|---|
+| 64 MiB | none: a bus error in a worker at the first batch |
+| `--shm-size`, 8 GiB over `9p` | 1795, 2170, 2155; 1720, 2152, 2152 |
+| `--tmpfs`, 8 GiB in the Sentry | 1231, 1507, 1494; 1232, 1497, 1497 |
+
+In a 2048 MiB Sandbox, 1024 MiB were written before a write failed with `ENOSPC`; with
+`/dev/shm` full, one process allocating held 568 MiB and was killed alone, and the Sandbox
+answered after it; 400 processes of 16 MiB ended the whole Sandbox as `MemoryExhaustedError`
+(the Sentry counted 63 to 67 kills, then the step exited 137) with `/dev/shm` full or empty,
+under either flag.
+
 Podman uses NVIDIA CDI devices by UUID. Setting NVIDIA_VISIBLE_DEVICES to void disables
 the duplicate NVIDIA hook. Register the injected libraries inside the sandbox. For nested
 Docker, Podman's default capability set omits capabilities the inner Docker expects.

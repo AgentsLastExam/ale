@@ -366,7 +366,9 @@ as a tmpfs, too, and, with shared verification, the verifier beside what the age
 Sandbox lost to either ends its Episode
 ([Episode protocol](episode-protocol.md#agent-or-oracle)). The Host's swap never adds to
 `memory_mb`, so that a Task gets the same memory on every Host; a guest system that pages to
-its own disk, as Windows and macOS do, keeps its paging
+its own disk, as Windows and macOS do, keeps its paging. A Linux Sandbox's `/dev/shm` holds
+half its `memory_mb`, as on a Linux machine of that memory, so that processes that share
+memory through it, such as PyTorch's DataLoader workers, get the same room on every Provider
 ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#memory)).
 
 ### GPUs

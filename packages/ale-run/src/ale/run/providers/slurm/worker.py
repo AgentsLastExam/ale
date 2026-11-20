@@ -500,6 +500,7 @@ def start(index: str) -> None:
         "--runtime-flag=ignore-cgroups",
         "--runtime-flag=enclosing-memory-cgroup=" + str(limit),
         "--oom-score-adj=500",
+        f"--shm-size={spec['shm_mb']}m",
         *spec["runtime_args"],
     ]
     if gpus:

@@ -480,7 +480,8 @@ and ALE's runsc 0.1.2):
   supervisord: exit 137); under Kata the guest, and under gVisor the Sentry, kills them one
   by one and the sandbox lives. A tmpfs mounted with `mount` and written full ends a Kata
   sandbox, and in a gVisor one every process the Sentry may choose, guestd among them;
-  `/dev/shm`, 64 MiB under runc and gVisor and half the VM under Kata, fills without harm.
+  `/dev/shm`, then 64 MiB under runc and gVisor and half the VM under Kata, filled without
+  harm; it now holds half the Task's memory ([The size of `/dev/shm`](#the-size-of-devshm)).
 - Docker's `OOMKilled` turns true at the first OOM kill of any process of the container,
   one `docker exec` started included, and stays true while the container runs on and after
   it stops, by `docker kill` too; under runc and runsc, with rootful Docker 29.1.3 and
@@ -532,6 +533,45 @@ stops.
   without reading its state or its watcher: an earlier OOM kill of one process, after which
   the Sandbox went on, leaves `OOMKilled` set or a count raised, which would make ALE's stop
   a loss to memory.
+
+## The size of `/dev/shm`
+
+**Problem.** PyTorch's DataLoader with 8 workers, which pass batches of 64 images of
+3×224×224 float32 to the main process through `/dev/shm`, ended at its first batch with
+`DataLoader worker (pid(s) ...) exited unexpectedly`, a bus error in a worker, under runc, as
+under gVisor on Slurm, where a Linux VM of the same memory ran it (November 2026).
+
+**Context.** Docker gives every container a 64 MiB `/dev/shm` (`size=65536k`), whatever its
+`--memory`. runsc mounts Docker's as a tmpfs of the Sentry of the size Docker gave
+(`--shm-size 512m` gave `size=524288k`; ALE's runsc 0.1.0, by `docker run`). Kata's
+guest mounts its own `/dev/shm` without a size, half the microVM, and ignores `--shm-size`
+(Kata 4.3.1). A tmpfs's pages are charged to the cgroup of whoever writes them, under gVisor
+the Sentry, so `--memory` holds them as it holds a process's. Linux sizes a tmpfs at half its
+memory by default.
+
+**Solution.** Every Sandbox gets `--shm-size` of half its Task's `memory_mb`
+([`memory.shm_mb`](../memory.py)). Measured with the container base at 2048 MiB (rootful
+Docker 29.1.3, Linux 7.0, Kata 4.3.1, November 2026):
+
+| | runc | Kata |
+|---|---|---|
+| `/dev/shm` | 1024 MiB, `size=1048576k` | 1049 MiB, half the 2195 MiB microVM |
+| Written until a write failed with `ENOSPC` | 1024 MiB | 1048 MiB |
+| Then one process allocating | held 608 MiB, killed alone; the Sandbox answered | held 592 MiB, killed alone; the Sandbox answered |
+| Then 400 processes of 16 MiB | the Sandbox died, `MemoryExhaustedError`, as with `/dev/shm` empty | the guest killed them one by one; the Sandbox lived |
+
+The DataLoader above, on CPU with 8 CPUs under runc, failed at 64 MiB and ran at 2320
+samples/s in a 16 GiB Sandbox (8 GiB of `/dev/shm`) and 2745 in a 4 GiB one (2 GiB).
+
+**Decisions.**
+- Half the memory, not a fixed size: what `/dev/shm` holds is the Sandbox's memory either
+  way, and half is what a Linux machine of that memory gives, so a Task has the same room in
+  a container as in a VM. A fixed size would be too small for a large Task or most of a small
+  one's memory.
+- Half the Task's `memory_mb`, not of `--memory`, which under gVisor adds the Sentry's
+  allowance.
+- Passed under Kata too, which ignores it, so that every runtime starts from one argument
+  list.
 
 ## guestd's replies under gVisor
 
