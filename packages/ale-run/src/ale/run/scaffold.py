@@ -23,8 +23,8 @@ artifacts = ["/home/user/output"]
 name = "{{name}}"
 
 [environment]
-cpus = 1
-memory_mb = 4096
+cpus = 2
+memory_mb = 8192
 
 [agent]
 user = "user"

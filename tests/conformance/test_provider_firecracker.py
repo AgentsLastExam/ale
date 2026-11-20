@@ -49,7 +49,7 @@ class TestFirecrackerProvider(ProviderConformance):
     async def request(self, **overrides: object) -> SandboxRequest:
         # A microVM's memory holds its kernel and page cache as well as the image's
         # processes, and the base starts a GNOME session.
-        resources = overrides.get("resources", Resources())
+        resources = overrides.get("resources", Resources(cpus=1, memory_mb=4096))
         assert isinstance(resources, Resources)
         if resources.gpus == 0:
             overrides["resources"] = resources.model_copy(

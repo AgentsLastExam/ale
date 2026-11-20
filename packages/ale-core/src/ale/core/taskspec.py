@@ -253,8 +253,8 @@ _ContainerFeatures = Annotated[tuple[ContainerFeature, ...], AfterValidator(_dis
 class Resources(BaseModel):
     model_config = _FROZEN
 
-    cpus: int = Field(default=1, ge=1)
-    memory_mb: int = Field(default=4096, ge=1)
+    cpus: int = Field(default=2, ge=1)
+    memory_mb: int = Field(default=8192, ge=1)
     storage_mb: int | None = Field(default=None, ge=1)
     gpus: int = Field(default=0, ge=0)
     gpu_types: tuple[str, ...] = ()
@@ -342,7 +342,7 @@ class NetworkPolicy(BaseModel):
 class PhaseTimeouts(BaseModel):
     model_config = _FROZEN
 
-    agent: float = Field(default=900, gt=0)
+    agent: float = Field(default=1800, gt=0)
     verify: float = Field(default=600, gt=0)
 
 
@@ -1055,8 +1055,8 @@ class EnvironmentTable(BaseModel):
     """An image used directly, or the base ``environment/``'s build script builds on;
     Harbor's ``docker_image`` names it too."""
     build_timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False, strict=True)
-    cpus: int = Field(default=1, ge=1, strict=True)
-    memory_mb: int = Field(default=4096, ge=1, strict=True)
+    cpus: int = Field(default=2, ge=1, strict=True)
+    memory_mb: int = Field(default=8192, ge=1, strict=True)
     storage_mb: int | None = Field(default=None, ge=1, strict=True)
     gpus: int = Field(default=0, ge=0, strict=True)
     gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
@@ -1118,7 +1118,7 @@ class AgentTable(BaseModel):
     model_config = _FROZEN
 
     user: str = Field(default="user", pattern=_ACCOUNT)
-    timeout_sec: float = Field(default=900, gt=0, allow_inf_nan=False, strict=True)
+    timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False, strict=True)
     network_mode: _NetworkModeName | None = None
     """Unset, ``[environment]``'s baseline applies, as in Harbor, and else no network."""
     allowed_hosts: tuple[str, ...] | None = None

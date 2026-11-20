@@ -116,7 +116,7 @@ def test_only_a_linux_registry_image_leaves_its_kind_open() -> None:
 def test_task_spec_hash_tracks_semantics() -> None:
     assert make_spec().spec_hash == make_spec().spec_hash
     assert make_spec().spec_hash != make_spec(instruction="different").spec_hash
-    assert make_spec().spec_hash != make_spec(resources={"cpus": 2}).spec_hash
+    assert make_spec().spec_hash != make_spec(resources={"cpus": 4}).spec_hash
 
 
 def test_an_open_verifier_network_keeps_the_spec_hash() -> None:
@@ -200,9 +200,9 @@ def test_task_config_requires_only_its_version_and_name() -> None:
     minimal = TaskConfig.model_validate(
         {"schema_version": SCHEMA_VERSION, "task": {"name": "org/demo"}}
     )
-    assert (minimal.environment.cpus, minimal.environment.memory_mb) == (1, 4096)
+    assert (minimal.environment.cpus, minimal.environment.memory_mb) == (2, 8192)
     assert minimal.environment.build_timeout_sec == 3600
-    assert (minimal.agent.user, minimal.agent.timeout_sec) == ("user", 900)
+    assert (minimal.agent.user, minimal.agent.timeout_sec) == ("user", 1800)
     assert minimal.agent_network.mode is NetworkMode.BLOCK
     assert minimal.verifier.timeout_sec == 600
     for table, key in (("", "schema_version"), ("task", "name")):
