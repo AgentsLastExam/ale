@@ -47,6 +47,7 @@ __all__ = [
     "SandboxRequest",
     "SandboxRole",
     "SandboxState",
+    "ShownDirectory",
     "snapshot_verifier_needs",
     "verifiers_needs",
 ]
@@ -211,6 +212,16 @@ class DesktopResolution(BaseModel):
         return {"width": int(width), "height": int(height)}
 
 
+class ShownDirectory(BaseModel):
+    """A Host directory the agent reads in its Sandbox, at ``target``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source: str = Field(min_length=1)
+    """Its absolute path on the Host."""
+    target: str = Field(min_length=1)
+
+
 class SandboxRequest(BaseModel):
     """What the engine asks a provider for."""
 
@@ -248,6 +259,10 @@ class SandboxRequest(BaseModel):
     volumes_from: str | None = None
     """A snapshot whose volumes a Sandbox of another image mounts views of: a separate
     verifier of a solver that mounted some."""
+    shown: ShownDirectory | None = Field(default=None, exclude_if=lambda value: value is None)
+    """The stage a Task shows its agent: a leaf on the Host that mounts Host directories
+    mounts it read-only at its target from the start, sparing a copy of its assets, and says
+    so in :attr:`Sandbox.shown`; the episode copies it there otherwise."""
     separate_verifier: Resources | None = None
     """The resources of the separate verifier that may mount views of this solver's
     volumes, for which a leaf that would host both reserves room; nothing requires it."""
@@ -492,6 +507,8 @@ class Sandbox(ABC):
         #: Which of its request's volume candidates it mounted as volumes of their own, or,
         #: mounting views of a snapshot's, which it mounted views of.
         self.volumes: tuple[str, ...] = ()
+        #: Whether it mounted its request's ``shown`` directory, read-only.
+        self.shown = False
 
     def release_resources(self) -> None:
         """Release Provider allocations after the underlying sandbox has stopped."""

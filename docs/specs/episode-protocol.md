@@ -69,7 +69,13 @@ and `C:\ProgramData\ALE` on Windows.
 If `environment/setup/` exists, ALE uploads the complete directory to `setup` under the
 staging root, opens egress, and executes `setup.sh` on Linux and macOS or `setup.ps1` on
 Windows with that directory as cwd, so its files are available by ordinary relative paths.
-Setup is optional and runs once.
+Setup is optional and runs once. Where `[verifier.validation].visibility` is true, the agent
+and the oracle read the stage that validates, `validation/` or else `tests/`, at
+`/opt/validation` (`C:\validation` on Windows) in every turn
+([Security](security.md#5-answers-are-absent-not-hidden)): a leaf that mounts Host
+directories mounts the Task folder's read-only there as the solver starts, which spares a
+copy of large assets, and setup ends by copying it there as the framework on every other
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#shown-stage)).
 
 ### Agent or oracle
 
@@ -84,7 +90,7 @@ autonomous CLI Harnesses use the base's native Node.js and Git Bash.
 Only the directory of the calibration case the oracle runs is uploaded, the reference
 solution's under `ale run --agent oracle`, and only for an oracle episode; none is present
 for an evaluated solver. `tests/` and `validation/` are also absent throughout this phase,
-in every turn. Answers are withheld by when they are staged and by the root-only staging
+in every turn, but for that copy. Answers are withheld by when they are staged and by the root-only staging
 directory, not by a conventional path or a flag a Task must remember.
 
 An agent run that ends early, by a timeout, a limit, a failure or a refusal, moves on to

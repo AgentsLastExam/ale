@@ -174,14 +174,17 @@ class TaskFolder:
         ``[solution]`` and ``[[calibration]]`` tables are left out: changing them keeps a
         retained solver reverifiable, unless ``tests/`` validated its agent's rounds, which
         reverification checks itself. ``validation/`` stays in, since the agent receives its
-        results. Asset bytes are left to their own commit identity rather than hashed on every
-        load; reverification compares that commit separately.
+        results, and so does ``tests/`` where the agent has a copy of it in place of a
+        ``validation/``. Asset bytes are left to their own commit identity rather than hashed
+        on every load; reverification compares that commit separately.
         """
+        own = config.verifier.validation
+        shown = own is not None and own.visibility and self.stage_dir(Stage.VALIDATION) is None
         files = tree_digest(
             self.root,
             exclude=(
                 TASK_CONFIG,
-                Stage.TESTS,
+                *(() if shown else (Stage.TESTS,)),
                 SOLUTION_DIR,
                 CALIBRATION_DIR,
                 *asset_roots(self.root),
@@ -469,6 +472,9 @@ def _spec(config: TaskConfig, folder: TaskFolder, name: TaskId) -> TaskSpec:
             ),
         },
         validation_rounds=config.agent.validation_rounds,
+        validation_visible=bool(
+            config.verifier.validation and config.verifier.validation.visibility
+        ),
         artifacts=config.artifacts,
         tools=ToolProvision(
             skills_dir=config.environment.skills_dir,

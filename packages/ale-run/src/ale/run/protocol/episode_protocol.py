@@ -72,6 +72,7 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxRequest,
     SandboxRole,
+    ShownDirectory,
 )
 from ale.core.task import Stage, Task
 from ale.core.taskspec import (
@@ -163,6 +164,10 @@ VALIDATION_PREAMBLE = (
     "hidden test set. Your time limit of {minutes} minutes covers all of your turns. "
     "Processes you leave running do not survive into your next turn.\n"
 )
+#: Below the instruction where the agent has a read-only copy of the stage that validates.
+VISIBLE_NOTE = (
+    "The files of the {set} are at {path}, where you can read them but not change them.\n"
+)
 TESTS_PREAMBLE = (
     "\n\n---\n\n"
     "How your work is evaluated: each time you end your turn, your work is scored on the "
@@ -195,6 +200,22 @@ def _layout(operating_system: OperatingSystem) -> _StageLayout:
         else PurePosixPath("/opt/ale")
     )
     return _StageLayout(root)
+
+
+def _visible_dir(operating_system: OperatingSystem) -> PurePath:
+    """Where the agent finds the copy of the stage that validates, where the Task shows it:
+    outside every directory the agent owns, and written by the framework, so the agent
+    reads it and, without sudo, cannot change it."""
+    if operating_system is OperatingSystem.WINDOWS:
+        return PureWindowsPath("C:/validation")
+    return PurePosixPath("/opt/validation")
+
+
+def _shown(ctx: EpisodeContext) -> ShownDirectory | None:
+    """The stage that validates, where the Task shows it to the agent of each solver."""
+    if not ctx.spec.validation_visible or ctx.shown_stage is None:
+        return None
+    return ShownDirectory(source=str(ctx.shown_stage), target=str(_visible_dir(ctx.spec.os)))
 
 
 def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
@@ -631,6 +652,7 @@ class EpisodeProtocol:
             round_verifier_network_mode=spec.validation_spec.network.mode,
             planned_saves=validations,
             volumes=spec.volume_candidates,
+            shown=_shown(ctx),
             separate_verifier=_separate_verifier(spec, validations),
             resources=spec.resources,
             **_network(ctx, spec.solver_network),
@@ -871,7 +893,8 @@ class EpisodeProtocol:
 
         Only agent-visible material is uploaded: the configuration, the tests and the
         calibration cases stay on the host until they are needed, which is what keeps
-        answers out of reach rather than merely out of sight.
+        answers out of reach rather than merely out of sight. A Task may show the stage that
+        validates, which is then copied where the agent reads it, as the last of setup.
 
         Directories come from the task — its asset destinations and the paths it wants
         collected — so a domain that needs a different layout simply declares one.
@@ -887,6 +910,11 @@ class EpisodeProtocol:
             if folder.stage_entry(Stage.SETUP, ctx.spec.os):
                 await self._run_stage(ctx, sandbox, target, Phase.SETUP, stage=Stage.SETUP)
         await self._healthcheck(ctx, sandbox)
+        # The one stage a Task may show: verifiers still run the Host's own copy of it. A
+        # leaf that mounted it read-only spares the copy.
+        shown = _shown(ctx)
+        if shown is not None and not sandbox.shown:
+            await sandbox.upload_dir(shown.source, shown.target)
 
     async def _healthcheck(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Harbor's ``[environment.healthcheck]``, once setup is done, under setup's deadline.
@@ -1127,14 +1155,22 @@ class EpisodeProtocol:
 
     def _instruction(self, ctx: EpisodeContext) -> str:
         """The first prompt: the instruction, verbatim, and, when the agent receives
-        validation rounds, the preamble that says how its turns go."""
+        validation rounds, the preamble that says how its turns go, and where the Task shows
+        it the stage that validates, where that is."""
         spec = ctx.spec
+        note = ""
+        if spec.validation_visible:
+            tests = ctx.validation_stage is Stage.TESTS
+            note = VISIBLE_NOTE.format(
+                set="test set that scores your final state" if tests else "validation set",
+                path=_visible_dir(spec.os),
+            )
         if not self.validation_rounds:
-            return spec.instruction
+            return spec.instruction + (f"\n\n---\n\n{note}" if note else "")
         rounds = "once" if self.validation_rounds == 1 else f"{self.validation_rounds} times"
         total = self.timeouts.agent or spec.timeouts.agent
         preamble = TESTS_PREAMBLE if ctx.validation_stage is Stage.TESTS else VALIDATION_PREAMBLE
-        return spec.instruction + preamble.format(rounds=rounds, minutes=_minutes(total))
+        return spec.instruction + preamble.format(rounds=rounds, minutes=_minutes(total)) + note
 
     async def _validation_rounds(
         self,

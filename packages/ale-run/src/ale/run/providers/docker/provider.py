@@ -30,6 +30,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import csv
+import io
 import json
 import logging
 import random
@@ -125,6 +127,9 @@ PREPARED_LABEL = "ale.prepared"
 #: On a container, the bytes written over its Task's image that the snapshot it booted from
 #: holds, which its ``storage_mb`` counts; on a snapshot, all it holds over that image.
 WRITTEN_LABEL = "ale.written"
+#: Set on a container that mounts its request's ``shown`` directory, which a reattaching run
+#: finds mounted rather than copies.
+SHOWN_LABEL = "ale.shown"
 HANDLE_PREFIX = "docker:"
 #: A snapshot is a local image in this repository, tagged with its Sandbox's ID.
 SNAPSHOT_REPOSITORY = "ale-snapshot"
@@ -1916,6 +1921,11 @@ class DockerProvider(Provider):
             argv += ["--cap-add", capability]
         for mount in mounts:
             argv += ["--mount", mount.argument]
+        if (shown := request.shown) is not None:
+            # The Task's own folder, read-only from the start: not even the agent's sudo writes
+            # to it, and its assets, however large, are never copied.
+            argv += ["--mount", _bind_mount(shown.source, shown.target)]
+            argv += ["--label", f"{SHOWN_LABEL}=true"]
         for key, value in request.env.items():
             argv += ["-e", f"{key}={value}"]
         argv += ["-e", f"{CONTAINER_VARIABLE}={request.desktop_resolution}"]
@@ -2094,6 +2104,7 @@ class DockerProvider(Provider):
             mounts=mounts,
             meter=meter,
         )
+        sandbox.shown = request.shown is not None
         sandbox.watch()
         return sandbox
 
@@ -2543,6 +2554,7 @@ class DockerProvider(Provider):
             mounts=(found := volumes.from_label(labels.get(volumes.MOUNTS_LABEL))),
             meter=volumes.Meter(container.removeprefix("ale-")) if found else None,
         )
+        sandbox.shown = labels.get(SHOWN_LABEL) == "true"
         if sealed:
             try:
                 # This run's proxy and token, through a guestd of this run's own.
@@ -2591,6 +2603,14 @@ def _url_port(url: str | None) -> str:
 #: The hosts of a URL this Host serves, which a container reaches at the Host's address on
 #: its network.
 _ON_HOST = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::"})
+
+
+def _bind_mount(source: str, target: str) -> str:
+    """``docker run --mount`` of the Host's ``source`` at ``target``, read-only, in Docker's
+    CSV form, so that a path holding a comma or a quote stays one field."""
+    line = io.StringIO()
+    csv.writer(line).writerow(["type=bind", f"src={source}", f"dst={target}", "readonly"])
+    return line.getvalue().rstrip("\r\n")
 
 
 def _ports_on_host(request: SandboxRequest) -> list[int]:
