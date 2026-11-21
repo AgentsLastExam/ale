@@ -3,9 +3,10 @@
 Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running. Set
 ALE_RUN_LIVE_ACCEPTANCE=1, ALE_LIVE_MACOS_CONFIG to a private run TOML, and
 ALE_ORCHARD_TEST_IMAGE / ALE_ORCHARD_TEST_USER to an image that logs that account in
-automatically. The TOML supplies the API-key Gateway configuration; credentials stay
-in the environment. Select one Harness with pytest -k and use
-its Gateway dialect: Responses for the CLIs, Anthropic for computer-use. Each test
+automatically, such as ``tests.support.MACOS_BASE`` and ``admin``; the Task adds the
+Node.js the CLI integration tests' image has. The TOML supplies the API-key Gateway
+configuration; credentials stay in the environment. Select one Harness with pytest -k and
+use its Gateway dialect: Responses for the CLIs, Anthropic for computer-use. Each test
 creates and destroys its own VM.
 """
 
@@ -31,7 +32,7 @@ from ale.run.protocol.episode_protocol import EpisodeProtocol
 from ale.run.secrets import provider_credentials
 from ale.run.tasksets.manifest import load_task_folder
 from ale.run.tools import resolved_cua_desktop
-from tests.support import provider_registry, write_task
+from tests.support import MACOS_RUNTIME_BUILD, provider_registry, write_task
 
 from .trajectory import LIVE, native_session_file, trajectory_mcp_calls
 
@@ -70,6 +71,7 @@ def _write_task(root: Path, image: str, user: str, *, policy: bool) -> Path:
         solve=f"#!/bin/sh\nset -eu\nprintf 'ALE macOS verified\\n' > {output}/result.txt\n",
     )
     (task / "environment" / "setup").mkdir(parents=True)
+    (task / "environment" / "build.sh").write_text(MACOS_RUNTIME_BUILD)
     (task / "environment" / "setup" / "setup.sh").write_text(setup)
     (task / "tests" / "verify.py").write_text(
         "from pathlib import Path\nfrom ale_verify import write\n"
@@ -100,7 +102,9 @@ async def test_macos_harness_completes_task_and_records_tools(tmp_path: Path, na
     )
     task = load_task_folder(_write_task(tmp_path / "task", image, user, policy=policy))
     api_key, upstream = provider_credentials(
-        config.gateway.api_key_env, config.gateway.base_url, config.gateway.dialect
+        config.gateway.provider,
+        base_url=config.gateway.base_url,
+        key_var=config.gateway.api_key_env,
     )
     gateway = Gateway(
         api_key=api_key, upstream=upstream, dialect=config.gateway.dialect, host="0.0.0.0"
