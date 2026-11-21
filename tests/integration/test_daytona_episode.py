@@ -102,6 +102,43 @@ async def test_the_oracle_solves_the_task_on_daytona(
     assert "@sha256:" in observed and observed.split("/")[0] == "cr.app.daytona.io"
 
 
+#: No desktop, whose session would be another account's than root's.
+ROOT_DOCKERFILE = (
+    "FROM python:3.12-slim\n"
+    "RUN mkdir -p /home/user/input /home/user/output"
+    " && printf 'world' > /home/user/input/word.txt\n"
+    'CMD ["sleep", "infinity"]\n'
+)
+
+
+@pytest.mark.asyncio
+async def test_a_root_agent_runs_and_is_recorded_as_elevated(
+    tmp_path: Path, write_repo: Callable[..., Path]
+) -> None:
+    """Daytona's daemon runs commands as root, which gives an agent that is root nothing it
+    lacks, so its sandbox is handed out as any other is."""
+    task_root = write_repo(
+        tmp_path / "repo",
+        config={"agent": {"user": "root", "sudo": True}},
+        dockerfile=ROOT_DOCKERFILE,
+    )
+    whole_gib(task_root)
+    (task_root / "solution" / "solve.sh").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\nid -u > /home/user/output/uid\n"
+        "word=$(cat /home/user/input/word.txt)\n"
+        "printf 'hello %s' \"$word\" > /home/user/output/result.txt\n"
+    )
+    result = await run_one(task_root, tmp_path / "runs")
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.verdict.rewards == {"reward": 1.0}
+    assert collected(result, "uid") == "0"
+    assert result.lock is not None and result.lock.resources is not None
+    assert result.lock.resources.effective.provider == "daytona"
+    assert result.lock.sandbox is not None
+    assert (result.lock.sandbox.user, result.lock.sandbox.sudo) == ("root", True)
+
+
 @pytest.mark.asyncio
 async def test_the_network_is_open_for_setup_and_closed_for_the_agent(
     tmp_path: Path, write_repo: Callable[..., Path]

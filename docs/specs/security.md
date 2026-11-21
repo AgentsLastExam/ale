@@ -292,9 +292,11 @@ stays claimed while a reboot or a saved disk carries none; Windows keeps it in m
 Container guest services are `docker exec` sessions with no listener, and a macOS VM's are
 `--stdio` sessions over Orchard's authenticated exec, which listen on nothing.
 
-Daytona's in-sandbox daemon runs commands for anyone who connects, as root. The Provider
-blocks every non-root user from it and proves that as the agent before handing the
-sandbox out; an agent granted `[agent].sudo` can lift the block, as it can any rule.
+A platform service inside the Sandbox that runs commands for whoever connects is a way up
+past `[agent].sudo`: an agent that reaches Daytona's daemon, which runs them as root, is root
+whatever its Task declared. The Provider therefore blocks every non-root account from it and
+proves that as the agent before handing the sandbox out. An agent that may elevate gains
+nothing from it, and with `[agent].sudo` can lift the block, as it can any rule.
 
 The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`, macOS
 `/opt/ale/logs/verifier`), a path the agent can create beforehand: with sudo on Linux and
