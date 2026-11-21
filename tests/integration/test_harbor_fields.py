@@ -83,9 +83,9 @@ async def test_a_harbor_task_runs_with_its_workdir_user_healthcheck_and_reward_t
 
 
 #: A Task as Harbor writes it: no format and no name, an image of no exact version without the
-#: account ALE's own Tasks use, and a working directory only root can write. Its command waits,
-#: as a Sandbox's image's does: Harbor replaces it, and ALE runs the image's own.
-HARBOR_DOCKERFILE = 'FROM debian\nWORKDIR /app\nCMD ["sleep", "infinity"]\n'
+#: account ALE's own Tasks use, a working directory only root can write, and debian's command,
+#: ``bash``, which exits at once without a terminal: Harbor replaces it, and so does ALE.
+HARBOR_DOCKERFILE = "FROM debian\nWORKDIR /app\n"
 HARBOR_SOLVE = """#!/usr/bin/env bash
 set -eu
 id -u > /app/out.txt

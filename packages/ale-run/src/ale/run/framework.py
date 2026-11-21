@@ -14,7 +14,9 @@ image layer:
 - sudo, installed when the image lacks it, so that any sandbox can be granted elevation.
   The grant is never part of the image: the Provider makes or revokes it at every sandbox
   start (``providers/privileges.py``), so one prepared image serves a Task with and
-  without ``[agent].sudo``.
+  without ``[agent].sudo``;
+- for a Harbor Task (``ImageSpec.keep_alive``), Harbor's command in place of the image's,
+  which keeps the container running whatever the image's own command does.
 
 The result is an ordinary image built on the Task image, which Docker runs. A label
 records what it was built with, which makes adding the same layer twice a no-op.
@@ -78,6 +80,7 @@ from ale.run.sources import cache_root
 
 __all__ = [
     "CUA_DRIVER_VERSION",
+    "KEEP_ALIVE",
     "LABEL",
     "MACOS_DRIVER",
     "MACOS_DRIVER_APP",
@@ -98,6 +101,9 @@ __all__ = [
 ]
 
 LABEL = "ale.framework"
+#: What Harbor runs in every Task container in place of its image's command; the image's
+#: entrypoint, if any, still runs it.
+KEEP_ALIVE = ("sh", "-c", "sleep infinity")
 #: Where a prepared Linux image, or a framed macOS disk, records the framework identity it
 #: carries.
 MARKER = "/opt/ale/framework"
@@ -322,18 +328,27 @@ def _guestd_digests() -> dict[str, str]:
     }
 
 
-async def with_framework(image: str, *, user: str) -> str:
+async def with_framework(image: str, *, user: str, keep_alive: bool = False) -> str:
     """Return the local identity of the container image ``image`` with the framework layer
     added.
 
     ``image`` is a local image ID or reference. Building is serialized per result, and an
-    image that already carries this exact layer is returned unchanged.
+    image that already carries this exact layer is returned unchanged. With ``keep_alive``,
+    as a Harbor Task's preparation asks, the layer also replaces the image's command with
+    ``KEEP_ALIVE``. The label stays the framework's, so a Provider framing a prepared image
+    again, which never asks for it, keeps the command the image was prepared with.
     """
     identity = framework_identity(user=user, vm=False)
+
+    def carries(config: dict) -> bool:
+        framed = (config.get("Labels") or {}).get(LABEL) == identity
+        return framed and (not keep_alive or config.get("Cmd") == list(KEEP_ALIVE))
+
     config = await _inspect(image)
-    if (config.get("Labels") or {}).get(LABEL) == identity:
+    if carries(config):
         return config["Id"]
-    digest = hashlib.sha256(f"{config['Id']}\n{identity}".encode()).hexdigest()[:32]
+    built_from = f"{config['Id']}\n{identity}" + ("\nkeep-alive" if keep_alive else "")
+    digest = hashlib.sha256(built_from.encode()).hexdigest()[:32]
     tag = f"ale-framework:{digest}"
     root = cache_root() / "framework"
     root.mkdir(parents=True, exist_ok=True)
@@ -341,9 +356,9 @@ async def with_framework(image: str, *, user: str) -> str:
         await acquire_lock(lock)
         try:
             built = await _inspect(tag, missing_ok=True)
-            if built and (built.get("Labels") or {}).get(LABEL) == identity:
+            if built and carries(built):
                 return built["Id"]
-            await _build(config, tag, identity, user=user)
+            await _build(config, tag, identity, user=user, keep_alive=keep_alive)
             return (await _inspect(tag))["Id"]
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -541,7 +556,7 @@ def _explained(stderr: str, stdout: str = "") -> str:
     return " ".join(said) if said else stderr.strip()[-2000:]
 
 
-async def _build(base: dict, tag: str, identity: str, *, user: str) -> None:
+async def _build(base: dict, tag: str, identity: str, *, user: str, keep_alive: bool) -> None:
     driver = await asyncio.to_thread(_cua_driver, "linux")
     python = await asyncio.to_thread(_python, "linux")
     base_tag = f"ale-framework-base:{base['Id'].removeprefix('sha256:')}"
@@ -566,6 +581,8 @@ async def _build(base: dict, tag: str, identity: str, *, user: str) -> None:
         )
         if base.get("User"):
             lines.append(f"USER {base['User']}")
+        if keep_alive:
+            lines.append(f"CMD {json.dumps(list(KEEP_ALIVE))}")
         lines.append(f"LABEL {LABEL}={json.dumps(identity)}")
         (context / "Dockerfile").write_text("\n".join(lines) + "\n")
         code, _, stderr = await _run(

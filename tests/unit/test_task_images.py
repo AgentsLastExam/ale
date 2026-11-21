@@ -47,7 +47,7 @@ LAYERED: list[tuple[str, str, bool]] = []
 def framework_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """These tests exercise the pipeline; the layer itself is tested in test_framework."""
 
-    async def layer(image: str, *, user: str) -> str:
+    async def layer(image: str, *, user: str, keep_alive: bool = False) -> str:
         LAYERED.append((image, user, False))
         return image
 

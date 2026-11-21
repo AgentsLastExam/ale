@@ -16,6 +16,7 @@ from ale.core.sandbox import PreparedTaskImage
 from ale.core.taskspec import OperatingSystem
 from ale.run import framework, guestd
 from ale.run.framework import (
+    KEEP_ALIVE,
     LABEL,
     MARKER,
     MATERIALIZER_IMAGE,
@@ -113,6 +114,50 @@ async def test_the_layer_is_built_on_the_task_image(
     # The same layer again is a no-op.
     images["task"] = {**images["task"], "Labels": {}}
     assert await with_framework("task", user="app") == layered
+
+
+@pytest.mark.asyncio
+async def test_a_kept_alive_layer_runs_harbor_s_command_and_stays_as_prepared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    driver = tmp_path / "cua-driver-release"
+    driver.mkdir()
+    (driver / "cua-driver").write_bytes(b"driver")
+    monkeypatch.setattr(framework, "_cua_driver", lambda platform: driver)
+    identity = framework_identity(user="root", vm=False)
+    images = {"task": {"Id": "sha256:" + "1" * 64, "Cmd": ["bash"], "Labels": {}}}
+    builds: list[str] = []
+
+    async def inspect(reference: str, *, missing_ok: bool = False) -> dict:
+        if reference in images:
+            return images[reference]
+        assert missing_ok
+        return {}
+
+    async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
+        if argv[:3] == ("docker", "buildx", "build"):
+            dockerfile = (Path(argv[-1]) / "Dockerfile").read_text()
+            builds.append(dockerfile)
+            kept = "CMD " + json.dumps(list(KEEP_ALIVE)) in dockerfile
+            images[argv[argv.index("--tag") + 1]] = {
+                "Id": "sha256:" + str(len(builds) + 1) * 64,
+                "Cmd": list(KEEP_ALIVE) if kept else ["bash"],
+                "Labels": {LABEL: identity},
+            }
+        return 0, "", ""
+
+    monkeypatch.setattr(framework, "_inspect", inspect)
+    monkeypatch.setattr(framework, "_run", run)
+    kept = await with_framework("task", user="root", keep_alive=True)
+    assert builds[0].rstrip().splitlines()[-2] == 'CMD ["sh", "-c", "sleep infinity"]'
+    # A Provider framing the prepared image again leaves its command as prepared.
+    images[kept] = next(image for image in images.values() if image["Id"] == kept)
+    assert await with_framework(kept, user="root") == kept
+    # The same image framed without it is another image, which never replaces the command.
+    plain = await with_framework("task", user="root")
+    assert plain != kept and "CMD" not in builds[1]
+    assert len(builds) == 2
 
 
 @pytest.mark.asyncio

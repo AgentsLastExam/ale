@@ -499,7 +499,12 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
             raise TaskDefinitionError(
                 "environment/Dockerfile names its base in FROM; remove [environment].image"
             )
-        return ImageSpec(kind=ImageKind.CONTAINER, user=user, build_timeout_sec=timeout)
+        return ImageSpec(
+            kind=ImageKind.CONTAINER,
+            user=user,
+            keep_alive=config.harbor,
+            build_timeout_sec=timeout,
+        )
     if folder.build_script(operating_system) is not None:
         if image is None:
             raise TaskDefinitionError(
@@ -510,7 +515,13 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
         needed = "environment/Dockerfile or [environment].image" if linux else "[environment].image"
         raise TaskDefinitionError(f"a {label} Task requires {needed}")
     kind = _named_kind(image, operating_system)
-    return ImageSpec(kind=kind, ref=image, user=user, build_timeout_sec=timeout)
+    return ImageSpec(
+        kind=kind,
+        ref=image,
+        user=user,
+        keep_alive=config.harbor and kind is not ImageKind.VM,
+        build_timeout_sec=timeout,
+    )
 
 
 def _named_kind(image: str, operating_system: OperatingSystem) -> ImageKind | None:
@@ -558,10 +569,19 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
                 "tests/Dockerfile names its base in FROM; remove [verifier.environment].image"
             )
         image = ImageSpec(
-            kind=ImageKind.CONTAINER, user=user, build_timeout_sec=sized.build_timeout_sec
+            kind=ImageKind.CONTAINER,
+            user=user,
+            keep_alive=config.harbor,
+            build_timeout_sec=sized.build_timeout_sec,
         )
     elif named is not None:
-        image = ImageSpec(kind=_named_kind(named, operating_system), ref=named, user=user)
+        kind = _named_kind(named, operating_system)
+        image = ImageSpec(
+            kind=kind,
+            ref=named,
+            user=user,
+            keep_alive=config.harbor and kind is not ImageKind.VM,
+        )
 
     resources = VerifierResources(
         cpus=sized.cpus or config.environment.cpus,

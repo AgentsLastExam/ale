@@ -691,6 +691,20 @@ def test_another_format_fails_to_load(tmp_path: Path) -> None:
     assert "neither ALE's format \"0.2.0\" nor one of Harbor's" in str(raised.value)
 
 
+def test_a_harbor_task_s_containers_are_kept_alive(tmp_path: Path) -> None:
+    verifier = {
+        "verifier": {"environment_mode": "separate", "environment": {"image": "python:3.12"}}
+    }
+    harbor = load_tasks(
+        write_task(tmp_path / "harbor", config={**HARBOR_TASK, **verifier}, dockerfile="FROM x\n")
+    )[0].spec
+    assert harbor.image.keep_alive and harbor.verify.image.keep_alive
+    ale = load_tasks(write_task(tmp_path / "ale", config=verifier))[0].spec
+    assert not (ale.image.keep_alive or ale.verify.image.keep_alive)
+    # Written only when set, so an ALE Task's identity is the one it had.
+    assert "keep_alive" not in ale.image.model_dump()
+
+
 def test_a_harbor_task_naming_its_account_keeps_it(tmp_path: Path) -> None:
     task = write_task(tmp_path / "demo", config={"schema_version": "1.4"})
     loaded = load_tasks(task)[0]

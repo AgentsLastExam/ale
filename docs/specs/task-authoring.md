@@ -738,6 +738,8 @@ describe.
   characters, both cases and `.`.
 - A Harbor Task's agent runs as `root`, with sudo, on Linux unless `[agent].user` or
   `[agent].sudo` says otherwise.
+- A Harbor Task's containers run `sh -c "sleep infinity"` in place of their image's
+  command, as Harbor's do.
 - `docker_image`, in `[environment]` and `[verifier.environment]`, is `image`: one field, so a
   table holds either, never both.
 - `[environment].workdir` is where the agent starts, unless `[agent].workdir` names another
