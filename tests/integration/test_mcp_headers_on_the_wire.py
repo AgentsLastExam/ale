@@ -28,6 +28,7 @@ from ale.run.harnesses.hermes import HermesHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
@@ -127,6 +128,11 @@ CASES: dict[str, tuple[Callable[[], CliHarness], str, str]] = {
         "scripted-model",
     ),
     "openclaw-cli": (OpenClawCliHarness, "openai-responses", "scripted-model"),
+    "opencode": (
+        partial(OpenCodeHarness, gateway_dialect="anthropic"),
+        "anthropic",
+        "scripted-model",
+    ),
     "openhands-cli": (
         partial(OpenHandsCliHarness, gateway_dialect="anthropic"),
         "anthropic",

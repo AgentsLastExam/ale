@@ -20,6 +20,7 @@ an agent-owned rollout against ALE's stepwise Sandbox environment.
 | `openhands-cli` | autonomous | Anthropic Messages by default; follows the model family | yes | no |
 | `hermes` | autonomous | OpenAI Chat Completions by default; also Anthropic Messages or Responses | yes | no |
 | `antigravity-cli` | autonomous | Gemini `generateContent` | yes | no |
+| `opencode` | autonomous | OpenAI Chat Completions by default; also Anthropic Messages, Responses or Gemini `generateContent` | yes | no |
 | `computer-use` | policy | Anthropic Messages | no | no |
 | `oracle`, `nop` | built in | none | no | no |
 
@@ -61,7 +62,7 @@ the same agent writes it, so a Harbor Task behaves alike in both:
 | `openclaw-cli` | `"transport": "sse"` |
 | `openhands-cli` | `"transport": "sse"` |
 | `qwen-code` | `"url"`, where Streamable HTTP is `"httpUrl"` |
-| `codex-cli`, `grok-build`, `pi-cli`, `hermes`, `antigravity-cli` | its URL alone, the entry Streamable HTTP gets, as Harbor writes it; the CLI then speaks Streamable HTTP to it |
+| `codex-cli`, `grok-build`, `pi-cli`, `hermes`, `antigravity-cli`, `opencode` | its URL alone, the entry Streamable HTTP gets, as Harbor writes it; the CLI then speaks Streamable HTTP to it |
 | `muse-code` | refused: Muse Code has no SSE transport, and Harbor refuses it too |
 | `zcode`, `forgecode`, `droid` | refused: their configuration documents no SSE transport, and Harbor has no adapter for them |
 

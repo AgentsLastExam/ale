@@ -17,6 +17,7 @@ from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.secrets import provider_credentials
 from tests.support import sibling_checkout
 
@@ -33,7 +34,13 @@ MODELS = {
     "xai": "grok-4.5",
 }
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
-SHIPPED = (ClaudeCodeHarness(), CodexCliHarness(), GrokBuildHarness(), OpenClawCliHarness())
+SHIPPED = (
+    ClaudeCodeHarness(),
+    CodexCliHarness(),
+    GrokBuildHarness(),
+    OpenClawCliHarness(),
+    OpenCodeHarness(),
+)
 WORKSPACE_ROOT = sibling_checkout("ale-tasks-base").parent
 
 
@@ -116,8 +123,9 @@ def native_session_file(
         and adapter.is_session_file(PurePosixPath(path.relative_to(logs).as_posix()), session_id)
         and (harness != "grok-build" or path.name == grok_file)
     ]
-    assert len(matches) == 1, (harness, session_id, matches)
-    return matches[0]
+    # OpenCode exports the whole session after every invocation; the newest export holds it.
+    assert len(matches) == 1 or (harness == "opencode" and matches), (harness, session_id, matches)
+    return max(matches)
 
 
 def audit_episode(

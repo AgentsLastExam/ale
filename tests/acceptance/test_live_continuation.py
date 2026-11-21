@@ -43,6 +43,7 @@ AGENTS: dict[str, tuple[str | None, tuple[str, ...]]] = {
     "kimi-code": (GPT, ('gateway.provider="openai"',)),
     "muse-code": (GPT, ('gateway.provider="openai"',)),
     "openclaw-cli": (GPT, ()),
+    "opencode": (GPT, ()),
     "openhands-cli": (CLAUDE, ()),
     "pi-cli": (GPT, ()),
     "qwen-code": (GPT, ('gateway.provider="openai"',)),

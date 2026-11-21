@@ -79,7 +79,7 @@ def _write_task(root: Path, image: str, user: str, *, policy: bool) -> Path:
     return task
 
 
-@pytest.mark.parametrize("name", ["grok-build", "openclaw-cli", "computer-use"])
+@pytest.mark.parametrize("name", ["grok-build", "openclaw-cli", "opencode", "computer-use"])
 async def test_macos_harness_completes_task_and_records_tools(tmp_path: Path, name: str) -> None:
     config_path = os.environ.get("ALE_LIVE_MACOS_CONFIG")
     image = os.environ.get("ALE_ORCHARD_TEST_IMAGE")
