@@ -129,8 +129,10 @@ deadline, 60 s later, only bounds a guest that no longer replies. ALE then stops
 and makes a final copy with its own 300 s budget. Session files are appended to, but a
 CLI may rewrite a small index or repair a session in place, so the final copy compares
 each file's guest digest with its Host copy once and copies a rewritten file again.
-Conversion is a pure function of the copied bytes, so it runs once, after the final
-copy. An interrupted run or an incomplete copy produces a trajectory marked incomplete.
+Conversion is a pure function of the copied bytes, so it runs after the final copy, and
+after the copy that ends each turn followed by a [validation round](#validation-rounds),
+which confirms the copy as the final one does, the agent's program having stopped. An
+interrupted run or an incomplete copy produces a trajectory marked incomplete.
 
 With separate verification, or when run policy sets `artifacts.collect = "host"`, every
 Task-declared artifact is captured as an immutable file or directory snapshot, but a volume
@@ -237,16 +239,17 @@ its session can take part. A turn that anything else ends, or that leaves none o
 agent's time, is the last, and its state is verified as any stopped agent's is. Each round,
 whatever the verification mode:
 
-1. copies the agent's logs, as the periodic copy does, and, under separate verification,
-   captures the declared artifacts;
+1. copies the agent's logs, as the final copy does, converts its trajectory of the turns
+   so far into the round's directory, and, under separate verification, captures the
+   declared artifacts;
 2. sanitizes the solver as for retention, the credential files every Harness declares
    included, and saves it as a snapshot, which stops it and every process in it, under the
    framework bound the save for a snapshot verifier has; once the save succeeds, the
    previous round's snapshot is released, so at most one round's snapshot exists at a time;
-3. runs `validation/`, or else `tests/`, in the round's verifier, a new Sandbox placed as
-   `[validation]`, or else `[verifier]`, says: shared, booted from the snapshot with the
-   solver's resources and no sudo, since the agent goes on from the state the snapshot
-   holds; snapshot, booted from it with the verifier's resources; separate, of the
+3. runs `validation/`, or else `tests/`, with that trajectory, in the round's verifier, a
+   new Sandbox placed as `[validation]`, or else `[verifier]`, says: shared, booted from the
+   snapshot with the solver's resources and no sudo, since the agent goes on from the state
+   the snapshot holds; snapshot, booted from it with the verifier's resources; separate, of the
    verifier's image with the artifacts restored, which are deleted when the round ends, and
    views of the snapshot's volumes where the leaf serves it. It has the verifier's network
    and runs under the verify limit, `[verifier].timeout_sec` or the Run's `timeouts.verify`,

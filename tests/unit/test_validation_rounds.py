@@ -519,8 +519,8 @@ async def test_without_validation_tests_validates_each_round_as_a_copy_of_it_wou
         (2, Status.COMPLETED, 0.67),
     ]
     assert result.verdict.rewards == {"reward": 1.0}
-    # A round has no trajectory yet; the final run of tests/ has the converted one.
-    assert ["ALE_TRAJECTORY_PATH" in env for env in verifiers.envs] == [False, False, True]
+    # Each round's run of tests/ has the trajectory so far, as the final one has all of it.
+    assert ["ALE_TRAJECTORY_PATH" in env for env in verifiers.envs] == [True, True, True]
     # Each round's feedback reaches the agent and is recorded; the final run's reaches no one.
     assert [item.feedback and item.feedback.path for item in rounds] == [
         "validation/1/feedback.md",
@@ -1445,41 +1445,76 @@ def test_a_rounds_prompt_the_session_lacks_is_a_parse_issue() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["validation", "tests"])
-async def test_validation_gets_no_trajectory_and_its_judges_are_recorded_as_validate(
+async def test_each_round_gets_the_trajectory_of_the_turns_so_far_and_records_its_judges(
     tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
-    """A trajectory in the episode's directory is never staged for a round, of validation/
-    or of tests/, only for the final run of tests/, and a Judge a round called is in the
-    RunLock with its placement."""
+    """Each round of validation/ or tests/ receives the agent's trajectory up to the turn
+    that ended, which its directory keeps, as the final run of tests/ receives all of it,
+    and a Judge a round called is in the RunLock with its placement."""
     import dataclasses
 
     from tests.unit.test_verification_recording import invocation
 
-    staged: list[tuple[bool, bool]] = []
+    staged: list[tuple[bool, list[str], str | None]] = []
     judged = json.dumps({"invocation": dataclasses.asdict(invocation())}) + "\n"
     exec_ = MemorySandbox.exec
 
     async def exec(self: MemorySandbox, argv: Any, **options: Any) -> ExecResult:
         if list(argv) == ["bash", "test.sh"] and options.get("cwd") == f"/opt/ale/{stage}":
             round_ = self.request.role is SandboxRole.VERIFIER
-            staged.append((round_, f"/opt/ale/{stage}/trajectory.json" in self.files))
+            data = json.loads(self.files[f"/opt/ale/{stage}/trajectory.json"])
+            said = [step["message"] for step in data["steps"] if step["source"] == "agent"]
+            staged.append((round_, said, (options.get("env") or {}).get("ALE_TRAJECTORY_PATH")))
             if round_:
                 self.files[f"/opt/ale/{stage}/llm-judge.jsonl"] = judged.encode()
         return await exec_(self, argv, **options)
 
-    class Converted(TurnsHarness):
-        async def _turn(self, prompt: str, sandbox: Any, session: Any, timeout: float) -> Any:
-            # As if a trajectory were converted already.
-            (tmp_path / "runs" / session.episode_id / "trajectory.json").write_text("{}")
-            return await super()._turn(prompt, sandbox, session, timeout)
-
     monkeypatch.setattr(MemorySandbox, "exec", exec)
-    task = _task(tmp_path, rounds=1, validation_dir=stage == "validation")
-    result = await _run(tmp_path, RoundsProvider(), task, Converted())
+    harness = TurnsHarness()
+    task = _task(tmp_path, rounds=2, validation_dir=stage == "validation")
+    result = await _run(tmp_path, RoundsProvider(), task, harness)
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert staged == ([(True, False)] if stage == "validation" else [(True, False), (False, True)])
+    path = f"/opt/ale/{stage}/trajectory.json"
+    rounds = [(True, ["turn 1"], path), (True, ["turn 1", "turn 2"], path)]
+    final = [(False, ["turn 1", "turn 2", "turn 3"], "/opt/ale/tests/trajectory.json")]
+    assert staged == (rounds if stage == "validation" else rounds + final)
+    # The round's own copy, complete, its earlier round's prompt marked as the final one is.
+    kept = AtifTrajectory.model_validate_json(
+        (result.run_dir / "validation" / "2" / "trajectory.json").read_text()
+    )
+    users = [step for step in kept.steps if step.source == "user"]
+    assert [step.message for step in users] == harness.prompts[:2]
+    assert (users[1].extra or {})["ale"]["validation_round"] == 1
+    assert not (kept.extra or {}).get("ale", {}).get("incomplete")
     assert result.lock is not None
-    assert [judge.placement for judge in result.lock.judges] == ["validate"]
+    assert [judge.placement for judge in result.lock.judges] == ["validate", "validate"]
+
+
+@pytest.mark.asyncio
+async def test_a_round_whose_logs_were_not_all_copied_gets_a_trajectory_marked_incomplete(
+    tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ale.run.protocol.log_mirror import LogMirror
+
+    sync = LogMirror.sync
+    calls = [0]
+
+    async def failing(self: LogMirror, *, final: bool = False) -> None:
+        await sync(self, final=final)
+        # The copy that ends the first turn, before the final one, loses its confirmation.
+        calls[0] += final
+        if calls[0] == 1 and final:
+            raise OSError("the guest went away")
+
+    monkeypatch.setattr(LogMirror, "sync", failing)
+    task = _task(tmp_path, rounds=1)
+    result = await _run(tmp_path, RoundsProvider(), task, TurnsHarness())
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    kept = json.loads((result.run_dir / "validation" / "1" / "trajectory.json").read_text())
+    assert kept["extra"]["ale"]["incomplete_reason"] == "collection_failed"
+    # The final copy retried, so the episode's own trajectory is complete.
+    final = json.loads((result.run_dir / "trajectory.json").read_text())
+    assert not (final.get("extra") or {}).get("ale", {}).get("incomplete")
 
 
 @pytest.mark.asyncio

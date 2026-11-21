@@ -35,10 +35,11 @@ from tests.support import (
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
 #: One verifier for validation/ and tests/ alike, as a Task may have: a third of the reward
-#: per line of work, the lines themselves, how many of the agent's processes outlived a turn
-#: and what of validation/ or tests/ a turn saw; validation/'s feedback tells the agent how far
-#: it got, and tests/'s is never read.
+#: per line of work, the lines themselves, how many of the agent's processes outlived a turn,
+#: what of validation/ or tests/ a turn saw and how many prompts the trajectory it received
+#: holds; validation/'s feedback tells the agent how far it got, and tests/'s is never read.
 VERIFY = """\
+import json
 import os
 from pathlib import Path
 from ale_verify import write
@@ -50,8 +51,18 @@ survivors = home / "survivors"
 outlived = len(survivors.read_text().splitlines()) if survivors.is_file() else 0
 leaks = home / "leaks"
 seen = leaks.read_text().splitlines() if leaks.is_file() else []
+# The oracle, which calibration runs, has no trajectory.
+trajectory = os.environ.get("ALE_TRAJECTORY_PATH")
+steps = json.loads(Path(trajectory).read_text())["steps"] if trajectory else []
+prompts = sum(step["source"] == "user" for step in steps)
 reward = round(min(1.0, len(lines) / 3), 2)
-result = {"reward": reward, "lines": lines, "survivors": outlived, "leaks": seen}
+result = {
+    "reward": reward,
+    "lines": lines,
+    "survivors": outlived,
+    "leaks": seen,
+    "prompts": prompts,
+}
 write(result, feedback=f"{len(lines)} of 3 lines; the last: {lines[-1] if lines else ''}")
 """
 TEST = '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ALE_VERIFY_PYTHON" verify.py\n'
@@ -132,6 +143,16 @@ def _check(result: Any, rounds: int = 2, *, stage: str = "validation") -> None:
     # validation/, tests/ or what they wrote.
     assert verification["survivors"] == 0
     assert verification["leaks"] == []
+    # Each round's verifier received the trajectory of the turns so far, which the round
+    # keeps; the final one received every turn's.
+    for index in range(1, rounds + 1):
+        scored = json.loads((result.run_dir / f"validation/{index}/verification.json").read_text())
+        assert scored["prompts"] == index
+        kept = AtifTrajectory.model_validate_json(
+            (result.run_dir / f"validation/{index}/trajectory.json").read_text()
+        )
+        assert sum(step.source == "user" for step in kept.steps) == index
+    assert verification["prompts"] == rounds + 1
     trajectory = AtifTrajectory.model_validate_json(
         (result.run_dir / "trajectory.json").read_text()
     )
@@ -182,6 +203,7 @@ async def test_an_agent_improves_over_rounds_tests_scores_without_validation_in_
     _check(result, stage="tests")
     assert sorted(path.name for path in (result.run_dir / "validation/1").iterdir()) == [
         "feedback.md",
+        "trajectory.json",
         "verification.json",
     ]
 

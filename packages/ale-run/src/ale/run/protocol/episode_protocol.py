@@ -1142,10 +1142,11 @@ class EpisodeProtocol:
         that something else ended, a Gateway limit included, is the last.
         ``check_validation`` validates once, with no turn after it.
 
-        Each round copies the agent's logs, saves the solver, which stops it and every
-        process in it, scores the snapshot with the stage that validates, ``validation/`` or
-        else ``tests/``, as the Task's verification topology places a verifier, and boots
-        the next solver from it without running setup again. Once the save succeeds nothing
+        Each round copies the agent's logs and converts its trajectory so far, saves the
+        solver, which stops it and every process in it, scores the snapshot with the stage
+        that validates, ``validation/`` or else ``tests/``, and that trajectory, as the
+        Task's verification topology places a verifier, and boots the next solver from it
+        without running setup again. Once the save succeeds nothing
         runs on the previous round's snapshot, which then goes, so at most one round's
         snapshot exists while the round's verifier runs.
         """
@@ -1174,14 +1175,16 @@ class EpisodeProtocol:
             directory = ctx.run_dir / "validation" / str(index)
             artifacts: ArtifactSink | None = None
             viewed: tuple[str, ...] = ()
+            trajectory: Path | None = None
             # The turn's end is the solver's, as its save for a snapshot verifier is.
             with self._traced(ctx, Phase.AGENT):
                 logger.info(
                     "the turn ended; a validation round begins",
                     extra={"ale_data": {"round": index}},
                 )
-                if logs is not None and ctx.agent_started:
-                    await self._copy_logs(logs)
+                if ctx.agent_started:
+                    copied = logs is None or await self._copy_logs(logs)
+                    trajectory = self._round_trajectory(ctx, directory, copied=copied)
                 if mode is VerificationMode.SEPARATE:
                     # Captured before the save, as for a separate verifier of tests/; volumes
                     # it mounts views of, from the snapshot the round saves anyway, are not.
@@ -1204,7 +1207,7 @@ class EpisodeProtocol:
                 await self._release_rounds(ctx, earlier)
             try:
                 feedback = await self._validate(
-                    task, ctx, index, handle, solver.image, artifacts, viewed
+                    task, ctx, index, handle, solver.image, artifacts, viewed, trajectory
                 )
             finally:
                 if artifacts is not None:
@@ -1272,16 +1275,29 @@ class EpisodeProtocol:
             secrets=ctx.secrets,
         )
 
-    async def _copy_logs(self, logs: LogMirror) -> None:
-        """Copy the agent's logs as a turn ends; the final copy confirms them later."""
+    async def _copy_logs(self, logs: LogMirror) -> bool:
+        """Copy and confirm the agent's logs as a turn ends, its program having finished, and
+        return whether every declared log was copied; the final copy retries what was not."""
         try:
             async with asyncio.timeout(FINAL_SYNC_TIMEOUT_SEC):
-                await logs.sync()
+                await logs.sync(final=True)
         except Exception as exc:
             logging.getLogger("ale.execution").warning(
                 "harness log copy at the end of a turn failed; the final copy retries",
                 extra={"ale_data": {"error": type(exc).__name__}},
             )
+            return False
+        return not logs.incomplete
+
+    def _round_trajectory(self, ctx: EpisodeContext, directory: Path, *, copied: bool) -> Path:
+        """Convert the agent's trajectory up to the turn that just ended, as the final one is
+        converted, and write it to the round's ``directory`` for its verifier; marked
+        incomplete where the turn's logs were not all ``copied``."""
+        trajectory = self._convert_harness_trajectory(ctx, collection_failed=not copied)
+        linked, _ = self._linked_trajectory(ctx, trajectory)
+        path = directory / "trajectory.json"
+        atomic_write_json(path, linked)
+        return path
 
     async def _validate(
         self,
@@ -1292,9 +1308,11 @@ class EpisodeProtocol:
         image: PreparedTaskImage | None,
         artifacts: ArtifactSink | None,
         viewed: tuple[str, ...] = (),
+        trajectory: Path | None = None,
     ) -> str | None:
-        """Score the snapshot ``handle`` with the stage that validates under the verifier's
-        budget and record the round; return the feedback text the agent receives.
+        """Score the snapshot ``handle`` with the stage that validates and the agent's
+        ``trajectory`` so far under the verifier's budget and record the round; return the
+        feedback text the agent receives.
 
         A round that produces no score is recorded with its failure, and the agent receives
         it as such: the round counts, and the episode goes on.
@@ -1323,7 +1341,13 @@ class EpisodeProtocol:
                 await artifacts.restore(verifier)
                 await self._prune_views(ctx, verifier, views)
             return await self._score(
-                task, ctx, verifier, ctx.validation_stage, directory, phase=Phase.VALIDATE
+                task,
+                ctx,
+                verifier,
+                ctx.validation_stage,
+                directory,
+                phase=Phase.VALIDATE,
+                trajectory=trajectory,
             )
 
         outcome: tuple[float, str | None] | Exception
@@ -1595,7 +1619,15 @@ class EpisodeProtocol:
         A crash or malformed output here is a task defect, reported as ``task_error``:
         deliberately distinguishable from an agent that simply scored zero.
         """
-        reward, _ = await self._score(task, ctx, sandbox, Stage.TESTS, ctx.run_dir)
+        trajectory = ctx.run_dir / "trajectory.json"
+        reward, _ = await self._score(
+            task,
+            ctx,
+            sandbox,
+            Stage.TESTS,
+            ctx.run_dir,
+            trajectory=trajectory if trajectory.is_file() else None,
+        )
         return {"reward": reward}
 
     async def _score(
@@ -1607,11 +1639,13 @@ class EpisodeProtocol:
         records: Path,
         *,
         phase: Phase = Phase.VERIFY,
+        trajectory: Path | None = None,
     ) -> tuple[float, str | None]:
-        """Run a verifier stage, ``tests/`` or ``validation/``, in ``sandbox`` and return its
-        reward and the feedback text the agent receives, recording its result and Judge logs
-        in ``records``: in ``phase`` verify, ``tests/`` scoring the final state, or in a
-        validation round's, the stage that validates."""
+        """Run a verifier stage, ``tests/`` or ``validation/``, in ``sandbox`` with the solver
+        ``trajectory``, if there is one, and return its reward and the feedback text the
+        agent receives, recording its result and Judge logs in ``records``: in ``phase``
+        verify, ``tests/`` scoring the final state, or in a validation round's, the stage
+        that validates."""
         folder = getattr(task, "folder", None)
         stage_dir = folder.stage_dir(stage) if folder else None
         if stage_dir is None:
@@ -1633,9 +1667,7 @@ class EpisodeProtocol:
                 + (reset.stderr.strip() or f"exit {reset.exit_code}")
             )
         await sandbox.upload_dir(str(stage_dir), str(root))
-        # Converted once, after the agent's last turn: a validation round has none yet.
-        trajectory = ctx.run_dir / "trajectory.json"
-        if phase is Phase.VERIFY and trajectory.is_file():
+        if trajectory is not None:
             await sandbox.write_file(
                 str(layout.path(stage, "trajectory.json")), trajectory.read_bytes()
             )
@@ -1688,7 +1720,13 @@ class EpisodeProtocol:
             ctx.open_judge_sessions(True)
         try:
             exit_code = await self._run_stage(
-                ctx, sandbox, root, phase, stage=stage, verify_python=python
+                ctx,
+                sandbox,
+                root,
+                phase,
+                stage=stage,
+                verify_python=python,
+                trajectory=trajectory is not None,
             )
         finally:
             if ctx.open_judge_sessions is not None:
@@ -2136,6 +2174,25 @@ class EpisodeProtocol:
     def _persist_trajectory(self, ctx: EpisodeContext, trajectory: AtifTrajectory) -> None:
         """Correlate only observed provider/native IDs, then persist before links."""
         assert ctx.trajectory is not None
+        trajectory, links = self._linked_trajectory(ctx, trajectory)
+        ctx.trajectory.write_trajectory(trajectory)
+        if ctx.transport is not None:
+            for call_id, step_id in links:
+                ctx.transport.append(
+                    TrajectoryLink(
+                        episode_id=ctx.episode_id,
+                        call_id=call_id,
+                        trajectory_id=ctx.trajectory_id,
+                        step_id=step_id,
+                    ),
+                    durable=True,
+                )
+
+    def _linked_trajectory(
+        self, ctx: EpisodeContext, trajectory: AtifTrajectory
+    ) -> tuple[AtifTrajectory, list[tuple[str, int]]]:
+        """``trajectory`` redacted, its steps linked to the model calls the transport trace
+        observed them make, and those links by call."""
         calls = {
             record["provider_response_id"]: record["call_id"]
             for record in read_jsonl(ctx.run_dir / "trace.transport.jsonl").records
@@ -2172,18 +2229,7 @@ class EpisodeProtocol:
                 )
             )
         )
-        ctx.trajectory.write_trajectory(trajectory)
-        if ctx.transport is not None:
-            for call_id, step_id in links:
-                ctx.transport.append(
-                    TrajectoryLink(
-                        episode_id=ctx.episode_id,
-                        call_id=call_id,
-                        trajectory_id=ctx.trajectory_id,
-                        step_id=step_id,
-                    ),
-                    durable=True,
-                )
+        return trajectory, links
 
     # --- helpers ---
 
@@ -2196,6 +2242,7 @@ class EpisodeProtocol:
         *,
         stage: Stage,
         verify_python: str | None = None,
+        trajectory: bool = False,
     ) -> int:
         layout = _layout(ctx.spec.os)
         entry = directory / stage.entry(ctx.spec.os)
@@ -2222,7 +2269,7 @@ class EpisodeProtocol:
             )
             if verify_python is not None:
                 env["ALE_VERIFY_PYTHON"] = verify_python
-            if phase is Phase.VERIFY and (ctx.run_dir / "trajectory.json").is_file():
+            if trajectory:
                 env["ALE_TRAJECTORY_PATH"] = str(layout.path(stage, "trajectory.json"))
             # Judges retry provider failures until this budget runs out, so a verdict is
             # recorded as failed before the phase deadline kills the verifier.

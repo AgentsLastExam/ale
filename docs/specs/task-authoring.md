@@ -627,20 +627,20 @@ each round in a separate verifier that mounts views of the agent's output and th
 state in the solver itself, where a running service can be checked; a validation score then
 predicts the final one less well where the two see different things. Run shared, it runs in
 a Sandbox booted from a snapshot of the agent's, with the agent's resources and
-`[environment].env` and no sudo, since the agent goes on from that state. It receives no
-solver trajectory, which is converted once, after the agent's last turn, so
-`judge(..., trajectory=True)` and the `checks.trajectory_*` checks raise there.
+`[environment].env` and no sudo, since the agent goes on from that state. Each round
+receives the agent's trajectory up to the turn that ended, converted as that turn ends just
+as the final one is, so `judge(..., trajectory=True)` and the `checks.trajectory_*` checks
+work in every round as they do in `tests/`.
 
 A Task without `validation/` validates with `tests/` instead: its rounds run `tests/` in the
-verifier `[validation]`, or else `[verifier]`, places, without a trajectory, so a Task whose
+verifier `[validation]`, or else `[verifier]`, places, so a Task whose
 data cannot be split still gives its agent results between turns. The reward that agent
 sees is the score it is ranked by, so it can overfit to the test set. It receives that
 reward, the round's status and the feedback `tests/` writes, if any, as if `tests/` were
 copied into `validation/`, and its RunLock records that `tests/` graded the rounds
 ([Trace](trace.md#verification-result)), setting such a score apart from one earned against
 a held-out validation set. Run policy can give rounds to any Task, so a Task whose test set
-must stay unseen has `validation/`. A `tests/` that reads the trajectory fails every round,
-which the agent then receives unscored.
+must stay unseen has `validation/`.
 
 With `[agent].validation_rounds = N`, the agent works in up to `N + 1` turns: its first turn
 ends, `validation/`, or else `tests/`, scores the state it left, the agent receives that
