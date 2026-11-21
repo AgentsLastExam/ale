@@ -666,7 +666,7 @@ def test_a_harbor_task_loads_as_it_is_with_harbor_s_account(tmp_path: Path) -> N
     assert str(loaded.spec.name) == "local/hello-world"
     assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("root", True)
     assert loaded.warnings == (
-        'task.toml: no schema_version, so it is read as a Harbor Task in ALE\'s format "0.2.0"; '
+        'task.toml: no schema_version, so it is read as a Harbor Task in ALE\'s format "0.2"; '
         "as in Harbor, its agent runs as root",
         "task.toml: no [task].name, so this Task is local/hello-world, after where it lives",
         "environment/Dockerfile: python can change under the Task; ALE uses the version it "
@@ -688,7 +688,7 @@ def test_another_format_fails_to_load(tmp_path: Path) -> None:
     task = write_task(tmp_path / "demo", config={"schema_version": "1.4+ale.1"})
     with pytest.raises(TaskDefinitionError, match="schema_version") as raised:
         load_tasks(task)
-    assert "neither ALE's format \"0.2.0\" nor one of Harbor's" in str(raised.value)
+    assert "neither ALE's format \"0.2\" nor one of Harbor's" in str(raised.value)
 
 
 def test_a_harbor_task_s_containers_are_kept_alive(tmp_path: Path) -> None:
@@ -712,7 +712,7 @@ def test_a_harbor_task_naming_its_account_keeps_it(tmp_path: Path) -> None:
     assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("user", False)
     assert loaded.warnings == (
         "task.toml: Harbor's schema_version \"1.4\", so it is read as a Harbor Task in ALE's "
-        'format "0.2.0"',
+        'format "0.2"',
     )
 
 

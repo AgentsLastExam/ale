@@ -12,9 +12,9 @@ A field ALE adds sits in the Harbor table of what it configures, under a name Ha
 no other meaning: a separate namespace would not stop one name meaning two things, and would
 have to mirror every table it extends. The exception is `[[calibration]]`, which no Harbor
 table configures; `validation/` and `calibration/` are ALE's directories. `schema_version`
-is the ALE version in which the format last changed, and ALE accepts exactly that value, so
-a file written for another format fails as it loads instead of being read with a different
-meaning.
+is the ALE version, major and minor, in which the format last changed, and ALE accepts
+exactly that value, so a file written for another format fails as it loads instead of being
+read with a different meaning.
 
 ## Task folder
 
@@ -73,7 +73,7 @@ form loads with a warning, which every command that loads it prints and the RunL
 in `task.warnings`; only an error fails `ale lint`.
 
 ```toml
-schema_version = "0.2.0"                    # required; exactly this
+schema_version = "0.2"                      # required; exactly this
 artifacts = [                               # outcome paths
   "output",                                 # below where the agent starts
   "/home/user/games/*.sgf",

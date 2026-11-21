@@ -215,7 +215,7 @@ def test_task_config_requires_no_key() -> None:
     # Neither the format nor the name is required: the loader names the Task and warns.
     empty = TaskConfig.model_validate({})
     assert (empty.schema_version, empty.task.name) == (None, None)
-    assert SCHEMA_VERSION == "0.2.0"
+    assert SCHEMA_VERSION == "0.2"
 
 
 @pytest.mark.parametrize(

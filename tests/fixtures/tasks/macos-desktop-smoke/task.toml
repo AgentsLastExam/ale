@@ -1,4 +1,4 @@
-schema_version = "0.2.0"
+schema_version = "0.2"
 artifacts = ["/Users/admin/output"]
 
 [task]

@@ -177,7 +177,7 @@ def test_preparation_says_where_a_task_departs_from_ale_s_form(
     assert len(prepared) == 1
     assert result.stderr.splitlines() == [
         'warning  agentslastexam/fresh: task.toml: Harbor\'s schema_version "1.4", so it is '
-        'read as a Harbor Task in ALE\'s format "0.2.0"',
+        'read as a Harbor Task in ALE\'s format "0.2"',
         "warning  agentslastexam/fresh: environment/Dockerfile: debian can change under the "
         "Task; ALE uses the version it names when the image is prepared and records its "
         "digest; name an exact version",

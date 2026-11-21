@@ -53,7 +53,7 @@ Name any Tart OCI image in `task.toml` as `[environment].image`, by SHA-256 dige
 tag that does not move (`ale lint` warns about `latest`):
 
 ```toml
-schema_version = "0.2.0"
+schema_version = "0.2"
 artifacts = ["/Users/admin/output"]
 
 [task]

@@ -881,10 +881,10 @@ class TaskSpec(BaseModel):
         return self
 
 
-#: The ``task.toml`` format ALE reads, named by the ALE version that last changed it. A
-#: Harbor Task, naming one of Harbor's formats or none, is read as this one, with a warning;
-#: a Task naming any other format fails.
-SCHEMA_VERSION = "0.2.0"
+#: The ``task.toml`` format ALE reads, named by the major and minor ALE version that last
+#: changed it, as Harbor names its own. A Harbor Task, naming one of Harbor's formats or
+#: none, is read as this one, with a warning; a Task naming any other format fails.
+SCHEMA_VERSION = "0.2"
 #: Harbor's format versions, ``1.0`` through its current ``1.4``. A Task naming one, or none,
 #: which Harbor reads as its own current version, is Harbor's (``TaskConfig.harbor``).
 _HARBOR_SCHEMA = re.compile(r"1\.[0-9]+")
