@@ -126,9 +126,15 @@ def release_identity(assets: ReleaseAssets) -> str:
 
 
 async def ensure_release_binary(
-    sandbox: Sandbox, *, binary: str, version: str, assets: ReleaseAssets
+    sandbox: Sandbox,
+    *,
+    binary: str,
+    version: str,
+    assets: ReleaseAssets,
+    directory: str | None = None,
 ) -> str:
-    """Install the Sandbox platform's pinned asset into the agent's prefix as the agent."""
+    """Install the Sandbox platform's pinned asset as the agent, into the agent's prefix or
+    the ``directory`` a program looks for the binary in."""
     home = await agent_home(sandbox)
     system = sandbox.request.os
     machine = await sandbox.exec(
@@ -140,7 +146,9 @@ async def ensure_release_binary(
         raise AgentUnsupportedError(
             f"{binary} {version} has no official release for {system.value}/{reported or '?'}"
         )
-    target = f"{agent_path(home)}/.local/bin/{binary}" + (".exe" if is_windows(home) else "")
+    target = f"{directory or f'{agent_path(home)}/.local/bin'}/{binary}" + (
+        ".exe" if is_windows(home) else ""
+    )
     result = await sandbox.exec(
         [
             agent_python(system),
