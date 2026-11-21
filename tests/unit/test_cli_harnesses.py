@@ -70,6 +70,7 @@ from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.harnesses.openclaw_cli.adapter import _supported_node
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
@@ -487,6 +488,7 @@ CLI_HARNESSES = [
     (KimiCodeHarness, '"headers"'),
     (MuseCodeHarness, '"headers"'),
     (OpenClawCliHarness, '"headers"'),
+    (OpenCodeHarness, '"headers"'),
     (OpenHandsCliHarness, '"headers"'),
     (PiCliHarness, '"headers"'),
     (QwenCodeHarness, '"headers"'),
@@ -551,6 +553,7 @@ SSE_SPELLINGS = [
     (KimiCodeHarness, '"transport": "sse"'),
     (MuseCodeHarness, None),
     (OpenClawCliHarness, '"transport": "sse"'),
+    (OpenCodeHarness, '"url": "https://mcp.example.org/sse"'),
     (OpenHandsCliHarness, '"transport": "sse"'),
     (PiCliHarness, '"url": "https://mcp.example.org/sse"'),
     (QwenCodeHarness, '"url": "https://mcp.example.org/sse"'),

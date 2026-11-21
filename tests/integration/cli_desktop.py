@@ -61,6 +61,7 @@ from ale.run.harnesses.hermes import HermesHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
@@ -195,6 +196,8 @@ CLIS: dict[type[CliHarness], Reach] = {
     KimiCodeHarness: Reach((("mcp__cua-desktop__screenshot", {}),)),
     # OpenHands names a lone server's tools plainly and asks every call for its risk.
     OpenHandsCliHarness: Reach((("screenshot", {"security_risk": "LOW"}),)),
+    # OpenCode names an MCP tool `<server>_<tool>`.
+    OpenCodeHarness: Reach((("cua-desktop_screenshot", {}),)),
     PiCliHarness: Reach(
         (("mcp__cua_desktop__screenshot", {}),), settings={"input": ["text", "image"]}
     ),

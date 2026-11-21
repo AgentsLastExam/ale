@@ -88,8 +88,8 @@ def run(
             "--agent",
             help=(
                 "antigravity-cli, claude-code, codex-cli, droid, forgecode, grok-build, "
-                "hermes, kimi-code, muse-code, openclaw-cli, openhands-cli, pi-cli, "
-                "qwen-code, zcode, computer-use, oracle or nop"
+                "hermes, kimi-code, muse-code, openclaw-cli, opencode, openhands-cli, "
+                "pi-cli, qwen-code, zcode, computer-use, oracle or nop"
             ),
         ),
     ] = None,

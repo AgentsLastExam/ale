@@ -32,6 +32,7 @@ from ale.run.harnesses.forgecode import ForgecodeHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.hermes import HermesHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.protocol.log_mirror import LogMirror
@@ -82,6 +83,12 @@ CASES: dict[str, Case] = {
             partial(HermesHarness, gateway_dialect=dialect), dialect, r"^terminal$"
         )
         for dialect in DIALECTS
+    },
+    **{
+        f"opencode-{dialect}": Case(
+            partial(OpenCodeHarness, gateway_dialect=dialect), dialect, r"^shell$"
+        )
+        for dialect in (*DIALECTS, "gemini")
     },
     **{
         # The pinned OpenHands SDK sends exactly the GPT-5 family over Responses.
@@ -236,6 +243,11 @@ DELEGATION: dict[str, tuple[str, Callable[[str], dict[str, object]]]] = {
     "hermes-openai-chat-completions": (
         r"^delegate_task$",
         lambda task: {"tasks": [{"goal": task, "context": "Use the terminal tool."}]},
+    ),
+    # The child runs as OpenCode's `general` agent, which may not delegate further.
+    "opencode-openai-chat-completions": (
+        r"^subagent$",
+        lambda task: {"agent": "general", "description": "Delegated work", "prompt": task},
     ),
     "openhands-cli-openai-chat-completions": (
         r"^task$",
