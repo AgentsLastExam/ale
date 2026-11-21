@@ -564,6 +564,26 @@ def test_the_earlier_episode_names_its_solver_session_and_trajectory(tmp_path: P
     assert resume.attach is not None
 
 
+async def test_a_kept_solver_is_attached_through_the_provider_that_kept_it(
+    tmp_path: Path,
+) -> None:
+    episode, task = _source(tmp_path)
+    harness = SimpleNamespace(name="claude-code", version=lambda: "2.1.170")
+    continued = _continued(episode, [task], RunConfig())
+    continued.require_keeper(task)
+    provider = SimpleNamespace(attach_retained=AsyncMock(return_value="attached"))
+    providers = SimpleNamespace(get=lambda name: provider)
+    resume = _continuation(continued, task, RunConfig(), harness, providers)  # type: ignore[arg-type]
+    assert resume.attach is not None
+    request = _request()
+
+    assert await resume.attach(request) == "attached"
+    handle, given, allocation, image = provider.attach_retained.await_args.args
+    assert (handle, given) == ("docker:kept", request)
+    assert allocation == continued.lock.resources.effective  # type: ignore[union-attr]
+    assert image.prepared_identity == continued.lock.image.prepared_identity
+
+
 def test_a_snapshot_continues_in_a_new_solver_with_this_tasks_resources(tmp_path: Path) -> None:
     snapshot = SandboxOutcome(
         roles=("solver",),

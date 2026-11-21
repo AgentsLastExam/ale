@@ -1010,7 +1010,7 @@ def _continuation(
         ),
         trajectory=continued.trajectory,
         attach=(
-            (lambda request: _attach_retained(handle, request, lock, providers)) if kept else None
+            partial(_attach_retained, handle, lock=lock, providers=providers) if kept else None
         ),
     )
 
