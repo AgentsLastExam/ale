@@ -667,7 +667,7 @@ def test_a_harbor_task_loads_as_it_is_with_harbor_s_account(tmp_path: Path) -> N
     assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("root", True)
     assert loaded.warnings == (
         'task.toml: no schema_version, so it is read as a Harbor Task in ALE\'s format "0.2.0"; '
-        "as in Harbor, its agent runs as root, with sudo",
+        "as in Harbor, its agent runs as root",
         "task.toml: no [task].name, so this Task is local/hello-world, after where it lives",
         "environment/Dockerfile: python can change under the Task; ALE uses the version it "
         "names when the image is prepared and records its digest; name an exact version",

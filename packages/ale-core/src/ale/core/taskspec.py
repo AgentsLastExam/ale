@@ -1127,8 +1127,9 @@ class EnvironmentTable(BaseModel):
 class AgentTable(BaseModel):
     """``[agent]``: the evaluated agent's account, budget and network; the oracle's too.
 
-    A Harbor Task's account and elevation default to Harbor's (``TaskConfig.agent_user`` and
-    ``TaskConfig.agent_sudo``), so a field's own default holds only where it is ALE's.
+    A Harbor Task's account defaults to Harbor's (``TaskConfig.agent_user``), and a root
+    account's elevation to true (``TaskConfig.agent_sudo``), so read those two through
+    ``TaskConfig``: a field's own default holds only where nothing else decides it.
     """
 
     model_config = _FROZEN
@@ -1382,11 +1383,16 @@ class TaskConfig(BaseModel):
 
     @property
     def agent_sudo(self) -> bool:
-        """Whether the agent can elevate: ``[agent].sudo``; unset, not, except in a Harbor
-        Task whose agent is ``root``, which can elevate under Harbor too."""
+        """Whether the agent can elevate: ``[agent].sudo``; unset, whether its account is
+        ``root``, which nothing can keep from elevating, outside Windows."""
         if "sudo" in self.agent.model_fields_set:
             return self.agent.sudo
-        return self.harbor and self.agent_user == HARBOR_ACCOUNT
+        return self._root_agent
+
+    @property
+    def _root_agent(self) -> bool:
+        """Whether the agent's account is root, which only Linux and macOS name so."""
+        return self.agent_user == "root" and self.environment.os is not OperatingSystem.WINDOWS
 
     @property
     def agent_network(self) -> NetworkPolicy:
@@ -1496,4 +1502,9 @@ class TaskConfig(BaseModel):
             if sized.gpu_memory_mb is not None:
                 raise ValueError(f"[{table}].gpu_memory_mb requires gpus")
         _validate_artifact_paths(self.artifacts, environment.os)
+        if self._root_agent and not self.agent_sudo:
+            raise ValueError(
+                "the agent's account is root, which nothing can keep from elevating: remove "
+                "[agent].sudo = false, or name a non-root [agent].user"
+            )
         return self

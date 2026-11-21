@@ -248,14 +248,23 @@ def test_a_harbor_task_s_own_account_and_elevation_win() -> None:
     named = config(harbor, {"agent": {"user": "agent"}})
     assert (named.agent_user, named.agent_sudo) == ("agent", False)
     assert config(harbor, {"agent": {"user": "agent", "sudo": True}}).agent_sudo is True
-    # Root that may not elevate is refused when its Sandbox starts, as in an ALE Task.
-    refused = config(harbor, {"agent": {"sudo": False}})
-    assert (refused.agent_user, refused.agent_sudo) == ("root", False)
+    # Root that may not elevate cannot be, in a Harbor Task as in an ALE one.
+    with pytest.raises(ValidationError, match="account is root"):
+        config(harbor, {"agent": {"sudo": False}})
     # Harbor has no macOS and runs Windows in containers, so ALE's defaults stay there.
     windows = config(harbor, {"environment": {"os": "windows", "image": "/disk.qcow2"}})
     assert (windows.agent_user, windows.agent_sudo) == ("user", False)
     ale = config({"agent": {"user": "root", "sudo": True}})
     assert (ale.harbor, ale.agent_user, ale.agent_sudo) == (False, "root", True)
+
+
+def test_a_root_agent_is_elevated_without_saying_so() -> None:
+    assert config({"agent": {"user": "root"}}).agent_sudo is True
+    with pytest.raises(ValidationError, match=re.escape("remove [agent].sudo = false")):
+        config({"agent": {"user": "root", "sudo": False}})
+    # Windows names no account root; elevation there is only what [agent].sudo says.
+    windows = {"environment": {"os": "windows", "image": "/disk.qcow2"}}
+    assert config(windows, {"agent": {"user": "root"}}).agent_sudo is False
 
 
 def test_harbor_s_original_version_key_is_the_schema_version() -> None:

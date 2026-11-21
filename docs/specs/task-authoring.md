@@ -113,12 +113,12 @@ args = ["--index", "/srv/index"]            # stdio
 # headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }  # streamable-http
 
 [agent]                                     # the evaluated agent and the oracle
-user = "user"                               # account in the image; root needs sudo; default user
+user = "user"                               # account in the image; default user
 timeout_sec = 1800                          # positive seconds; default 1800
 network_mode = "allowlist"                  # no-network | allowlist | blocklist | public; default no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 # blocked_hosts = ["github.com"]            # ALE; required, and only, for blocklist
-sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
+sudo = false                                # ALE; sudo works exactly when true, always for root (Administrator on Windows)
 # workdir = "project"                       # ALE; where the agent starts; default its home
 validation_rounds = 0                       # ALE; validation/ results it gets; default 0
 
@@ -736,8 +736,8 @@ describe.
   below, with a warning and `task.harbor` in the RunLock. Any other version fails.
 - Without `[task].name`, a Task is named `<repository>/<folder>`; a name may use Harbor's
   characters, both cases and `.`.
-- A Harbor Task's agent runs as `root`, with sudo, on Linux unless `[agent].user` or
-  `[agent].sudo` says otherwise.
+- A Harbor Task's agent runs as `root` on Linux unless `[agent].user` names another
+  account.
 - A Harbor Task's containers run `sh -c "sleep infinity"` in place of their image's
   command, as Harbor's do.
 - `docker_image`, in `[environment]` and `[verifier.environment]`, is `image`: one field, so a

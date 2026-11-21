@@ -30,8 +30,9 @@ _SET = r"""
 import os, pwd, subprocess, sys
 
 user, sudo = sys.argv[1], sys.argv[2] == "true"
-if pwd.getpwnam(user).pw_uid == 0 and not sudo:
-    sys.exit(3)
+if pwd.getpwnam(user).pw_uid == 0:
+    # Root is elevated by being root: there is nothing to grant, and nothing can revoke it.
+    sys.exit(0 if sudo else 3)
 MARK = "# ALE: the agent's elevation in this sandbox, set at every start"
 ADMINISTRATORS = {"sudo", "wheel", "admin"}
 
@@ -95,8 +96,8 @@ async def set_elevation(
 ) -> None:
     """Grant the agent elevation for this start when ``sudo``, else revoke every way up.
 
-    An account that is root cannot be kept from elevating, so a Task that names one without
-    declaring ``[agent].sudo`` is refused.
+    An account that is root is elevated already, and cannot be kept from elevating, so it
+    gets no grant, and a request that it may not elevate is refused.
     """
     python = guestd.PYTHON[operating_system.value]
     code, _, stderr, _ = await client.exec(
@@ -149,12 +150,13 @@ async def verify_identities(client: GuestClient, agent_user: str, *, sudo: bool)
     Both directions of the agent check matter. A grant that was made but does not work
     tells a Task it had a privilege it never received; a way up it never asked for (a root
     agent account, a rule the revocation did not override) lets the agent rewrite the
-    conditions of its own measurement while provenance records ``sudo: false``. A Provider
-    whose platform adds another way up checks that one itself.
+    conditions of its own measurement while provenance records ``sudo: false``. A root
+    agent is elevated whether or not the image has sudo. A Provider whose platform adds
+    another way up checks that one itself.
     """
     await verify_framework(client)
     agent_uid, elevates = await _probe(client, agent_user)
-    if sudo and elevates != "yes":
+    if sudo and agent_uid != "0" and elevates != "yes":
         why = (
             "the image has no sudo, and ALE found no package manager to install it with"
             if elevates == "none"

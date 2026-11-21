@@ -517,8 +517,9 @@ a snapshot gets what its own request asks for. On Linux and macOS the root guest
 agent's account elevation, or revokes every way up through sudo and the groups that make
 administrators; how is in
 [Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux-and-macos).
-Nothing can keep a root account from elevating, so a Task whose `[agent].user` is root
-must declare `[agent].sudo = true`. Grants, and their absence, are verified and recorded: a
+Nothing can keep a root account from elevating, so a root agent is elevated: its
+`[agent].sudo` is true unless written, a Task writing it false fails to load, and the agent
+needs no sudo program. Grants, and their absence, are verified and recorded: a
 Linux or macOS sandbox the agent works in is refused when its guest service is not root,
 when a requested grant does not work, or when an agent that did not request one can still
 use sudo.

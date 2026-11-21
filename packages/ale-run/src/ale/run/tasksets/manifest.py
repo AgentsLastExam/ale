@@ -381,13 +381,9 @@ def _warnings(config: TaskConfig, folder: TaskFolder, name: TaskId) -> tuple[str
 
 def _harbor_defaults(config: TaskConfig) -> str:
     """What Harbor's defaults gave a Harbor Task, as the end of its warning."""
-    agent = config.agent
-    given = []
-    if "user" not in agent.model_fields_set and config.agent_user == HARBOR_ACCOUNT:
-        given.append(f"its agent runs as {HARBOR_ACCOUNT}")
-    if "sudo" not in agent.model_fields_set and config.agent_sudo:
-        given.append("with sudo")
-    return f"; as in Harbor, {', '.join(given)}" if given else ""
+    if "user" not in config.agent.model_fields_set and config.agent_user == HARBOR_ACCOUNT:
+        return f"; as in Harbor, its agent runs as {HARBOR_ACCOUNT}"
+    return ""
 
 
 def _moving_images(config: TaskConfig, folder: TaskFolder) -> list[tuple[str, str]]:

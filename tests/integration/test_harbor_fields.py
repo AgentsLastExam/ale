@@ -102,7 +102,7 @@ fi
 
 
 @pytest.mark.asyncio
-async def test_a_harbor_task_runs_as_it_is_as_root_with_sudo(tmp_path: Path) -> None:
+async def test_a_harbor_task_runs_as_it_is_as_root(tmp_path: Path) -> None:
     task = write_task(
         tmp_path / "hello-harbor",
         config={"schema_version": None, "task": None, "agent": {"user": None}},
