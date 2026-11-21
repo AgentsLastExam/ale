@@ -565,7 +565,7 @@ def test_the_task_format_holds_validation_rounds(tmp_path: Path) -> None:
         with pytest.raises(ValidationError, match=problem):
             TaskConfig.model_validate(
                 {
-                    "schema_version": "0.2.0",
+                    "schema_version": "0.2",
                     "task": {"name": "a/b"},
                     "agent": {"validation_rounds": value},
                 }

@@ -91,8 +91,9 @@ async def test_a_root_agent_can_only_be_an_elevated_one(etc: Path) -> None:
     before = (etc / "sudoers").read_text()
     with pytest.raises(TaskDefinitionError, match=r"root.*\[agent\]\.sudo = true"):
         await set_elevation(Guest(etc.parent), "root", sudo=False, operating_system=LINUX)  # type: ignore[arg-type]
-    assert (etc / "sudoers").read_text() == before
+    # Root is elevated already, so it gets no grant.
     await set_elevation(Guest(etc.parent), "root", sudo=True, operating_system=LINUX)  # type: ignore[arg-type]
+    assert (etc / "sudoers").read_text() == before
 
 
 @pytest.mark.asyncio
@@ -104,6 +105,17 @@ async def test_a_requested_grant_that_cannot_work_says_why() -> None:
     with pytest.raises(ProviderCapabilityError, match="has no sudo"):
         await verify_identities(Probed(), "user", sudo=True)  # type: ignore[arg-type]
     await verify_identities(Probed(), "user", sudo=False)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_root_agent_needs_no_sudo_program() -> None:
+    class Probed:
+        async def exec(self, argv, *, run_as=None, timeout_sec=None):  # type: ignore[no-untyped-def]
+            return 0, "0 none", "", False
+
+    await verify_identities(Probed(), "root", sudo=True)  # type: ignore[arg-type]
+    with pytest.raises(ProviderCapabilityError, match="root is root"):
+        await verify_identities(Probed(), "root", sudo=False)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

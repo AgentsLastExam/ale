@@ -4,7 +4,7 @@
 # one and, from the trajectory, that ALE attributes the child's work to the child. The
 # verifier checks the file; live acceptance checks the trajectory. Nothing here needs the
 # parent to receive the child's result, which a one-shot OpenClaw run cannot deliver yet.
-schema_version = "0.2.0"
+schema_version = "0.2"
 artifacts = ["/home/user/output"]
 
 [task]

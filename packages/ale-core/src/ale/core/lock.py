@@ -111,6 +111,11 @@ class TaskProvenance(BaseModel):
     non_verifier_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     variables: tuple[TaskVariableProvenance, ...] = ()
     """The variables this episode resolved, ``[solution].env`` only for the oracle."""
+    harbor: bool = Field(default=False, exclude_if=lambda value: not value)
+    """Read as a Harbor Task: its ``schema_version`` is Harbor's or absent, so Harbor's
+    defaults applied where it sets none."""
+    warnings: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    """Where the Task departs from ALE's form, as loading it said."""
 
 
 class ImageProvenance(BaseModel):

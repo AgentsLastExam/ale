@@ -50,10 +50,10 @@ that setting stays after cleanup
 ## Choose an image
 
 Name any Tart OCI image in `task.toml` as `[environment].image`, by SHA-256 digest or by a
-tag that does not move (`ale lint` reports `latest`):
+tag that does not move (`ale lint` warns about `latest`):
 
 ```toml
-schema_version = "0.2.0"
+schema_version = "0.2"
 artifacts = ["/Users/admin/output"]
 
 [task]

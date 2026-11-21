@@ -64,7 +64,7 @@ def _case(**expect: object) -> CalibrationCase:
 
 def _config(*entries: dict[str, Any]) -> TaskConfig:
     return TaskConfig.model_validate(
-        {"schema_version": "0.2.0", "task": {"name": "a/b"}, "calibration": list(entries)}
+        {"schema_version": "0.2", "task": {"name": "a/b"}, "calibration": list(entries)}
     )
 
 

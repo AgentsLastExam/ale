@@ -26,6 +26,7 @@ from ale.core.ids import TaskId, content_hash
 
 __all__ = [
     "DEFAULT_SOLUTION",
+    "HARBOR_ACCOUNT",
     "SCHEMA_VERSION",
     "SOLUTION_CASE",
     "AgentTable",
@@ -187,6 +188,10 @@ class ImageSpec(BaseModel):
     base_ref: str | None = Field(default=None, min_length=1)
     user: str = Field(default="user", pattern=_ACCOUNT)
     """The agent account. It must exist in the image; preparation fails if it does not."""
+    keep_alive: bool = Field(default=False, exclude_if=lambda value: not value)
+    """Whether the framework layer replaces a container image's command with one that runs
+    until the Sandbox is destroyed, as Harbor replaces every Task container's: a Harbor
+    Task's. A VM has no command to replace."""
     build_timeout_sec: float = Field(default=3600, gt=0)
     """How long the Task's own build may run. Not part of the image's identity."""
 
@@ -876,9 +881,15 @@ class TaskSpec(BaseModel):
         return self
 
 
-#: The ``task.toml`` format ALE reads, named by the ALE version that last changed it. ALE
-#: accepts exactly this value.
-SCHEMA_VERSION = "0.2.0"
+#: The ``task.toml`` format ALE reads, named by the major and minor ALE version that last
+#: changed it, as Harbor names its own. A Harbor Task, naming one of Harbor's formats or
+#: none, is read as this one, with a warning; a Task naming any other format fails.
+SCHEMA_VERSION = "0.2"
+#: Harbor's format versions, ``1.0`` through its current ``1.4``. A Task naming one, or none,
+#: which Harbor reads as its own current version, is Harbor's (``TaskConfig.harbor``).
+_HARBOR_SCHEMA = re.compile(r"1\.[0-9]+")
+#: The account Harbor's agent runs as in an image that names no other ``USER``.
+HARBOR_ACCOUNT = "root"
 
 #: ``task.toml`` network modes and what they mean for the agent, the oracle and the verifier.
 #: ``blocklist`` is ALE's; Harbor's format has the other three.
@@ -918,7 +929,8 @@ class TaskTable(BaseModel):
 
     model_config = _FROZEN
 
-    name: TaskId
+    name: TaskId | None = None
+    """``None`` identifies the Task by where it lives instead, as Harbor does."""
     description: str = ""
     version: str | None = Field(default=None, min_length=1)
     authors: tuple[Author, ...] = ()
@@ -1113,7 +1125,12 @@ class EnvironmentTable(BaseModel):
 
 
 class AgentTable(BaseModel):
-    """``[agent]``: the evaluated agent's account, budget and network; the oracle's too."""
+    """``[agent]``: the evaluated agent's account, budget and network; the oracle's too.
+
+    A Harbor Task's account defaults to Harbor's (``TaskConfig.agent_user``), and a root
+    account's elevation to true (``TaskConfig.agent_sudo``), so read those two through
+    ``TaskConfig``: a field's own default holds only where nothing else decides it.
+    """
 
     model_config = _FROZEN
 
@@ -1325,15 +1342,18 @@ class TaskConfig(BaseModel):
 
     A Harbor field keeps Harbor's meaning. A field ALE adds sits in the Harbor table of what
     it configures, under a name Harbor gives no other meaning, except ``[[calibration]]``,
-    which no Harbor table configures. Only ``schema_version`` and ``[task].name`` are
-    required.
+    which no Harbor table configures. Every key has a default: a Task that leaves out
+    ``schema_version`` or ``[task].name``, which ALE's form writes, still loads, and the
+    loader says so.
     """
 
     model_config = _FROZEN
 
-    schema_version: Literal["0.2.0"]
+    schema_version: str | None = None
+    """``SCHEMA_VERSION``, one of Harbor's, or ``None`` when the Task names no format, as
+    Harbor allows; ``harbor`` says which."""
     artifacts: tuple[Artifact, ...] = ()
-    task: TaskTable
+    task: TaskTable = TaskTable()
     metadata: dict[str, Any] = Field(default_factory=dict)
     environment: EnvironmentTable = EnvironmentTable()
     agent: AgentTable = AgentTable()
@@ -1343,6 +1363,36 @@ class TaskConfig(BaseModel):
     solution: SolutionTable = SolutionTable()
     calibration: tuple[CalibrationCase, ...] = ()
     """``[[calibration]]`` as written; ``calibration_cases`` adds the default ``solution``."""
+
+    @property
+    def harbor(self) -> bool:
+        """Whether this is a Harbor Task: one naming one of Harbor's format versions, or none,
+        which Harbor reads as its own. Harbor's defaults apply where it sets nothing."""
+        version = self.schema_version
+        return version is None or _HARBOR_SCHEMA.fullmatch(version) is not None
+
+    @property
+    def agent_user(self) -> str:
+        """The agent's account: ``[agent].user``; unset, ``user``, or in a Harbor Linux Task
+        ``root``, the account Harbor runs its agent as in an image naming no other ``USER``."""
+        agent = self.agent
+        linux = self.environment.os is OperatingSystem.LINUX
+        if "user" in agent.model_fields_set or not (self.harbor and linux):
+            return agent.user
+        return HARBOR_ACCOUNT
+
+    @property
+    def agent_sudo(self) -> bool:
+        """Whether the agent can elevate: ``[agent].sudo``; unset, whether its account is
+        ``root``, which nothing can keep from elevating, outside Windows."""
+        if "sudo" in self.agent.model_fields_set:
+            return self.agent.sudo
+        return self._root_agent
+
+    @property
+    def _root_agent(self) -> bool:
+        """Whether the agent's account is root, which only Linux and macOS name so."""
+        return self.agent_user == "root" and self.environment.os is not OperatingSystem.WINDOWS
 
     @property
     def agent_network(self) -> NetworkPolicy:
@@ -1375,6 +1425,28 @@ class TaskConfig(BaseModel):
         )
 
     # --- validation ---
+
+    @field_validator("schema_version")
+    @classmethod
+    def _readable_version(cls, value: str | None) -> str | None:
+        if value is None or value == SCHEMA_VERSION or _HARBOR_SCHEMA.fullmatch(value):
+            return value
+        raise ValueError(
+            f'"{value}" is neither ALE\'s format "{SCHEMA_VERSION}" nor one of Harbor\'s, 1.<n>'
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _harbor_version_key(cls, data: Any) -> Any:
+        """A root-level ``version`` is ``schema_version`` under the name Harbor first gave it:
+        one field, written once."""
+        if not isinstance(data, dict) or "version" not in data:
+            return data
+        if "schema_version" in data:
+            raise ValueError("version and schema_version are one field; write only one of them")
+        return {
+            ("schema_version" if key == "version" else key): value for key, value in data.items()
+        }
 
     @model_validator(mode="before")
     @classmethod
@@ -1430,4 +1502,9 @@ class TaskConfig(BaseModel):
             if sized.gpu_memory_mb is not None:
                 raise ValueError(f"[{table}].gpu_memory_mb requires gpus")
         _validate_artifact_paths(self.artifacts, environment.os)
+        if self._root_agent and not self.agent_sudo:
+            raise ValueError(
+                "the agent's account is root, which nothing can keep from elevating: remove "
+                "[agent].sudo = false, or name a non-root [agent].user"
+            )
         return self

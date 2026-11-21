@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from tests.support import edit_task_config as edit
+from tests.support import write_task
 
 from ale.core.errors import TaskDefinitionError
 from ale.core.task import Stage
@@ -255,10 +256,10 @@ def test_load_errors_name_the_key(tmp_path: Path) -> None:
     edit(task, {"environment": {"tpu": {"type": "v6e", "topology": "2x4"}}})
     with pytest.raises(TaskDefinitionError, match=r"environment\.tpu is not supported"):
         load_tasks(task)
-    edit(task, {"environment": {"tpu": None}, "task": {"name": None}})
-    with pytest.raises(TaskDefinitionError, match=r"task\.name is required"):
+    edit(task, {"environment": {"tpu": None}, "calibration": [{"name": "partial"}]})
+    with pytest.raises(TaskDefinitionError, match=r"calibration\.0\.expect is required"):
         load_tasks(task)
-    edit(task, {"task": {"name": "agentslastexam/demo"}, "agent": {"shell": "bash"}})
+    edit(task, {"calibration": None, "agent": {"shell": "bash"}})
     with pytest.raises(TaskDefinitionError, match=r"agent\.shell is not a task\.toml key"):
         load_tasks(task)
     edit(task, {"agent": {"shell": None}, "environment": {"docker_image": "ghcr.io/a/b:1"}})
@@ -647,3 +648,109 @@ def test_a_verifier_runs_as_the_framework_unless_harbor_s_user_names_an_account(
         edit(task, {"verifier": {"user": 1000}})
         assert load_tasks(task)[0].spec.verify.user == "1000"
         edit(task, {"verifier": {"user": None}})
+
+
+#: A Harbor Task as Harbor writes one: no format, no name, root's image at no exact version.
+HARBOR_TASK: dict[str, object] = {
+    "schema_version": None,
+    "task": None,
+    "agent": {"user": None},
+    "metadata": {"network_justification": "none needed"},
+}
+
+
+def test_a_harbor_task_loads_as_it_is_with_harbor_s_account(tmp_path: Path) -> None:
+    task = write_task(tmp_path / "hello-world", config=HARBOR_TASK, dockerfile="FROM python\n")
+    loaded = load_tasks(task)[0]
+    assert loaded.harbor
+    assert str(loaded.spec.name) == "local/hello-world"
+    assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("root", True)
+    assert loaded.warnings == (
+        'task.toml: no schema_version, so it is read as a Harbor Task in ALE\'s format "0.2"; '
+        "as in Harbor, its agent runs as root",
+        "task.toml: no [task].name, so this Task is local/hello-world, after where it lives",
+        "environment/Dockerfile: python can change under the Task; ALE uses the version it "
+        "names when the image is prepared and records its digest; name an exact version",
+    )
+    # Every warning is one for lint, which still passes.
+    findings = lint_repository(task)
+    assert [item.severity for item in findings] == ["warning"] * 3
+    assert all(str(item).startswith(f"{task}: warning: ") for item in findings)
+
+
+def test_an_ale_task_loads_without_a_warning(tmp_path: Path) -> None:
+    loaded = load_tasks(scaffold_task(tmp_path / "demo"))[0]
+    assert (loaded.harbor, loaded.warnings) == (False, ())
+    assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("user", False)
+
+
+def test_another_format_fails_to_load(tmp_path: Path) -> None:
+    task = write_task(tmp_path / "demo", config={"schema_version": "1.4+ale.1"})
+    with pytest.raises(TaskDefinitionError, match="schema_version") as raised:
+        load_tasks(task)
+    assert "neither ALE's format \"0.2\" nor one of Harbor's" in str(raised.value)
+
+
+def test_a_harbor_task_s_containers_are_kept_alive(tmp_path: Path) -> None:
+    verifier = {
+        "verifier": {"environment_mode": "separate", "environment": {"image": "python:3.12"}}
+    }
+    harbor = load_tasks(
+        write_task(tmp_path / "harbor", config={**HARBOR_TASK, **verifier}, dockerfile="FROM x\n")
+    )[0].spec
+    assert harbor.image.keep_alive and harbor.verify.image.keep_alive
+    ale = load_tasks(write_task(tmp_path / "ale", config=verifier))[0].spec
+    assert not (ale.image.keep_alive or ale.verify.image.keep_alive)
+    # Written only when set, so an ALE Task's identity is the one it had.
+    assert "keep_alive" not in ale.image.model_dump()
+
+
+def test_a_harbor_task_naming_its_account_keeps_it(tmp_path: Path) -> None:
+    task = write_task(tmp_path / "demo", config={"schema_version": "1.4"})
+    loaded = load_tasks(task)[0]
+    # It names its own account, so only the format is Harbor's.
+    assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("user", False)
+    assert loaded.warnings == (
+        "task.toml: Harbor's schema_version \"1.4\", so it is read as a Harbor Task in ALE's "
+        'format "0.2"',
+    )
+
+
+def test_a_harbor_image_s_own_user_is_named_in_a_warning(tmp_path: Path) -> None:
+    dockerfile = "FROM python:3.12 AS build\nUSER builder\nFROM python:3.12\nUSER agent:agent\n"
+    task = write_task(tmp_path / "demo", config=HARBOR_TASK, dockerfile=dockerfile)
+    assert (
+        "environment/Dockerfile: its image runs as USER agent, which Harbor's agent runs as; "
+        "ALE's runs as root unless [agent].user names agent"
+    ) in load_tasks(task)[0].warnings
+    edit(task, {"agent": {"user": "agent"}})
+    loaded = load_tasks(task)[0]
+    assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("agent", False)
+    assert not any("USER" in warning for warning in loaded.warnings)
+    (task / "environment/Dockerfile").write_text("FROM python:3.12\nUSER root\n")
+    edit(task, {"agent": {"user": None}})
+    assert not any("USER" in warning for warning in load_tasks(task)[0].warnings)
+
+
+def test_a_task_naming_none_is_named_after_its_repository_and_folder(
+    write_task_repo,
+) -> None:  # type: ignore[no-untyped-def]
+    repository = write_task_repo(
+        "harbor-tasks", tasks=("hello world", "Fix.Bug"), config=HARBOR_TASK
+    )
+    names = [str(task.spec.name) for task in load_tasks(repository)]
+    assert names == ["harbor-tasks/Fix.Bug", "harbor-tasks/hello-world"]
+    # The same folder name twice in one collection needs a name of its own.
+    shutil.copytree(repository / "tasks/hello world", repository / "other/hello world")
+    with pytest.raises(TaskDefinitionError, match=r"give each its own \[task\]\.name"):
+        load_tasks(repository)
+
+
+def test_a_name_in_harbor_s_characters_is_read_as_written(tmp_path: Path) -> None:
+    task = write_task(tmp_path / "demo", name="SWE-smith/vuejs__core.d0b513eb")
+    loaded = load_tasks(task)[0]
+    assert str(loaded.spec.name) == "SWE-smith/vuejs__core.d0b513eb"
+    assert loaded.warnings == (
+        "task.toml: [task].name SWE-smith/vuejs__core.d0b513eb is Harbor's form; ALE's is a "
+        "lowercase org/name of letters, digits, '-' and '_'",
+    )

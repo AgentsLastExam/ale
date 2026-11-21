@@ -379,11 +379,11 @@ a Judge failure according to its own scoring policy.
 
 ## 7. A result carries what produced it
 
-`RunLock` records the explicit Task name, complete Task-folder source digest, source and
-commit when available, exact locally built image content, for the solver and a separate or
-snapshot verifier the Provider selected and the leaf that started the Sandbox with its
-container runtime, requested and effective resources, GPU allocation and sandbox
-observations, agent version and integrity, harness family, one optional Task-asset
+`RunLock` records the Task name, the warnings loading the Task gave, complete Task-folder
+source digest, source and commit when available, exact locally built image content, for the
+solver and a separate or snapshot verifier the Provider selected and the leaf that started
+the Sandbox with its container runtime, requested and effective resources, GPU allocation and
+sandbox observations, agent version and integrity, harness family, one optional Task-asset
 repository/path/commit/dirty observation, the name and value source of each Task variable,
 the agent's and the verifier's network policies, verification topology and image/resources,
 sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.

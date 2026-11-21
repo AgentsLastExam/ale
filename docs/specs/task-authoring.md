@@ -12,9 +12,9 @@ A field ALE adds sits in the Harbor table of what it configures, under a name Ha
 no other meaning: a separate namespace would not stop one name meaning two things, and would
 have to mirror every table it extends. The exception is `[[calibration]]`, which no Harbor
 table configures; `validation/` and `calibration/` are ALE's directories. `schema_version`
-is the ALE version in which the format last changed, and ALE accepts exactly that value, so
-a file written for another format fails as it loads instead of being read with a different
-meaning.
+is the ALE version, major and minor, in which the format last changed, and ALE accepts
+exactly that value, so a file written for another format fails as it loads instead of being
+read with a different meaning.
 
 ## Task folder
 
@@ -68,10 +68,12 @@ other key has a default, so a Task states what makes it different. An unknown ke
 Harbor key ALE does not implement fails with a message saying so. The annotated shape below
 describes every key of ALE's format, with `ALE` marking the ones Harbor does not have; the
 Harbor keys ALE also reads, so that a Harbor Task loads with few edits, are in
-[Harbor compatibility](#harbor-compatibility).
+[Harbor compatibility](#harbor-compatibility). A Task ALE can read but that departs from this
+form loads with a warning, which every command that loads it prints and the RunLock records
+in `task.warnings`; only an error fails `ale lint`.
 
 ```toml
-schema_version = "0.2.0"                    # required; exactly this
+schema_version = "0.2"                      # required; exactly this
 artifacts = [                               # outcome paths
   "output",                                 # below where the agent starts
   "/home/user/games/*.sgf",
@@ -111,12 +113,12 @@ args = ["--index", "/srv/index"]            # stdio
 # headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }  # streamable-http
 
 [agent]                                     # the evaluated agent and the oracle
-user = "user"                               # account in the image; root needs sudo; default user
+user = "user"                               # account in the image; default user
 timeout_sec = 1800                          # positive seconds; default 1800
 network_mode = "allowlist"                  # no-network | allowlist | blocklist | public; default no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
 # blocked_hosts = ["github.com"]            # ALE; required, and only, for blocklist
-sudo = false                                # ALE; sudo works exactly when true (Administrator on Windows)
+sudo = false                                # ALE; sudo works exactly when true, always for root (Administrator on Windows)
 # workdir = "project"                       # ALE; where the agent starts; default its home
 validation_rounds = 0                       # ALE; validation/ results it gets; default 0
 
@@ -433,7 +435,7 @@ required by the Task. The Linux bases are:
   `[environment].image`.
 
 Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the container
-base's current version, and `ale lint` reports a registry `FROM` or `image` with no tag or
+base's current version, and `ale lint` warns about a registry `FROM` or `image` with no tag or
 `latest`. A Task keeps building from the version it names until its author moves it
 ([Sandbox image](sandbox-image.md#versions)).
 
@@ -729,6 +731,15 @@ ALE also reads these Harbor keys and files, with Harbor's meaning, so that a Har
 with few edits. They are not part of ALE's format: a new Task uses the form the sections above
 describe.
 
+- `schema_version` may be left out, or name Harbor's `1.<n>`, or be Harbor's root-level
+  `version`: ALE reads the Task as a Harbor Task, in its own format with the defaults
+  below, with a warning and `task.harbor` in the RunLock. Any other version fails.
+- Without `[task].name`, a Task is named `<repository>/<folder>`; a name may use Harbor's
+  characters, both cases and `.`.
+- A Harbor Task's agent runs as `root` on Linux unless `[agent].user` names another
+  account.
+- A Harbor Task's containers run `sh -c "sleep infinity"` in place of their image's
+  command, as Harbor's do.
 - `docker_image`, in `[environment]` and `[verifier.environment]`, is `image`: one field, so a
   table holds either, never both.
 - `[environment].workdir` is where the agent starts, unless `[agent].workdir` names another

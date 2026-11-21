@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import ValidationError
 from tests.support import MINIMAL_TASK_CONFIG, merged_config
 
-from ale.core.ids import TaskId, canonical_json, content_hash, task_component
+from ale.core.ids import TaskId, canonical_json, content_hash, in_ale_form, task_component
 from ale.core.taskspec import (
     SCHEMA_VERSION,
     Artifact,
@@ -190,12 +192,17 @@ def config(*layers: dict[str, object]) -> TaskConfig:
 def test_task_ids_are_org_and_name_and_one_safe_component() -> None:
     assert TaskId("agentslastexam/demo_hello") == "agentslastexam/demo_hello"
     assert task_component(TaskId("agentslastexam/demo-hello")) == "agentslastexam.demo-hello"
-    for invalid in ("demo", "a/b/c", "Org/demo", "org/", "/demo", "org/demo.v1", "-org/demo"):
+    # Harbor's characters, both cases and '.', are read as written; a component is lowercase.
+    assert TaskId("SWE-smith/vuejs__core.d0b513eb") == "SWE-smith/vuejs__core.d0b513eb"
+    assert task_component(TaskId("Org/Demo.v1")) == "org.demo.v1"
+    assert in_ale_form("agentslastexam/demo_hello")
+    assert not any(in_ale_form(name) for name in ("Org/demo", "org/demo.v1"))
+    for invalid in ("demo", "a/b/c", "org/", "/demo", "-org/demo", ".org/demo", "org/a..b"):
         with pytest.raises(ValueError, match="org/name"):
             TaskId(invalid)
 
 
-def test_task_config_requires_only_its_version_and_name() -> None:
+def test_task_config_requires_no_key() -> None:
     assert config().environment.image is None
     minimal = TaskConfig.model_validate(
         {"schema_version": SCHEMA_VERSION, "task": {"name": "org/demo"}}
@@ -205,18 +212,65 @@ def test_task_config_requires_only_its_version_and_name() -> None:
     assert (minimal.agent.user, minimal.agent.timeout_sec) == ("user", 1800)
     assert minimal.agent_network.mode is NetworkMode.BLOCK
     assert minimal.verifier.timeout_sec == 600
-    for table, key in (("", "schema_version"), ("task", "name")):
-        payload = merged_config(MINIMAL_TASK_CONFIG, {table: {key: None}} if table else {key: None})
-        with pytest.raises(ValidationError) as raised:
-            TaskConfig.model_validate(payload)
-        assert raised.value.errors()[0]["type"] == "missing"
-        assert raised.value.errors()[0]["loc"] == ((table, key) if table else (key,))
-    # The format is named by the ALE version that last changed it, and only that one is
-    # read.
-    assert SCHEMA_VERSION == "0.2.0"
-    for version in ("1.4", "1.4+ale.1", "0.1.1"):
-        with pytest.raises(ValidationError, match=r"0\.2\.0"):
-            config({"schema_version": version})
+    # Neither the format nor the name is required: the loader names the Task and warns.
+    empty = TaskConfig.model_validate({})
+    assert (empty.schema_version, empty.task.name) == (None, None)
+    assert SCHEMA_VERSION == "0.2"
+
+
+@pytest.mark.parametrize(
+    ("version", "harbor"),
+    [
+        (SCHEMA_VERSION, False),
+        (None, True),
+        ("1.0", True),
+        ("1.4", True),
+        ("1.12", True),
+    ],
+)
+def test_harbor_s_versions_or_none_make_a_harbor_task(version: str | None, harbor: bool) -> None:
+    task = config({"schema_version": version, "agent": {"user": None}})
+    assert task.harbor is harbor
+    # As Harbor runs its agent, as root in an image naming no other USER, which can elevate.
+    assert (task.agent_user, task.agent_sudo) == (("root", True) if harbor else ("user", False))
+
+
+# ALE's earlier label among them: only ALE's current format and Harbor's are read.
+@pytest.mark.parametrize("version", ["1.4+ale.1", "1.4.0", "0.1.1", "2.0"])
+def test_any_other_format_is_refused(version: str) -> None:
+    with pytest.raises(ValidationError, match=f'"{re.escape(version)}" is neither ALE'):
+        config({"schema_version": version})
+
+
+def test_a_harbor_task_s_own_account_and_elevation_win() -> None:
+    harbor = {"schema_version": None, "agent": {"user": None}}
+    # A non-root account is how a Harbor Task keeps its agent from what grades it.
+    named = config(harbor, {"agent": {"user": "agent"}})
+    assert (named.agent_user, named.agent_sudo) == ("agent", False)
+    assert config(harbor, {"agent": {"user": "agent", "sudo": True}}).agent_sudo is True
+    # Root that may not elevate cannot be, in a Harbor Task as in an ALE one.
+    with pytest.raises(ValidationError, match="account is root"):
+        config(harbor, {"agent": {"sudo": False}})
+    # Harbor has no macOS and runs Windows in containers, so ALE's defaults stay there.
+    windows = config(harbor, {"environment": {"os": "windows", "image": "/disk.qcow2"}})
+    assert (windows.agent_user, windows.agent_sudo) == ("user", False)
+    ale = config({"agent": {"user": "root", "sudo": True}})
+    assert (ale.harbor, ale.agent_user, ale.agent_sudo) == (False, "root", True)
+
+
+def test_a_root_agent_is_elevated_without_saying_so() -> None:
+    assert config({"agent": {"user": "root"}}).agent_sudo is True
+    with pytest.raises(ValidationError, match=re.escape("remove [agent].sudo = false")):
+        config({"agent": {"user": "root", "sudo": False}})
+    # Windows names no account root; elevation there is only what [agent].sudo says.
+    windows = {"environment": {"os": "windows", "image": "/disk.qcow2"}}
+    assert config(windows, {"agent": {"user": "root"}}).agent_sudo is False
+
+
+def test_harbor_s_original_version_key_is_the_schema_version() -> None:
+    assert config({"schema_version": None, "version": "1.0"}).schema_version == "1.0"
+    with pytest.raises(ValidationError, match="write only one of them"):
+        config({"version": "1.0"})
 
 
 @pytest.mark.parametrize(

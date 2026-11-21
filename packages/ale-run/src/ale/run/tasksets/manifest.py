@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tomllib
 from functools import cached_property
@@ -12,7 +13,7 @@ from pydantic import ValidationError
 
 from ale.core.episode import EpisodeContext
 from ale.core.errors import TaskDefinitionError
-from ale.core.ids import content_hash
+from ale.core.ids import TaskId, content_hash, in_ale_form
 from ale.core.task import (
     CALIBRATION_DIR,
     SOLUTION_DIR,
@@ -23,6 +24,8 @@ from ale.core.task import (
     case_path,
 )
 from ale.core.taskspec import (
+    HARBOR_ACCOUNT,
+    SCHEMA_VERSION,
     SOLUTION_CASE,
     ImageKind,
     ImageSpec,
@@ -70,6 +73,9 @@ _OS_LABELS = {
 }
 #: Generated state, never Task source.
 _CACHE_DIR = ".ale-cache"
+#: A Dockerfile stage's base and its alias.
+_FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.I | re.M)
+_USER = re.compile(r"^\s*USER\s+(\S+)", re.I | re.M)
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -241,6 +247,8 @@ class ManifestTask(Task):
             spec,
             folder=folder,
             source=folder.source,
+            harbor=config.harbor,
+            warnings=_warnings(config, folder, spec.name),
             task_digest=folder.content_digest,
             non_verifier_digest=folder.non_verifier_digest(config),
             image_source_digest=folder.image_source_digest(spec.image),
@@ -289,7 +297,8 @@ def load_tasks(path: Path) -> list[ManifestTask]:
         previous = seen.get(str(task.spec.name))
         if previous is not None:
             raise TaskDefinitionError(
-                f"duplicate Task name {task.spec.name!r}: {previous} and {folder.root}"
+                f"duplicate Task name {task.spec.name!r}: {previous} and {folder.root}; "
+                "give each its own [task].name"
             )
         seen[str(task.spec.name)] = folder.root
         tasks.append(task)
@@ -311,7 +320,7 @@ def _load_folder(folder: TaskFolder) -> ManifestTask:
         raise TaskDefinitionError(f"invalid {path}: {describe(exc)}") from exc
     _require_files(folder, config)
     try:
-        spec = _spec(config, folder)
+        spec = _spec(config, folder, config.task.name or _folder_name(folder))
     except ValidationError as exc:
         raise TaskDefinitionError(f"invalid Task {folder.root}: {describe(exc)}") from exc
     except TaskDefinitionError as exc:
@@ -319,10 +328,105 @@ def _load_folder(folder: TaskFolder) -> ManifestTask:
     return ManifestTask(spec, folder, config)
 
 
-def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
+def _folder_name(folder: TaskFolder) -> TaskId:
+    """The id of a Task that names none, as Harbor names one by its folder: its repository,
+    or ``local`` outside one, then its folder, each in the characters a Task id allows."""
+    parts = (folder.source.repository_name or "local", folder.root.name)
+    cleaned = (
+        re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._-]+", "-", part)).strip("._-")
+        for part in parts
+    )
+    try:
+        return TaskId("/".join(cleaned))
+    except ValueError:
+        raise TaskDefinitionError(
+            "no [task].name, and its folder gives no Task id; name the Task in task.toml"
+        ) from None
+
+
+def _warnings(config: TaskConfig, folder: TaskFolder, name: TaskId) -> tuple[str, ...]:
+    """Where the Task departs from ALE's form, each naming the file it is about: what it
+    leaves to a default ALE then chooses, and what can change under it."""
+    found: list[str] = []
+    version = config.schema_version
+    if config.harbor:
+        written = (
+            "no schema_version" if version is None else f'Harbor\'s schema_version "{version}"'
+        )
+        found.append(
+            f"{TASK_CONFIG}: {written}, so it is read as a Harbor Task in ALE's format "
+            f'"{SCHEMA_VERSION}"{_harbor_defaults(config)}'
+        )
+    if config.task.name is None:
+        found.append(f"{TASK_CONFIG}: no [task].name, so this Task is {name}, after where it lives")
+    elif not in_ale_form(name):
+        found.append(
+            f"{TASK_CONFIG}: [task].name {name} is Harbor's form; ALE's is a lowercase org/name "
+            "of letters, digits, '-' and '_'"
+        )
+    found.extend(
+        f"{path}: {image} can change under the Task; ALE uses the version it names when the "
+        "image is prepared and records its digest; name an exact version"
+        for path, image in _moving_images(config, folder)
+    )
+    account = _image_user(folder.dockerfile) if folder.dockerfile else None
+    defaulted = "user" not in config.agent.model_fields_set
+    if account is not None and defaulted and config.agent_user == HARBOR_ACCOUNT:
+        found.append(
+            f"{ENVIRONMENT_DIR}/Dockerfile: its image runs as USER {account}, which Harbor's "
+            f"agent runs as; ALE's runs as {HARBOR_ACCOUNT} unless [agent].user names {account}"
+        )
+    return tuple(found)
+
+
+def _harbor_defaults(config: TaskConfig) -> str:
+    """What Harbor's defaults gave a Harbor Task, as the end of its warning."""
+    if "user" not in config.agent.model_fields_set and config.agent_user == HARBOR_ACCOUNT:
+        return f"; as in Harbor, its agent runs as {HARBOR_ACCOUNT}"
+    return ""
+
+
+def _moving_images(config: TaskConfig, folder: TaskFolder) -> list[tuple[str, str]]:
+    """Every image the Task names, built on or used directly, that names no exact version,
+    with the file naming it."""
+    named: list[tuple[str, str]] = []
+    for dockerfile in (folder.dockerfile, folder.verifier_dockerfile):
+        if dockerfile is None:
+            continue
+        stages = _FROM.findall(dockerfile.read_text(encoding="utf-8", errors="replace"))
+        aliases = {alias.lower() for _, alias in stages} | {"scratch"}
+        path = dockerfile.relative_to(folder.root).as_posix()
+        named += [(path, base) for base, _ in stages if base.lower() not in aliases]
+    verifier = config.verifier.environment
+    for image in (config.environment.image, verifier.image if verifier else None):
+        if image is not None:
+            named.append((TASK_CONFIG, image))
+    return [(path, image) for path, image in named if _moves(image)]
+
+
+def _moves(image: str) -> bool:
+    """Whether ``image`` can change under a Task: no digest, and no tag or ``latest``."""
+    if "@" in image or "$" in image:  # a build argument names it elsewhere
+        return False
+    if PurePosixPath(image).is_absolute():  # a local disk, whose content is its identity
+        return False
+    return image.rpartition("/")[2].partition(":")[2] in ("", "latest")
+
+
+def _image_user(dockerfile: Path) -> str | None:
+    """The account other than root a Dockerfile's last stage runs as, if it names one."""
+    text = dockerfile.read_text(encoding="utf-8", errors="replace")
+    stages = list(_FROM.finditer(text))
+    final = text[stages[-1].end() :] if stages else text
+    users = _USER.findall(final)
+    account = users[-1].partition(":")[0] if users else None
+    return None if account in (None, HARBOR_ACCOUNT, "0") else account
+
+
+def _spec(config: TaskConfig, folder: TaskFolder, name: TaskId) -> TaskSpec:
     """The runtime specification: ``task.toml`` with the folder's build definitions."""
     return TaskSpec(
-        name=config.task.name,
+        name=name,
         os=config.environment.os,
         image=_solver_image(config, folder),
         instruction=(folder.root / INSTRUCTION).read_text(encoding="utf-8"),
@@ -333,7 +437,7 @@ def _spec(config: TaskConfig, folder: TaskFolder) -> TaskSpec:
             "gpus": config.environment.gpus,
             "gpu_types": config.environment.gpu_types or (),
             "gpu_memory_mb": config.environment.gpu_memory_mb,
-            "sudo": config.agent.sudo,
+            "sudo": config.agent_sudo,
             "container_features": config.environment.container_features,
         },
         network=config.agent_network,
@@ -373,7 +477,7 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
     (``build.ps1`` on Windows, ``build.sh`` elsewhere) builds a VM on ``image``. ``image``
     alone is used directly.
     """
-    environment, user = config.environment, config.agent.user
+    environment, user = config.environment, config.agent_user
     operating_system, image = environment.os, environment.image
     linux = operating_system is OperatingSystem.LINUX
     label, script = _OS_LABELS[operating_system], BUILD_SCRIPTS[operating_system]
@@ -391,7 +495,12 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
             raise TaskDefinitionError(
                 "environment/Dockerfile names its base in FROM; remove [environment].image"
             )
-        return ImageSpec(kind=ImageKind.CONTAINER, user=user, build_timeout_sec=timeout)
+        return ImageSpec(
+            kind=ImageKind.CONTAINER,
+            user=user,
+            keep_alive=config.harbor,
+            build_timeout_sec=timeout,
+        )
     if folder.build_script(operating_system) is not None:
         if image is None:
             raise TaskDefinitionError(
@@ -402,7 +511,13 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
         needed = "environment/Dockerfile or [environment].image" if linux else "[environment].image"
         raise TaskDefinitionError(f"a {label} Task requires {needed}")
     kind = _named_kind(image, operating_system)
-    return ImageSpec(kind=kind, ref=image, user=user, build_timeout_sec=timeout)
+    return ImageSpec(
+        kind=kind,
+        ref=image,
+        user=user,
+        keep_alive=config.harbor and kind is not ImageKind.VM,
+        build_timeout_sec=timeout,
+    )
 
 
 def _named_kind(image: str, operating_system: OperatingSystem) -> ImageKind | None:
@@ -442,7 +557,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     # Without a verifier environment, the verifier gets the solver's resources.
     sized = environment or config.environment
     named = environment.image if environment is not None else None
-    user = config.agent.user
+    user = config.agent_user
     image: ImageSpec | None = None
     if dockerfile is not None:
         if named is not None:
@@ -450,10 +565,19 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
                 "tests/Dockerfile names its base in FROM; remove [verifier.environment].image"
             )
         image = ImageSpec(
-            kind=ImageKind.CONTAINER, user=user, build_timeout_sec=sized.build_timeout_sec
+            kind=ImageKind.CONTAINER,
+            user=user,
+            keep_alive=config.harbor,
+            build_timeout_sec=sized.build_timeout_sec,
         )
     elif named is not None:
-        image = ImageSpec(kind=_named_kind(named, operating_system), ref=named, user=user)
+        kind = _named_kind(named, operating_system)
+        image = ImageSpec(
+            kind=kind,
+            ref=named,
+            user=user,
+            keep_alive=config.harbor and kind is not ImageKind.VM,
+        )
 
     resources = VerifierResources(
         cpus=sized.cpus or config.environment.cpus,

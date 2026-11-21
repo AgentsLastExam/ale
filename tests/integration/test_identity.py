@@ -58,6 +58,16 @@ async def run_one(task_root: Path, run_dir: Path, **kwargs):  # type: ignore[no-
     )
 
 
+#: No desktop, whose session would be another account's, no sudo, and no package manager to
+#: install it with.
+BARE_DOCKERFILE = (
+    "FROM python:3.12-slim\n"
+    "RUN mkdir -p /home/user/input /home/user/output"
+    " && printf 'world' > /home/user/input/word.txt && rm /usr/bin/apt-get /usr/bin/apt\n"
+    'CMD ["sleep", "infinity"]\n'
+)
+
+
 def with_oracle(task_root: Path, body: str) -> None:
     (task_root / "solution" / "solve.sh").write_text(
         "#!/usr/bin/env bash\nset -uo pipefail\nmkdir -p /home/user/output\n"
@@ -208,17 +218,25 @@ class TestPrivilegeDeclaration:
         assert "90-user" in collected(result, "rules").split()
 
     @pytest.mark.asyncio
-    async def test_a_root_agent_must_declare_its_elevation(
+    async def test_a_root_agent_is_elevated_without_declaring_it(
         self, tmp_path: Path, write_repo: Callable[..., Path]
     ) -> None:
-        """Nothing can keep root from elevating, so that combination is the Task's error."""
-        task_root = write_repo(tmp_path / "repo")
+        """Nothing can keep root from elevating, so it needs neither ``[agent].sudo`` nor a
+        sudo program, which this image lacks along with any package manager to install it."""
+        task_root = write_repo(tmp_path / "repo", dockerfile=BARE_DOCKERFILE)
         edit_task_config(task_root, {"agent": {"user": "root"}})
+        with_oracle(
+            task_root,
+            """\
+            id -u > /home/user/output/uid
+            command -v sudo > /home/user/output/sudo || echo none > /home/user/output/sudo
+            printf 'hello world' > /home/user/output/result.txt
+            """,
+        )
 
         result = await run_one(task_root, tmp_path / "runs")
-        assert result.verdict.status is not Status.COMPLETED
-        assert result.verdict.failure is not None
-        assert "[agent].sudo = true" in result.verdict.failure.message
+        assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+        assert (collected(result, "uid"), collected(result, "sudo")) == ("0", "none")
 
     @pytest.mark.asyncio
     async def test_a_declared_need_is_actually_granted(

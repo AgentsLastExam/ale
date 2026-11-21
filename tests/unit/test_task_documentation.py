@@ -7,6 +7,7 @@ import pytest
 from tests.support import sibling_checkout
 
 from ale.core import lock
+from ale.core.ids import in_ale_form
 from ale.core.taskspec import SCHEMA_VERSION, TaskConfig
 
 pytestmark = pytest.mark.unit
@@ -163,7 +164,10 @@ def test_maintained_tasks_use_the_current_configuration(repository: Path) -> Non
     if not repository.is_dir():
         pytest.skip(f"optional Task checkout not present: {repository.name}")
     for path in repository.glob("tasks/**/task.toml"):
-        TaskConfig.model_validate(tomllib.loads(path.read_text(encoding="utf-8")))
+        config = TaskConfig.model_validate(tomllib.loads(path.read_text(encoding="utf-8")))
+        # Loading accepts more; a maintained Task is in ALE's form.
+        assert config.schema_version == SCHEMA_VERSION, path
+        assert config.task.name is not None and in_ale_form(config.task.name), path
 
 
 def test_current_docs_name_prepare_and_current_schema() -> None:

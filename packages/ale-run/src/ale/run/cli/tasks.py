@@ -270,7 +270,7 @@ async def _run_one(
     providers = ProviderRegistry(settings)
     try:
         resolved = resolve(reference)
-        tasks = load_tasks(resolved.task_dir)
+        tasks = _load(resolved.task_dir)
         rounds: dict[str, int] = {}
         for task in tasks:
             harness.validate_os(task.spec.os)
@@ -525,7 +525,7 @@ async def _reverify(
     """Reverify retained solver episodes without launching their Harness again."""
     try:
         resolved = resolve(reference)
-        tasks = load_tasks(resolved.task_dir)
+        tasks = _load(resolved.task_dir)
         providers = ProviderRegistry(settings)
         by_name = {str(task.spec.name): task for task in tasks}
         sources = _retained_source_episodes(source_run)
@@ -1058,7 +1058,7 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
     providers = ProviderRegistry(settings)
     try:
         resolved = resolve(reference)
-        tasks = load_tasks(resolved.task_dir)
+        tasks = _load(resolved.task_dir)
         for task in tasks:
             # Every case checks validation/ too, on a snapshot of the same final state.
             task.validations = int(task.folder.stage_dir(Stage.VALIDATION) is not None)
@@ -1217,11 +1217,12 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
 async def _prepare_only(reference: str, settings: RunConfig) -> int:
     try:
         resolved = resolve(reference)
-        tasks = load_tasks(resolved.task_dir)
+        tasks = _load(resolved.task_dir)
         for root in {task.folder.root for task in tasks}:
-            if findings := lint_repository(root):
+            findings = lint_repository(root)
+            if problems := [item for item in findings if item.severity == "error"]:
                 raise TaskDefinitionError(
-                    "lint: " + "; ".join(str(item) for item in findings)[:2000]
+                    "lint: " + "; ".join(str(item) for item in problems)[:2000]
                 )
         results = await _prepare_images(tasks, ProviderRegistry(settings))
     except AleError as error:
@@ -1301,6 +1302,15 @@ def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
         for task in tasks
         for stage in ((Stage.TESTS, Stage.VALIDATION) if task.validates else (Stage.TESTS,))
     ]
+
+
+def _load(path: Path) -> list[ManifestTask]:
+    """The Tasks at ``path``, saying once where each departs from ALE's form."""
+    tasks = load_tasks(path)
+    for task in tasks:
+        for warning in task.warnings:
+            typer.echo(f"warning  {task.spec.name}: {warning}", err=True)
+    return tasks
 
 
 def _note(notices: tuple[str, ...]) -> None:
