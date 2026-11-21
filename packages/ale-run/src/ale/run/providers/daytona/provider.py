@@ -17,8 +17,9 @@ works within that:
   environment, which nothing needs, so guestd starts without it.
 * **Daemon.** Daytona's daemon listens, without authentication, on a few local ports and
   runs what it is asked as root. The Provider rejects connections to them from every
-  non-root user, then proves it by connecting as the agent. A sandbox that cannot be sealed
-  is destroyed rather than handed out.
+  non-root user, then proves it by connecting as an agent that may not elevate. A sandbox
+  that cannot be sealed is destroyed rather than handed out. An agent that may elevate,
+  root among them, gains nothing through the daemon it does not have already.
 * **Image command.** Daytona starts its own daemon in place of the image's entrypoint and
   command, so the Provider starts those itself, as the image's user and with its
   environment and working directory, and waits for the desktop when the image has one.
@@ -647,7 +648,7 @@ class DaytonaProvider(Provider):
             await _size_shared_memory(client, request.resources.memory_mb)
             await memory.watch(ssh)
             await set_and_prove_elevation(client, request, request.user)
-            await _seal_daemon(client, request.user)
+            await _seal_daemon(client, request)
             if request.resources.gpus:
                 await _register_driver_libraries(client)
                 gpus = await _observed_gpus(client, request, data)
@@ -848,7 +849,7 @@ class DaytonaProvider(Provider):
             agent_home, _ = await _guest_contract(client)
             await _require_framework(client, attached)
             await memory.watch(ssh)
-            await _seal_daemon(client, request.user)  # idempotent: the rules persist
+            await _seal_daemon(client, attached)  # idempotent: the rules persist
             if listeners:
                 tunnel = GatewayTunnel(ssh, listeners=listeners, targets=targets)
                 await tunnel.start()
@@ -1087,8 +1088,14 @@ async def _observed_gpus(
     )
 
 
-async def _seal_daemon(client: GuestClient, agent_user: str) -> None:
-    """Keep every non-root user away from Daytona's daemon, and prove it from the agent."""
+async def _seal_daemon(client: GuestClient, request: SandboxRequest) -> None:
+    """Keep every non-root user away from Daytona's daemon, and prove it from an agent that
+    may not elevate.
+
+    The daemon runs what it is asked as root, which is all it gives: its API acts only inside
+    the sandbox, and it holds no credential. An agent that may elevate, root among them, can
+    do that much without it, so it is not probed and its sandbox is handed out.
+    """
     code, stdout, stderr, _ = await client.exec(
         [PYTHON, "-c", _SEAL, ",".join(map(str, DAEMON_PORTS))], timeout_sec=60
     )
@@ -1097,6 +1104,9 @@ async def _seal_daemon(client: GuestClient, agent_user: str) -> None:
             f"could not restrict access to Daytona's daemon in this sandbox: {stderr.strip()}"
         )
     ports = json.loads(stdout)
+    agent_user = request.user
+    if request.sudo or agent_user == "root":
+        return
     code, stdout, stderr, _ = await client.exec(
         [PYTHON, "-c", _PROBE, agent_user, ",".join(map(str, ports))],
         timeout_sec=120,
@@ -1109,8 +1119,8 @@ async def _seal_daemon(client: GuestClient, agent_user: str) -> None:
         raise ProviderStartError(f"could not probe the daemon ports as {agent_user}: {stderr}")
     if reached:
         raise ProviderCapabilityError(
-            f"{agent_user} can still reach Daytona's daemon at {', '.join(reached)}; "
-            "a sandbox where the agent can run commands as root is not handed out"
+            f"{agent_user} can still reach Daytona's daemon at {', '.join(reached)}, which "
+            "would run its commands as root though the Task did not request elevation"
         )
 
 

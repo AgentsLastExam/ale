@@ -398,7 +398,7 @@ class ScriptedClient:
 
 async def test_the_agent_is_probed_on_every_port_the_seal_covers() -> None:
     client = ScriptedClient(reachable=[])
-    await _seal_daemon(client, "user")  # type: ignore[arg-type]
+    await _seal_daemon(client, request())  # type: ignore[arg-type]
     _, (probe, _) = client.calls
     # The probe drops to the agent itself: the framework's Python is root's alone.
     assert probe[3] == "user" and "os.setuid(account.pw_uid)" in probe[2]
@@ -407,12 +407,22 @@ async def test_the_agent_is_probed_on_every_port_the_seal_covers() -> None:
 
 async def test_a_daemon_the_agent_can_still_reach_stops_the_sandbox() -> None:
     with pytest.raises(ProviderCapabilityError, match=r"127\.0\.0\.1:2280"):
-        await _seal_daemon(ScriptedClient(reachable=["127.0.0.1:2280"]), "user")  # type: ignore[arg-type]
+        await _seal_daemon(ScriptedClient(reachable=["127.0.0.1:2280"]), request())  # type: ignore[arg-type]
 
 
 async def test_rules_that_cannot_be_installed_stop_the_sandbox() -> None:
     with pytest.raises(ProviderCapabilityError, match="Permission denied"):
-        await _seal_daemon(ScriptedClient([], seal_fails=True), "user")  # type: ignore[arg-type]
+        await _seal_daemon(ScriptedClient([], seal_fails=True), request())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("elevated", [{"user": "root", "sudo": True}, {"sudo": True}])
+async def test_an_agent_that_may_elevate_is_sealed_from_but_not_refused(
+    elevated: dict[str, Any],
+) -> None:
+    """It reaches root without the daemon, and the daemon gives root nothing more."""
+    client = ScriptedClient(reachable=["127.0.0.1:2280"])
+    await _seal_daemon(client, request(**elevated))  # type: ignore[arg-type]
+    assert len(client.calls) == 1  # the rules for every other account, and no probe
 
 
 # --- GPUs ------------------------------------------------------------------------

@@ -109,3 +109,33 @@ processes of 16 MiB end the sandbox, as they do with it empty, and ALE reports
 
 **Decision.** `mount(2)` through the C library from the framework's Python, not the image's
 `mount`, which an image need not carry.
+
+## A root agent and the daemon
+
+**Problem.** A Task whose agent runs as `root` was refused on every Daytona start, after the
+sandbox was made: `root can still reach Daytona's daemon at 127.0.0.1:2280, ...; a sandbox
+where the agent can run commands as root is not handed out` (November 2026). A Harbor Task,
+whose agent runs as root by default, ran on Docker and could not run on Daytona.
+
+**Context.** The daemon is PID 1, `/usr/local/bin/daytona`, and runs as root. It listens
+without authentication on 2280 (its toolbox API), 22220, 22222 and 33333. The Provider
+rejects every non-root account's connections to them with `iptables` owner rules; root's
+cannot be rejected. Probed as root in a sandbox (daemon 0.233.1, CPU runner):
+- the toolbox API's paths (from its own `/swagger/doc.json`) act inside the sandbox only:
+  files, processes, sessions, git, LSP, ports, computer use, `/env` and `/init`;
+- PID 1's environment names the organization, region, sandbox and snapshot, a telemetry
+  endpoint and the egress proxy `172.20.0.1:18080` outside the sandbox. No variable holds a
+  token, key, secret or password;
+- `/etc/daytona` holds only the public CA of Daytona's egress proxy, and `/root/.daytona`
+  the session that runs the image's command. `GET /env` returns nothing.
+
+A non-root agent with `[agent].sudo` already reached the daemon through root, and was
+handed its sandbox.
+
+**Solution.** `_seal_daemon` still installs the rules in every sandbox, which keeps every
+other account away. It probes only an agent that may not elevate; one that may, root among
+them, is not refused.
+
+**Decision.** The daemon gives root nothing root lacks in the sandbox, so refusing a root
+agent kept nothing from it. What such an agent can change is what elevation always allows,
+recorded as `sandbox.sudo`.
