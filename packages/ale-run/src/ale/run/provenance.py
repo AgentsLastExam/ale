@@ -45,7 +45,7 @@ from ale.core.lock import (
 )
 from ale.core.result import SandboxOutcome
 from ale.core.sandbox import PreparedTaskImage, ResolvedImage, ResourceAllocation
-from ale.core.taskspec import ImageSpec, TaskSpec
+from ale.core.taskspec import ImageSpec, TaskSpec, VerifySpec
 from ale.run import __version__
 from ale_verify import JudgeInvocation
 
@@ -228,6 +228,10 @@ def build_lock(
     verifier_resolved_image: ResolvedImage | None = None,
     verifier_allocation: ResourceAllocation | None = None,
     prepared_verifier_image: PreparedTaskImage | None = None,
+    validated: bool = False,
+    validation_resolved_image: ResolvedImage | None = None,
+    validation_allocation: ResourceAllocation | None = None,
+    prepared_validation_image: PreparedTaskImage | None = None,
     ale_verify: AleVerifyProvenance | None = None,
     termination: LimitTermination | None = None,
     sandbox_outcomes: tuple[SandboxOutcome, ...] = (),
@@ -236,8 +240,10 @@ def build_lock(
     harbor: bool = False,
     warnings: tuple[str, ...] = (),
     seed: int = 0,
+    validation_stage: Literal["validation", "tests"] = "validation",
 ) -> RunLock:
-    """Bind one episode's result to everything that produced it."""
+    """Bind one episode's result to everything that produced it: with the verifier of
+    validation rounds where it has its own and the episode ``validated``."""
     return RunLock(
         task=TaskProvenance(
             name=spec.name,
@@ -258,35 +264,57 @@ def build_lock(
         config_hash=inputs.config_hash,
         timeouts=inputs.timeouts,
         validation_rounds=inputs.validation_rounds,
+        validation_stage=validation_stage,
         seed=seed,
         ale_verify=ale_verify,
         judges=inputs.judges,
         asset=asset,
-        verification=VerificationProvenance(
-            mode=spec.verify.environment_mode,
-            network=spec.verify.network,
-            image=(
-                _image_provenance(
-                    spec.verify.image or spec.image,
-                    verifier_resolved_image,
-                    verifier_allocation,
-                    prepared_verifier_image,
-                )
-                if verifier_resolved_image is not None and verifier_allocation is not None
-                else None
-            ),
-            resources=(
-                ResourceProvenance(
-                    requested=spec.verify.resources.as_resources(),
-                    effective=verifier_allocation,
-                )
-                if spec.verify.resources is not None and verifier_allocation is not None
-                else None
-            ),
+        verification=_verification(
+            spec,
+            spec.verify,
+            verifier_resolved_image,
+            verifier_allocation,
+            prepared_verifier_image,
+        ),
+        validation=(
+            _verification(
+                spec,
+                spec.validation,
+                validation_resolved_image,
+                validation_allocation,
+                prepared_validation_image,
+            )
+            if validated and spec.validation is not None
+            else None
         ),
         termination=termination,
         sandbox_outcomes=sandbox_outcomes,
         resumed_from=resumed_from,
+    )
+
+
+def _verification(
+    spec: TaskSpec,
+    placed: VerifySpec,
+    resolved: ResolvedImage | None,
+    allocation: ResourceAllocation | None,
+    prepared: PreparedTaskImage | None,
+) -> VerificationProvenance:
+    """Where a verifier ``placed`` was, and the image and resources of its Sandbox of its
+    own, if it ran one."""
+    return VerificationProvenance(
+        mode=placed.environment_mode,
+        network=placed.network,
+        image=(
+            _image_provenance(placed.image or spec.image, resolved, allocation, prepared)
+            if resolved is not None and allocation is not None
+            else None
+        ),
+        resources=(
+            ResourceProvenance(requested=placed.resources.as_resources(), effective=allocation)
+            if placed.resources is not None and allocation is not None
+            else None
+        ),
     )
 
 

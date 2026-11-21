@@ -102,7 +102,9 @@ def test_timestamps_do_not_change_content_identity(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["outside", "missing_record", "image", "assets"])
+@pytest.mark.parametrize(
+    "change", ["outside", "missing_record", "image", "assets", "tests", "tests_unchanged"]
+)
 async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
     tmp_path, monkeypatch, capsys, change
 ):
@@ -134,6 +136,26 @@ async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
             "image": lock.image.model_copy(update={"declaration": declaration}),
         }
     )
+    if change.startswith("tests"):
+        # tests/ validated the source agent's rounds, so its results reached that agent.
+        lock = lock.model_copy(
+            update={
+                "task": lock.task.model_copy(update={"content_digest": task.task_digest}),
+                "validation_rounds": 1,
+                "validation_stage": "tests",
+            }
+        )
+    if change == "tests":
+        (root / "tests/test.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    if change == "tests_unchanged":
+        # The Task is as it was, so the next check, of the image, refuses it instead.
+        lock = lock.model_copy(
+            update={
+                "image": lock.image.model_copy(
+                    update={"declaration": declaration.model_copy(update={"user": "other"})}
+                )
+            }
+        )
     if change == "outside":
         instruction = root / "instruction.md"
         instruction.write_text(instruction.read_text() + "\nDifferent solver task")
@@ -159,8 +181,13 @@ async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
         "missing_record": "content outside tests/ changed",
         "image": "its image differs from the source run's",
         "assets": "Task assets differ from the source run",
+        "tests": "tests/ validated the source agent's rounds and the Task changed since",
+        "tests_unchanged": "its image differs from the source run's",
     }
-    assert refusal[change] in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert refusal[change] in err
+    if change == "tests_unchanged":
+        assert "tests/ validated" not in err
 
 
 @pytest.mark.asyncio

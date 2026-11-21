@@ -28,7 +28,7 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxRequest,
 )
-from ale.core.task import ResolvedVariables, TaskSourceContext
+from ale.core.task import ResolvedVariables, Stage, TaskSourceContext
 from ale.core.taskspec import NetworkPolicy, TaskSpec
 from ale.core.trajectory import AtifTrajectory
 from ale.core.verdict import Rewards
@@ -161,6 +161,8 @@ class EpisodeContext:
     spec: TaskSpec
     task_dir: Path
     """Host-side task folder: configuration, environment, tests and calibration cases."""
+    validation_stage: Stage
+    """The stage that validates: ``validation/``, or ``tests/`` for a Task without one."""
 
     run_dir: Path
     """Host-side output directory for this episode."""
@@ -196,6 +198,9 @@ class EpisodeContext:
     """Validated solver image selected before provisioning."""
     prepared_verifier_image: PreparedTaskImage | None = None
     """Prepared dedicated verifier image; None for shared verification."""
+    prepared_validation_image: PreparedTaskImage | None = None
+    """The image of the verifier of validation rounds in a Sandbox of its own; None where
+    they validate shared or not at all."""
     agent_stop: Exception | None = None
     """What ended the agent's run early. Its work is verified first, as in Harbor; this then
     decides the Episode's status."""
@@ -271,6 +276,9 @@ class EpisodeContext:
     ale_verify_provenance: AleVerifyProvenance | None = None
     verifier_resolved_image: ResolvedImage | None = None
     verifier_resource_allocation: ResourceAllocation | None = None
+    validation_resolved_image: ResolvedImage | None = None
+    """The image of the first validation round's verifier of its own."""
+    validation_resource_allocation: ResourceAllocation | None = None
 
     agent_started: bool = False
     agent_run: AgentRun | None = None

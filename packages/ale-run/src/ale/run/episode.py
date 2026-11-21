@@ -57,7 +57,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.task import ResolvedVariables, Task
+from ale.core.task import ResolvedVariables, Stage, Task
 from ale.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
@@ -79,6 +79,7 @@ from ale.run.providers import ProviderRegistry
 from ale.run.recording import EpisodeRecording, Redactor
 from ale.run.task_images import (
     prepare_task_image,
+    prepare_validation_image,
     prepare_verifier_image,
     resolve_image_kinds,
 )
@@ -842,13 +843,13 @@ def check_retention(
     spec: TaskSpec, retention: SandboxRetentionConfig, *, validates: bool = False
 ) -> None:
     """Refuse, before anything is prepared, a retention that cannot hold for ``spec``, whose
-    episodes run ``validation/`` when it ``validates``.
+    episodes validate when it ``validates``.
 
     A snapshot verifier boots from a snapshot of the solver, and saving the snapshot stops
     the solver, so it cannot be kept; a kept verifier still runs on the snapshot, which no
-    Provider destroys under it, so the snapshot must be kept too. A solver that runs
-    ``validation/`` boots its next turn's solver from a snapshot of its own, which is never
-    kept and which a kept solver would still run on, whichever setting keeps it.
+    Provider destroys under it, so the snapshot must be kept too. A solver that validates
+    boots its next turn's solver from a snapshot of its own, which is never kept and which a
+    kept solver would still run on, whichever setting keeps it.
     """
     shared = spec.verify.environment_mode is VerificationMode.SHARED
     # The Sandbox that holds the solver: under shared verification the verifier's policy
@@ -861,7 +862,7 @@ def check_retention(
             else ("sandbox_retention.verifier, which under shared verification is the solver's,")
         )
         raise ConfigError(
-            f"{spec.name} runs validation/ from a snapshot of its solver, from which the "
+            f"{spec.name} validates on a snapshot of its solver, from which the "
             f"solver after it boots, and which a kept solver would still run on: {setting} "
             "cannot be 'keep'; sandbox_retention.solver = 'snapshot' keeps its disk"
         )
@@ -939,6 +940,10 @@ async def run_episode(
         task.prepared_verifier_image = await prepare_verifier_image(
             task, providers.get(task.verifier_provider or task.provider)
         )
+    if task.prepared_validation_image is None:
+        task.prepared_validation_image = await prepare_validation_image(
+            task, providers.get(task.verifier_provider or task.provider)
+        )
     if alone:
         await providers.preflight([task])
     episode_id = episode_id or f"{task_component(task.spec.name)}-{uuid.uuid4().hex[:8]}"
@@ -995,7 +1000,8 @@ async def run_episode(
     # policy, the agent's or the verifier's: its policy is that of the phase that runs, and
     # the agent's model token, which its CLI holds, is never one.
     egress: GatewaySession | None = None
-    if proxy_url and (task.spec.network.proxied or task.spec.verify.network.proxied):
+    proxied = (task.spec.network, task.spec.verify.network, task.spec.validation_spec.network)
+    if proxy_url and any(policy.proxied for policy in proxied):
         candidate = GatewaySession(
             episode_id=episode_id, model="", purpose="egress", suspended=True
         )
@@ -1021,6 +1027,7 @@ async def run_episode(
         episode_id=episode_id,
         spec=task.spec,
         task_dir=task.folder.root if task.folder is not None else run_dir,
+        validation_stage=task.validation_stage,
         run_dir=episode_dir,
         sandboxes=lease,
         artifacts=sink,
@@ -1053,6 +1060,7 @@ async def run_episode(
         open_egress_session=None if egress is None else partial(_open_egress, egress),
         prepared_image=task.prepared_image,
         prepared_verifier_image=task.prepared_verifier_image,
+        prepared_validation_image=task.prepared_validation_image,
         phase_callback=phase_callback,
         limit_refusal=lambda: _gateway_refusal(session),
         open_agent_session=None if session is None else partial(_open_sessions, (session,)),
@@ -1284,6 +1292,10 @@ def _write_lock(
         verifier_resolved_image=ctx.verifier_resolved_image,
         verifier_allocation=ctx.verifier_resource_allocation,
         prepared_verifier_image=ctx.prepared_verifier_image,
+        validated=inputs.validation_rounds > 0 or bool(ctx.validation_rounds),
+        validation_resolved_image=ctx.validation_resolved_image,
+        validation_allocation=ctx.validation_resource_allocation,
+        prepared_validation_image=ctx.prepared_validation_image,
         ale_verify=ctx.ale_verify_provenance,
         termination=ctx.limit_termination,
         sandbox_outcomes=ctx.sandbox_outcomes,
@@ -1292,6 +1304,11 @@ def _write_lock(
         harbor=task.harbor,
         warnings=task.warnings,
         seed=seed,
+        # The agent was to receive rounds, or calibration's validation check ran.
+        validation_stage="tests"
+        if ctx.validation_stage is Stage.TESTS
+        and (inputs.validation_rounds > 0 or bool(ctx.validation_rounds))
+        else "validation",
     )
     return lock
 

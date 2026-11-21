@@ -14,7 +14,7 @@ import uuid
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ale.core.capability import (
     Arch,
@@ -35,7 +35,13 @@ from ale.core.sandbox import (
     verifiers_needs,
 )
 from ale.core.task import Task
-from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, VerificationMode
+from ale.core.taskspec import (
+    ContainerFeature,
+    NetworkMode,
+    NetworkPolicy,
+    VerificationMode,
+    VerifySpec,
+)
 from ale.run import capprobe, guestd
 
 if TYPE_CHECKING:
@@ -136,14 +142,19 @@ async def missing_features(
     }
 
 
-def _sandboxes(
-    task: Task, *, snapshot: bool, solver: bool
-) -> Iterator[tuple[SandboxRole, str, SandboxNeeds]]:
+#: Which of a Task's prepared images a Sandbox runs: the solver's, the verifier's of
+#: ``tests/`` or that of validation rounds.
+_Image = Literal["solver", "verifier", "validation"]
+_Planned = tuple[SandboxRole, str, SandboxNeeds, _Image]
+
+
+def _sandboxes(task: Task, *, snapshot: bool, solver: bool) -> Iterator[_Planned]:
     """Each Sandbox an episode of ``task`` starts, as the episode protocol requests it: its
-    role, the agent's account in it, and what it needs. A verifier that boots from a
-    snapshot its solver saves, a snapshot verifier or a shared validation round's, runs on
-    the leaf that saved it, so the solver needs what that verifier needs too, and as many
-    saves in a row as :func:`~ale.core.capability.solver_saves` counts."""
+    role, the agent's account in it, what it needs and which prepared image it runs. A
+    verifier that boots from a snapshot its solver saves, a snapshot verifier or a
+    validation round's, runs on the leaf that saved it, so the solver needs what that
+    verifier needs too, and as many saves in a row as
+    :func:`~ale.core.capability.solver_saves` counts."""
     spec = task.spec
     mode = spec.verify.environment_mode
     snapshot_verifier = (
@@ -154,8 +165,10 @@ def _sandboxes(
     verifier = verifiers_needs(
         spec.image.kind,
         spec.os,
-        (snapshot_verifier, round_verifier_resources(spec, task.validations)),
-        spec.verify.network.mode,
+        (
+            (snapshot_verifier, spec.verify.network.mode),
+            (round_verifier_resources(spec, task.validations), spec.validation_spec.network.mode),
+        ),
     )
     saves = solver_saves(
         task.validations,
@@ -177,21 +190,24 @@ def _sandboxes(
                 saves=saves,
                 verifier=verifier,
             ),
+            "solver",
         )
     if mode is VerificationMode.SNAPSHOT:
         assert verifier is not None
-        yield SandboxRole.VERIFIER, spec.image.user, verifier
-    separate = [spec.verify] if mode is VerificationMode.SEPARATE else []
+        yield SandboxRole.VERIFIER, spec.image.user, verifier, "verifier"
+    separate: list[tuple[VerifySpec, _Image]] = (
+        [(spec.verify, "verifier")] if mode is VerificationMode.SEPARATE else []
+    )
     validation = spec.validation
     if (
         task.validations
         and validation is not None
         and validation.environment_mode is VerificationMode.SEPARATE
-        and validation not in separate
+        and (validation != spec.verify or task.validation_image_source_digest is not None)
     ):
-        # A separate verifier of validation/ apart from tests/'s, on the verifier's Provider.
-        separate.append(validation)
-    for placed in separate:
+        # A separate round verifier apart from tests/'s, on the verifier's Provider.
+        separate.append((validation, "validation"))
+    for placed, prepared in separate:
         image = placed.image or spec.image
         assert placed.resources is not None
         yield (
@@ -204,6 +220,7 @@ def _sandboxes(
                 network_mode=placed.network.mode,
                 resources=placed.resources.as_resources(),
             ),
+            prepared,
         )
 
 
@@ -278,12 +295,12 @@ class ProviderRegistry:
         watched: Counter[str] = Counter()
         for task in tasks:
             sandboxes = list(_sandboxes(task, snapshot=snapshots, solver=solvers))
-            groups: list[tuple[list[tuple[SandboxRole, str, SandboxNeeds]], Sequence[str]]]
+            groups: list[tuple[list[_Planned], Sequence[str]]]
             snapshot = task.spec.verify.environment_mode is VerificationMode.SNAPSHOT
             if snapshot and not solvers:
                 # Its solver's snapshot is kept by the Provider that saved it, and only there.
                 assert task.provider is not None, "a reused solver names its Provider"
-                ((role, user, needs),) = sandboxes
+                ((role, user, needs, _),) = sandboxes
                 if why := await self.get(task.provider).unserved(needs, user=user, role=role):
                     raise ProviderCapabilityError(
                         f"{task.spec.name}: its verifier boots from the snapshot "
@@ -295,7 +312,7 @@ class ProviderRegistry:
                 # One choice for both: only the leaf that saved the snapshot boots from it.
                 groups = [(sandboxes, order)]
             else:
-                # Every separate verifier of a Task, of tests/ and of validation/, runs on
+                # Every separate verifier of a Task, of tests/ and of its rounds, runs on
                 # the one Provider its Task names for verifiers.
                 verifiers = [each for each in sandboxes if each[0] is SandboxRole.VERIFIER]
                 groups = [
@@ -305,12 +322,12 @@ class ProviderRegistry:
                 ] + ([(verifiers, order)] if verifiers else [])
             for group, candidates in groups:
                 reasons: list[str] = []
-                label = " and ".join(_ROLE[role] for role, _, _ in group)
+                label = " and ".join(_ROLE[role] for role, *_ in group)
                 for provider_id in candidates:
                     provider = self.get(provider_id)
                     why = await _unserved(provider, group)
                     if not why:
-                        for role, _, needs in group:
+                        for role, _, needs, _ in group:
                             if role is SandboxRole.VERIFIER:
                                 task.verifier_provider = provider_id
                             else:
@@ -354,14 +371,18 @@ class ProviderRegistry:
         wanted: dict[str, list[SandboxNeeds]] = {}
         first: dict[tuple[str, frozenset[ContainerFeature]], SandboxRequest] = {}
         for task in tasks:
-            for role, user, needs in _sandboxes(task, snapshot=False, solver=solvers):
+            for role, user, needs, prepared in _sandboxes(task, snapshot=False, solver=solvers):
                 verifier = role is SandboxRole.VERIFIER
                 provider_id = task.verifier_provider if verifier else task.provider
                 assert provider_id is not None, "select before preflight"
                 if provider_id in SCHEDULERS:
                     continue
                 wanted.setdefault(provider_id, []).append(needs)
-                image = task.prepared_verifier_image if verifier else task.prepared_image
+                image = {
+                    "solver": task.prepared_image,
+                    "verifier": task.prepared_verifier_image,
+                    "validation": task.prepared_validation_image,
+                }[prepared]
                 assert image is not None, "prepare before preflight"
                 first.setdefault(
                     (provider_id, frozenset(needs.resources.container_features)),
@@ -440,25 +461,23 @@ _ROLE = {
 }
 
 
-async def _unserved(
-    provider: Provider, group: Sequence[tuple[SandboxRole, str, SandboxNeeds]]
-) -> list[str]:
+async def _unserved(provider: Provider, group: Sequence[_Planned]) -> list[str]:
     """Why ``provider`` does not serve every Sandbox of ``group``, each reason prefixed with
     its role when there are several; and, when it serves each, why none of its leaves
     serves a solver and its snapshot verifier together."""
     if len(group) == 1:
-        ((role, user, needs),) = group
+        ((role, user, needs, _),) = group
         return list(await provider.unserved(needs, user=user, role=role))
     why = [
         f"{_ROLE[role]}: {reason}"
-        for role, user, needs in group
+        for role, user, needs, _ in group
         for reason in await provider.unserved(
             needs.model_copy(update={"verifier": None}), user=user, role=role
         )
     ]
     if why:
         return why
-    for role, user, needs in group:
+    for role, user, needs, _ in group:
         if needs.verifier is not None and await provider.unserved(needs, user=user, role=role):
             return ["no one of its leaves serves both the solver and its snapshot verifier"]
     return []

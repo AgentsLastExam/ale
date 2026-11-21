@@ -770,7 +770,7 @@ class ScriptedCliHarness(CliHarness):
     scores more each turn and reads which prompt each turn received, and reports its
     session as a CLI's stream would. On Linux it also starts a process meant to outlive the
     turn, after noting in ``survivors`` any an earlier turn left that still runs, and in
-    ``leaks`` what of ``validation/`` and its feedback it can see.
+    ``leaks`` what of ``validation/``, ``tests/`` and their feedback it can see.
     """
 
     name = "scripted-cli"
@@ -805,7 +805,7 @@ for process in /proc/[0-9]*; do
   fi
 done
 (setsid sleep 9999 > /dev/null 2>&1 &)
-for leaked in /opt/ale/validation /logs/verifier/feedback.md; do
+for leaked in /opt/ale/validation /opt/ale/tests /logs/verifier/feedback.md; do
   if [ -e "$leaked" ]; then echo "turn $turn: $leaked" >> {home}/leaks; fi
 done
 """
@@ -970,8 +970,9 @@ class RoundsProvider(MemoryProvider):
 
 class Verifiers:
     """``validation/`` and ``tests/`` both score the lines of work, a third each, and write
-    feedback; ``failing`` validation rounds exit 1 instead, and ``seen`` is called with the
-    Sandbox each run of ``validation/`` scores."""
+    feedback; the ``failing`` runs of ``validation/``, counted from 1, exit 1 instead, and
+    ``seen`` is called with the Sandbox each run of ``validation/`` scores. ``envs`` holds
+    each run's environment, of ``tests/`` too."""
 
     def __init__(self) -> None:
         self.failing: set[int] = set()
@@ -981,12 +982,14 @@ class Verifiers:
             "/opt/ale/tests": "hidden test detail",
         }
         self.runs: list[tuple[str, str]] = []
+        self.envs: list[dict[str, str]] = []
 
     async def __call__(self, sandbox: MemorySandbox, argv: Any, options: dict[str, Any]) -> bool:
         cwd = options.get("cwd")
         if list(argv) != ["bash", "test.sh"] or cwd not in self.feedback:
             return True
         self.runs.append((cwd, sandbox.sandbox_id))
+        self.envs.append(dict(options.get("env") or {}))
         if cwd == "/opt/ale/validation":
             self.seen(sandbox)
             if sum(stage == cwd for stage, _ in self.runs) in self.failing:
@@ -1000,15 +1003,26 @@ class Verifiers:
 
 
 def rounds_task(
-    tmp_path: Path, *, rounds: int = 2, mode: str = "shared", **config: Any
+    tmp_path: Path,
+    *,
+    rounds: int = 2,
+    mode: str = "shared",
+    validation_dir: bool = True,
+    validation: dict[str, Any] | None = None,
+    **config: Any,
 ) -> ManifestTask:
-    """A Task whose agent receives ``rounds`` validation rounds, verified in ``mode``."""
+    """A Task whose agent receives ``rounds`` validation rounds, verified in ``mode`` and
+    validated as ``validation``, its ``[verifier.validation]``, says; without
+    ``validation_dir``, ``tests/`` validates."""
     root = scaffold_task(tmp_path / "task")
-    (root / "validation").mkdir()
-    (root / "validation" / "test.sh").write_text("#!/usr/bin/env bash\n")
+    if validation_dir:
+        (root / "validation").mkdir()
+        (root / "validation" / "test.sh").write_text("#!/usr/bin/env bash\n")
     verifier: dict[str, Any] = {"environment_mode": mode}
     if mode != "shared":
         verifier["environment"] = {"cpus": 4, "memory_mb": 2048}
+    if validation is not None:
+        verifier["validation"] = validation
     edit_task_config(
         root,
         {

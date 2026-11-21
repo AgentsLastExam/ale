@@ -129,8 +129,10 @@ deadline, 60 s later, only bounds a guest that no longer replies. ALE then stops
 and makes a final copy with its own 300 s budget. Session files are appended to, but a
 CLI may rewrite a small index or repair a session in place, so the final copy compares
 each file's guest digest with its Host copy once and copies a rewritten file again.
-Conversion is a pure function of the copied bytes, so it runs once, after the final
-copy. An interrupted run or an incomplete copy produces a trajectory marked incomplete.
+Conversion is a pure function of the copied bytes, so it runs after the final copy, and
+after the copy that ends each turn followed by a [validation round](#validation-rounds),
+which confirms the copy as the final one does, the agent's program having stopped. An
+interrupted run or an incomplete copy produces a trajectory marked incomplete.
 
 With separate verification, or when run policy sets `artifacts.collect = "host"`, every
 Task-declared artifact is captured as an immutable file or directory snapshot, but a volume
@@ -177,7 +179,8 @@ released per its retention, it is destroyed, unless the solver's retention keeps
 Verification runs as framework-controlled Task code with elevated privileges (root on Linux
 and macOS, Administrator on Windows), in every mode, and with the verifier's network
 ([Task authoring](task-authoring.md#resources-and-network)), which ALE applies just before
-`tests/` or `validation/` runs and records in the trace: in a shared solver it replaces the
+`tests/` or `validation/` runs and records in the trace, a validation round's from
+`[verifier.validation]` when that names one: in a shared solver it replaces the
 agent's, which is why a solver that serves a shared verifier is created able to apply both
 ([Security](security.md#1-a-sandbox-has-only-declared-ways-out)). Task code may explicitly
 drop privileges when executing a submitted program. ALE stages `ale_verify`, the
@@ -207,7 +210,8 @@ saves snapshots and serves its verifier too, which selection chooses for both, a
 snapshot it keeps is the one its verifier booted from. It cannot be kept, since saving the
 snapshot stops it, and a kept verifier needs the snapshot kept, since it runs on it; a Run
 asking otherwise is refused before anything is prepared.
-With validation rounds, retention concerns the last solver and the verifier of `tests/`.
+With validation rounds, retention concerns the last solver and the verifier that scores
+the final state.
 No solver of an episode with rounds is kept running: each after the first runs on a
 round's snapshot, which is never kept, and `snapshot` keeps the last one's disk. A setting
 whose effective policy would keep such a solver running, `keep` for the solver, or for the
@@ -225,30 +229,33 @@ cleanup command and any reason.
 ### Validation rounds
 
 A Task's `[agent].validation_rounds`, or the Run's `validation_rounds`, is `N`, how many
-results of [`validation/`](task-authoring.md#validation) the agent receives. With `N = 0`
-the episode is the one above. With `N > 0` the agent works in up to `N + 1` turns, and a
-round follows each turn but the last: its result is the agent's next prompt, and `tests/`
-scores the final state once, as above. Only the evaluated agent receives rounds; the oracle
-never does. A turn ends when the Harness's program finishes normally, exiting zero with no
-limit, timeout or failure, so the agent submits by ending its turn and needs no command in
-the Sandbox to do it, and any Harness that resumes its session can take part. A turn that
-anything else ends, or that leaves none of the agent's time, is the last, and its state is
-verified as any stopped agent's is. Each round, whatever the verification mode:
+results of [`validation/`](task-authoring.md#validation), or of `tests/` for a Task without
+it, the agent receives. With `N = 0` the episode is the one above. With `N > 0` the agent
+works in up to `N + 1` turns, and a round follows each turn but the last: its result is the
+agent's next prompt, and `tests/` scores the final state once, as above. Only the evaluated
+agent receives rounds; the oracle never does. A turn ends when the Harness's program
+finishes normally, exiting zero with no limit, timeout or failure, so the agent submits by
+ending its turn and needs no command in the Sandbox to do it, and any Harness that resumes
+its session can take part. A turn that anything else ends, or that leaves none of the
+agent's time, is the last, and its state is verified as any stopped agent's is. Each round,
+whatever the verification mode:
 
-1. copies the agent's logs, as the periodic copy does, and, under separate verification,
-   captures the declared artifacts;
+1. copies the agent's logs, as the final copy does, converts its trajectory of the turns
+   so far into the round's directory, and, under separate verification, captures the
+   declared artifacts;
 2. sanitizes the solver as for retention, the credential files every Harness declares
    included, and saves it as a snapshot, which stops it and every process in it, under the
    framework bound the save for a snapshot verifier has; once the save succeeds, the
    previous round's snapshot is released, so at most one round's snapshot exists at a time;
-3. runs `validation/` in the round's verifier, a new Sandbox placed as `[validation]`, or
-   else `[verifier]`, says: shared, booted from the snapshot with the solver's resources and
-   no sudo, since the agent goes on from the state the snapshot holds; snapshot, booted from
-   it with the verifier's resources; separate, of the verifier's image with the artifacts
-   restored, which are deleted when the round ends, and views of the snapshot's volumes
-   where the leaf serves it. It has the verifier's network and runs under the verify limit,
-   `[verifier].timeout_sec` or the Run's `timeouts.verify`, which its Judge calls share, and
-   Run retention never keeps it;
+3. runs `validation/`, or else `tests/`, with that trajectory, in the round's verifier, a
+   new Sandbox that the verifier of validation rounds, `[verifier.validation]` over
+   `[verifier]`, places: shared, booted from the snapshot with the solver's resources and no
+   sudo, since the agent goes on from the state the snapshot holds; snapshot, booted from it
+   with that verifier's resources; separate, of that verifier's image with the artifacts
+   restored, which are deleted when the round ends, and views of the snapshot's volumes where
+   the leaf serves it. It has that verifier's network, account and variables, runs under its
+   limit, `timeout_sec` or the Run's `timeouts.verify`, which its Judge calls share, and Run
+   retention never keeps it;
 4. boots the next turn's solver from the snapshot, with the solver's resources and network,
    on the leaf that saved it, without running setup again, so nothing setup started runs
    in it; the Harness finds its CLI in place, is given the episode's Gateway session, the
@@ -263,27 +270,28 @@ of it, so a Task's time limit means the same with and without rounds. Gateway li
 across the turns, which share one session; between turns and after the last the agent's
 session is closed ([Security](security.md#5-answers-are-absent-not-hidden)). The next turn's
 solver is sealed as soon as it boots, and a boot that finds no room, as when another Run
-took its GPUs while `validation/` ran, is tried again every 10 s for up to 30 minutes, a
-framework bound outside the agent's time. A round whose verifier produces no score, by
-failing, timing out or losing its Sandbox, is recorded with its failure and given to the
-agent as unscored, and the episode goes on; a save or boot that fails ends the
+took its GPUs while the round's verifier ran, is tried again every 10 s for up to 30
+minutes, a framework bound outside the agent's time. A round whose verifier produces no
+score, by failing, timing out or losing its Sandbox, is recorded with its failure and given
+to the agent as unscored, and the episode goes on; a save or boot that fails ends the
 episode without a score, as a failed save for a snapshot verifier does.
 
 The prompts are framework-owned and neutral. Below the instruction, which stays verbatim
 above it, a preamble says that ending a turn sends the work to a validation set whose result
 the agent receives before it continues, at most `N` times, that the final state is then
 scored once on a separate hidden test set, that the time limit covers all turns and that no
-process survives a turn's end. Each round's prompt gives the round, its reward, or that it
-has none and why, the verifier's [feedback](verification.md#feedback) verbatim, the rounds
-and minutes left, and whether ending the next turn validates again or scores on the test
-set.
+process survives a turn's end; where `tests/` validates, it names the test set that scores
+the final state in place of the validation set and says the final state is then scored once
+more on it. Each round's prompt gives the round, its reward, or that it has none and why, the
+[feedback](verification.md#feedback) of the stage that validated verbatim, or that it wrote
+none, the rounds and minutes left, and whether ending the next turn validates again or
+scores on the test set.
 
-Rounds need what each step does: a Task with `validation/`, a Harness with native resume,
-since every turn after the first resumes the session, and a leaf that saves as many
-snapshots in a row as the solver plans
-([Provider selection](sandbox-image.md#provider-selection)) and, for a shared or snapshot
-verifier, serves the round's verifier too. A Run giving rounds to a Harness without native
-resume is refused before provisioning, and one that no leaf serves before anything is
+Rounds need what each step does: a Harness with native resume, since every turn after the
+first resumes the session, and a leaf that saves as many snapshots in a row as the solver
+plans ([Provider selection](sandbox-image.md#provider-selection)) and, for a shared or
+snapshot verifier, serves the round's verifier too. A Run giving rounds to a Harness without
+native resume is refused before provisioning, and one that no leaf serves before anything is
 prepared; either can set `validation_rounds = 0`.
 
 ## Reverification
@@ -351,15 +359,16 @@ is still allowed when the retry configuration is nonzero.
 `ale calibrate` runs every [calibration case](task-authoring.md#calibration) of a Task
 through this same protocol as the oracle, each a complete episode in fresh Sandboxes:
 `solution` first, then the other cases in the order `task.toml` lists them. When the Task
-has `validation/`, each case also runs a validation check: `validation/` once on the case's
-final state, before `tests/`, in a verifier placed as a round's is, with no turn after it,
-so it is not a round. The oracle's solver is saved for it, so both verifiers score one
-state, and under shared verification `tests/` then runs in a solver booted from that
-snapshot, where it sees, as `validation/` always does, no process the oracle left running.
+has `validation/`, or `[agent].validation_rounds` above 0 without it, each case also runs a
+validation check: the stage that validates, `validation/` or else `tests/`, once on the
+case's final state, before `tests/` scores it, in a verifier placed as a round's is, with no
+turn after it, so it is not a round. The oracle's solver is saved for it, so both verifiers
+score one state, and under shared verification `tests/` then runs in a solver booted from
+that snapshot, where it sees, as a round always does, no process the oracle left running.
 
 - a case passes when its episode completes and meets its
-  [expectation](task-authoring.md#calibration), and, when the Task has `validation/`, its
-  validation check completes and meets the expectation for `validation/`;
+  [expectation](task-authoring.md#calibration), and its validation check, where it has
+  one, completes and meets the expectation for the stage that validates;
 - setup, image, resource, artifact, verifier, Judge, timeout, and infrastructure failures
   fail the case rather than becoming scores.
 

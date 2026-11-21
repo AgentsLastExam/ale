@@ -111,6 +111,9 @@ class TaskFolder(Protocol):
     @property
     def verifier_dockerfile(self) -> Path | None: ...
 
+    @property
+    def validation_dockerfile(self) -> Path | None: ...
+
     def stage_dir(self, stage: Stage) -> Path | None: ...
 
     def stage_entry(
@@ -130,6 +133,7 @@ class Task(ABC):
         task_digest: str,
         image_source_digest: str | None,
         verifier_image_source_digest: str | None = None,
+        validation_image_source_digest: str | None = None,
         non_verifier_digest: str | None = None,
         harbor: bool = False,
         warnings: tuple[str, ...] = (),
@@ -145,6 +149,9 @@ class Task(ABC):
         self.non_verifier_digest = non_verifier_digest
         self.image_source_digest = image_source_digest
         self.verifier_image_source_digest = verifier_image_source_digest
+        self.validation_image_source_digest = validation_image_source_digest
+        """What the verifier of validation rounds' own image is built from,
+        ``validation/Dockerfile``'s context; None where it builds none."""
         self.provider: str | None = None
         """The provider id the Run selected to start the solver's Sandbox."""
         self.verifier_provider: str | None = None
@@ -152,13 +159,14 @@ class Task(ABC):
         snapshot verifier's, which is its solver's."""
         self.prepared_image: PreparedTaskImage | None = None
         self.prepared_verifier_image: PreparedTaskImage | None = None
+        self.prepared_validation_image: PreparedTaskImage | None = None
         self.asset_observation: TaskAssetObservation | None = None
         self.variables: ResolvedVariables | None = None
         self.validations: int = 0
-        """How many times the Run's episodes of it run ``validation/`` before ``tests/``: once
-        for each validation round its agent receives, or once for calibration's validation
-        check of each case's final state. Each saves the solver as a snapshot, so selection
-        gives it a Provider that saves that many in a row."""
+        """How many times the Run's episodes of it validate before ``tests/`` scores the final
+        state: once for each validation round its agent receives, or once for calibration's
+        validation check of each case's final state. Each saves the solver as a snapshot, so
+        selection gives it a Provider that saves that many in a row."""
 
     @property
     def id(self) -> str:
@@ -166,8 +174,16 @@ class Task(ABC):
 
     @property
     def validates(self) -> bool:
-        """Whether the Run's episodes of it run ``validation/``."""
+        """Whether the Run's episodes of it validate."""
         return self.validations > 0
+
+    @property
+    def validation_stage(self) -> Stage:
+        """The stage that validates: ``validation/``, or ``tests/`` for a Task without one."""
+        folder = self.folder
+        if folder is not None and folder.stage_dir(Stage.VALIDATION) is not None:
+            return Stage.VALIDATION
+        return Stage.TESTS
 
     async def setup(self, ctx: EpisodeContext) -> None:
         return None

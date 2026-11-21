@@ -17,7 +17,7 @@ from ale.core.config import RunConfig
 from ale.core.episode import Phase
 from ale.core.errors import ConfigError, TaskDefinitionError
 from ale.core.sandbox import ExecResult
-from ale.core.task import ResolvedVariables
+from ale.core.task import ResolvedVariables, Stage
 from ale.core.taskspec import OperatingSystem, TaskVariables, VerificationMode, VerifySpec
 from ale.core.trace import read_jsonl
 from ale.run.cli.main import app
@@ -371,8 +371,8 @@ async def test_each_stage_receives_its_tables_beneath_the_framework_variables(
     ctx = _context(tmp_path, variables)
     sandbox = _Sandbox()
     protocol = EpisodeProtocol(NopHarness())
-    for phase in (Phase.SETUP, Phase.VERIFY):
-        await protocol._run_stage(ctx, sandbox, PurePosixPath("/opt/ale/stage"), phase)  # type: ignore[arg-type]
+    for phase, stage in ((Phase.SETUP, Stage.SETUP), (Phase.VERIFY, Stage.TESTS)):
+        await protocol._run_stage(ctx, sandbox, PurePosixPath("/opt/ale/stage"), phase, stage=stage)  # type: ignore[arg-type]
     setup, verify = sandbox.envs
     assert setup is not None and verify is not None
     assert {key: setup[key] for key in ("SHARED", "ONLY")} == variables.environment
@@ -403,6 +403,7 @@ async def test_stage_output_never_records_a_secret(tmp_path: Path) -> None:
         sandbox,
         PurePosixPath("/opt/ale/setup"),
         Phase.SETUP,  # type: ignore[arg-type]
+        stage=Stage.SETUP,
     )
     trace = (tmp_path / "trace.execution.jsonl").read_text()
     assert "tok-service" not in trace

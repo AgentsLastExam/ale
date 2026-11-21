@@ -39,6 +39,7 @@ from ale.core.harness import (
 )
 from ale.core.result import ResultRecord
 from ale.core.sandbox import ExecResult, PreparedTaskImage, SandboxRequest, SandboxRole
+from ale.core.task import Stage
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskConfig
 from ale.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
 from ale.core.verdict import Status
@@ -497,10 +498,119 @@ async def test_retention_concerns_only_the_final_solver_and_verifier(
     assert len(provider.snapshots) == 1
 
 
+# --- without validation/, tests/ validates ---
+
+
+@pytest.mark.asyncio
+async def test_without_validation_tests_validates_each_round_as_a_copy_of_it_would(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    harness = TurnsHarness()
+    task = _task(tmp_path, rounds=2, validation_dir=False)
+    result = await _run(tmp_path, RoundsProvider(), task, harness)
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+
+    # tests/ scored the state after turns 1 and 2 in the rounds' verifiers, and the final
+    # state once, which alone is the Episode's reward.
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/tests"] * 3
+    rounds = result.record.validation_rounds
+    assert [(item.index, item.status, item.reward) for item in rounds] == [
+        (1, Status.COMPLETED, 0.33),
+        (2, Status.COMPLETED, 0.67),
+    ]
+    assert result.verdict.rewards == {"reward": 1.0}
+    # Each round's run of tests/ has the trajectory so far, as the final one has all of it.
+    assert ["ALE_TRAJECTORY_PATH" in env for env in verifiers.envs] == [True, True, True]
+    # Each round's feedback reaches the agent and is recorded; the final run's reaches no one.
+    assert [item.feedback and item.feedback.path for item in rounds] == [
+        "validation/1/feedback.md",
+        "validation/2/feedback.md",
+    ]
+    assert not (result.run_dir / "feedback.md").exists()
+
+    first, second, third = harness.prompts
+    preamble = first.removeprefix(task.spec.instruction)
+    for said in (
+        "on the test set that scores your final state and you receive the result",
+        "at most 2 times",
+        "scored once more, on the same test set",
+    ):
+        assert said in preamble
+    # Nothing the framework says names a validation set the Task does not have.
+    assert not any("validat" in text.lower() for text in (preamble, second, third))
+    lines = second.splitlines()
+    assert lines[:5] == [
+        "Round 1 of 2: reward 0.33.",
+        "",
+        "Feedback from the test set:",
+        "<feedback>",
+        "hidden test detail",
+    ]
+    assert lines[-1].startswith("Rounds left: 1.")
+    assert lines[-1].endswith("your work is scored again.")
+    assert third.splitlines()[0] == "Round 2 of 2: reward 0.67."
+    assert third.endswith("your final state is scored once more, on the same test set.")
+
+    # The RunLock says the agent's rounds were the test set's.
+    assert result.lock is not None
+    assert (result.lock.validation_rounds, result.lock.validation_stage) == (2, "tests")
+    assert json.loads((result.run_dir / "lock.json").read_text())["validation_stage"] == "tests"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("rounds", "validation"), [(1, True), (0, True), (0, False)])
+async def test_a_lock_records_no_stage_unless_tests_validated_rounds(
+    tmp_path: Path, verifiers: Verifiers, rounds: int, validation: bool
+) -> None:
+    task = _task(tmp_path, rounds=rounds, validation_dir=validation)
+    result = await _run(tmp_path, RoundsProvider(), task, TurnsHarness())
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert result.lock is not None and result.lock.validation_stage == "validation"
+    assert "validation_stage" not in json.loads((result.run_dir / "lock.json").read_text())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["shared", "separate", "snapshot"])
+async def test_tests_is_in_no_solver_while_the_agent_works_when_it_validates(
+    tmp_path: Path, verifiers: Verifiers, mode: str
+) -> None:
+    """Each round's verifier holds tests/; no turn's solver holds it, or what it wrote."""
+    seen: list[set[str]] = []
+
+    class Watching(TurnsHarness):
+        async def _turn(self, prompt: str, sandbox: Any, *args: Any) -> AgentRun:
+            staged = {target for target in sandbox.uploads if target.startswith("/opt/ale/")}
+            seen.append(staged | ({"/logs/verifier/feedback.md"} & set(sandbox.files)))
+            return await super()._turn(prompt, sandbox, *args)
+
+    provider = RoundsProvider()
+    task = _task(tmp_path, rounds=2, mode=mode, validation_dir=False)
+    result = await _run(tmp_path, provider, task, Watching())
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert len(seen) == 3
+    assert not any(
+        {"/opt/ale/tests", "/opt/ale/validation", "/logs/verifier/feedback.md"} & staged
+        for staged in seen
+    )
+    # Nor did any solver hold it before its save: only the last shared one, after the last
+    # turn, for the final verification.
+    last = provider.sandboxes[-1] if mode == "shared" else None
+    for sandbox in provider.sandboxes:
+        if sandbox.request.role is not SandboxRole.VERIFIER and sandbox is not last:
+            assert "/opt/ale/tests" not in sandbox.uploads
+    validators = [
+        sandbox
+        for sandbox in provider.sandboxes
+        if sandbox.request.role is SandboxRole.VERIFIER and "/opt/ale/tests" in sandbox.uploads
+    ]
+    assert len(validators) == (2 if mode == "shared" else 3)
+    assert not any("/opt/ale/validation" in sandbox.uploads for sandbox in provider.sandboxes)
+
+
 # --- what is refused before anything starts ---
 
 
-def test_rounds_need_validation_and_a_harness_that_resumes(tmp_path: Path) -> None:
+def test_rounds_need_a_harness_that_resumes(tmp_path: Path) -> None:
     task = _task(tmp_path, rounds=2)
     assert validation_rounds(task, TurnsHarness(), None) == 2
     # The Run's override replaces the Task's count.
@@ -515,10 +625,10 @@ def test_rounds_need_validation_and_a_harness_that_resumes(tmp_path: Path) -> No
     assert ClaudeCodeHarness().resume_support is ResumeSupport.NATIVE
     validation_rounds(task, ClaudeCodeHarness(), None)
 
+    # A Task without validation/ loops on tests/.
     plain = load_tasks(scaffold_task(tmp_path / "plain"))[0]
     assert validation_rounds(plain, TurnsHarness(), None) == 0
-    with pytest.raises(ConfigError, match="has no validation/"):
-        validation_rounds(plain, TurnsHarness(), 1)
+    assert validation_rounds(plain, TurnsHarness(), 1) == 1
 
 
 class _NoResume(TurnsHarness):
@@ -531,12 +641,6 @@ async def test_the_protocol_refuses_rounds_it_cannot_run_before_provisioning(
     tmp_path: Path,
 ) -> None:
     provider = RoundsProvider()
-    plain = load_tasks(scaffold_task(tmp_path / "plain"))[0]
-    plain.prepared_image = IMAGE
-    result = await _run(tmp_path, provider, plain, TurnsHarness(), rounds=1)
-    assert result.verdict.failure is not None
-    assert result.verdict.failure.error_class == "ConfigError"
-    assert provider.requests == []
     task = _task(tmp_path, rounds=1)
     result = await _run(tmp_path, provider, task, _NoResume())
     assert result.verdict.failure is not None
@@ -548,14 +652,15 @@ async def test_the_protocol_refuses_rounds_it_cannot_run_before_provisioning(
 def test_the_task_format_holds_validation_rounds(tmp_path: Path) -> None:
     root = scaffold_task(tmp_path / "task")
     edit_task_config(root, {"agent": {"validation_rounds": 2}})
-    with pytest.raises(TaskDefinitionError, match="validation_rounds needs validation/"):
-        load_tasks(root)
+    # Without validation/, tests/ validates.
+    assert load_tasks(root)[0].validation_stage is Stage.TESTS
     (root / "validation").mkdir()
     with pytest.raises(TaskDefinitionError, match=r"validation/test\.sh"):
         load_tasks(root)
     (root / "validation/test.sh").write_text("#!/usr/bin/env bash\n")
     task = load_tasks(root)[0]
     assert task.spec.validation_rounds == 2
+    assert task.validation_stage is Stage.VALIDATION
     # A stage of the Task's own, which lint accepts as it accepts tests/.
     assert not [item for item in lint_repository(root) if "validation" in str(item.path)]
     # The count is the Task's: it moves its identity, unlike the Run's override.
@@ -792,6 +897,107 @@ async def test_calibration_runs_validation_once_on_a_snapshot_of_the_final_state
     assert verifiers.runs[1][1] == provider.sandboxes[-1].sandbox_id
     assert provider.snapshots == {}
     assert result.lock is not None and result.lock.validation_rounds == 0
+
+
+@pytest.mark.asyncio
+async def test_calibration_checks_tests_where_it_validates_the_agents_rounds(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    provider = RoundsProvider()
+    task = _task(tmp_path, rounds=2, validation_dir=False)
+    lock = make_lock()
+    result = await run_episode(
+        task,
+        EpisodeProtocol(OracleHarness(), check_validation=True),
+        provider_registry(provider),
+        run_dir=tmp_path / "runs",
+        provenance=ProvenanceInputs(
+            source=lock.task.source,
+            agent=lock.agent,
+            gateway=lock.gateway,
+            config_hash=lock.config_hash,
+            framework=lock.framework,
+        ),
+    )
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    # tests/ scored the oracle's state from a snapshot, as a round does, then the same state
+    # in a solver booted from it.
+    (round_,) = result.record.validation_rounds
+    assert round_.status is Status.COMPLETED
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/tests", "/opt/ale/tests"]
+    (validator,) = provider.booted(SandboxRole.VERIFIER)
+    assert validator.snapshot is not None
+    # The oracle receives no rounds, and its RunLock still says tests/ validated.
+    assert result.lock is not None
+    assert (result.lock.validation_rounds, result.lock.validation_stage) == (0, "tests")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rounds", "validation", "stage"),
+    [(0, True, "validation"), (2, False, "tests"), (0, False, None)],
+)
+async def test_calibrate_checks_the_stage_that_validates_where_there_is_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    rounds: int,
+    validation: bool,
+    stage: str | None,
+) -> None:
+    """validation/ always, and else tests/ only for a Task whose agent receives rounds."""
+    from datetime import UTC, datetime
+    from importlib import import_module
+    from unittest.mock import AsyncMock
+
+    from ale.core.result import ValidationRound
+    from ale.core.verdict import Verdict
+    from ale.run.episode import EpisodeResult
+    from ale.run.providers import ProviderRegistry
+    from ale.run.recording import atomic_write_json
+
+    task_cli = import_module("ale.run.cli.tasks")
+    root = _task(tmp_path, rounds=rounds, validation_dir=validation).folder.root
+    lock = make_lock()
+    checked: list[int] = []
+
+    async def prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
+        for item in tasks:
+            item.prepared_image = IMAGE
+        return ()
+
+    async def execute(task, protocol, _providers, **kwargs):  # type: ignore[no-untyped-def]
+        checked.append(task.validations)
+        directory = kwargs["run_dir"] / kwargs["episode_id"]
+        now = datetime.now(UTC)
+        scored = ValidationRound(
+            index=1, status=Status.COMPLETED, reward=0.5, started_at=now, finished_at=now
+        )
+        record = ResultRecord(
+            episode_id=kwargs["episode_id"],
+            status=Status.COMPLETED,
+            rewards={"reward": 1.0},
+            started_at=now,
+            finished_at=now,
+            validation_rounds=(scored,) if protocol.check_validation else (),
+        )
+        atomic_write_json(directory / "result.json", record)
+        atomic_write_json(directory / "lock.json", lock)
+        verdict = Verdict.completed({"reward": 1.0})
+        return EpisodeResult(kwargs["episode_id"], verdict, directory, 0, record, lock)
+
+    monkeypatch.setattr(ProviderRegistry, "preflight", AsyncMock())
+    monkeypatch.setattr(task_cli, "_prepare_images", prepare)
+    monkeypatch.setattr(task_cli, "run_episode", execute)
+    code = await task_cli._calibrate(str(root), RunConfig(), tmp_path / "runs")
+    assert checked == [int(stage is not None)]
+    output = capsys.readouterr().out
+    if stage is None:
+        assert code == 0 and "/:" not in output
+    else:
+        # The case expects reward 1 of the stage that validates too, which gave 0.5.
+        assert code == 2
+        assert f"solution: reward=1.0; {stage}/: reward is 0.5, expected 1" in output
 
 
 @pytest.mark.asyncio
@@ -1238,34 +1444,113 @@ def test_a_rounds_prompt_the_session_lacks_is_a_parse_issue() -> None:
 
 
 @pytest.mark.asyncio
-async def test_validation_gets_no_trajectory_and_its_judges_are_recorded_as_validate(
-    tmp_path: Path, verifiers: Verifiers
+@pytest.mark.parametrize("stage", ["validation", "tests"])
+async def test_each_round_gets_the_trajectory_of_the_turns_so_far_and_records_its_judges(
+    tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
-    """A trajectory in the episode's directory is never staged for validation/, and a Judge
-    validation/ called is in the RunLock with its placement."""
+    """Each round of validation/ or tests/ receives the agent's trajectory up to the turn
+    that ended, which its directory keeps, as the final run of tests/ receives all of it,
+    and a Judge a round called is in the RunLock with its placement."""
     import dataclasses
 
     from tests.unit.test_verification_recording import invocation
 
-    staged: list[bool] = []
+    staged: list[tuple[bool, list[str], str | None]] = []
     judged = json.dumps({"invocation": dataclasses.asdict(invocation())}) + "\n"
+    exec_ = MemorySandbox.exec
 
-    def validating(sandbox: MemorySandbox) -> None:
-        staged.append("/opt/ale/validation/trajectory.json" in sandbox.files)
-        sandbox.files["/opt/ale/validation/llm-judge.jsonl"] = judged.encode()
+    async def exec(self: MemorySandbox, argv: Any, **options: Any) -> ExecResult:
+        if list(argv) == ["bash", "test.sh"] and options.get("cwd") == f"/opt/ale/{stage}":
+            round_ = self.request.role is SandboxRole.VERIFIER
+            data = json.loads(self.files[f"/opt/ale/{stage}/trajectory.json"])
+            said = [step["message"] for step in data["steps"] if step["source"] == "agent"]
+            staged.append((round_, said, (options.get("env") or {}).get("ALE_TRAJECTORY_PATH")))
+            if round_:
+                self.files[f"/opt/ale/{stage}/llm-judge.jsonl"] = judged.encode()
+        return await exec_(self, argv, **options)
 
-    class Converted(TurnsHarness):
-        async def _turn(self, prompt: str, sandbox: Any, session: Any, timeout: float) -> Any:
-            # As if a trajectory were converted already.
-            (tmp_path / "runs" / session.episode_id / "trajectory.json").write_text("{}")
-            return await super()._turn(prompt, sandbox, session, timeout)
-
-    verifiers.seen = validating
-    result = await _run(tmp_path, RoundsProvider(), _task(tmp_path, rounds=1), Converted())
+    monkeypatch.setattr(MemorySandbox, "exec", exec)
+    harness = TurnsHarness()
+    task = _task(tmp_path, rounds=2, validation_dir=stage == "validation")
+    result = await _run(tmp_path, RoundsProvider(), task, harness)
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert staged == [False]
+    path = f"/opt/ale/{stage}/trajectory.json"
+    rounds = [(True, ["turn 1"], path), (True, ["turn 1", "turn 2"], path)]
+    final = [(False, ["turn 1", "turn 2", "turn 3"], "/opt/ale/tests/trajectory.json")]
+    assert staged == (rounds if stage == "validation" else rounds + final)
+    # The round's own copy, complete, its earlier round's prompt marked as the final one is.
+    kept = AtifTrajectory.model_validate_json(
+        (result.run_dir / "validation" / "2" / "trajectory.json").read_text()
+    )
+    users = [step for step in kept.steps if step.source == "user"]
+    assert [step.message for step in users] == harness.prompts[:2]
+    assert (users[1].extra or {})["ale"]["validation_round"] == 1
+    assert not (kept.extra or {}).get("ale", {}).get("incomplete")
     assert result.lock is not None
-    assert [judge.placement for judge in result.lock.judges] == ["validate"]
+    assert [judge.placement for judge in result.lock.judges] == ["validate", "validate"]
+
+
+@pytest.mark.asyncio
+async def test_a_round_whose_logs_were_not_all_copied_gets_a_trajectory_marked_incomplete(
+    tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ale.run.protocol.log_mirror import LogMirror
+
+    sync = LogMirror.sync
+    calls = [0]
+
+    async def failing(self: LogMirror, *, final: bool = False) -> None:
+        await sync(self, final=final)
+        # The copy that ends the first turn, before the final one, loses its confirmation.
+        calls[0] += final
+        if calls[0] == 1 and final:
+            raise OSError("the guest went away")
+
+    monkeypatch.setattr(LogMirror, "sync", failing)
+    task = _task(tmp_path, rounds=1)
+    result = await _run(tmp_path, RoundsProvider(), task, TurnsHarness())
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    kept = json.loads((result.run_dir / "validation" / "1" / "trajectory.json").read_text())
+    assert kept["extra"]["ale"]["incomplete_reason"] == "collection_failed"
+    # The final copy retried, so the episode's own trajectory is complete.
+    final = json.loads((result.run_dir / "trajectory.json").read_text())
+    assert not (final.get("extra") or {}).get("ale", {}).get("incomplete")
+
+
+@pytest.mark.asyncio
+async def test_validation_places_the_rounds_of_tests_where_there_is_no_validation_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without validation/, [verifier.validation] places the verifier of each round of tests/:
+    here a separate one in its own working directory, while tests/ scores the final state
+    shared."""
+    runs: list[tuple[SandboxRole, str | None, list[str]]] = []
+    exec_ = MemorySandbox.exec
+
+    async def exec(self: MemorySandbox, argv: Any, **options: Any) -> ExecResult:
+        if list(argv[:1]) == ["bash"] and str(argv[-1]).endswith("test.sh"):
+            runs.append((self.request.role, options.get("cwd"), list(argv)))
+            self.files["/logs/verifier/reward.json"] = b'{"reward": 0.5}'
+            return ExecResult(exit_code=0)
+        return await exec_(self, argv, **options)
+
+    monkeypatch.setattr(MemorySandbox, "exec", exec)
+    provider = RoundsProvider()
+    task = _task(
+        tmp_path,
+        rounds=1,
+        validation_dir=False,
+        validation={"environment_mode": "separate", "environment": {"cpus": 3, "workdir": "grade"}},
+    )
+    result = await _run(tmp_path, provider, task, TurnsHarness())
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert [(item.index, item.reward) for item in result.record.validation_rounds] == [(1, 0.5)]
+    (validator,) = provider.booted(SandboxRole.VERIFIER)
+    assert (validator.snapshot, validator.resources.cpus) == (None, 3)
+    assert runs == [
+        (SandboxRole.VERIFIER, "/home/user/grade", ["bash", "/opt/ale/tests/test.sh"]),
+        (SandboxRole.SHARED, "/opt/ale/tests", ["bash", "test.sh"]),
+    ]
 
 
 @pytest.mark.asyncio

@@ -225,6 +225,8 @@ def _resolve(
         environment=tables["environment"],
         verifier=tables["verifier"],
         verifier_environment=tables.get("verifier.environment"),
+        validation=tables.get("verifier.validation"),
+        validation_environment=tables.get("verifier.validation.environment"),
         solution=tables.get("solution", {}),
         mcp_headers=mcp_headers,
     )

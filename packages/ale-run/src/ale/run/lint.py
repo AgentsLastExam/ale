@@ -219,9 +219,17 @@ def _check_variables(path: Path, config: dict[str, object]) -> list[Finding]:
         body = config.get(table)
         if isinstance(body, dict):
             tables.append((table, body.get("env")))
-            nested = body.get("environment") if table == "verifier" else None
-            if isinstance(nested, dict):
-                tables.append(("verifier.environment", nested.get("env")))
+            if table != "verifier":
+                continue
+            validation = body.get("validation")
+            for name, owner in (("verifier", body), ("verifier.validation", validation)):
+                if not isinstance(owner, dict):
+                    continue
+                if owner is validation:
+                    tables.append((name, owner.get("env")))
+                nested = owner.get("environment")
+                if isinstance(nested, dict):
+                    tables.append((f"{name}.environment", nested.get("env")))
     findings: list[Finding] = []
     for table, env in tables:
         for key, value in env.items() if isinstance(env, dict) else ():

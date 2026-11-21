@@ -94,7 +94,13 @@ class TaskVariableProvenance(BaseModel):
     model_config = _FROZEN
 
     table: Literal[
-        "environment", "verifier", "verifier.environment", "solution", "environment.mcp_servers"
+        "environment",
+        "verifier",
+        "verifier.environment",
+        "verifier.validation",
+        "verifier.validation.environment",
+        "solution",
+        "environment.mcp_servers",
     ]
     name: str = Field(min_length=1)
     """The variable's name; ``server.header`` for an MCP header."""
@@ -239,7 +245,7 @@ class JudgeProvenance(BaseModel):
     adapter: Literal["codex-cli", "claude-code"] | None = None
     adapter_version: str | None = None
     placement: Literal["verify", "validate"] = "verify"
-    """Whether it ran in ``tests/``, or in a validation round's ``validation/``."""
+    """Whether it ran in ``tests/`` scoring the final state, or in a validation round."""
     attempts: int = Field(default=0, ge=0)
 
 
@@ -259,7 +265,7 @@ class VerificationProvenance(BaseModel):
     image: ImageProvenance | None = None
     resources: ResourceProvenance | None = None
     network: NetworkPolicy = NetworkPolicy(mode=NetworkMode.OPEN)
-    """The network ``tests/`` and ``validation/`` ran with."""
+    """The network the verifier ran with."""
 
 
 class AleVerifyProvenance(BaseModel):
@@ -334,10 +340,23 @@ class RunLock(BaseModel):
     judges: tuple[JudgeProvenance, ...] = ()
     asset: AssetProvenance | None = None
     verification: VerificationProvenance = VerificationProvenance()
+    """The verifier of ``tests/``, and of validation rounds unless they had their own."""
+    validation: VerificationProvenance | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """The verifier of validation rounds, where ``[verifier.validation]`` or a
+    ``validation/Dockerfile`` gave them their own and the episode validated: its placement,
+    network, and the image and resources of its first round's Sandbox of its own."""
     timeouts: RunTimeouts = RunTimeouts()
     validation_rounds: int = Field(default=0, ge=0)
     """How many validation rounds the agent was to receive: the Task's, or the Run's override;
     0 for the oracle, which never receives one."""
+    validation_stage: Literal["validation", "tests"] = Field(
+        default="validation", exclude_if=lambda value: value == "validation"
+    )
+    """The stage that validated, in the agent's rounds or calibration's validation check:
+    ``tests/`` for a Task without ``validation/``, whose agent then received the results of
+    the set that scores it; left out where ``validation/`` validated or nothing did."""
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     termination: LimitTermination | None = None
     resumed_from: ResumedFrom | None = None

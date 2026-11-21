@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 import typer
 
@@ -95,9 +96,12 @@ from ale.run.subscription import SubscriptionCredential, resolve_authentication
 from ale.run.task_images import (
     ImagePreparationResult,
     ImagePreparationStep,
+    ImageRole,
     prepare_task_image_result,
     prepare_verifier_image_result,
     resolve_image_kinds,
+    shares_verifier_image,
+    validates_separately,
 )
 from ale.run.tasksets.manifest import ManifestTask, load_tasks
 from ale.run.verification import preflight_judges
@@ -604,6 +608,19 @@ async def _reverify(
                 )
                 failures += 1
                 continue
+            if (
+                source_lock.validation_rounds
+                and source_lock.validation_stage == "tests"
+                and task.task_digest != source_lock.task.content_digest
+            ):
+                # Its agent received tests/'s results, so tests/ is part of what it did.
+                typer.echo(
+                    f"{task.spec.name}: tests/ validated the source agent's rounds and the Task "
+                    "changed since; run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
             if task.spec.image != source_lock.image.declaration:
                 typer.echo(
                     f"{task.spec.name}: its image differs from the source run's; "
@@ -1060,8 +1077,11 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
         resolved = resolve(reference)
         tasks = _load(resolved.task_dir)
         for task in tasks:
-            # Every case checks validation/ too, on a snapshot of the same final state.
-            task.validations = int(task.folder.stage_dir(Stage.VALIDATION) is not None)
+            # Every case checks validation/ too, or tests/ where it validates the agent's
+            # rounds, on a snapshot of the same final state.
+            task.validations = int(
+                task.validation_stage is Stage.VALIDATION or task.spec.validation_rounds > 0
+            )
         _resolve_variables(tasks, settings, oracle=True)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
@@ -1162,7 +1182,9 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                         case, result.verdict, result.run_dir
                     )
                     validation = (
-                        _validation_check(case, result.record, result.run_dir)
+                        _validation_check(
+                            case, result.record, result.run_dir, task.validation_stage
+                        )
                         if task.validates
                         else None
                     )
@@ -1177,7 +1199,7 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
                             passed=not case_failures and (validation is None or validation.passed),
                         )
                     )
-                    typer.echo(_case_line(str(spec.name), cases[-1]))
+                    typer.echo(_case_line(str(spec.name), cases[-1], task.validation_stage))
 
                 passed = all(case.passed for case in cases)
                 observations.append(
@@ -1224,6 +1246,9 @@ async def _prepare_only(reference: str, settings: RunConfig) -> int:
                 raise TaskDefinitionError(
                     "lint: " + "; ".join(str(item) for item in problems)[:2000]
                 )
+        for task in tasks:
+            # The images its own rounds need too, the validation verifier's among them.
+            task.validations = task.spec.validation_rounds
         results = await _prepare_images(tasks, ProviderRegistry(settings))
     except AleError as error:
         typer.echo(str(error), err=True)
@@ -1266,8 +1291,8 @@ async def _judge_gateway(settings: RunConfig) -> Gateway | None:
 async def _egress_proxy(
     tasks: list[ManifestTask], gateway: Gateway | None
 ) -> tuple[EgressProxy | None, SessionRegistry | None]:
-    """The egress proxy when a Task's agent or verifier has a proxied policy, an allowlist or
-    a blocklist, and the sessions only it serves.
+    """The egress proxy when a Task's agent or a verifier, of ``tests/`` or of its rounds, has
+    a proxied policy, an allowlist or a blocklist, and the sessions only it serves.
 
     The oracle meets the agent's network, a proxied one included, and a verifier its own, so
     the proxy starts whether or not anything calls a model. With a Gateway it shares the
@@ -1275,7 +1300,13 @@ async def _egress_proxy(
     episodes open theirs in a registry of the proxy's own.
     """
     if not any(
-        policy.proxied for task in tasks for policy in (task.spec.network, task.spec.verify.network)
+        policy.proxied
+        for task in tasks
+        for policy in (
+            task.spec.network,
+            task.spec.verify.network,
+            task.spec.validation_spec.network,
+        )
     ):
         return None, None
     registry = gateway.sessions if gateway is not None else SessionRegistry()
@@ -1296,11 +1327,13 @@ def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
-    """The verifier stages the Run runs: ``tests/``, and ``validation/`` where it runs."""
+    """The verifier stages the Run runs: ``tests/``, and ``validation/`` where it validates."""
     return [
         task.folder.root / stage
         for task in tasks
-        for stage in ((Stage.TESTS, Stage.VALIDATION) if task.validates else (Stage.TESTS,))
+        for stage in dict.fromkeys(
+            (Stage.TESTS, task.validation_stage) if task.validates else (Stage.TESTS,)
+        )
     ]
 
 
@@ -1344,9 +1377,14 @@ async def _prepare_images(
     by_source: dict[str, PreparedTaskImage] = {}
     by_identity: dict[tuple[str, ImageKind, str], PreparedTaskImage] = {}
 
-    async def prepared(task: ManifestTask, role: str, provider: str) -> ImagePreparationResult:
-        own = role == "verifier"
-        spec = task.spec.verify.image if own else task.spec.image
+    async def prepared(
+        task: ManifestTask, role: ImageRole, provider: str
+    ) -> ImagePreparationResult:
+        spec = {
+            "solver": task.spec.image,
+            "verifier": task.spec.verify.image,
+            "validation": task.spec.validation_spec.image,
+        }[role]
         assert spec is not None
         key = content_hash(
             {
@@ -1354,7 +1392,11 @@ async def _prepare_images(
                 "provider": provider,
                 "os": task.spec.os,
                 "kind": spec.kind,
-                "local": task.verifier_image_source_digest if own else task.image_source_digest,
+                "local": {
+                    "solver": task.image_source_digest,
+                    "verifier": task.verifier_image_source_digest,
+                    "validation": task.validation_image_source_digest,
+                }[role],
                 "ref": spec.ref,
                 "base_ref": spec.base_ref,
                 "user": spec.user,
@@ -1364,9 +1406,9 @@ async def _prepare_images(
         if image is not None:
             return _reused_result(task, role, image)
         result = await (
-            prepare_verifier_image_result(task, providers.get(provider))
-            if role == "verifier"
-            else prepare_task_image_result(task, providers.get(provider))
+            prepare_task_image_result(task, providers.get(provider))
+            if role == "solver"
+            else prepare_verifier_image_result(task, providers.get(provider), role=role)
         )
         assert result is not None
         image = by_identity.setdefault(
@@ -1375,6 +1417,25 @@ async def _prepare_images(
         by_source[key] = image
         return result if image is result.image else _reused_result(task, role, image)
 
+    async def verifier(
+        task: ManifestTask, role: Literal["verifier", "validation"]
+    ) -> PreparedTaskImage | None:
+        """The image of a verifier of its own: its own, or the very one its solver runs."""
+        placed = task.spec.validation_spec if role == "validation" else task.spec.verify
+        if placed.environment_mode is VerificationMode.SHARED:
+            return None
+        assert task.verifier_provider is not None
+        result = (
+            await prepare_verifier_image_result(
+                task, providers.get(task.verifier_provider), role=role
+            )
+            if placed.image is None
+            else await prepared(task, role, task.verifier_provider)
+        )
+        assert result is not None
+        results.append(result)
+        return result.image
+
     results: list[ImagePreparationResult] = []
     for task in tasks:
         assert task.provider is not None
@@ -1382,23 +1443,14 @@ async def _prepare_images(
         solver = await prepared(task, "solver", task.provider)
         results.append(solver)
         task.prepared_image = solver.image
-        verify = task.spec.verify
-        if verify.environment_mode is VerificationMode.SHARED:
-            task.prepared_verifier_image = None
-            continue
-        assert task.verifier_provider is not None
-        if verify.image is None:
-            # A verifier without an image of its own runs the very one its solver runs.
-            reused = await prepare_verifier_image_result(
-                task, providers.get(task.verifier_provider)
-            )
-            assert reused is not None
-            results.append(reused)
-            task.prepared_verifier_image = reused.image
-            continue
-        verifier = await prepared(task, "verifier", task.verifier_provider)
-        results.append(verifier)
-        task.prepared_verifier_image = verifier.image
+        task.prepared_verifier_image = await verifier(task, "verifier")
+        task.prepared_validation_image = (
+            None
+            if not validates_separately(task)
+            else task.prepared_verifier_image
+            if shares_verifier_image(task)
+            else await verifier(task, "validation")
+        )
     return tuple(results)
 
 
@@ -1440,22 +1492,23 @@ def _calibration_check(
 
 
 def _validation_check(
-    case: CalibrationCase, record: ResultRecord, episode_dir: Path
+    case: CalibrationCase, record: ResultRecord, episode_dir: Path, stage: Stage
 ) -> CalibrationCheck:
-    """What ``validation/`` gave a case's final state, which its episode ran once before
-    ``tests/``, against ``expect_validation``, or ``expect`` without one."""
+    """What ``stage``, the one that validates, gave a case's final state, which its episode
+    ran once before ``tests/`` scored it, against ``expect_validation``, or ``expect``
+    without one."""
     expect = case.validation_expect
     scored = next(iter(record.validation_rounds), None)
     observed: dict[str, float | None] = {}
     if scored is None:
-        message = f"the episode ended with {record.status.value} before validation/ ran"
+        message = f"the episode ended with {record.status.value} before {stage}/ validated"
         failures: tuple[CalibrationNotice, ...] = (
             CalibrationNotice(code="not_completed", message=message),
         )
     elif scored.status is not Status.COMPLETED:
         failure = scored.failure
         detail = f" ({failure.error_type}: {failure.message})" if failure is not None else ""
-        message = f"validation/ ended with {scored.status.value}{detail}"
+        message = f"{stage}/ ended with {scored.status.value}{detail}"
         failures = (CalibrationNotice(code="not_completed", message=message),)
     else:
         path = episode_dir / "validation" / str(scored.index) / "verification.json"
@@ -1515,8 +1568,9 @@ def _calibration_attempt(result: EpisodeResult, run_dir: Path) -> CalibrationAtt
     )
 
 
-def _case_line(task: str, case: CaseCalibrationObservation) -> str:
-    """One case: the values it observed when it passed, or each way it failed."""
+def _case_line(task: str, case: CaseCalibrationObservation, stage: Stage) -> str:
+    """One case: the values it observed when it passed, or each way it failed, and those of
+    its validation check by ``stage``."""
 
     def outcome(observed: dict[str, float | None], failures: tuple[CalibrationNotice, ...]) -> str:
         if failures:
@@ -1525,7 +1579,7 @@ def _case_line(task: str, case: CaseCalibrationObservation) -> str:
 
     line = outcome(case.observed, case.failures)
     if case.validation is not None:
-        line += "; validation/: " + outcome(case.validation.observed, case.validation.failures)
+        line += f"; {stage}/: " + outcome(case.validation.observed, case.validation.failures)
     return f"{'ok  ' if case.passed else 'FAIL'}  {task} {case.name}: {line}"
 
 
@@ -1566,6 +1620,7 @@ async def _plan_on_fleet(
                 ),
                 round_verifier=round_verifier_resources(task.spec, task.validations),
                 verifier_network=task.spec.verify.network,
+                round_verifier_network=task.spec.validation_spec.network,
                 planned_saves=task.validations,
             )
         )

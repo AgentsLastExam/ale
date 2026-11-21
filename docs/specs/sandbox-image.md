@@ -257,15 +257,17 @@ built image recorded in RunLock. It is not the decision to reuse a solver's answ
 A Task run records `task.non_verifier_digest`: a content hash of every Task file outside
 `tests/`, `solution/` and `calibration/` (paths, executable bits and link targets), with `task.toml` read
 without its `[solution]` and `[[calibration]]` tables, computed once per Task folder. None
-of these reaches an evaluated agent, so changing verification, the reference solution or
-another calibration case keeps a retained solver reverifiable. `validation/` is part of the
-digest, because the agent receives its results. The asset roots and engine-owned
-`.ale-cache` are excluded, so loading a Task never reads asset bytes. File timestamps do not
-enter this hash. Reverification requires this digest to match the source episode and the
-Task's asset observation to equal the source RunLock's: the same repository, Task path and
-commit, clean on both sides. Any outside change, any asset change (asset commits do not
-distinguish `tests/assets` from the other roots), or missing source evidence requires a
-fresh solver run. This also protects direct CLI use.
+of these reaches an evaluated agent unless `tests/` validated its rounds, so changing
+verification, the reference solution or another calibration case keeps a retained solver
+reverifiable. `validation/` is part of the digest, because the agent receives its results.
+The asset roots and engine-owned `.ale-cache` are excluded, so loading a Task never reads
+asset bytes. File timestamps do not enter this hash. Reverification requires this digest to
+match the source episode and the Task's asset observation to equal the source RunLock's: the
+same repository, Task path and commit, clean on both sides. Any outside change, any asset
+change (asset commits do not distinguish `tests/assets` from the other roots), or missing
+source evidence requires a fresh solver run, and so does a source whose rounds `tests/`
+validated once the Task has changed at all, since its agent received `tests/`'s results.
+This also protects direct CLI use.
 
 When only verification changed, ALE does not build or resolve the solver image again.
 It attaches the retained solver using the source RunLock's exact image identity, takes the
@@ -367,6 +369,11 @@ Naming an image beside `tests/Dockerfile` fails, as the Dockerfile names its bas
 and a verifier never builds on a base. The local verifier context is fixed at `tests/`; its
 Dockerfile is the declaration. Named images are pulled and resolved to an immutable
 repository/content identity before solver execution.
+
+A separate verifier of [validation rounds](task-authoring.md#validation) has its image by the
+same rules, from `[verifier.validation.environment].image` or `validation/Dockerfile` with
+`validation/` as context, or else the image it inherits: a separate verifier's of `tests/`,
+prepared once for both, else the solver's.
 
 Any verifier image must satisfy the same guest contract and permit ALE to stage
 `ale_verify`. Verification runs as framework-controlled Task code.
@@ -576,10 +583,10 @@ its end for its verifier. Selection compares that count with how many snapshots 
 profile saves (`max_saves`), and a leaf that saves fewer in a row is not chosen. Under
 shared verification a solver with rounds also carries the needs of the round's verifier,
 which boots from its snapshot with the solver's resources and no sudo, and of
-`[validation]`'s snapshot verifier when that places one. Volumes ask nothing of selection:
-a separate verifier mounts views of its solver's volumes only where, as the episode finds,
-the solver's leaf serves it and saves the solver once more for it, and a Sandbox's
-volumes are copied otherwise.
+`[verifier.validation]`'s snapshot verifier when that places one, each with its own
+network. Volumes ask nothing of selection: a separate verifier mounts views of its solver's
+volumes only where, as the episode finds, the solver's leaf serves it and saves the solver
+once more for it, and a Sandbox's volumes are copied otherwise.
 
 Before any episode starts, the Run has each selected leaf run its preflight with the needs
 of the Sandboxes selected for it, which finds what the leaf runs those with, such as its

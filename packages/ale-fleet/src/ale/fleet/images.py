@@ -26,7 +26,7 @@ from ale.core.errors import AleError, ProviderCapabilityError
 from ale.core.fleet import ImageHolding, ImageInputs
 from ale.core.sandbox import PreparedTaskImage, Provider
 from ale.core.task import Task
-from ale.core.taskspec import ImageKind, OperatingSystem
+from ale.core.taskspec import ImageKind, ImageSpec, OperatingSystem
 from ale.core.verdict import Rewards
 from ale.run.process import run
 from ale.run.task_images import prepare_task_image_result, prepare_verifier_image_result
@@ -54,14 +54,21 @@ class _BuildTask(Task):
         assert inputs.task is not None
         spec = inputs.task
         folder = TaskFolder(root)
-        solver = inputs.role == "solver"
+        role = inputs.role
         super().__init__(
             spec,
             folder=folder,
             task_digest=inputs.key,
-            image_source_digest=folder.image_source_digest(spec.image) if solver else None,
+            image_source_digest=folder.image_source_digest(spec.image)
+            if role == "solver"
+            else None,
             verifier_image_source_digest=(
-                None if solver else folder.verifier_image_source_digest(spec.verify.image)
+                folder.verifier_image_source_digest(_image(inputs)) if role != "solver" else None
+            ),
+            validation_image_source_digest=(
+                folder.validation_image_source_digest(_image(inputs))
+                if role == "validation"
+                else None
             ),
         )
 
@@ -69,10 +76,20 @@ class _BuildTask(Task):
         raise NotImplementedError("a Node only prepares this Task's images")
 
 
+def _image(inputs: ImageInputs) -> ImageSpec | None:
+    """The declaration of the image ``inputs`` names."""
+    assert inputs.task is not None
+    spec = inputs.task
+    return {
+        "solver": spec.image,
+        "verifier": spec.verify.image,
+        "validation": spec.validation_spec.image,
+    }[inputs.role]
+
+
 def _built(inputs: ImageInputs) -> bool:
     """Whether the image is built from the Task folder, rather than named by a reference."""
-    assert inputs.task is not None
-    image = inputs.task.image if inputs.role == "solver" else inputs.task.verify.image
+    image = _image(inputs)
     return image is not None and image.ref is None
 
 
@@ -168,7 +185,7 @@ class NodeImages:
         # Off the event loop, as is all hashing of build inputs: heartbeats and leases go on.
         task = await asyncio.to_thread(_BuildTask, inputs, self._folder(inputs.key) / "task")
         spec = task.spec
-        image = spec.image if inputs.role == "solver" else spec.verify.image
+        image = _image(inputs)
         if image is None:
             raise ProviderCapabilityError("this Task's verifier has no image of its own")
         if image.kind is None:
@@ -177,7 +194,7 @@ class NodeImages:
         provider = self._lend(image.kind, spec.os)
         if inputs.role == "solver":
             return (await prepare_task_image_result(task, provider)).image
-        result = await prepare_verifier_image_result(task, provider)
+        result = await prepare_verifier_image_result(task, provider, role=inputs.role)
         assert result is not None
         return result.image
 

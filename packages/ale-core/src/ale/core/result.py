@@ -79,8 +79,9 @@ class ValidationFeedback(BaseModel):
 
 
 class ValidationRound(BaseModel):
-    """One validation round: what ``validation/`` gave the agent's state when one of its
-    turns ended, which the agent received as its next turn began."""
+    """One validation round: what the stage that validates, ``validation/`` or else
+    ``tests/``, gave the agent's state when one of its turns ended, which the agent received
+    as its next turn began."""
 
     model_config = _STRICT
 

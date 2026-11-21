@@ -326,10 +326,12 @@ be read by anything.
 
 `validation/` runs only in a round's verifier, a Sandbox apart from every solver, between
 two of the agent's turns, or in calibration's validation check, and the next turn's solver
-boots from the snapshot saved before it ran, so it is in no solver at any time. Its reward,
-status and feedback text are the only channel from it to the agent, and `tests/` has none:
-its result is recorded and never shown. What the feedback reveals is the Task author's
-decision, so a Task whose test set must stay unseen keeps out of it what `tests/` checks.
+boots from the snapshot saved before it ran, so it is in no solver at any time. A Task
+without `validation/` validates with `tests/` there instead, so `tests/` too is in no solver
+while the agent works. A round's reward and status, and the feedback text of the stage that
+validated, are the only channel from either to the agent; the final run of `tests/` reaches
+it not at all. What the feedback reveals is the Task author's decision, so a Task whose test
+set must stay unseen has `validation/`, whose feedback keeps out what `tests/` checks.
 
 The agent's Gateway session is open from its creation through its first turn and then only
 while a later turn runs, so between turns and after the last the Gateway refuses calls with
@@ -339,17 +341,19 @@ files a Harness leaves on disk. A Judge's session is open only while a verifier 
 Judge's token that reaches the agent, in feedback or from a verifier's process, is refused
 in its later turns. Before a solver is saved or kept, between turns included, ALE removes
 the credential files every Harness declares, whichever Harness ran. A refused call is traced
-as refused, `session_suspended`. The round's verifier has the verifier's network, open
-unless the Task seals it, and, under shared or snapshot verification, runs on the agent's
+as refused, `session_suspended`. The round's verifier has the network of the verifier of
+validation rounds, `[verifier.validation]`'s or else `[verifier]`'s, open unless the Task
+seals it, and, under shared or snapshot verification, runs on the agent's
 disk, so a `validation/` that runs the agent's program runs it with that network, as
-`tests/` would, and with
-`[agent].sudo` what the agent left there can write the round's feedback and reward; what
-reaches the agent is still only the round's reward, status and feedback.
+`tests/` would, and with `[agent].sudo` what the agent left there can write the round's
+feedback and reward; what reaches the agent is still only the round's reward, status and
+feedback.
 
 Verified by `test_agent_never_sees_verification_material`, whose setup probe exits
 non-zero if any scoring path exists during setup, and by
-`test_validation_is_never_in_a_solver_and_tests_never_in_a_validation_verifier`, in every
-verification mode; the Gateway's refusal and the credential removal by
+`test_validation_is_never_in_a_solver_and_tests_never_in_a_validation_verifier` and
+`test_tests_is_in_no_solver_while_the_agent_works_when_it_validates`, in every verification
+mode; the Gateway's refusal and the credential removal by
 `test_the_agents_session_is_open_only_while_its_turns_run`,
 `test_the_judges_sessions_are_open_only_while_a_verifier_runs` and
 `test_every_harness_credential_files_go_before_a_rounds_save`, and, with each real CLI, by
@@ -387,7 +391,8 @@ solver and a separate or snapshot verifier the Provider selected and the leaf th
 the Sandbox with its container runtime, requested and effective resources, GPU allocation and
 sandbox observations, agent version and integrity, harness family, one optional Task-asset
 repository/path/commit/dirty observation, the name and value source of each Task variable,
-the agent's and the verifier's network policies, verification topology and image/resources,
+the agent's and each verifier's network policies, verification topology and image/resources,
+the verifier of validation rounds' among them where it has its own,
 sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 Leaves of one kind isolate a Task differently and give it different kernel features, so a
 result names the one that ran it, under a scheduler too.
@@ -531,8 +536,8 @@ validation round boots, which is sealed as soon as it is up, before anything is 
 staged in it, so what starts at boot has the agent's own sealed network. A Task that needs a
 strict boundary uses separate verification, which restores only the declared artifacts into
 a fresh Sandbox. Calibration's validation check saves the oracle's solver before `tests/`
-runs, so in calibration of a Task with `validation/` no process the oracle left reaches
-`tests/` in any mode.
+scores it, so in calibration of a Task that runs that check no process the oracle left
+reaches `tests/` in any mode.
 
 **Programs on the agent's disk.** A shared or snapshot verifier runs as root on the disk the
 agent left. With `[agent].sudo` the agent could change any program there, the image's

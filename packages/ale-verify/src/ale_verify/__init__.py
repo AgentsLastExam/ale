@@ -143,8 +143,8 @@ def write(result: dict[str, Any], *, feedback: str | None = None) -> None:
     ``verification.json`` receives the complete result and ``reward.json`` its ``reward``,
     both with ``reward`` rounded, in the platform's framework-owned verifier directory.
     ``feedback``, at most ``MAX_FEEDBACK_BYTES`` of UTF-8, goes to ``feedback.md`` beside
-    them; a validation round shows it to the agent. Without it, a feedback text an earlier
-    call wrote is removed, so the files always hold one call's result.
+    them; a validation round of ``validation/`` shows it to the agent. Without it, a feedback
+    text an earlier call wrote is removed, so the files always hold one call's result.
     """
     # Round-tripping also rejects non-JSON Python objects and non-finite values.
     _json_types(result)
