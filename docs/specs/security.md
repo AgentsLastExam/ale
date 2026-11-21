@@ -87,7 +87,7 @@ longer holds what the agent or the framework left running in it
 A Mac without that filter refuses restricted Tasks before provisioning.
 
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A Task must
-declare it for its agent, while a verifier is open unless the Task seals it, as in Harbor;
+declare it for its agent, while a verifier is open unless the Task seals it;
 the RunLock records both policies, `sandbox.network` and `verification.network`.
 
 Verified by `tests/integration/test_gateway_isolation.py`, including that a sealed
@@ -470,8 +470,7 @@ Stating these plainly is part of the model. Treating an unlisted gap as covered 
 security claims rot.
 
 **A malicious task author.** A Task folder's setup and verification entries run as trusted
-framework-controlled code, and a Task may declare `[agent].sudo` for its agent, or run its
-verifier as an account the agent controls with Harbor's `[verifier].user`. Tasks
+framework-controlled code, and a Task may declare `[agent].sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
 *agent*, not a host from its Task. The gates that exist (`ale lint`, `ale calibrate`, CI,
 PR review) are aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host
