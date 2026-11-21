@@ -628,6 +628,7 @@ class EpisodeProtocol:
             else None,
             round_verifier=round_verifier_resources(spec, validations),
             verifier_network_mode=spec.verify.network.mode,
+            round_verifier_network_mode=spec.validation_spec.network.mode,
             planned_saves=validations,
             volumes=spec.volume_candidates,
             separate_verifier=_separate_verifier(spec, validations),
@@ -692,9 +693,11 @@ class EpisodeProtocol:
         """A verifier of its own, where ``placed`` puts it, as ``tests/``'s by default: of its
         image, mounting views of the volumes of the solver's snapshot ``volumes_from`` if
         given, or booted from the solver's ``snapshot`` with the solver's ``image``."""
+        validation = placed is not None and placed is ctx.spec.validation
         placed = placed or ctx.spec.verify
         resources = placed.resources
-        prepared = (image or ctx.prepared_image) if snapshot else ctx.prepared_verifier_image
+        own = ctx.prepared_validation_image if validation else ctx.prepared_verifier_image
+        prepared = (image or ctx.prepared_image) if snapshot else own
         if resources is None or prepared is None:
             raise TaskError("the verifier's image and resources were not prepared")
         return SandboxRequest(
@@ -709,7 +712,7 @@ class EpisodeProtocol:
             gateway_url=ctx.session.gateway_url or None,
             env={"ALE_EPISODE_ID": ctx.episode_id},
             sudo=False,
-            user=(ctx.spec.verify.image or ctx.spec.image).user,
+            user=(placed.image or ctx.spec.image).user,
         )
 
     async def _provision_verifier(
@@ -752,11 +755,11 @@ class EpisodeProtocol:
         image: PreparedTaskImage | None,
         viewed: tuple[str, ...],
     ) -> Sandbox:
-        """A validation round's verifier, where ``[validation]``, or else ``[verifier]``,
+        """A validation round's verifier, as ``[verifier.validation]`` over ``[verifier]``
         places one: booted from the round's snapshot, with the solver's resources and no
-        sudo when shared and its own when a snapshot verifier, or of the verifier's image when
-        separate, mounting views of the snapshot's ``viewed`` volumes. Retention never keeps
-        it."""
+        sudo when shared and its own when a snapshot verifier, or of its image when separate,
+        mounting views of the snapshot's ``viewed`` volumes, the first recorded in the
+        RunLock. Retention never keeps it."""
         spec = ctx.spec
         validation = spec.validation_spec
         mode = validation.environment_mode
@@ -784,7 +787,12 @@ class EpisodeProtocol:
             request = self._verifier_request(
                 ctx, placed=validation, volumes_from=handle if viewed else None
             )
-        return await ctx.sandboxes.acquire(request, validation=True)
+        sandbox = await ctx.sandboxes.acquire(request, validation=True)
+        if mode is not VerificationMode.SHARED and ctx.validation_resolved_image is None:
+            ctx.prepared_validation_image = sandbox.request.prepared_image
+            ctx.validation_resolved_image = sandbox.resolved_image
+            ctx.validation_resource_allocation = sandbox.allocation
+        return sandbox
 
     async def _boot_solver(
         self,
@@ -1311,7 +1319,7 @@ class EpisodeProtocol:
         trajectory: Path | None = None,
     ) -> str | None:
         """Score the snapshot ``handle`` with the stage that validates and the agent's
-        ``trajectory`` so far under the verifier's budget and record the round; return the
+        ``trajectory`` so far under its verifier's limit and record the round; return the
         feedback text the agent receives.
 
         A round that produces no score is recorded with its failure, and the agent receives
@@ -1353,7 +1361,7 @@ class EpisodeProtocol:
         outcome: tuple[float, str | None] | Exception
         try:
             outcome = await self._with_deadline(
-                ctx, Phase.VALIDATE, self._verify_timeout(ctx), run()
+                ctx, Phase.VALIDATE, self._verify_timeout(ctx, validation=True), run()
             )
         except Exception as error:
             outcome = error
@@ -2247,11 +2255,14 @@ class EpisodeProtocol:
         layout = _layout(ctx.spec.os)
         entry = directory / stage.entry(ctx.spec.os)
         variables = ctx.variables.values
+        placed = ctx.spec.validation_spec if phase is Phase.VALIDATE else ctx.spec.verify
         env = {
             **(
                 variables.environment
                 if phase is Phase.SETUP
-                else variables.verification(ctx.spec.verify.environment_mode)
+                else variables.verification(
+                    placed.environment_mode, validation=phase is Phase.VALIDATE
+                )
             ),
             "ALE_STAGE_DIR": str(directory),
             "ALE_HOME": ctx.home,
@@ -2281,7 +2292,6 @@ class EpisodeProtocol:
         execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
         # Stage code runs in its own directory, unless the Task names Harbor's working
         # directory for its verifier; its entry is then named by its full path.
-        placed = ctx.spec.validation_spec if phase is Phase.VALIDATE else ctx.spec.verify
         workdir = None if phase is Phase.SETUP else placed.workdir
         home = PureWindowsPath if ctx.spec.os is OperatingSystem.WINDOWS else PurePosixPath
         cwd = str(directory) if workdir is None else str(home(ctx.home) / workdir)
@@ -2398,10 +2408,13 @@ class EpisodeProtocol:
         root = solution_dir(ctx.home, ctx.spec.os)
         await sandbox.upload_dir(str(source), str(root), identity=Identity.AGENT)
 
-    def _verify_timeout(self, ctx: EpisodeContext) -> float | None:
+    def _verify_timeout(self, ctx: EpisodeContext, *, validation: bool = False) -> float | None:
+        """The limit of ``tests/``'s verifier, or of a validation round's: the Run's verify
+        limit, which holds for both, or else the Task's own."""
         if self.timeouts.verify == "unlimited":
             return None
-        return self.timeouts.verify or ctx.spec.timeouts.verify
+        own = ctx.spec.validation_timeout if validation else ctx.spec.timeouts.verify
+        return self.timeouts.verify or own
 
     async def _with_deadline(self, ctx, phase: Phase, seconds: float | None, coro):  # type: ignore[no-untyped-def]
         return await self._timed(ctx, phase, coro, timeout_sec=seconds)

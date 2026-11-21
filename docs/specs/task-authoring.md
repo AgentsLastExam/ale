@@ -126,7 +126,7 @@ validation_rounds = 0                       # ALE; validation results it gets; d
 timeout_sec = 600                           # positive seconds; default 600
 environment_mode = "separate"               # shared | separate | snapshot (ALE)
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
-# network_mode = "no-network"               # tests/ and validation/ alike; default public
+# network_mode = "no-network"               # default public
 # allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
 # blocked_hosts = ["github.com"]            # ALE; with blocklist, as in [agent]
 
@@ -142,17 +142,16 @@ gpus = 0                                    # default 0
 container_features = []                     # ALE; default none
 env = {}                                    # replaces [environment].env
 
-[validation]                                # ALE; where rounds validate; default [verifier]'s
-environment_mode = "separate"               # shared | separate | snapshot
+[verifier.validation]                       # ALE; the rounds' verifier; default [verifier]
+timeout_sec = 300                           # every [verifier] key, each over [verifier]'s
+environment_mode = "snapshot"               # shared | separate | snapshot
+env = { SPLIT = "validation" }              # over [verifier].env, by variable
+# network_mode = "public"                   # with its hosts, replaces [verifier]'s whole
+# user = "grader"                           # as [verifier].user
 
-[validation.environment]                    # a separate or snapshot validation verifier's size
-cpus = 1                                    # default [environment].cpus
-memory_mb = 4096                            # default [environment].memory_mb
-storage_mb = 8192                           # default the Provider's
-gpus = 0                                    # default 0
-# gpu_types = ["H100"]                      # default any
-# gpu_memory_mb = 4096                      # default whole GPUs
-container_features = []                     # default none
+[verifier.validation.environment]           # over [verifier.environment], key by key
+# image = "registry.example/val:tag"        # separate only; not with validation/Dockerfile
+cpus = 2                                    # here [verifier.environment]'s 1 otherwise
 
 [solution]
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
@@ -241,7 +240,8 @@ as in Harbor: the table alone means `separate`, so `snapshot` is always written 
 verifier of its own, separate or snapshot, has the `[verifier.environment]` resources, or
 the solver's when that table is absent. A separate verifier's image is
 `[verifier.environment].image`, a Linux container built from `tests/Dockerfile`, or else the
-solver's, as [Verifier images](sandbox-image.md#verifier-images) says.
+solver's, as [Verifier images](sandbox-image.md#verifier-images) says. The verifier of
+[validation rounds](#validation) is placed by the same rules, from `[verifier.validation]`.
 
 A snapshot verifier suits verification that needs all the solver left, such as tens of GB of
 checkpoints, and more than the solver had, such as more GPUs to train with: a shared one
@@ -284,12 +284,11 @@ allowlist. A blocklist keeps the agent from the hosts it names, not from what th
 mirror, a cache or another host with the same content stays reachable
 ([Security](security.md#2-egress-is-a-decision-made-in-our-code)).
 
-`[verifier].network_mode` and its hosts are the verifier's network, for `tests/` and
-`validation/` alike, in every topology, with the same modes and host rules. The default is
-`public`: a verifier runs the Task's trusted code, which often needs what the agent may not
-reach. `[validation.environment]` takes no network: a validation verifier has the verifier's.
-Under `no-network` a verifier still reaches the Gateway, so its
-[Judges](verification.md#judge-tools) work. Setup, the Harness's installation and image builds
+`[verifier].network_mode` and its hosts are the verifier's network, and
+`[verifier.validation]`'s that of [validation rounds](#validation), in every topology, with
+the same modes and host rules. The default is `public`: a verifier runs the Task's trusted
+code, which often needs what the agent may not reach. Under `no-network` a verifier still
+reaches the Gateway, so its [Judges](verification.md#judge-tools) work. Setup, the Harness's installation and image builds
 have the network, since they are the Task's trusted preparation and ours; enforcement is
 specified in [Security](security.md). The quality standard owns resource feasibility and
 network-policy selection. `ale lint` requires `[metadata].network_justification` when the
@@ -385,9 +384,10 @@ Harbor's `env` tables set environment variables for the Task's commands:
 
 | Table | Received by |
 |---|---|
-| `[environment].env` | setup, the agent and the oracle, and, under shared verification, the verifier of `tests/` and of `validation/` |
-| `[verifier].env` | the verifier, of `tests/` and of `validation/` alike |
+| `[environment].env` | setup, the agent and the oracle, and, under shared verification, the verifier of `tests/` and of validation rounds |
+| `[verifier].env` | the verifier, of `tests/` and of validation rounds alike |
 | `[verifier.environment].env` | a verifier of its own, instead of `[environment].env` |
+| `[verifier.validation].env`, `[verifier.validation.environment].env` | the verifier of validation rounds, over the two above |
 | `[solution].env` | the oracle |
 | `[[environment.mcp_servers]].headers` | the agent's MCP client |
 
@@ -617,12 +617,22 @@ Windows), conventionally `verify.py`, writes `reward.json` and optionally
 and Judges. It is staged only when it runs, in its own root-only stage directory,
 `/opt/ale/validation` (`C:\ProgramData\ALE\validation` on Windows), where its entry runs
 with `ALE_STAGE_DIR` set, as `tests/`'s does. It is absent during every turn of the agent,
-as `tests/` is. It runs where ALE's `[validation]` places it, by `[verifier]`'s
-[verification topology](#verification-topology) rules, or else where `tests/` runs, with
-`[verifier]`'s budget and variables either way. It has no Dockerfile or image of its own: a
-separate verifier runs it on the image a separate verifier of `tests/` runs, or else the
-solver's, so a `validation/Dockerfile` is only a file there and `[validation.environment]`
-sets only the Sandbox's size and capabilities. Placed apart, a Task can, for example, score
+as `tests/` is.
+
+Rounds run in `[verifier]`'s verifier unless ALE's `[verifier.validation]` says otherwise,
+since a round often needs less, or other things, than the final score: a shorter limit, a
+smaller Sandbox, a sealed network. That table takes every key `[verifier]` takes, each over
+`[verifier]`'s: a key it sets replaces the verifier's, a table it sets merges into the
+verifier's key by key and its `env` variable by variable, and a network it names replaces the
+inherited one whole. What its placement cannot use is not inherited, so a shared one takes no
+environment and a snapshot one no image, and an environment it declares over a shared verifier
+makes it separate, as Harbor resolves a verifier that declares one. With
+`[verifier] network_mode = "public"` and `[verifier.validation] network_mode = "no-network"`,
+for example, the rounds are sealed while `tests/` reaches what it needs. Its placement follows
+the [verification topology](#verification-topology) rules; a separate one runs the image
+`[verifier.validation.environment].image` names or `validation/Dockerfile` builds, which, as
+`tests/Dockerfile` does, requires a separate verifier, or else the one it inherits: a separate
+verifier's of `tests/`, else the solver's. Placed apart, a Task can, for example, score
 each round in a separate verifier that mounts views of the agent's output and the final
 state in the solver itself, where a running service can be checked; a validation score then
 predicts the final one less well where the two see different things. Run shared, it runs in
@@ -633,11 +643,11 @@ as the final one is, so `judge(..., trajectory=True)` and the `checks.trajectory
 work in every round as they do in `tests/`.
 
 A Task without `validation/` validates with `tests/` instead: its rounds run `tests/` in the
-verifier `[validation]`, or else `[verifier]`, places, so a Task whose
-data cannot be split still gives its agent results between turns. The reward that agent
-sees is the score it is ranked by, so it can overfit to the test set. It receives that
-reward, the round's status and the feedback `tests/` writes, if any, as if `tests/` were
-copied into `validation/`, and its RunLock records that `tests/` graded the rounds
+verifier of validation rounds, so a Task whose data cannot be split still gives its agent
+results between turns. The reward that agent sees is the score it is ranked by, so it can
+overfit to the test set. It receives that reward, the round's status and the feedback
+`tests/` writes, if any, as if `tests/` were copied into `validation/`, and its RunLock
+records that `tests/` graded the rounds
 ([Trace](trace.md#verification-result)), setting such a score apart from one earned against
 a held-out validation set. Run policy can give rounds to any Task, so a Task whose test set
 must stay unseen has `validation/`.
@@ -758,10 +768,10 @@ describe.
 - `[environment].workdir` is where the agent starts, unless `[agent].workdir` names another
   start, and where `tests/` and `validation/` run, their entries named by full path, so Harbor's
   verifiers find what they expect. `[verifier.environment].workdir`, and
-  `[validation.environment].workdir` for `validation/`, replace it for a verifier with a
-  Sandbox of its own. Setup and the oracle keep their stage directories.
-- `[verifier].user` is the account, by name or uid, that `tests/` and `validation/` run as on
-  Linux and macOS; Windows refuses it, since verification there runs as Administrator. ALE then
+  `[verifier.validation.environment].workdir` for validation rounds, replace it for a verifier
+  with a Sandbox of its own. Setup and the oracle keep their stage directories.
+- `[verifier].user` is the account, by name or uid, that `tests/` runs as on Linux and macOS,
+  and `[verifier.validation].user` that of validation rounds; Windows refuses it, since verification there runs as Administrator. ALE then
   gives that one account the stage directory and the verifier directory, which are otherwise
   the framework's alone, so a verifier running as an account the agent controls, such as
   `[agent].user`, can be changed by what the agent left: that is the Task's choice.

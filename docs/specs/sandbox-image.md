@@ -370,6 +370,11 @@ and a verifier never builds on a base. The local verifier context is fixed at `t
 Dockerfile is the declaration. Named images are pulled and resolved to an immutable
 repository/content identity before solver execution.
 
+A separate verifier of [validation rounds](task-authoring.md#validation) has its image by the
+same rules, from `[verifier.validation.environment].image` or `validation/Dockerfile` with
+`validation/` as context, or else the image it inherits: a separate verifier's of `tests/`,
+prepared once for both, else the solver's.
+
 Any verifier image must satisfy the same guest contract and permit ALE to stage
 `ale_verify`. Verification runs as framework-controlled Task code.
 
@@ -578,10 +583,10 @@ its end for its verifier. Selection compares that count with how many snapshots 
 profile saves (`max_saves`), and a leaf that saves fewer in a row is not chosen. Under
 shared verification a solver with rounds also carries the needs of the round's verifier,
 which boots from its snapshot with the solver's resources and no sudo, and of
-`[validation]`'s snapshot verifier when that places one. Volumes ask nothing of selection:
-a separate verifier mounts views of its solver's volumes only where, as the episode finds,
-the solver's leaf serves it and saves the solver once more for it, and a Sandbox's
-volumes are copied otherwise.
+`[verifier.validation]`'s snapshot verifier when that places one, each with its own
+network. Volumes ask nothing of selection: a separate verifier mounts views of its solver's
+volumes only where, as the episode finds, the solver's leaf serves it and saves the solver
+once more for it, and a Sandbox's volumes are copied otherwise.
 
 Before any episode starts, the Run has each selected leaf run its preflight with the needs
 of the Sandboxes selected for it, which finds what the leaf runs those with, such as its

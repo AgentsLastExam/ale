@@ -1,4 +1,4 @@
-"""Volumes and [validation]: which artifacts a Provider may mount, where validation/ runs,
+"""Volumes and [verifier.validation]: which artifacts a Provider may mount, where validation/ runs,
 what selection asks for it, and what a verifier's view of a volume leaves."""
 
 from __future__ import annotations
@@ -74,8 +74,10 @@ def test_validation_runs_where_its_table_places_it(tmp_path: Path) -> None:
         tmp_path,
         {
             "agent": {"validation_rounds": 2},
-            "verifier": {"environment_mode": "shared"},
-            "validation": {"environment": {"cpus": 4, "memory_mb": 8192}},
+            "verifier": {
+                "environment_mode": "shared",
+                "validation": {"environment": {"cpus": 4, "memory_mb": 8192}},
+            },
         },
     )
     validation = task.spec.validation_spec
@@ -88,19 +90,6 @@ def test_validation_runs_where_its_table_places_it(tmp_path: Path) -> None:
     assert plain.spec.validation_spec is plain.spec.verify
 
 
-@pytest.mark.parametrize(
-    "environment",
-    [{"image": "registry.example/v:1"}, {"build_timeout_sec": 10}, {"env": {"A": "1"}}],
-)
-def test_a_validation_verifier_has_no_image_or_variables_of_its_own(
-    tmp_path: Path, environment: dict[str, object]
-) -> None:
-    with pytest.raises(Exception, match=r"\[validation.environment\] cannot set"):
-        _task(
-            tmp_path, {"validation": {"environment_mode": "separate", "environment": environment}}
-        )
-
-
 def test_a_separate_validation_verifier_shares_the_tasks_verifier_provider(
     tmp_path: Path,
 ) -> None:
@@ -110,24 +99,29 @@ def test_a_separate_validation_verifier_shares_the_tasks_verifier_provider(
         tmp_path,
         {
             "agent": {"validation_rounds": 1},
-            "validation": {"environment_mode": "separate", "environment": {"cpus": 3}},
+            "verifier": {
+                "validation": {"environment_mode": "separate", "environment": {"cpus": 3}}
+            },
         },
     )
     task.validations = 1
-    (solver_role, _, solver), (verifier_role, _, verifier) = _sandboxes(
+    (solver_role, _, solver, _), (verifier_role, _, verifier, image) = _sandboxes(
         task, snapshot=False, solver=True
     )
+    assert image == "validation"
     assert (solver_role, verifier_role) == (SandboxRole.SHARED, SandboxRole.VERIFIER)
     assert solver.verifier is None and verifier.resources.cpus == 3
     snapshot = _task(
         tmp_path / "snapshot",
         {
             "agent": {"validation_rounds": 1},
-            "validation": {"environment_mode": "snapshot", "environment": {"cpus": 3}},
+            "verifier": {
+                "validation": {"environment_mode": "snapshot", "environment": {"cpus": 3}}
+            },
         },
     )
     snapshot.validations = 1
-    ((_, _, booted),) = _sandboxes(snapshot, snapshot=False, solver=True)
+    ((_, _, booted, _),) = _sandboxes(snapshot, snapshot=False, solver=True)
     assert booted.verifier is not None and booted.verifier.resources.cpus == 3
     resources = round_verifier_resources(snapshot.spec)
     assert resources is not None and resources.cpus == 3

@@ -92,7 +92,7 @@ def _task(root: Path, mode: str, validation: str | None, *, vm: bool = False) ->
         "verifier": verifier,
     }
     if validation is not None:
-        config["validation"] = {"environment_mode": validation, "environment": size}
+        verifier["validation"] = {"environment_mode": validation, "environment": size}
     edit_task_config(root, config)
     for stage in ("tests", "validation"):
         (root / stage).mkdir(exist_ok=True)
@@ -242,10 +242,13 @@ async def test_an_agent_works_in_a_volume_of_a_windows_vm(
         "environment": {"os": "windows", "image": "local/windows-base", **size},
         "agent": {"timeout_sec": 900, "validation_rounds": 2},
         "verifier": {"environment_mode": mode, "timeout_sec": 900}
-        | ({"environment": size} if mode != "shared" else {}),
+        | ({"environment": size} if mode != "shared" else {})
+        | (
+            {"validation": {"environment_mode": validation, "environment": size}}
+            if validation is not None
+            else {}
+        ),
     }
-    if validation is not None:
-        config["validation"] = {"environment_mode": validation, "environment": size}
     root = write_task(
         tmp_path / f"windows-{mode}-{validation or 'alike'}",
         name=f"agentslastexam/windows-{mode}-{validation or 'alike'}",

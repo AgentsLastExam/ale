@@ -294,8 +294,10 @@ shown when the stage that validated wrote one.
 A separate verifier's copy of the round's artifacts is
 deleted when the round ends, even with `artifacts.collect = "host"`. The RunLock records the
 effective `validation_rounds`, `validation_stage` as `tests` only where `tests/` validated,
-in rounds or calibration's validation check, and each Judge's `placement`, `verify` or
-`validate`.
+in rounds or calibration's validation check, `validation`, the placement, network, image and
+resources of the verifier of validation rounds where `[verifier.validation]` or a
+`validation/Dockerfile` gave it its own and the episode validated, and each Judge's
+`placement`, `verify` or `validate`.
 See [Verification](verification.md) for the result and tool contracts.
 
 ## Interoperability

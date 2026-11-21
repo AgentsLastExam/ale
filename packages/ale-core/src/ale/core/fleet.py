@@ -301,7 +301,9 @@ class SandboxDemand(BaseModel):
     """Under shared verification, the resources of the verifier each validation round boots
     from this solver's snapshot, on the same leaf."""
     verifier_network_mode: NetworkMode = NetworkMode.OPEN
-    """The network mode of ``verifier`` and ``round_verifier``, which that leaf applies too."""
+    """The network mode of ``verifier``, which that leaf applies too."""
+    round_verifier_network_mode: NetworkMode = NetworkMode.OPEN
+    """The network mode of ``round_verifier``, which that leaf applies too."""
     planned_saves: int = Field(default=0, ge=0)
     """How many validations still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
@@ -324,8 +326,10 @@ class SandboxDemand(BaseModel):
             verifier=verifiers_needs(
                 self.kind,
                 self.os,
-                (self.verifier, self.round_verifier),
-                self.verifier_network_mode,
+                (
+                    (self.verifier, self.verifier_network_mode),
+                    (self.round_verifier, self.round_verifier_network_mode),
+                ),
             ),
         )
 
@@ -516,7 +520,9 @@ class ImageInputs(BaseModel):
     tag or a changed builder reaches it, and reuses it within the Run."""
     os: OperatingSystem
     task: TaskSpec | None = None
-    role: Literal["solver", "verifier"] = "solver"
+    role: Literal["solver", "verifier", "validation"] = "solver"
+    """Which of the Task's images: the solver's, the verifier's of ``tests/``, or that of
+    the verifier of validation rounds."""
     reference: ImageRef | None = None
 
     # --- validation ---

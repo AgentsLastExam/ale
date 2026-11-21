@@ -179,7 +179,8 @@ released per its retention, it is destroyed, unless the solver's retention keeps
 Verification runs as framework-controlled Task code with elevated privileges (root on Linux
 and macOS, Administrator on Windows), in every mode, and with the verifier's network
 ([Task authoring](task-authoring.md#resources-and-network)), which ALE applies just before
-`tests/` or `validation/` runs and records in the trace: in a shared solver it replaces the
+`tests/` or `validation/` runs and records in the trace, a validation round's from
+`[verifier.validation]` when that names one: in a shared solver it replaces the
 agent's, which is why a solver that serves a shared verifier is created able to apply both
 ([Security](security.md#1-a-sandbox-has-only-declared-ways-out)). Task code may explicitly
 drop privileges when executing a submitted program. ALE stages `ale_verify`, the
@@ -247,13 +248,14 @@ whatever the verification mode:
    framework bound the save for a snapshot verifier has; once the save succeeds, the
    previous round's snapshot is released, so at most one round's snapshot exists at a time;
 3. runs `validation/`, or else `tests/`, with that trajectory, in the round's verifier, a
-   new Sandbox placed as `[validation]`, or else `[verifier]`, says: shared, booted from the
-   snapshot with the solver's resources and no sudo, since the agent goes on from the state
-   the snapshot holds; snapshot, booted from it with the verifier's resources; separate, of the
-   verifier's image with the artifacts restored, which are deleted when the round ends, and
-   views of the snapshot's volumes where the leaf serves it. It has the verifier's network
-   and runs under the verify limit, `[verifier].timeout_sec` or the Run's `timeouts.verify`,
-   which its Judge calls share, and Run retention never keeps it;
+   new Sandbox that the verifier of validation rounds, `[verifier.validation]` over
+   `[verifier]`, places: shared, booted from the snapshot with the solver's resources and no
+   sudo, since the agent goes on from the state the snapshot holds; snapshot, booted from it
+   with that verifier's resources; separate, of that verifier's image with the artifacts
+   restored, which are deleted when the round ends, and views of the snapshot's volumes where
+   the leaf serves it. It has that verifier's network, account and variables, runs under its
+   limit, `timeout_sec` or the Run's `timeouts.verify`, which its Judge calls share, and Run
+   retention never keeps it;
 4. boots the next turn's solver from the snapshot, with the solver's resources and network,
    on the leaf that saved it, without running setup again, so nothing setup started runs
    in it; the Harness finds its CLI in place, is given the episode's Gateway session, the

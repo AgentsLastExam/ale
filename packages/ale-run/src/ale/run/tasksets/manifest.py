@@ -36,6 +36,7 @@ from ale.core.taskspec import (
     ToolProvision,
     VerificationMode,
     VerifierResources,
+    VerifierTable,
     VerifySpec,
 )
 from ale.core.verdict import Rewards
@@ -122,6 +123,10 @@ class TaskFolder:
     def verifier_dockerfile(self) -> Path | None:
         return _file(self.root / Stage.TESTS / "Dockerfile")
 
+    @property
+    def validation_dockerfile(self) -> Path | None:
+        return _file(self.root / Stage.VALIDATION / "Dockerfile")
+
     def stage_dir(self, stage: Stage) -> Path | None:
         path = self.environment_dir / SETUP_DIR if stage is Stage.SETUP else self.root / stage
         return path if path.is_dir() else None
@@ -150,6 +155,12 @@ class TaskFolder:
         if image is None or image.ref is not None:
             return None
         return tree_digest(self.root / Stage.TESTS, exclude=("assets",))
+
+    def validation_image_source_digest(self, image: ImageSpec | None) -> str | None:
+        """What ``validation/Dockerfile`` builds the validation verifier's image from."""
+        if image is None or image.ref is not None or self.validation_dockerfile is None:
+            return None
+        return tree_digest(self.root / Stage.VALIDATION, exclude=("assets",))
 
     @cached_property
     def content_digest(self) -> str:
@@ -254,6 +265,9 @@ class ManifestTask(Task):
             non_verifier_digest=folder.non_verifier_digest(config),
             image_source_digest=folder.image_source_digest(spec.image),
             verifier_image_source_digest=folder.verifier_image_source_digest(spec.verify.image),
+            validation_image_source_digest=folder.validation_image_source_digest(
+                spec.validation.image if spec.validation else None
+            ),
         )
 
     async def score(self, ctx: EpisodeContext) -> Rewards:
@@ -391,15 +405,16 @@ def _moving_images(config: TaskConfig, folder: TaskFolder) -> list[tuple[str, st
     """Every image the Task names, built on or used directly, that names no exact version,
     with the file naming it."""
     named: list[tuple[str, str]] = []
-    for dockerfile in (folder.dockerfile, folder.verifier_dockerfile):
+    for dockerfile in (folder.dockerfile, folder.verifier_dockerfile, folder.validation_dockerfile):
         if dockerfile is None:
             continue
         stages = _FROM.findall(dockerfile.read_text(encoding="utf-8", errors="replace"))
         aliases = {alias.lower() for _, alias in stages} | {"scratch"}
         path = dockerfile.relative_to(folder.root).as_posix()
         named += [(path, base) for base, _ in stages if base.lower() not in aliases]
-    verifier = config.verifier.environment
-    for image in (config.environment.image, verifier.image if verifier else None):
+    validation = config.verifier.validation
+    tables = (config.verifier.environment, validation.environment if validation else None)
+    for image in (config.environment.image, *(table.image if table else None for table in tables)):
         if image is not None:
             named.append((TASK_CONFIG, image))
     return [(path, image) for path, image in named if _moves(image)]
@@ -444,20 +459,32 @@ def _spec(config: TaskConfig, folder: TaskFolder, name: TaskId) -> TaskSpec:
         network=config.agent_network,
         workdir=config.agent.workdir or config.environment.workdir,
         healthcheck=config.environment.healthcheck,
-        timeouts={"agent": config.agent.timeout_sec, "verify": config.verifier.timeout_sec},
+        timeouts={
+            "agent": config.agent.timeout_sec,
+            "verify": config.verifier.timeout_sec,
+            "validation": (
+                config.verifier.for_validation().timeout_sec
+                if config.verifier.validation is not None
+                else None
+            ),
+        },
         validation_rounds=config.agent.validation_rounds,
         artifacts=config.artifacts,
         tools=ToolProvision(
             skills_dir=config.environment.skills_dir,
             mcp_servers=tuple(entry.server for entry in config.environment.mcp_servers),
         ),
-        verify=(verify := _verification(config, folder)),
-        validation=_validation(config, verify),
+        verify=(verify := _verification(config, config.verifier, folder.verifier_dockerfile)),
+        validation=_validation(config, folder, verify),
         variables=TaskVariables(
             environment=config.environment.env,
             verifier=config.verifier.env,
             verifier_environment=(
                 config.verifier.environment.env if config.verifier.environment else None
+            ),
+            validation=validation.env if (validation := config.verifier.validation) else None,
+            validation_environment=(
+                validation.environment.env if validation and validation.environment else None
             ),
             solution=config.solution.env,
             mcp_headers={
@@ -532,26 +559,32 @@ def _named_kind(image: str, operating_system: OperatingSystem) -> ImageKind | No
     return None
 
 
-def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
-    """Harbor's verifier semantics; a Windows or macOS verifier image is a VM. A snapshot
+def _verification(
+    config: TaskConfig,
+    verifier: VerifierTable,
+    dockerfile: Path | None,
+    *,
+    stage: Stage = Stage.TESTS,
+    table: str = "verifier",
+) -> VerifySpec:
+    """Harbor's verifier semantics, for the verifier ``verifier`` describes, whose own image
+    ``<stage>/Dockerfile`` builds; a Windows or macOS verifier image is a VM. A snapshot
     verifier boots from the solver's snapshot, so it has resources and no image."""
-    verifier = config.verifier
     mode = verifier.mode
-    dockerfile = folder.verifier_dockerfile
     # Harbor's working directory: a verifier's own environment's, else the agent's.
     own = verifier.environment.workdir if verifier.environment is not None else None
     workdir = own or config.environment.workdir
     if mode is not VerificationMode.SEPARATE and dockerfile is not None:
-        raise TaskDefinitionError("tests/Dockerfile requires separate verification")
+        raise TaskDefinitionError(f"{stage}/Dockerfile requires separate verification in [{table}]")
     account = None if verifier.user is None else str(verifier.user)
-    network = config.verifier_network
+    network = config.network_of(verifier)
     if mode is VerificationMode.SHARED:
         return VerifySpec(workdir=workdir, user=account, network=network)
     operating_system = config.environment.os
     if dockerfile is not None and operating_system is not OperatingSystem.LINUX:
         raise TaskDefinitionError(
-            "only a Linux verifier builds tests/Dockerfile; reuse the solver image or name "
-            "[verifier.environment].image"
+            f"only a Linux verifier builds {stage}/Dockerfile; reuse the solver image or name "
+            f"[{table}.environment].image"
         )
 
     environment = verifier.environment
@@ -563,7 +596,7 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     if dockerfile is not None:
         if named is not None:
             raise TaskDefinitionError(
-                "tests/Dockerfile names its base in FROM; remove [verifier.environment].image"
+                f"{stage}/Dockerfile names its base in FROM; remove [{table}.environment].image"
             )
         image = ImageSpec(
             kind=ImageKind.CONTAINER,
@@ -599,31 +632,34 @@ def _verification(config: TaskConfig, folder: TaskFolder) -> VerifySpec:
     )
 
 
-def _validation(config: TaskConfig, verify: VerifySpec) -> VerifySpec | None:
-    """Where ``[validation]`` places the rounds' verifier, or None to place it as ``tests/``'s.
-    A separate one runs a separate verifier's image of ``tests/``, or else the solver's."""
-    table = config.validation
-    if table is None:
+def _validation(config: TaskConfig, folder: TaskFolder, verify: VerifySpec) -> VerifySpec | None:
+    """The verifier of validation rounds, where ``[verifier.validation]`` or
+    ``validation/Dockerfile`` sets it apart from ``tests/``'s, by the rules of ``tests/``'s
+    over what ``[verifier]`` leaves it. A separate one runs the image ``validation/Dockerfile``
+    builds or it names, or else the one it inherits, a separate verifier's of ``tests/``,
+    else the solver's."""
+    dockerfile = folder.validation_dockerfile
+    own = config.verifier.validation
+    if own is None and dockerfile is None:
         return None
-    mode = table.mode
-    # [verifier]'s account and network, and Harbor's working directory: its own
-    # environment's, else where tests/ runs.
-    own = table.environment.workdir if table.environment is not None else None
-    placed = {"workdir": own or verify.workdir, "user": verify.user, "network": verify.network}
-    if mode is VerificationMode.SHARED:
-        return VerifySpec(**placed)
-    sized = table.environment or config.environment
-    resources = VerifierResources(
-        cpus=sized.cpus or config.environment.cpus,
-        memory_mb=sized.memory_mb or config.environment.memory_mb,
-        storage_mb=sized.storage_mb,
-        gpus=sized.gpus,
-        gpu_types=sized.gpu_types or (),
-        gpu_memory_mb=sized.gpu_memory_mb,
-        container_features=sized.container_features,
+    table = config.verifier.for_validation()
+    named = own is not None and own.environment is not None and own.environment.image
+    if dockerfile is not None and table.environment is not None and not named:
+        # Its own Dockerfile builds its image, whatever image [verifier] names.
+        table = table.model_copy(
+            update={"environment": table.environment.model_copy(update={"image": None})}
+        )
+    placed = _verification(
+        config, table, dockerfile, stage=Stage.VALIDATION, table="verifier.validation"
     )
-    image = verify.image if mode is VerificationMode.SEPARATE else None
-    return VerifySpec(environment_mode=mode, image=image, resources=resources, **placed)
+    inherits = (
+        placed.environment_mode is VerificationMode.SEPARATE
+        and placed.image is None
+        and verify.image is not None
+        and verify.image.ref is None
+    )
+    # The image tests/Dockerfile builds, which it inherits as a key of [verifier] would be.
+    return placed.model_copy(update={"image": verify.image}) if inherits else placed
 
 
 def _require_files(folder: TaskFolder, config: TaskConfig) -> None:

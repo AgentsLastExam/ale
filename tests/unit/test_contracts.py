@@ -129,8 +129,9 @@ def test_an_open_verifier_network_keeps_the_spec_hash() -> None:
     sealed = make_spec(verify={"network": _BLOCK})
     assert sealed.spec_hash != make_spec().spec_hash
     assert TaskSpec.model_validate_json(sealed.model_dump_json()) == sealed
-    with pytest.raises(ValidationError, match="verifier's network"):
-        make_spec(verify={"network": _BLOCK}, validation={"network": _OPEN})
+    # Validation rounds may have a network of their own.
+    apart = make_spec(verify={"network": _BLOCK}, validation={"network": _OPEN})
+    assert apart.validation_spec.network == _OPEN and apart.spec_hash != sealed.spec_hash
 
 
 def test_a_policy_without_a_blocklist_keeps_its_dump() -> None:
@@ -668,14 +669,11 @@ def test_a_verifier_s_network_obeys_the_agent_s_host_rules() -> None:
         ),
         ({"verifier": {"network_mode": "offline"}}, "network_mode"),
         ({"verifier": {"environment": {**_OWN, "allow_internet": "yes"}}}, "allow_internet"),
-        # validation/ runs with the verifier's network.
+        # [verifier.validation] by the same rules.
+        ({"verifier": {"validation": {"network_mode": "allowlist"}}}, "non-empty allowed_hosts"),
         (
-            {"validation": {"environment": {**_OWN, "network_mode": "public"}}},
-            "verifier's network",
-        ),
-        (
-            {"validation": {"environment": {**_OWN, **_BLOCK_GITHUB}}},
-            "verifier's network",
+            {"verifier": {"validation": {"environment": {**_OWN, "network_mode": "blocklist"}}}},
+            "non-empty blocked_hosts",
         ),
     ):
         with pytest.raises(ValidationError, match=message):

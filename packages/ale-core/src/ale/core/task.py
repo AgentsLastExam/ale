@@ -111,6 +111,9 @@ class TaskFolder(Protocol):
     @property
     def verifier_dockerfile(self) -> Path | None: ...
 
+    @property
+    def validation_dockerfile(self) -> Path | None: ...
+
     def stage_dir(self, stage: Stage) -> Path | None: ...
 
     def stage_entry(
@@ -130,6 +133,7 @@ class Task(ABC):
         task_digest: str,
         image_source_digest: str | None,
         verifier_image_source_digest: str | None = None,
+        validation_image_source_digest: str | None = None,
         non_verifier_digest: str | None = None,
         harbor: bool = False,
         warnings: tuple[str, ...] = (),
@@ -145,6 +149,9 @@ class Task(ABC):
         self.non_verifier_digest = non_verifier_digest
         self.image_source_digest = image_source_digest
         self.verifier_image_source_digest = verifier_image_source_digest
+        self.validation_image_source_digest = validation_image_source_digest
+        """What the verifier of validation rounds' own image is built from,
+        ``validation/Dockerfile``'s context; None where it builds none."""
         self.provider: str | None = None
         """The provider id the Run selected to start the solver's Sandbox."""
         self.verifier_provider: str | None = None
@@ -152,6 +159,7 @@ class Task(ABC):
         snapshot verifier's, which is its solver's."""
         self.prepared_image: PreparedTaskImage | None = None
         self.prepared_verifier_image: PreparedTaskImage | None = None
+        self.prepared_validation_image: PreparedTaskImage | None = None
         self.asset_observation: TaskAssetObservation | None = None
         self.variables: ResolvedVariables | None = None
         self.validations: int = 0

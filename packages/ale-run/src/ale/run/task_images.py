@@ -74,10 +74,17 @@ __all__ = [
     "ImagePreparationStep",
     "prepare_task_image",
     "prepare_task_image_result",
+    "prepare_validation_image",
     "prepare_verifier_image",
     "prepare_verifier_image_result",
     "resolve_image_kinds",
+    "shares_verifier_image",
+    "validates_separately",
 ]
+
+#: One of a Task's images: the solver's, the verifier's of ``tests/``, or that of the verifier
+#: of validation rounds.
+ImageRole = Literal["solver", "verifier", "validation"]
 
 WINDOWS_BUILD_CONTRACT = "ale-windows-powershell/v1"
 LINUX_BUILD_CONTRACT = "ale-linux-bash/v1"
@@ -143,8 +150,8 @@ async def resolve_image_kinds(tasks: Iterable[Task]) -> None:
         {
             image.ref
             for task in tasks
-            for image in (task.spec.image, task.spec.verify.image)
-            if image is not None and image.kind is None and image.ref is not None
+            for image in task.spec.images
+            if image.kind is None and image.ref is not None
         }
     )
     if not references:
@@ -167,11 +174,18 @@ async def resolve_image_kinds(tasks: Iterable[Task]) -> None:
     for task in tasks:
         spec = task.spec
         image, verifier = decided(spec.image), decided(spec.verify.image)
-        if image is not spec.image or verifier is not spec.verify.image:
+        own = spec.validation
+        validation = decided(own.image) if own is not None else None
+        if (
+            image is not spec.image
+            or verifier is not spec.verify.image
+            or (own is not None and validation is not own.image)
+        ):
             verify = spec.verify.model_copy(update={"image": verifier})
+            placed = own.model_copy(update={"image": validation}) if own is not None else None
             try:
                 task.spec = TaskSpec.model_validate(
-                    {**dict(spec), "image": image, "verify": verify}
+                    {**dict(spec), "image": image, "verify": verify, "validation": placed}
                 )
             except ValidationError as error:
                 raise TaskDefinitionError(f"invalid Task {spec.name}: {describe(error)}") from None
@@ -297,20 +311,49 @@ async def prepare_verifier_image(task: Task, provider: Provider) -> PreparedTask
     return result.image if result is not None else None
 
 
+async def prepare_validation_image(task: Task, provider: Provider) -> PreparedTaskImage | None:
+    """The image of a separate verifier of validation rounds: the verifier's of ``tests/``
+    where it is the same, prepared before it, or else its own. A shared or snapshot one boots
+    from the solver's snapshot, on the solver's leaf, so it needs none."""
+    if not validates_separately(task):
+        return None
+    if shares_verifier_image(task):
+        return task.prepared_verifier_image
+    result = await prepare_verifier_image_result(task, provider, role="validation")
+    return result.image if result is not None else None
+
+
+def validates_separately(task: Task) -> bool:
+    """Whether the Task's episodes validate in a separate verifier, of an image of its own,
+    rather than in one booted from the solver's snapshot."""
+    mode = task.spec.validation_spec.environment_mode
+    return task.validates and mode is VerificationMode.SEPARATE
+
+
+def shares_verifier_image(task: Task) -> bool:
+    """Whether a separate verifier of validation rounds runs the image of ``tests/``'s
+    separate one: as it inherits it, or both the solver's, prepared for the verifier's
+    Provider."""
+    spec = task.spec
+    if spec.verify.environment_mode is not VerificationMode.SEPARATE:
+        return False
+    return spec.validation is None or (
+        spec.validation.image == spec.verify.image and task.validation_image_source_digest is None
+    )
+
+
 async def prepare_verifier_image_result(
-    task: Task, provider: Provider
+    task: Task, provider: Provider, *, role: Literal["verifier", "validation"] = "verifier"
 ) -> ImagePreparationResult | None:
-    """The image of a verifier of its own, prepared for ``provider``: a separate verifier's,
-    of ``tests/`` or of ``validation/``, or the solver's for a snapshot verifier, which boots
-    from the solver's snapshot; none when every verifier runs in the solver."""
-    verify = task.spec.verify
-    validation = task.spec.validation_spec.environment_mode
-    if verify.environment_mode is VerificationMode.SHARED and validation is not (
-        VerificationMode.SEPARATE
-    ):
+    """The image of a verifier of its own, prepared for ``provider``: of ``tests/``'s, or of
+    the verifier of validation rounds for ``role`` validation; a separate verifier's own, or
+    else the solver's, which a snapshot verifier boots from the snapshot of; none when it
+    runs in the solver or a Sandbox booted from its snapshot as a shared one."""
+    placed = task.spec.validation_spec if role == "validation" else task.spec.verify
+    if placed.environment_mode is VerificationMode.SHARED:
         return None
 
-    if verify.image is None:
+    if placed.image is None:
         image = task.prepared_image
         if image is None:
             raise TaskDefinitionError("solver image must be prepared before verifier image")
@@ -320,11 +363,11 @@ async def prepare_verifier_image_result(
             # Fleet, which prepares an image on its Nodes from what the Task declares.
             if isinstance(provider, FleetProvider) or task.provider == FleetProvider.name:
                 result = await prepare_task_image_result(_pinned(task, image), provider)
-                return dataclasses.replace(result, role="verifier")
+                return dataclasses.replace(result, role=role)
             image = await _stage("artifact-check", provider.prepare_image(image))
             return _result(
                 task,
-                "verifier",
+                role,
                 image,
                 ImagePreparationStep(
                     "artifact-check", "executed", image.prepared_identity, image.runtime_ref
@@ -332,20 +375,21 @@ async def prepare_verifier_image_result(
             )
         return _result(
             task,
-            "verifier",
+            role,
             image,
             ImagePreparationStep(
                 "artifact-check", "reused", image.prepared_identity, image.runtime_ref
             ),
         )
 
-    kind = _kind(verify.image)
+    declared = placed.image
+    kind = _kind(declared)
     if isinstance(provider, FleetProvider):
-        return _on_fleet(task, "verifier", provider)
-    if verify.image.ref is not None:
+        return _on_fleet(task, role, provider)
+    if declared.ref is not None:
         image = await _stage(
             "reference-resolution",
-            provider.prepare_image(ImageRef(kind=kind, reference=verify.image.ref)),
+            provider.prepare_image(ImageRef(kind=kind, reference=declared.ref)),
         )
         steps = [
             ImagePreparationStep(
@@ -358,9 +402,7 @@ async def prepare_verifier_image_result(
         if kind is ImageKind.CONTAINER:
             image = await _stage(
                 "framework-layer",
-                _framed_reference(
-                    image, user=verify.image.user, keep_alive=verify.image.keep_alive
-                ),
+                _framed_reference(image, user=declared.user, keep_alive=declared.keep_alive),
             )
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
@@ -368,7 +410,7 @@ async def prepare_verifier_image_result(
         elif task.spec.os is not OperatingSystem.MACOS:
             image, reused = await _stage(
                 "framework-layer",
-                framed_disk(image, operating_system=task.spec.os, user=verify.image.user),
+                framed_disk(image, operating_system=task.spec.os, user=declared.user),
             )
             steps.append(
                 ImagePreparationStep(
@@ -380,7 +422,7 @@ async def prepare_verifier_image_result(
             )
         return _result(
             task,
-            "verifier",
+            role,
             image,
             *steps,
             ImagePreparationStep(
@@ -388,18 +430,26 @@ async def prepare_verifier_image_result(
             ),
         )
 
-    source_identity = task.verifier_image_source_digest
-    dockerfile = _task_folder(task).verifier_dockerfile
+    folder = _task_folder(task)
+    if role == "validation" and task.validation_image_source_digest is not None:
+        source_identity, dockerfile = (
+            task.validation_image_source_digest,
+            folder.validation_dockerfile,
+        )
+        source = "validation-local"
+    else:
+        source_identity, dockerfile = task.verifier_image_source_digest, folder.verifier_dockerfile
+        source = "verifier-local"
     if source_identity is None or dockerfile is None:
-        raise TaskDefinitionError("the verifier image has no tests/Dockerfile to build")
+        raise TaskDefinitionError(f"the {role} verifier's image has no Dockerfile to build")
     candidate, steps = await _prepare_local(
         dockerfile=dockerfile,
         exclude=(),
         source_digest=source_identity,
-        source="verifier-local",
-        user=verify.image.user,
-        keep_alive=verify.image.keep_alive,
-        build_timeout_sec=verify.image.build_timeout_sec,
+        source=source,
+        user=declared.user,
+        keep_alive=declared.keep_alive,
+        build_timeout_sec=declared.build_timeout_sec,
     )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
     steps.append(
@@ -407,7 +457,7 @@ async def prepare_verifier_image_result(
             "artifact-check", "executed", image.prepared_identity, image.runtime_ref
         )
     )
-    return _result(task, "verifier", image, *steps)
+    return _result(task, role, image, *steps)
 
 
 def _pinned(task: Task, solver: PreparedTaskImage) -> Task:
@@ -425,9 +475,7 @@ def _pinned(task: Task, solver: PreparedTaskImage) -> Task:
     return pinned
 
 
-def _on_fleet(
-    task: Task, role: Literal["solver", "verifier"], provider: FleetProvider
-) -> ImagePreparationResult:
+def _on_fleet(task: Task, role: ImageRole, provider: FleetProvider) -> ImagePreparationResult:
     """One of a Task's images as the Fleet prepares it: on each Node that runs it, from what
     this names, through this same preparation.
 
@@ -435,7 +483,11 @@ def _on_fleet(
     Task's storage, which a VM build sizes its disk by, the build context as
     ``_context_identity`` observes it, and the framework.
     """
-    image = task.spec.image if role == "solver" else task.spec.verify.image
+    image = {
+        "solver": task.spec.image,
+        "verifier": task.spec.verify.image,
+        "validation": task.spec.validation_spec.image,
+    }[role]
     assert image is not None
     kind = _kind(image)
     folder = _task_folder(task)
@@ -444,6 +496,8 @@ def _on_fleet(
     if image.ref is None:
         if role == "solver":
             context, exclude = folder.environment_dir, (SETUP_DIR,)
+        elif role == "validation" and task.validation_image_source_digest is not None:
+            context = folder.root / "validation"
         else:
             context = folder.root / "tests"
     identity = _context_identity(context, exclude=exclude) if context else None

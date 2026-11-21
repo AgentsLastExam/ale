@@ -82,7 +82,7 @@ class PreparedTaskImage(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: ImageKind
-    source: Literal["solver-local", "verifier-local", "external-ref"]
+    source: Literal["solver-local", "verifier-local", "validation-local", "external-ref"]
     input_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     image_source_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     runtime_ref: str = Field(min_length=1)
@@ -231,8 +231,11 @@ class SandboxRequest(BaseModel):
     from this solver's snapshot (:func:`~ale.core.capability.round_verifier_resources`), on
     the leaf that saved it, which serves both."""
     verifier_network_mode: NetworkMode = NetworkMode.OPEN
-    """The network mode of ``snapshot_verifier`` and ``round_verifier``, the Task's verifier
-    network's (:attr:`~ale.core.taskspec.VerifySpec.network`)."""
+    """The network mode of ``snapshot_verifier``, the Task's verifier network's
+    (:attr:`~ale.core.taskspec.VerifySpec.network`)."""
+    round_verifier_network_mode: NetworkMode = NetworkMode.OPEN
+    """The network mode of ``round_verifier``, that of the verifier of validation rounds
+    (:attr:`~ale.core.taskspec.TaskSpec.validation_spec`)."""
     planned_saves: int = Field(default=0, ge=0)
     """How many validations still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
@@ -299,8 +302,10 @@ class SandboxRequest(BaseModel):
             verifier=verifiers_needs(
                 self.image_kind,
                 self.os,
-                (self.snapshot_verifier, self.round_verifier),
-                self.verifier_network_mode,
+                (
+                    (self.snapshot_verifier, self.verifier_network_mode),
+                    (self.round_verifier, self.round_verifier_network_mode),
+                ),
             ),
         )
 
@@ -316,20 +321,18 @@ class SandboxRequest(BaseModel):
 def verifiers_needs(
     kind: ImageKind,
     operating_system: OperatingSystem,
-    verifiers: Sequence[Resources | None],
-    network_mode: NetworkMode,
+    verifiers: Sequence[tuple[Resources | None, NetworkMode]],
 ) -> SandboxNeeds | None:
     """What the verifiers that boot from a solver's snapshot need, a snapshot verifier's and
-    a validation round's, each of the ``verifiers`` given, with the verifier's
-    ``network_mode``, the next nested in the one before, so that every check of one profile
-    holds it to all of them."""
-    distinct: list[Resources] = []
-    for each in verifiers:
-        if each is not None and each not in distinct:
-            distinct.append(each)
+    a validation round's, each of the ``verifiers`` given with its network mode, the next
+    nested in the one before, so that every check of one profile holds it to all of them."""
+    distinct: list[tuple[Resources, NetworkMode]] = []
+    for resources, mode in verifiers:
+        if resources is not None and (resources, mode) not in distinct:
+            distinct.append((resources, mode))
     needs = None
-    for resources in reversed(distinct):
-        outer = snapshot_verifier_needs(kind, operating_system, resources, network_mode)
+    for resources, mode in reversed(distinct):
+        outer = snapshot_verifier_needs(kind, operating_system, resources, mode)
         needs = outer if needs is None else outer.model_copy(update={"verifier": needs})
     return needs
 

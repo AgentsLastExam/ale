@@ -21,6 +21,7 @@ from ale.run.providers.qemu import QemuProvider
 from ale.run.providers.slurm import SlurmProvider
 from ale.run.providers.slurm.job import Job
 from ale.run.scaffold import scaffold_task
+from ale.run.secrets import resolve_task_variables
 from ale.run.tasksets.manifest import load_tasks
 from tests.support import (
     VM_BASE,
@@ -62,6 +63,7 @@ result = {
     "survivors": outlived,
     "leaks": seen,
     "prompts": prompts,
+    "split": os.environ.get("SPLIT"),
 }
 write(result, feedback=f"{len(lines)} of 3 lines; the last: {lines[-1] if lines else ''}")
 """
@@ -105,6 +107,7 @@ def _stages(root: Path, entry: str, name: str, *, validation: bool = True) -> No
 
 async def _episode(tmp_path: Path, root: Path, provider: Provider) -> Any:
     task = load_tasks(root)[0]
+    resolve_task_variables([task], oracle=False, protected={})
     return await run_episode(
         task,
         EpisodeProtocol(ScriptedCliHarness(), validation_rounds=task.spec.validation_rounds),
@@ -206,6 +209,28 @@ async def test_an_agent_improves_over_rounds_tests_scores_without_validation_in_
         "trajectory.json",
         "verification.json",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["separate", "snapshot"])
+async def test_verifier_validation_places_the_rounds_with_variables_of_their_own_in_docker(
+    tmp_path: Path, mode: str
+) -> None:
+    """[verifier.validation] gives the rounds a verifier of their own, here apart from a
+    shared tests/, with a limit and a variable over [verifier]'s."""
+    root = _task(tmp_path / f"rounds-own-{mode}", "shared")
+    validation = {"environment_mode": mode, "timeout_sec": 300, "env": {"SPLIT": "validation"}}
+    if mode == "separate":
+        validation["environment"] = {"cpus": 2, "memory_mb": 2048}
+    edit_task_config(root, {"verifier": {"env": {"SPLIT": "tests"}, "validation": validation}})
+    result = await _episode(tmp_path, root, DockerProvider())
+    _check(result)
+    scored = json.loads((result.run_dir / "validation/1/verification.json").read_text())
+    final = json.loads((result.run_dir / "verification.json").read_text())
+    assert (scored["split"], final["split"]) == ("validation", "tests")
+    # The rounds' verifiers ran apart from the solver, tests/ in it.
+    roles = [item.roles for item in result.record.sandboxes]
+    assert roles.count(("verifier",)) == 2, roles
 
 
 @pytest.mark.needs_slurm

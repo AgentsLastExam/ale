@@ -18,6 +18,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -349,6 +350,9 @@ class PhaseTimeouts(BaseModel):
 
     agent: float = Field(default=1800, gt=0)
     verify: float = Field(default=600, gt=0)
+    validation: float | None = Field(default=None, gt=0, exclude_if=lambda value: value is None)
+    """A validation verifier's limit, ``[verifier.validation].timeout_sec`` as it resolves over
+    ``[verifier]``'s; ``None`` without that table, for ``verify``."""
 
 
 class SkillSource(BaseModel):
@@ -724,6 +728,14 @@ class TaskVariables(BaseModel):
     verifier_environment: dict[str, str] | None = None
     """``[verifier.environment].env``. ``None`` without that table: a verifier in a Sandbox of
     its own then receives ``environment``, as Harbor copies ``[environment]`` for it."""
+    validation: dict[str, str] | None = Field(default=None, exclude_if=lambda value: value is None)
+    """``[verifier.validation].env``, over ``verifier`` for a validation verifier; ``None``
+    without that table."""
+    validation_environment: dict[str, str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """``[verifier.validation.environment].env``, over ``verifier_environment`` for a
+    validation verifier of its own; ``None`` without that table."""
     solution: dict[str, str] = Field(default_factory=dict)
     """``[solution].env``: the oracle only."""
     mcp_headers: dict[str, dict[str, str]] = Field(default_factory=dict)
@@ -733,17 +745,31 @@ class TaskVariables(BaseModel):
     def tables(self) -> tuple[tuple[str, dict[str, str]], ...]:
         """Each declared table by its ``task.toml`` name."""
         tables = [("environment", self.environment), ("verifier", self.verifier)]
-        if self.verifier_environment is not None:
-            tables.append(("verifier.environment", self.verifier_environment))
+        for name, env in (
+            ("verifier.environment", self.verifier_environment),
+            ("verifier.validation", self.validation),
+            ("verifier.validation.environment", self.validation_environment),
+        ):
+            if env is not None:
+                tables.append((name, env))
         tables.append(("solution", self.solution))
         return tuple(tables)
 
     def oracle(self) -> dict[str, str]:
         return {**self.environment, **self.solution}
 
-    def verification(self, mode: VerificationMode) -> dict[str, str]:
-        own = mode is not VerificationMode.SHARED and self.verifier_environment is not None
-        return {**(self.verifier_environment if own else self.environment), **self.verifier}
+    def verification(self, mode: VerificationMode, *, validation: bool = False) -> dict[str, str]:
+        """What a verifier placed by ``mode`` receives: that of ``tests/``, or of validation
+        rounds when ``validation``, whose tables go over the verifier's."""
+        environments = [self.verifier_environment]
+        if validation:
+            environments.append(self.validation_environment)
+        declared = [env for env in environments if env is not None]
+        base: dict[str, str] = self.environment
+        if mode is not VerificationMode.SHARED and declared:
+            base = {key: value for env in declared for key, value in env.items()}
+        own = self.validation if validation and self.validation is not None else {}
+        return {**base, **self.verifier, **own}
 
 
 class TaskSpec(BaseModel):
@@ -770,16 +796,23 @@ class TaskSpec(BaseModel):
     tools: ToolProvision = ToolProvision()
     verify: VerifySpec = VerifySpec()
     validation: VerifySpec | None = None
-    """Where rounds validate, when ``[validation]`` places them apart from ``tests/``;
-    :attr:`validation_spec` resolves it."""
+    """The verifier of validation rounds, where ``[verifier.validation]``, or a
+    ``validation/Dockerfile``, sets it apart from ``tests/``'s; :attr:`validation_spec`
+    resolves it."""
     variables: TaskVariables = TaskVariables()
     calibration: tuple[CalibrationCase, ...] = (DEFAULT_SOLUTION,)
     """Every calibration case, in the order ``ale calibrate`` runs them."""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
+    def images(self) -> tuple[ImageSpec, ...]:
+        """Its images: the solver's and each verifier's own."""
+        verifiers = (self.verify, *((self.validation,) if self.validation else ()))
+        return (self.image, *(each.image for each in verifiers if each.image is not None))
+
+    @property
     def spec_hash(self) -> str:
-        if any(image and image.kind is None for image in (self.image, self.verify.image)):
+        if any(image.kind is None for image in self.images):
             raise ValueError("a specification is hashed once the kinds of its images are decided")
         return content_hash(self.model_dump(mode="json"))
 
@@ -789,22 +822,33 @@ class TaskSpec(BaseModel):
 
     @property
     def validation_spec(self) -> VerifySpec:
-        """Where rounds validate: ``[validation]``'s, or ``tests/``'s."""
+        """The verifier of validation rounds: its own, or ``tests/``'s."""
         return self.validation or self.verify
 
     @property
+    def validation_timeout(self) -> float:
+        """The verifier of validation rounds' limit: its own, or ``tests/``'s."""
+        return (
+            self.timeouts.verify if self.timeouts.validation is None else self.timeouts.validation
+        )
+
+    @property
     def solver_network(self) -> NetworkPolicy:
-        """The network a solver Sandbox is created with: the agent's, and when ``tests/`` or
-        ``validation/`` runs in it, one that can also apply the verifier's. A Provider fixes
-        at creation whether it can seal a Sandbox and relay it to the egress proxy, so this
-        is the least open provisioning either phase needs: a proxied policy (``allowlist`` or
-        ``blocklist``), with every host when both are allowlists and else the agent's or, when
-        the agent's is not proxied, the verifier's; then ``block``; then ``open``. Each phase
-        then applies its own policy."""
-        placements = (self.verify.environment_mode, self.validation_spec.environment_mode)
-        if VerificationMode.SHARED not in placements:
+        """The network a solver Sandbox is created with: the agent's, and when a verifier
+        runs in it or in a Sandbox booted from its snapshot as a shared one, one that can also
+        apply that verifier's. A Provider fixes at creation whether it can seal a Sandbox and
+        relay it to the egress proxy, so this is the least open provisioning every phase
+        needs: a proxied policy (``allowlist`` or ``blocklist``), with every host when all are
+        allowlists and else the agent's or, when the agent's is not proxied, a verifier's;
+        then ``block``; then ``open``. Each phase then applies its own policy."""
+        shared = [
+            placed.network
+            for placed in dict.fromkeys((self.verify, self.validation_spec))
+            if placed.environment_mode is VerificationMode.SHARED
+        ]
+        if not shared:
             return self.network
-        policies = (self.network, self.verify.network)
+        policies = (self.network, *shared)
         if all(policy.mode is NetworkMode.ALLOWLIST for policy in policies):
             hosts = dict.fromkeys(host for policy in policies for host in policy.allowed_hosts)
             return NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=tuple(hosts))
@@ -850,15 +894,9 @@ class TaskSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _one_verifier_network(self) -> Self:
-        if self.validation is not None and self.validation.network != self.verify.network:
-            raise ValueError("validation/ runs with the verifier's network, as tests/ does")
-        return self
-
-    @model_validator(mode="after")
     def _kind_left_open_only_for_a_registry(self) -> Self:
-        for image in (self.image, self.verify.image):
-            if image is None or image.kind is not None:
+        for image in self.images:
+            if image.kind is not None:
                 continue
             local = image.ref is not None and PurePosixPath(image.ref).is_absolute()
             if self.os is not OperatingSystem.LINUX or local:
@@ -870,9 +908,10 @@ class TaskSpec(BaseModel):
     @model_validator(mode="after")
     def _container_features_need_a_container(self) -> Self:
         sandboxes = [("solver", self.image, self.resources)]
-        if self.verify.resources is not None:
-            image = self.verify.image or self.image
-            sandboxes.append(("verifier", image, self.verify.resources.as_resources()))
+        for role, placed in (("verifier", self.verify), ("validation verifier", self.validation)):
+            if placed is not None and placed.resources is not None:
+                image = placed.image or self.image
+                sandboxes.append((role, image, placed.resources.as_resources()))
         for role, image, resources in sandboxes:
             if resources.container_features and image.kind is ImageKind.VM:
                 raise ValueError(
@@ -902,6 +941,12 @@ _NETWORK_MODES = {
 }
 
 _HARBOR_ENVIRONMENT_ONLY = frozenset({"memory", "storage", "tpu"})
+_VERIFIER_ENVIRONMENT_ONLY = _HARBOR_ENVIRONMENT_ONLY | {
+    "healthcheck",
+    "mcp_servers",
+    "os",
+    "skills_dir",
+}
 
 #: A ``gpu_types`` entry: a GPU model as Harbor names it, such as ``H100`` or ``RTX-PRO-6000``.
 _GpuType = Annotated[str, Field(pattern=r"[A-Za-z0-9]")]
@@ -912,9 +957,10 @@ _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
     (): frozenset({"multi_step_reward_strategy", "source", "steps"}),
     ("environment",): _HARBOR_ENVIRONMENT_ONLY,
     ("verifier",): frozenset({"collect"}),
+    ("verifier", "validation"): frozenset({"collect"}),
     # Harbor runs a healthcheck in the agent's environment only.
-    ("verifier", "environment"): _HARBOR_ENVIRONMENT_ONLY
-    | {"healthcheck", "mcp_servers", "os", "skills_dir"},
+    ("verifier", "environment"): _VERIFIER_ENVIRONMENT_ONLY,
+    ("verifier", "validation", "environment"): _VERIFIER_ENVIRONMENT_ONLY,
 }
 
 
@@ -1222,8 +1268,8 @@ class VerifierEnvironmentTable(BaseModel):
         return self
 
 
-class VerifierTable(BaseModel):
-    """``[verifier]``: the verifier's budget, network and where it runs."""
+class _VerifierKeys(BaseModel):
+    """What ``[verifier]`` and ``[verifier.validation]`` each say of their verifier."""
 
     model_config = _FROZEN
 
@@ -1236,8 +1282,8 @@ class VerifierTable(BaseModel):
     ) = None
     """Harbor's account for the verifier, by name or uid; unset, the framework's identity."""
     network_mode: _NetworkModeName | None = None
-    """The verifier's own network, for ``tests/`` and ``validation/`` alike; unset, Harbor's
-    baseline applies (``TaskConfig.verifier_network``)."""
+    """The verifier's own network; unset, Harbor's baseline applies
+    (``TaskConfig.verifier_network``)."""
     allowed_hosts: tuple[str, ...] | None = None
     blocked_hosts: tuple[str, ...] | None = None
 
@@ -1273,61 +1319,95 @@ class VerifierTable(BaseModel):
         if self.environment is None:
             return self
         if self.environment_mode is VerificationMode.SHARED:
-            raise ValueError("environment_mode 'shared' cannot declare [verifier.environment]")
+            raise ValueError("environment_mode 'shared' cannot declare an environment")
         if self.environment_mode is VerificationMode.SNAPSHOT and (
             image_keys := sorted({"image", "build_timeout_sec"} & self.environment.model_fields_set)
         ):
             raise ValueError(
                 "environment_mode 'snapshot' boots the verifier from the solver's snapshot, so "
-                f"[verifier.environment] cannot set {' or '.join(image_keys)}"
+                f"its environment cannot set {' or '.join(image_keys)}"
             )
         return self
 
 
-class ValidationTable(BaseModel):
-    """``[validation]``, ALE's: where rounds validate, when not where ``[verifier]`` puts
-    ``tests/``. Its budget and variables are ``[verifier]``'s, and a separate one runs the
-    image a separate verifier of ``tests/`` would, as it has no image of its own."""
+class ValidationTable(_VerifierKeys):
+    """``[verifier.validation]``, ALE's: the verifier of validation rounds, wherever it
+    differs from ``[verifier]``'s, with every key ``[verifier]`` has. ``TaskConfig`` resolves
+    it over ``[verifier]`` (:meth:`VerifierTable.for_validation`)."""
 
-    model_config = _FROZEN
 
-    environment_mode: VerificationMode | None = None
-    environment: VerifierEnvironmentTable | None = None
+#: The keys that name a verifier's network together: one names them all.
+_NETWORK_KEYS = frozenset({"network_mode", "allowed_hosts", "blocked_hosts"})
+_ENVIRONMENT_NETWORK_KEYS = _NETWORK_KEYS | {"allow_internet"}
+_IMAGE_KEYS = frozenset({"image", "build_timeout_sec"})
 
-    @property
-    def mode(self) -> VerificationMode:
-        """As ``[verifier]``'s: separate when an environment is declared."""
-        if self.environment_mode is not None:
-            return self.environment_mode
-        if self.environment is not None:
-            return VerificationMode.SEPARATE
-        return VerificationMode.SHARED
 
-    # --- validation ---
+class VerifierTable(_VerifierKeys):
+    """``[verifier]``: the verifier's budget, network and where it runs, and in
+    ``[verifier.validation]`` what differs for the verifier of validation rounds."""
 
-    @model_validator(mode="after")
-    def _environment_fits_the_mode(self) -> Self:
-        if self.environment is None:
-            return self
-        if self.environment_mode is VerificationMode.SHARED:
-            raise ValueError("environment_mode 'shared' cannot declare [validation.environment]")
-        if keys := sorted(
-            {"image", "build_timeout_sec", "env"} & self.environment.model_fields_set
+    validation: ValidationTable | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    def for_validation(self) -> VerifierTable:
+        """The verifier of validation rounds: each key ``[verifier.validation]`` sets, over
+        ``[verifier]``'s. A table it sets merges into ``[verifier]``'s key by key, ``env``
+        variable by variable; a network it names, its own or its environment's baseline,
+        replaces every inherited one; and what it cannot use is not inherited: a shared one
+        inherits no environment, a snapshot one no image, one without GPUs no GPU model or
+        memory. An environment it declares over a shared verifier makes it separate, as
+        Harbor resolves a verifier that declares one."""
+        own = self.validation
+        if own is None:
+            return self.model_copy(update={"validation": None})
+        keys = own.model_fields_set
+        values: dict[str, Any] = {
+            name: getattr(own if name in keys else self, name)
+            for name in ("timeout_sec", "environment_mode", "user")
+        }
+        if (
+            "environment_mode" not in keys
+            and own.environment is not None
+            and self.environment_mode is VerificationMode.SHARED
         ):
-            raise ValueError(
-                f"[validation.environment] cannot set {' or '.join(keys)}: a validation "
-                "verifier runs the image a separate verifier of tests/ would, with "
-                "[verifier]'s variables"
-            )
-        if keys := sorted(
-            {"network_mode", "allowed_hosts", "blocked_hosts", "allow_internet"}
-            & self.environment.model_fields_set
-        ):
-            raise ValueError(
-                f"[validation.environment] cannot set {' or '.join(keys)}: a validation "
-                "verifier runs with the verifier's network, as tests/ does"
-            )
-        return self
+            values["environment_mode"] = None
+        values["env"] = {**self.env, **own.env}
+        named = own.environment is not None and bool(
+            own.environment.model_fields_set & _ENVIRONMENT_NETWORK_KEYS
+        )
+        network = own if keys & _NETWORK_KEYS or named else self
+        values.update({name: getattr(network, name) for name in _NETWORK_KEYS})
+        mode = values["environment_mode"]
+        inherited = None if mode is VerificationMode.SHARED else self.environment
+        values["environment"] = _merged_environment(
+            inherited, own.environment, snapshot=mode is VerificationMode.SNAPSHOT
+        )
+        return VerifierTable.model_validate(values)
+
+
+def _merged_environment(
+    inherited: VerifierEnvironmentTable | None,
+    own: VerifierEnvironmentTable | None,
+    *,
+    snapshot: bool,
+) -> VerifierEnvironmentTable | None:
+    """``own`` over ``inherited``, key by key, without an inherited image for a snapshot
+    verifier, an inherited network where ``own`` names one, or an inherited GPU model or
+    memory where ``own`` asks for no GPUs."""
+    if inherited is None:
+        return own
+    keys = set(own.model_fields_set) if own is not None else set()
+    kept = set(inherited.model_fields_set) - keys
+    if snapshot:
+        kept -= _IMAGE_KEYS
+    if keys & _ENVIRONMENT_NETWORK_KEYS:
+        kept -= _ENVIRONMENT_NETWORK_KEYS
+    if own is not None and "gpus" in keys and not own.gpus:
+        kept -= {"gpu_types", "gpu_memory_mb"}
+    values = {name: getattr(inherited, name) for name in kept}
+    if own is not None:
+        values.update({name: getattr(own, name) for name in keys})
+        values["env"] = {**inherited.env, **own.env}
+    return VerifierEnvironmentTable.model_validate(values)
 
 
 class SolutionTable(BaseModel):
@@ -1359,8 +1439,6 @@ class TaskConfig(BaseModel):
     environment: EnvironmentTable = EnvironmentTable()
     agent: AgentTable = AgentTable()
     verifier: VerifierTable = VerifierTable()
-    validation: ValidationTable | None = None
-    """``[validation]``; without it rounds validate where ``[verifier]`` puts ``tests/``."""
     solution: SolutionTable = SolutionTable()
     calibration: tuple[CalibrationCase, ...] = ()
     """``[[calibration]]`` as written; ``calibration_cases`` adds the default ``solution``."""
@@ -1403,11 +1481,15 @@ class TaskConfig(BaseModel):
 
     @property
     def verifier_network(self) -> NetworkPolicy:
-        """Harbor's resolution for ``tests/`` and ``validation/``: ``[verifier]``'s own policy;
-        else, for a verifier with a Sandbox of its own and a ``[verifier.environment]``, that
-        table's baseline, open when it names none, as Harbor's separate environment is; else
+        """Harbor's resolution for ``tests/``: ``[verifier]``'s own policy; else, for a
+        verifier with a Sandbox of its own and a ``[verifier.environment]``, that table's
+        baseline, open when it names none, as Harbor's separate environment is; else
         ``[environment]``'s baseline; else open, ALE's default for verification."""
-        verifier = self.verifier
+        return self.network_of(self.verifier)
+
+    def network_of(self, verifier: VerifierTable) -> NetworkPolicy:
+        """The network of the verifier ``verifier`` describes, by Harbor's resolution: that
+        of ``tests/``, or with :meth:`VerifierTable.for_validation`, of validation rounds."""
         if (own := verifier.network) is not None:
             return own
         open_ = NetworkPolicy(mode=NetworkMode.OPEN)
@@ -1487,14 +1569,33 @@ class TaskConfig(BaseModel):
         skills_dir = environment.skills_dir
         if skills_dir is not None and not _task_path(skills_dir, environment.os).is_absolute():
             raise ValueError("[environment].skills_dir must be an absolute path")
-        if verifier.user is not None and environment.os is OperatingSystem.WINDOWS:
-            raise ValueError(
-                "[verifier].user is for Linux and macOS; Windows verification runs as Administrator"
-            )
+        for table, declared in (
+            ("verifier", verifier),
+            ("verifier.validation", verifier.validation),
+        ):
+            if declared is None or declared.user is None:
+                continue
+            if environment.os is OperatingSystem.WINDOWS:
+                raise ValueError(
+                    f"[{table}].user is for Linux and macOS; Windows verification runs as "
+                    "Administrator"
+                )
+        rounds: VerifierTable | None = None
+        if verifier.validation is not None:
+            try:
+                rounds = verifier.for_validation()
+            except ValidationError as exc:
+                reasons = "; ".join(
+                    error["msg"].removeprefix("Value error, ") for error in exc.errors()
+                )
+                raise ValueError(
+                    f"[verifier.validation] over what it inherits from [verifier]: {reasons}"
+                ) from None
+        # The rounds' verifier as it resolves, whose GPU keys may each come from either table.
         for table, sized in (
             ("environment", environment),
             ("verifier.environment", verifier.environment),
-            ("validation.environment", self.validation and self.validation.environment),
+            ("verifier.validation.environment", rounds and rounds.environment),
         ):
             if sized is None or sized.gpus:
                 continue

@@ -1008,9 +1008,11 @@ def rounds_task(
     rounds: int = 2,
     mode: str = "shared",
     validation_dir: bool = True,
+    validation: dict[str, Any] | None = None,
     **config: Any,
 ) -> ManifestTask:
-    """A Task whose agent receives ``rounds`` validation rounds, verified in ``mode``; without
+    """A Task whose agent receives ``rounds`` validation rounds, verified in ``mode`` and
+    validated as ``validation``, its ``[verifier.validation]``, says; without
     ``validation_dir``, ``tests/`` validates."""
     root = scaffold_task(tmp_path / "task")
     if validation_dir:
@@ -1019,6 +1021,8 @@ def rounds_task(
     verifier: dict[str, Any] = {"environment_mode": mode}
     if mode != "shared":
         verifier["environment"] = {"cpus": 4, "memory_mb": 2048}
+    if validation is not None:
+        verifier["validation"] = validation
     edit_task_config(
         root,
         {

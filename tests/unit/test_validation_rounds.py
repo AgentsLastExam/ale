@@ -1521,8 +1521,9 @@ async def test_a_round_whose_logs_were_not_all_copied_gets_a_trajectory_marked_i
 async def test_validation_places_the_rounds_of_tests_where_there_is_no_validation_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without validation/, [validation] places the verifier of each round of tests/: here a
-    separate one in its own working directory, while tests/ scores the final state shared."""
+    """Without validation/, [verifier.validation] places the verifier of each round of tests/:
+    here a separate one in its own working directory, while tests/ scores the final state
+    shared."""
     runs: list[tuple[SandboxRole, str | None, list[str]]] = []
     exec_ = MemorySandbox.exec
 

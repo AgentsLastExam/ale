@@ -341,8 +341,9 @@ files a Harness leaves on disk. A Judge's session is open only while a verifier 
 Judge's token that reaches the agent, in feedback or from a verifier's process, is refused
 in its later turns. Before a solver is saved or kept, between turns included, ALE removes
 the credential files every Harness declares, whichever Harness ran. A refused call is traced
-as refused, `session_suspended`. The round's verifier has the verifier's network, open
-unless the Task seals it, and, under shared or snapshot verification, runs on the agent's
+as refused, `session_suspended`. The round's verifier has the network of the verifier of
+validation rounds, `[verifier.validation]`'s or else `[verifier]`'s, open unless the Task
+seals it, and, under shared or snapshot verification, runs on the agent's
 disk, so a `validation/` that runs the agent's program runs it with that network, as
 `tests/` would, and with `[agent].sudo` what the agent left there can write the round's
 feedback and reward; what reaches the agent is still only the round's reward, status and
@@ -390,7 +391,8 @@ solver and a separate or snapshot verifier the Provider selected and the leaf th
 the Sandbox with its container runtime, requested and effective resources, GPU allocation and
 sandbox observations, agent version and integrity, harness family, one optional Task-asset
 repository/path/commit/dirty observation, the name and value source of each Task variable,
-the agent's and the verifier's network policies, verification topology and image/resources,
+the agent's and each verifier's network policies, verification topology and image/resources,
+the verifier of validation rounds' among them where it has its own,
 sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 Leaves of one kind isolate a Task differently and give it different kernel features, so a
 result names the one that ran it, under a scheduler too.
