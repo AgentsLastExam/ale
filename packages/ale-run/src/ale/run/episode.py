@@ -1028,6 +1028,11 @@ async def run_episode(
         spec=task.spec,
         task_dir=task.folder.root if task.folder is not None else run_dir,
         validation_stage=task.validation_stage,
+        shown_stage=(
+            task.folder.stage_dir(task.validation_stage)
+            if task.spec.validation_visible and task.folder is not None
+            else None
+        ),
         run_dir=episode_dir,
         sandboxes=lease,
         artifacts=sink,

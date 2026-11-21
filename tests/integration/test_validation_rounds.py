@@ -54,7 +54,7 @@ leaks = home / "leaks"
 seen = leaks.read_text().splitlines() if leaks.is_file() else []
 turns = {
     name: (home / name).read_text().splitlines() if (home / name).is_file() else []
-    for name in ("shown", "written")
+    for name in ("shown", "written", "mounted")
 }
 # The oracle, which calibration runs, has no trajectory.
 trajectory = os.environ.get("ALE_TRAJECTORY_PATH")
@@ -231,6 +231,9 @@ async def test_the_agent_reads_the_stage_that_validates_where_the_task_shows_it_
     edit_task_config(root, {"verifier": {"validation": {"visibility": True}}})
     result = await _episode(tmp_path, root, DockerProvider())
     _check(result, stage=shown, shown=True)
+    # Docker mounts the Task folder's stage read-only in every turn's solver, copying none.
+    verification = json.loads((result.run_dir / "verification.json").read_text())
+    assert verification["mounted"] == ["turn 1", "turn 2", "turn 3"]
 
 
 @pytest.mark.asyncio

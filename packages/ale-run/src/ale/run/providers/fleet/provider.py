@@ -990,7 +990,8 @@ class FleetProvider(Provider):
             if parts.port is None:
                 raise ProviderCapabilityError(f"{url!r} has no explicit port to tunnel")
             targets[slot] = tunnel.target(parts.hostname or "127.0.0.1", parts.port)
-        sent = request.model_copy(update={"prepared_image": image})
+        # A Node holds none of this Host's files, so it copies what the agent is shown.
+        sent = request.model_copy(update={"prepared_image": image, "shown": None})
         body = CreateSandbox(
             grant=placement.grant or "",
             request=sent,

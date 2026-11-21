@@ -72,6 +72,7 @@ from ale.core.sandbox import (
     Sandbox,
     SandboxRequest,
     SandboxRole,
+    ShownDirectory,
 )
 from ale.core.task import Stage, Task
 from ale.core.taskspec import (
@@ -208,6 +209,13 @@ def _visible_dir(operating_system: OperatingSystem) -> PurePath:
     if operating_system is OperatingSystem.WINDOWS:
         return PureWindowsPath("C:/validation")
     return PurePosixPath("/opt/validation")
+
+
+def _shown(ctx: EpisodeContext) -> ShownDirectory | None:
+    """The stage that validates, where the Task shows it to the agent of each solver."""
+    if not ctx.spec.validation_visible or ctx.shown_stage is None:
+        return None
+    return ShownDirectory(source=str(ctx.shown_stage), target=str(_visible_dir(ctx.spec.os)))
 
 
 def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
@@ -644,6 +652,7 @@ class EpisodeProtocol:
             round_verifier_network_mode=spec.validation_spec.network.mode,
             planned_saves=validations,
             volumes=spec.volume_candidates,
+            shown=_shown(ctx),
             separate_verifier=_separate_verifier(spec, validations),
             resources=spec.resources,
             **_network(ctx, spec.solver_network),
@@ -901,10 +910,11 @@ class EpisodeProtocol:
             if folder.stage_entry(Stage.SETUP, ctx.spec.os):
                 await self._run_stage(ctx, sandbox, target, Phase.SETUP, stage=Stage.SETUP)
         await self._healthcheck(ctx, sandbox)
-        # The one stage a Task may show: verifiers still run the Host's own copy of it.
-        shown = folder.stage_dir(ctx.validation_stage) if folder is not None else None
-        if ctx.spec.validation_visible and shown is not None:
-            await sandbox.upload_dir(str(shown), str(_visible_dir(ctx.spec.os)))
+        # The one stage a Task may show: verifiers still run the Host's own copy of it. A
+        # leaf that mounted it read-only spares the copy.
+        shown = _shown(ctx)
+        if shown is not None and not sandbox.shown:
+            await sandbox.upload_dir(shown.source, shown.target)
 
     async def _healthcheck(self, ctx: EpisodeContext, sandbox: Sandbox) -> None:
         """Harbor's ``[environment.healthcheck]``, once setup is done, under setup's deadline.

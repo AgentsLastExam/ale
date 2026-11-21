@@ -102,3 +102,48 @@ def test_a_shown_tests_dir_is_part_of_what_the_agent_depended_on(tmp_path: Path)
         (task.folder.root / "tests" / "test.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
         changed = load_tasks(task.folder.root)[0].non_verifier_digest != task.non_verifier_digest
         assert changed is visibility
+
+
+@pytest.mark.asyncio
+async def test_a_leaf_that_mounts_the_stage_read_only_spares_the_copy(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    """Each solver's request names the Task folder's stage; one a leaf mounted is not copied."""
+
+    class Mounting(RoundsProvider):
+        async def create(self, request: Any) -> Any:
+            sandbox = await super().create(request)
+            sandbox.shown = request.shown is not None
+            return sandbox
+
+    provider = Mounting()
+    task = _task(tmp_path, rounds=1, validation={"visibility": True})
+    result = await _run(tmp_path, provider, task, TurnsHarness())
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert task.folder is not None
+    solvers = [
+        sandbox for sandbox in provider.sandboxes if sandbox.request.role is SandboxRole.SHARED
+    ]
+    assert len(solvers) == 2
+    for sandbox in solvers:
+        shown = sandbox.request.shown
+        assert shown is not None
+        assert (shown.source, shown.target) == (
+            str(task.folder.root / "validation"),
+            "/opt/validation",
+        )
+        assert "/opt/validation" not in sandbox.uploads
+    # No verifier is shown it; each stages its own.
+    assert all(
+        sandbox.request.shown is None
+        for sandbox in provider.sandboxes
+        if sandbox.request.role is SandboxRole.VERIFIER
+    )
+
+
+def test_docker_mounts_a_path_with_a_comma_as_one_field() -> None:
+    from ale.run.providers.docker.provider import _bind_mount
+
+    assert _bind_mount("/tasks/a,b/validation", "/opt/validation") == (
+        'type=bind,"src=/tasks/a,b/validation",dst=/opt/validation,readonly'
+    )

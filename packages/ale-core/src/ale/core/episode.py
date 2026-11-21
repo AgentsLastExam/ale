@@ -198,6 +198,9 @@ class EpisodeContext:
     """Validated solver image selected before provisioning."""
     prepared_verifier_image: PreparedTaskImage | None = None
     """Prepared dedicated verifier image; None for shared verification."""
+    shown_stage: Path | None = None
+    """The folder on the Host of the stage that validates, where the Task shows it to its
+    agent (``[verifier.validation].visibility``)."""
     prepared_validation_image: PreparedTaskImage | None = None
     """The image of the verifier of validation rounds in a Sandbox of its own; None where
     they validate shared or not at all."""

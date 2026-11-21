@@ -771,8 +771,8 @@ class ScriptedCliHarness(CliHarness):
     session as a CLI's stream would. On Linux it also starts a process meant to outlive the
     turn, after noting in ``survivors`` any an earlier turn left that still runs, in
     ``leaks`` what of ``validation/``, ``tests/`` and their feedback it can see, and in
-    ``shown`` and ``written`` whether it reads, and changes, a copy of the stage that
-    validates the Task shows it.
+    ``shown``, ``written`` and ``mounted`` whether it reads, and changes, a copy of the stage
+    that validates the Task shows it, and whether that is a read-only mount.
     """
 
     name = "scripted-cli"
@@ -811,6 +811,9 @@ for leaked in /opt/ale/validation /opt/ale/tests /logs/verifier/feedback.md; do
   if [ -e "$leaked" ]; then echo "turn $turn: $leaked" >> {home}/leaks; fi
 done
 if [ -r /opt/validation/verify.py ]; then echo "turn $turn" >> {home}/shown; fi
+if awk '$2 == "/opt/validation" && $4 ~ /^ro(,|$)/' /proc/mounts | grep -q .; then
+  echo "turn $turn" >> {home}/mounted
+fi
 if touch /opt/validation/verify.py 2>/dev/null; then echo "turn $turn" >> {home}/written; fi
 """
         script = f"""

@@ -69,10 +69,13 @@ and `C:\ProgramData\ALE` on Windows.
 If `environment/setup/` exists, ALE uploads the complete directory to `setup` under the
 staging root, opens egress, and executes `setup.sh` on Linux and macOS or `setup.ps1` on
 Windows with that directory as cwd, so its files are available by ordinary relative paths.
-Setup is optional and runs once. Where `[verifier.validation].visibility` is true, setup ends
-by copying the stage that validates, `validation/` or else `tests/`, to `/opt/validation`
-(`C:\validation` on Windows) as the framework, where the agent and the oracle read it in
-every turn ([Security](security.md#5-answers-are-absent-not-hidden)).
+Setup is optional and runs once. Where `[verifier.validation].visibility` is true, the agent
+and the oracle read the stage that validates, `validation/` or else `tests/`, at
+`/opt/validation` (`C:\validation` on Windows) in every turn
+([Security](security.md#5-answers-are-absent-not-hidden)): a leaf that mounts Host
+directories mounts the Task folder's read-only there as the solver starts, which spares a
+copy of large assets, and setup ends by copying it there as the framework on every other
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#shown-stage)).
 
 ### Agent or oracle
 

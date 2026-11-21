@@ -644,8 +644,9 @@ as the final one is, so `judge(..., trajectory=True)` and the `checks.trajectory
 work in every round as they do in `tests/`.
 
 With `[verifier.validation] visibility = true`, the agent works beside a read-only copy of
-the stage that validates, copied as setup ends to `/opt/validation` (`C:\validation` on
-Windows), and a line below the instruction says where it is: a validation set the agent may
+the stage that validates at `/opt/validation` (`C:\validation` on Windows), mounted from the
+Task folder where the solver's Provider mounts Host directories and copied as setup ends
+elsewhere, and a line below the instruction says where it is: a validation set the agent may
 study, its data and how it is scored, as a researcher studies one. The default is `false`,
 which keeps the stage out of every turn. A verifier always runs its own copy, so the agent's
 reaches no score.
