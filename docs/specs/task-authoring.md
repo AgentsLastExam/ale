@@ -148,6 +148,7 @@ environment_mode = "snapshot"               # shared | separate | snapshot
 env = { SPLIT = "validation" }              # over [verifier].env, by variable
 # network_mode = "public"                   # with its hosts, replaces [verifier]'s whole
 # user = "grader"                           # as [verifier].user
+visibility = false                          # a read-only copy for the agent; default false
 
 [verifier.validation.environment]           # over [verifier.environment], key by key
 # image = "registry.example/val:tag"        # separate only; not with validation/Dockerfile
@@ -642,6 +643,13 @@ receives the agent's trajectory up to the turn that ended, converted as that tur
 as the final one is, so `judge(..., trajectory=True)` and the `checks.trajectory_*` checks
 work in every round as they do in `tests/`.
 
+With `[verifier.validation] visibility = true`, the agent works beside a read-only copy of
+the stage that validates, copied as setup ends to `/opt/validation` (`C:\validation` on
+Windows), and a line below the instruction says where it is: a validation set the agent may
+study, its data and how it is scored, as a researcher studies one. The default is `false`,
+which keeps the stage out of every turn. A verifier always runs its own copy, so the agent's
+reaches no score.
+
 A Task without `validation/` validates with `tests/` instead: its rounds run `tests/` in the
 verifier of validation rounds, so a Task whose data cannot be split still gives its agent
 results between turns. The reward that agent sees is the score it is ranked by, so it can
@@ -650,7 +658,8 @@ overfit to the test set. It receives that reward, the round's status and the fee
 records that `tests/` graded the rounds
 ([Trace](trace.md#verification-result)), setting such a score apart from one earned against
 a held-out validation set. Run policy can give rounds to any Task, so a Task whose test set
-must stay unseen has `validation/`.
+must stay unseen has `validation/`. With `visibility = true` it is `tests/` that the agent
+reads.
 
 With `[agent].validation_rounds = N`, the agent works in up to `N + 1` turns: its first turn
 ends, `validation/`, or else `tests/`, scores the state it left, the agent receives that
