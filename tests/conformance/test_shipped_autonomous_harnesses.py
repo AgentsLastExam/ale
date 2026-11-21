@@ -33,6 +33,8 @@ def _adapters(base: type[CliHarness]) -> list[type[CliHarness]]:
 
 
 HARNESSES = [adapter() for adapter in _adapters(CliHarness)]
+#: What a CLI requires before the UUID of a session ALE names: OpenCode's IDs start "ses".
+SESSION_PREFIXES = {"opencode": "ses_"}
 PROMPT = "Unique prompt: 多行\n'quoted' $HOME `cmd`"
 
 
@@ -120,7 +122,9 @@ async def test_prompt_arrives_as_a_file_and_resume_asks_for_its_exact_session(
     if native_session_id is not None:
         assert command.session_id == native_session_id
     elif command.session_id is not None:
-        uuid.UUID(command.session_id)
+        prefix = SESSION_PREFIXES.get(harness.name, "")
+        assert command.session_id.startswith(prefix)
+        uuid.UUID(command.session_id.removeprefix(prefix))
         again = await harness.prepare_command(
             prompt_path,
             PathSandbox(),  # type: ignore[arg-type]

@@ -70,9 +70,10 @@ def prompt_argument(prompt_path: str) -> tuple[str, str]:
 
 
 #: What a CLI rewrites in a value of its own configuration file: ``$`` references, Forge's
-#: ``{{ }}`` templates and Pi's leading ``!`` command. Several offer no escape, so a header is
-#: refused for all of them rather than arriving changed in some.
-_CONFIG_EXPANSION = re.compile(r"\$|\{\{|^!")
+#: ``{{ }}`` templates, Pi's leading ``!`` command and OpenCode's ``{env:}`` and ``{file:}``.
+#: Several offer no escape, so a header is refused for all of them rather than arriving
+#: changed in some.
+_CONFIG_EXPANSION = re.compile(r"\$|\{\{|^!|\{(?:env|file):")
 
 
 def http_headers(resolved: ResolvedMcpServer) -> dict[str, dict[str, str]]:
@@ -178,8 +179,9 @@ class CliHarness(AutonomousHarness):
             for name, value in resolved.headers.items():
                 if _CONFIG_EXPANSION.search(value):
                     raise AgentUnsupportedError(
-                        f"MCP server {resolved.name} header {name}: agent CLIs expand $, {{{{ and "
-                        "a leading ! in their configuration, so the value would change"
+                        f"MCP server {resolved.name} header {name}: agent CLIs expand $, {{{{, "
+                        "{env:, {file: and a leading ! in their configuration, so the value "
+                        "would change"
                     )
 
     async def install(self, sandbox: Sandbox) -> str:
