@@ -50,7 +50,8 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - API-key and shipped subscription credentials, Judge keys included, remain on the Host
   Gateway; a sandbox holds episode tokens and only the variables its Task declares.
   `tests/`, `validation/`, `solution/` and `calibration/` never appear during the evaluated
-  agent phase.
+  agent phase, except a read-only copy of the stage that validates where a Task sets
+  `[verifier.validation].visibility`.
 
 ## Local guides
 

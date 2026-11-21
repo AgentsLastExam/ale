@@ -769,8 +769,10 @@ class ScriptedCliHarness(CliHarness):
     and appends it to ``work.txt`` in the agent's home, so a verifier that counts the lines
     scores more each turn and reads which prompt each turn received, and reports its
     session as a CLI's stream would. On Linux it also starts a process meant to outlive the
-    turn, after noting in ``survivors`` any an earlier turn left that still runs, and in
-    ``leaks`` what of ``validation/``, ``tests/`` and their feedback it can see.
+    turn, after noting in ``survivors`` any an earlier turn left that still runs, in
+    ``leaks`` what of ``validation/``, ``tests/`` and their feedback it can see, and in
+    ``shown``, ``written`` and ``mounted`` whether it reads, and changes, a copy of the stage
+    that validates the Task shows it, and whether that is a read-only mount.
     """
 
     name = "scripted-cli"
@@ -808,6 +810,11 @@ done
 for leaked in /opt/ale/validation /opt/ale/tests /logs/verifier/feedback.md; do
   if [ -e "$leaked" ]; then echo "turn $turn: $leaked" >> {home}/leaks; fi
 done
+if [ -r /opt/validation/verify.py ]; then echo "turn $turn" >> {home}/shown; fi
+if awk '$2 == "/opt/validation" && $4 ~ /^ro(,|$)/' /proc/mounts | grep -q .; then
+  echo "turn $turn" >> {home}/mounted
+fi
+if touch /opt/validation/verify.py 2>/dev/null; then echo "turn $turn" >> {home}/written; fi
 """
         script = f"""
 mkdir -p {directory}

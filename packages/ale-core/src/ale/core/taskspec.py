@@ -790,6 +790,9 @@ class TaskSpec(BaseModel):
     validation_rounds: int = Field(default=0, ge=0)
     """``[agent].validation_rounds``: how many results of ``validation/``, or else ``tests/``,
     the evaluated agent receives, each between two of its turns."""
+    validation_visible: bool = Field(default=False, exclude_if=lambda value: not value)
+    """``[verifier.validation].visibility``: whether the agent and the oracle work beside a
+    read-only copy of the stage that validates."""
     healthcheck: Healthcheck | None = Field(default=None, exclude_if=lambda value: value is None)
     """``[environment.healthcheck]``, run where the agent starts once setup is done."""
     artifacts: tuple[Artifact, ...] = ()
@@ -1334,6 +1337,10 @@ class ValidationTable(_VerifierKeys):
     """``[verifier.validation]``, ALE's: the verifier of validation rounds, wherever it
     differs from ``[verifier]``'s, with every key ``[verifier]`` has. ``TaskConfig`` resolves
     it over ``[verifier]`` (:meth:`VerifierTable.for_validation`)."""
+
+    visibility: bool = Field(default=False, strict=True)
+    """Whether the agent has a read-only copy of the stage that validates, ``validation/``,
+    or else ``tests/``, as it is in the Task folder."""
 
 
 #: The keys that name a verifier's network together: one names them all.

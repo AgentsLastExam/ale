@@ -229,6 +229,17 @@ filled from the image, a view of a stack of two layers, a deletion through it ke
 whiteout that the next view honours, and a container engine's images and deletions kept by a
 snapshot written out and loaded in another allocation.
 
+## Shown stage
+
+Where a Task shows its agent the stage that validates
+([`[verifier.validation].visibility`](../../../../../../docs/specs/task-authoring.md#validation)),
+a solver's request names the Task folder's directory and where it goes. Docker mounts it
+there read-only as the container starts (`--mount type=bind,...,readonly`), labelled
+`ale.shown`, so no copy of its assets is made, a Sandbox booted from a snapshot mounts it
+again, and not even the agent's sudo writes to it. Every other Provider, and Docker on a Fleet
+Node, which holds none of the Run's files, leaves it to the episode, which copies it as setup
+ends.
+
 ## Reattaching by handle
 
 A Sandbox's `handle` names it to `reattach` and `discard`, by which another process on the

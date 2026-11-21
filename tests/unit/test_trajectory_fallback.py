@@ -45,7 +45,7 @@ def test_conversion_failure_keeps_a_minimal_trajectory_and_the_native_logs(
         agent_run=AgentRun(exit_code=0, final_message="Report written."),
         episode_id="episode",
         trajectory_id="trajectory-1",
-        spec=SimpleNamespace(instruction="Write the report."),
+        spec=SimpleNamespace(instruction="Write the report.", validation_visible=False),
         run_dir=tmp_path,
         session=SimpleNamespace(model="model", token="secret-episode-token"),
         secrets=("secret-episode-token",),

@@ -333,6 +333,15 @@ validated, are the only channel from either to the agent; the final run of `test
 it not at all. What the feedback reveals is the Task author's decision, so a Task whose test
 set must stay unseen has `validation/`, whose feedback keeps out what `tests/` checks.
 
+The one exception is a Task's own: `[verifier.validation].visibility = true` gives the agent
+the stage that validates, `validation/` or else `tests/`, at a fixed path outside every
+directory the agent owns, readable by it and writable only by the framework: a read-only
+mount of the Task folder's where the leaf mounts Host directories, else a copy written once
+setup is done. It is for a validation set the agent may study, as a researcher reads
+the validation code and data, and makes `tests/` visible where it validates. A verifier
+always runs its own copy, staged from the Host, so an agent with `[agent].sudo` that changes
+the one it reads changes nothing that scores it.
+
 The agent's Gateway session is open from its creation through its first turn and then only
 while a later turn runs, so between turns and after the last the Gateway refuses calls with
 the agent's episode token: code run during validation, and a `tests/` that runs the agent's

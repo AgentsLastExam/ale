@@ -52,6 +52,10 @@ survivors = home / "survivors"
 outlived = len(survivors.read_text().splitlines()) if survivors.is_file() else 0
 leaks = home / "leaks"
 seen = leaks.read_text().splitlines() if leaks.is_file() else []
+turns = {
+    name: (home / name).read_text().splitlines() if (home / name).is_file() else []
+    for name in ("shown", "written", "mounted")
+}
 # The oracle, which calibration runs, has no trajectory.
 trajectory = os.environ.get("ALE_TRAJECTORY_PATH")
 steps = json.loads(Path(trajectory).read_text())["steps"] if trajectory else []
@@ -64,6 +68,7 @@ result = {
     "leaks": seen,
     "prompts": prompts,
     "split": os.environ.get("SPLIT"),
+    **turns,
 }
 write(result, feedback=f"{len(lines)} of 3 lines; the last: {lines[-1] if lines else ''}")
 """
@@ -116,9 +121,10 @@ async def _episode(tmp_path: Path, root: Path, provider: Provider) -> Any:
     )
 
 
-def _check(result: Any, rounds: int = 2, *, stage: str = "validation") -> None:
+def _check(result: Any, rounds: int = 2, *, stage: str = "validation", shown: bool = False) -> None:
     """``rounds + 1`` turns, a round ``stage`` scored between each two, tests/ once on the
-    final state."""
+    final state; every turn read the copy of ``stage`` where it was ``shown``, and none
+    changed it."""
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": round(min(1.0, (rounds + 1) / 3), 2)}
     scores = [round(min(1.0, index / 3), 2) for index in range(1, rounds + 1)]
@@ -146,6 +152,8 @@ def _check(result: Any, rounds: int = 2, *, stage: str = "validation") -> None:
     # validation/, tests/ or what they wrote.
     assert verification["survivors"] == 0
     assert verification["leaks"] == []
+    assert verification["shown"] == ([f"turn {i}" for i in range(1, rounds + 2)] if shown else [])
+    assert verification["written"] == []
     # Each round's verifier received the trajectory of the turns so far, which the round
     # keeps; the final one received every turn's.
     for index in range(1, rounds + 1):
@@ -209,6 +217,23 @@ async def test_an_agent_improves_over_rounds_tests_scores_without_validation_in_
         "trajectory.json",
         "verification.json",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validation", [True, False])
+async def test_the_agent_reads_the_stage_that_validates_where_the_task_shows_it_in_docker(
+    tmp_path: Path, validation: bool
+) -> None:
+    """Every turn reads its read-only copy, of validation/ or else of tests/, and cannot
+    change it; the rounds and the final score run the Host's."""
+    shown = "validation" if validation else "tests"
+    root = _task(tmp_path / f"rounds-shown-{shown}", "shared", validation=validation)
+    edit_task_config(root, {"verifier": {"validation": {"visibility": True}}})
+    result = await _episode(tmp_path, root, DockerProvider())
+    _check(result, stage=shown, shown=True)
+    # Docker mounts the Task folder's stage read-only in every turn's solver, copying none.
+    verification = json.loads((result.run_dir / "verification.json").read_text())
+    assert verification["mounted"] == ["turn 1", "turn 2", "turn 3"]
 
 
 @pytest.mark.asyncio
