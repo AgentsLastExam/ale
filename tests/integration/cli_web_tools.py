@@ -51,6 +51,7 @@ from ale.run.harnesses.hermes import HermesHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
@@ -120,6 +121,8 @@ SEARCHES: dict[type[CliHarness], Search] = {
     KimiCodeHarness: Search("openai-chat-completions"),
     OpenHandsCliHarness: Search("anthropic"),
     PiCliHarness: Search("openai-chat-completions"),
+    # Its websearch runs in the Sandbox, and is off unless a search service is named.
+    OpenCodeHarness: Search("openai-chat-completions"),
 }
 
 

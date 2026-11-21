@@ -70,6 +70,7 @@ from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.harnesses.openclaw_cli.adapter import _supported_node
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
@@ -487,6 +488,7 @@ CLI_HARNESSES = [
     (KimiCodeHarness, '"headers"'),
     (MuseCodeHarness, '"headers"'),
     (OpenClawCliHarness, '"headers"'),
+    (OpenCodeHarness, '"headers"'),
     (OpenHandsCliHarness, '"headers"'),
     (PiCliHarness, '"headers"'),
     (QwenCodeHarness, '"headers"'),
@@ -509,7 +511,9 @@ async def test_every_cli_writes_a_remote_server_s_headers_natively(harness_type,
 
 
 @pytest.mark.parametrize(("harness_type", "key"), CLI_HARNESSES)
-@pytest.mark.parametrize("value", ["pa$$word", "Bearer ${HOME}", "{{env.HOME}}", "!whoami"])
+@pytest.mark.parametrize(
+    "value", ["pa$$word", "Bearer ${HOME}", "{{env.HOME}}", "!whoami", "Bearer {env:HOME}"]
+)
 def test_a_header_a_cli_would_expand_is_refused_for_every_cli(
     harness_type, key: str, value: str
 ) -> None:
@@ -549,6 +553,7 @@ SSE_SPELLINGS = [
     (KimiCodeHarness, '"transport": "sse"'),
     (MuseCodeHarness, None),
     (OpenClawCliHarness, '"transport": "sse"'),
+    (OpenCodeHarness, '"url": "https://mcp.example.org/sse"'),
     (OpenHandsCliHarness, '"transport": "sse"'),
     (PiCliHarness, '"url": "https://mcp.example.org/sse"'),
     (QwenCodeHarness, '"url": "https://mcp.example.org/sse"'),
@@ -2293,6 +2298,20 @@ async def test_release_install_picks_the_asset_for_the_sandbox_platform(
         "",
         "",
     ]
+
+
+async def test_a_release_binary_goes_where_its_program_looks_for_it() -> None:
+    sandbox = ReleaseSandbox("x86_64")
+    await ensure_release_binary(
+        sandbox,  # type: ignore[arg-type]
+        binary="fixture",
+        version="2.0.0",
+        assets=ReleasedHarness.release_assets,
+        directory="/home/user/.cache/program/bin",
+    )
+    (install,) = [command for command in sandbox.commands if command[:2] == ["python3", "-c"]]
+    assert install[5] == "/home/user/.cache/program/bin/fixture"
+    assert ["/home/user/.cache/program/bin/fixture", "--version"] in sandbox.commands
 
 
 async def test_release_install_fails_closed_on_an_unknown_platform_or_wrong_version() -> None:
