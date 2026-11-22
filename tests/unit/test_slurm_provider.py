@@ -143,7 +143,11 @@ def test_an_allocation_is_sized_for_every_verifier_it_may_hold_in_turn():
     )
     solver = needs(Resources(cpus=2, memory_mb=2048)).model_copy(update={"verifier": verifiers})
     assert _capacity(solver) == (3, step_memory_mb(6144), 0)
-    assert _capacity(solver, Resources(cpus=1, gpus=1)) == (3, step_memory_mb(6144), 1)
+    assert _capacity(solver, Resources(cpus=1, memory_mb=1024, gpus=1)) == (
+        3,
+        step_memory_mb(6144),
+        1,
+    )
 
 
 def test_a_sandbox_booted_from_a_snapshot_views_its_volumes_and_copies_its_engines():
@@ -215,7 +219,7 @@ def test_an_allocation_is_kept_while_its_episode_needs_a_snapshot_in_it():
     assert not held.idle  # its verifier boots from it here still
     snapshot.boots = 0
     assert held.idle
-    held.reserve(Resources())
+    held.reserve(Resources(cpus=1, memory_mb=1024))
     assert not held.idle
 
 
@@ -290,14 +294,16 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
         )
 
     view = [dict(path="/work", kind="view", layers=["x.1.0"], root=[0, 0, 0o755])]
-    booted, index, resolved, seed, specs = await slurm._boot(request(Resources(cpus=2, gpus=1)), ())
+    booted, index, resolved, seed, specs = await slurm._boot(
+        request(Resources(cpus=2, memory_mb=4096, gpus=1)), ()
+    )
     assert (booted, index, resolved.observed_identity, seed) == (held, "1", SAVED, SAVED)
     assert specs == view and held.viewing["1"] == {"x.1.0"}
     assert not written and not allocated
     # A verifier of the verifier's image views the volumes in the same allocation, which
     # loads that image.
     held.running.clear()
-    viewer = request(Resources(cpus=1)).model_copy(
+    viewer = request(Resources(cpus=1, memory_mb=1024)).model_copy(
         update={"snapshot": None, "volumes_from": handle}
     )
     booted, index, resolved, seed, specs = await slurm._boot(viewer, ())
