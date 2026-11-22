@@ -61,7 +61,8 @@ all of them; the Codex and Claude Code READMEs state theirs. A stream the provid
 cannot be sent again: it is recorded `failed` and its client retries it. A subscription
 token the provider rejects is refreshed once and the call sent again.
 
-The session keeps the failure in progress until the provider answers a call.
+The session keeps the failure in progress until the provider answers a call, and the
+episode protocol reads it when the agent's program stops.
 
 ## Dialects
 

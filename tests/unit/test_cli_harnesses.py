@@ -25,7 +25,6 @@ from ale.core.errors import (
     ConfigError,
     NativeContinuationError,
     PhaseTimeoutError,
-    SubscriptionProviderLimitError,
 )
 from ale.core.harness import (
     EffectiveAgentResources,
@@ -299,7 +298,7 @@ async def test_subscription_failure_keeps_native_reason_before_long_stderr() -> 
     sandbox = FakeSandbox(1)
     sandbox.native_stdout = b'{"type":"turn.failed","error":{"message":"rate limit reached token"}}'
     sandbox.native_stderr = b"unrelated warning\n" * 1000
-    with pytest.raises(SubscriptionProviderLimitError) as caught:
+    with pytest.raises(AgentError) as caught:
         await CodexCliHarness().launch(
             "work", sandbox, session(authentication="subscription"), timeout_sec=60
         )

@@ -11,6 +11,7 @@ so `task_error` means the same thing for every Task.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -611,6 +612,9 @@ class _Lease:
 def _open_sessions(sessions: tuple[GatewaySession, ...], opened: bool) -> None:
     for session in sessions:
         session.suspended = not opened
+        if opened:
+            # A turn's program answers for its own run's calls, not for an earlier turn's.
+            session.failure = None
 
 
 def _open_egress(session: GatewaySession, policy: NetworkPolicy) -> None:
@@ -1069,6 +1073,7 @@ async def run_episode(
         prepared_validation_image=task.prepared_validation_image,
         phase_callback=phase_callback,
         limit_refusal=lambda: _gateway_refusal(session),
+        model_provider_failure=lambda: _model_provider_failure(session),
         open_agent_session=None if session is None else partial(_open_sessions, (session,)),
         logging_policy=logging_policy or LoggingPolicy(),
         verification_config=verification_config or VerificationConfig(),
@@ -1331,6 +1336,13 @@ def _gateway_refusal(session: GatewaySession | None) -> LimitTermination | None:
         observed_value=refusal.observed,
         reason="the Gateway refused a model call",
     )
+
+
+def _model_provider_failure(session: GatewaySession | None) -> str | None:
+    failure = session.failure if session is not None else None
+    if failure is None:
+        return None
+    return failure.describe(asyncio.get_running_loop().time())
 
 
 def _exhausted(status: Status, resources: Resources) -> tuple[str, int] | None:

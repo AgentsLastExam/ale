@@ -23,7 +23,6 @@ from ale.core.errors import (
     SubscriptionCompatibilityError,
     SubscriptionEntitlementError,
     SubscriptionProfileError,
-    SubscriptionProviderLimitError,
     SubscriptionUnavailableError,
 )
 from ale.core.lock import AuthenticationProvenance
@@ -444,21 +443,6 @@ def classify_subscription_error(harness: str, detail: str) -> Exception:
         return SubscriptionCompatibilityError(
             f"{harness} no longer matches ALE's pinned subscription contract: {detail}"
         )
-    if any(
-        marker in lowered
-        for marker in (
-            "rate limit",
-            "rate_limit",
-            "quota",
-            "usage limit",
-            "weekly limit",
-            "too many requests",
-            "concurrency limit",
-            " 429",
-            "429 ",
-        )
-    ):
-        return SubscriptionProviderLimitError(f"{harness} subscription limit: {detail}")
     if any(
         marker in lowered
         for marker in (

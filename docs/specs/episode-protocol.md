@@ -98,7 +98,10 @@ An agent run that ends early, by a timeout, a limit, a failure or a refusal, mov
 evidence capture and verification, as in Harbor, because what it left is still its work. The
 Episode's status stays what stopped the agent, and `rewards` holds the score. If capture or
 verification then fails, that status stands without a score. An agent phase that never reached
-its run, or a guest that stopped replying, ends the Episode without verification.
+its run, or a guest that stopped replying, ends the Episode without verification. So does a
+run whose program fails while the model provider fails the agent's calls, as the Gateway
+saw ([Transport trace](trace.md#transport-trace)): the provider stopped it, not the agent,
+so the Episode ends `env_error` (`ModelProviderError`) and nothing scores it.
 
 A Sandbox lost to memory or storage ends the Episode at once, without verification, unless
 what stopped the agent before stands as above: lost after an OOM kill in it, at any time

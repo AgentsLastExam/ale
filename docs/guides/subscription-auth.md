@@ -84,8 +84,9 @@ configured limits, usage accounting and Transport Trace stay common.
 ## Limits
 
 - Provider subscription quota, billing and account concurrency remain provider-owned.
-- ALE retries one refreshable subscription `401` and one transient `429`; sustained
-  provider limits fail explicitly.
+- ALE refreshes a rejected subscription token once. A usage limit is not tried again
+  ([Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md#provider-failures))
+  and an agent whose CLI stops on one ends `env_error`, unscored.
 - Codex's subscription endpoint rejects `max_output_tokens`. ALE records completed usage
   and refuses later calls after a ceiling, but cannot hard-cap that current response with
   the public Responses field.

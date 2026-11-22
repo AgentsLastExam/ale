@@ -40,6 +40,7 @@ from ale.core.errors import (
     ConfigError,
     EnvironmentError_,
     GuestUnreachableError,
+    ModelProviderError,
     NativeContinuationError,
     PhaseTimeoutError,
     ProviderCapabilityError,
@@ -47,6 +48,8 @@ from ale.core.errors import (
     ProviderStartError,
     ResourceExhaustedError,
     RetentionFinalizationError,
+    SubscriptionAuthenticationError,
+    SubscriptionEntitlementError,
     TaskError,
     TrajectoryConversionError,
     VerificationInfrastructureError,
@@ -1246,7 +1249,7 @@ class EpisodeProtocol:
                 ctx.validation_prompts[round_index] = prompt
             if segment is not None:
                 ctx.move_prompts[segment] = prompt
-            with _limit_terminated(ctx):
+            with _attributed(ctx):
                 if ctx.open_agent_session is not None:
                     ctx.open_agent_session(True)
                 try:
@@ -1910,7 +1913,7 @@ class EpisodeProtocol:
             max_steps=self.max_steps,
             stall_limit=self.stall_limit,
         ) as env:
-            with _limit_terminated(ctx):
+            with _attributed(ctx):
                 closing = await harness.rollout(
                     env, ctx.session.model_copy(update={"home": ctx.home})
                 )
@@ -3330,22 +3333,40 @@ def _with_ale(trajectory: AtifTrajectory, **fields: object) -> AtifTrajectory:
 
 
 @contextlib.contextmanager
-def _limit_terminated(ctx: EpisodeContext) -> Iterator[None]:
-    """Attribute an agent failure to the Gateway limit that caused it.
+def _attributed(ctx: EpisodeContext) -> Iterator[None]:
+    """Attribute an agent failure to what the Gateway saw cause it.
 
-    Agent programs report a refused call as their own error: an API error, a provider
-    limit, a failed turn. Whatever they say, an agent phase that fails after the Gateway
-    refused a call was stopped by that limit, which only the Gateway knows.
+    Agent programs report a refused call, or a provider that failed their calls, as their own
+    error: an API error, a provider limit, a failed turn. Whatever they say, an agent phase
+    that fails after the Gateway refused a call was stopped by that limit, and one whose
+    program fails while the provider fails its calls was stopped by the provider, which only
+    the Gateway knows.
     """
     try:
         yield
     except (AgentError, EnvironmentError_) as error:
         refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
-        if refusal is None:
+        if refusal is not None:
+            raise BudgetExceededError(
+                refusal.name, float(refusal.configured_value), refusal.observed_value
+            ) from error
+        failure = ctx.model_provider_failure() if ctx.model_provider_failure is not None else None
+        if failure is None or not _program_failed(error):
             raise
-        raise BudgetExceededError(
-            refusal.name, float(refusal.configured_value), refusal.observed_value
+        raise ModelProviderError(
+            f"the model provider was failing the agent's calls as its program stopped: "
+            f"{failure}; {error}"
         ) from error
+
+
+def _program_failed(error: Exception) -> bool:
+    """Whether a Harness reported its program's own failure, in the program's words, behind
+    which a model provider failing its calls may be: an AgentError of no narrower kind, or a
+    subscription's login or entitlement as the CLI put it; not what ALE found wrong itself,
+    such as a missing native session or a trajectory it could not convert."""
+    return type(error) is AgentError or isinstance(
+        error, (SubscriptionAuthenticationError, SubscriptionEntitlementError)
+    )
 
 
 def _with_parse_issue(trajectory: AtifTrajectory, issue: dict[str, object]) -> AtifTrajectory:
