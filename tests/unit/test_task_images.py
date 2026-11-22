@@ -1137,3 +1137,92 @@ async def test_an_undecided_kind_is_never_prepared(write_task_repo) -> None:  # 
         await prepare_task_image_result(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
     with pytest.raises(TaskDefinitionError, match="was not decided before its preparation"):
         await prepare_verifier_image_result(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
+
+
+def _slurm(monkeypatch: pytest.MonkeyPatch) -> tuple[Provider, list[object]]:
+    """A Slurm Provider whose cluster prepares nothing, recording each recipe it gets."""
+    config = RunConfig.model_validate(
+        {
+            "sandbox": {
+                "providers": ["slurm"],
+                "slurm": {"partitions": [{"name": "cpu", "max_cpus": 8, "max_memory_mb": 16384}]},
+            }
+        }
+    )
+    slurm = ProviderRegistry(config).get("slurm")
+    recipes: list[object] = []
+
+    async def prepare_recipe(recipe):  # type: ignore[no-untyped-def]
+        recipes.append(recipe)
+        image = PreparedTaskImage(
+            kind=ImageKind.CONTAINER,
+            source=recipe.source,
+            input_identity=recipe.key,
+            image_source_identity=recipe.source_identity,
+            runtime_ref="images/prepared.tar.gz",
+            prepared_identity="sha256:" + "9" * 64,
+            resolved_reference=recipe.reference,
+        )
+        return image, len(recipes) > 1
+
+    monkeypatch.setattr(slurm, "prepare_recipe", prepare_recipe)
+    return slurm, recipes
+
+
+@pytest.mark.asyncio
+async def test_slurm_prepares_a_tasks_own_build_on_the_cluster(  # type: ignore[no-untyped-def]
+    write_task_repo, monkeypatch
+) -> None:
+    """No container runtime runs where ALE drives Slurm, so the build context, less setup/,
+    goes to the cluster as a recipe, keyed by what goes into it, and nothing is built or
+    framed here."""
+    task = _task(write_task_repo)
+    slurm, recipes = _slurm(monkeypatch)
+    result = await prepare_task_image_result(task, slurm)
+    (recipe,) = recipes
+    assert (recipe.source, recipe.reference, recipe.exclude) == ("solver-local", None, ("setup",))
+    assert recipe.context == task.folder.environment_dir
+    assert recipe.source_identity == task.image_source_digest
+    assert result.image.input_identity == recipe.key
+    assert [(step.name, step.outcome) for step in result.steps] == [
+        ("lint", "executed"),
+        ("slurm-preparation", "executed"),
+    ]
+    assert LAYERED == []
+    again = await prepare_task_image_result(task, slurm)
+    assert recipes[1].key == recipe.key and again.steps[-1].outcome == "reused"
+    # A change to the context is another image.
+    (task.folder.environment_dir / "extra.txt").write_text("changed")
+    await prepare_task_image_result(task, slurm)
+    assert recipes[2].key != recipe.key
+
+
+@pytest.mark.asyncio
+async def test_slurm_pins_a_named_image_by_its_registry_before_preparing_it(  # type: ignore[no-untyped-def]
+    write_task_repo, monkeypatch
+) -> None:
+    """A tag may name another image tomorrow: the recipe names the digest it names now, so
+    the cluster's cache never serves a stale image under it."""
+    repository = write_task_repo(
+        "ale-tasks-named", config={"environment": {"image": "ghcr.io/acme/t:v1"}}, dockerfile=None
+    )
+    task = _classified(load_tasks(repository / "tasks/demo")[0], ImageKind.CONTAINER)
+    pinned = "ghcr.io/acme/t@sha256:" + "a" * 64
+    asked: list[str] = []
+
+    async def pin(reference: str) -> str:
+        asked.append(reference)
+        return pinned
+
+    monkeypatch.setattr("ale.run.task_images.pin", pin)
+    slurm, recipes = _slurm(monkeypatch)
+    result = await prepare_task_image_result(task, slurm)
+    (recipe,) = recipes
+    assert asked == ["ghcr.io/acme/t:v1"]
+    assert (recipe.source, recipe.reference, recipe.context) == ("external-ref", pinned, None)
+    assert result.image.resolved_reference == pinned
+    assert [step.name for step in result.steps] == [
+        "lint",
+        "reference-resolution",
+        "slurm-preparation",
+    ]

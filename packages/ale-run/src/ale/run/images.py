@@ -235,7 +235,7 @@ async def classify_image(reference: str) -> ImageKind:
         )
     except OSError:
         # No Docker CLI here, as on a Slurm login node: the registry is read over HTTP,
-        # without Docker's credentials.
+        # with the credentials Docker's configuration saves, if any.
         parsed = Reference.parse(qualified(reference))
         async with Registry(api(parsed)) as registry:
             data, _ = await registry.manifest(parsed.digest or parsed.tag or "latest")

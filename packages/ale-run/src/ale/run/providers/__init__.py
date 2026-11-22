@@ -507,7 +507,7 @@ def provider_named(name: str) -> Provider:
     if name in {"firecracker", "qemu", "orchard"}:
         return leaf(name)
     if name == "slurm":
-        # Without a Run's partitions it finds no hosts to list, but a handle names its own.
+        # Its snapshots are listed from the cache below the home, whatever the partitions.
         return leaf("slurm")
     if name == "daytona":
         from ale.run.providers.daytona import DaytonaProvider

@@ -1,6 +1,7 @@
 """Slurm selection must find one feasible allocation on one compute node."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -10,16 +11,16 @@ from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import (
     ImageKind,
     PreparedTaskImage,
-    ResolvedImage,
     SandboxRequest,
     SandboxRole,
     snapshot_verifier_needs,
     verifiers_needs,
 )
 from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from ale.run.oci import Reference, api, qualified
 from ale.run.providers import ProviderRegistry
-from ale.run.providers.slurm import worker
-from ale.run.providers.slurm.job import Job, JobReady
+from ale.run.providers.slurm import images, worker
+from ale.run.providers.slurm.job import CACHE, Job, JobReady
 from ale.run.providers.slurm.provider import (
     JOB_OVERHEAD_MB,
     MAX_SAVES,
@@ -36,9 +37,8 @@ from ale.run.providers.slurm.provider import (
 
 def provider():
     partitions = [
-        dict(host="cpu", name="cpu", max_cpus=64, max_memory_mb=32768),
+        dict(name="cpu", max_cpus=64, max_memory_mb=32768),
         dict(
-            host="gpu",
             name="small",
             max_cpus=4,
             max_memory_mb=16384,
@@ -46,7 +46,6 @@ def provider():
             gpu_model=dict(name="NVIDIA H100 80GB HBM3", memory_mb=81559),
         ),
         dict(
-            host="gpu",
             name="large",
             max_cpus=16,
             max_memory_mb=32768,
@@ -223,10 +222,10 @@ def test_an_allocation_is_kept_while_its_episode_needs_a_snapshot_in_it():
     assert not held.idle
 
 
-def test_a_snapshot_handle_names_its_host_allocation_and_sandbox():
+def test_a_snapshot_handle_names_its_allocation_and_sandbox():
     held = chain()
-    assert _parse(_handle(held.job, "3")) == ("gpu", held.job.name, "3")
-    for wrong in ("slurm:gpu", "slurm:gpu/x/1", "slurm:gpu/ale-1/x", "docker:gpu/ale-1/1"):
+    assert _parse(_handle(held.job, "3")) == (held.job.name, "3")
+    for wrong in ("slurm:ale-1", "slurm:x/1", "slurm:ale-1/x", "docker:ale-1/1"):
         with pytest.raises(ProviderCapabilityError):
             _parse(wrong)
 
@@ -255,33 +254,29 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
         saved.archive = "snapshots/out.tar.gz"
         return saved.archive
 
-    async def allocate(needs, *, image, archive=None, host=None, layers=None):
-        allocated.append((image, archive, host, layers))
+    async def allocate(needs, *, image, archive, layers=None):
+        allocated.append((image, archive, layers))
         return chain(cpus=8, memory_mb=step_memory_mb(8192), gpus=1)
 
-    async def framed(request):
-        return ResolvedImage(
-            kind=ImageKind.CONTAINER,
-            prepared_identity=OTHER,
-            observed_identity=OTHER,
-            observed_ref=OTHER,
-        )
-
     async def load(chain, image):
-        loaded.append((chain, image))
-        return image
+        loaded.append((chain, image.prepared_identity))
+        return image.prepared_identity
 
     monkeypatch.setattr(slurm, "write_out", write_out)
     monkeypatch.setattr(slurm, "_allocate", allocate)
-    monkeypatch.setattr(slurm, "_framed", framed)
     monkeypatch.setattr(slurm, "_load", load)
+    # Both images were prepared for the cluster.
+    monkeypatch.setattr(images, "recorded", lambda image: {"user": "user"})
     image = PreparedTaskImage(
         kind=ImageKind.CONTAINER,
         source="external-ref",
         input_identity=PREPARED,
-        runtime_ref="ref",
+        runtime_ref="images/solver.tar.gz",
         resolved_reference="ref",
         prepared_identity=PREPARED,
+    )
+    own = image.model_copy(
+        update={"runtime_ref": "images/verifier.tar.gz", "prepared_identity": OTHER}
     )
 
     def request(resources):
@@ -304,15 +299,17 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
     # loads that image.
     held.running.clear()
     viewer = request(Resources(cpus=1, memory_mb=1024)).model_copy(
-        update={"snapshot": None, "volumes_from": handle}
+        update={"snapshot": None, "volumes_from": handle, "prepared_image": own}
     )
     booted, index, resolved, seed, specs = await slurm._boot(viewer, ())
     assert (booted, seed, specs) == (held, OTHER, view) and loaded == [(held, OTHER)]
     booted, index, _, _, _ = await slurm._boot(request(Resources(cpus=8, gpus=1)), ())
     assert booted is not held and written == [snapshot]
-    assert allocated == [
-        (SAVED, "snapshots/out.tar.gz", "gpu", {"x.1.0": "snapshots/out.x.1.0.tar"})
-    ]
+    assert allocated == [(SAVED, "snapshots/out.tar.gz", {"x.1.0": "snapshots/out.x.1.0.tar"})]
+    # A viewer that does not fit either loads its own image in an allocation of its own.
+    viewer = viewer.model_copy(update={"resources": Resources(cpus=8, gpus=1)})
+    await slurm._boot(viewer, ())
+    assert allocated[-1] == (OTHER, "images/verifier.tar.gz", {"x.1.0": "snapshots/out.x.1.0.tar"})
     with pytest.raises(ProviderCapabilityError, match="prepared solver image"):
         await slurm._boot(
             request(Resources()).model_copy(
@@ -338,3 +335,57 @@ def test_a_job_removes_only_the_stores_of_jobs_that_ended(tmp_path, monkeypatch)
     monkeypatch.setenv("SLURM_JOB_ID", "5")
     monkeypatch.setattr(worker.subprocess, "run", squeue)
     assert worker.stale_stores(tmp_path) == [tmp_path / f"{worker.STORE_PREFIX}ended"]
+
+
+def test_a_volume_candidate_is_a_directory_with_no_link_on_its_way(tmp_path):
+    (tmp_path / "home/user/work").mkdir(parents=True)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "link").symlink_to("data")
+    (tmp_path / "file").write_text("")
+    paths = ["/home/user/work", "/link", "/link/x", "/file", "/missing", "/data"]
+    assert worker.directories_in(str(tmp_path), paths) == ["/home/user/work", "/data"]
+
+
+def test_a_name_without_a_registry_is_docker_hubs():
+    assert qualified("python:3.12") == "docker.io/library/python:3.12"
+    assert qualified("owner/name") == "docker.io/owner/name"
+    for named in ("ghcr.io/a/b:1", "localhost/a", "host:5000/a"):
+        assert qualified(named) == named
+    assert api(Reference.parse("docker.io/library/python")).registry == "registry-1.docker.io"
+    assert api(Reference.parse("ghcr.io/a/b")).registry == "ghcr.io"
+
+
+@pytest.mark.asyncio
+async def test_a_reference_pinned_by_digest_needs_no_registry():
+    digest = "sha256:" + "a" * 64
+    assert await images.pin(f"python:3.12@{digest}") == f"docker.io/library/python@{digest}"
+
+
+@pytest.mark.asyncio
+async def test_an_image_is_prepared_on_the_cluster_once_per_key(tmp_path, monkeypatch):
+    """The cache keeps what a preparation job saved; one whose archive is gone is prepared
+    again."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    prepared = []
+
+    async def run_job(config, recipe):
+        prepared.append(recipe.key)
+        (tmp_path / CACHE / images.archive(recipe.key)).write_bytes(b"image")
+        return {"image": OTHER, "base": PREPARED, "repo_digests": []}
+
+    monkeypatch.setattr(images, "_prepare", run_job)
+    config = provider().config
+    recipe = images.Recipe(
+        key=PREPARED, source="external-ref", reference="ghcr.io/a/b@sha256:" + "4" * 64
+    )
+    first, reused = await images.prepare(config, recipe)
+    assert not reused and first.prepared_identity == OTHER
+    assert first.runtime_ref == images.archive(PREPARED) and images.recorded(first)
+    again, reused = await images.prepare(config, recipe)
+    assert reused and again == first and prepared == [PREPARED]
+    (tmp_path / CACHE / first.runtime_ref).unlink()
+    assert not images.recorded(first)
+    _, reused = await images.prepare(config, recipe)
+    assert not reused and prepared == [PREPARED, PREPARED]
+    # Images are prepared where no GPU is held.
+    assert images.build_partition(config).name == "cpu"

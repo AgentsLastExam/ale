@@ -1,10 +1,13 @@
-"""A single-node Slurm allocation and the Sandboxes in it. Copied to the cluster, standard
-library only.
+"""A single-node Slurm allocation and the Sandboxes in it, or the job that prepares an image
+for them. Copied to the cluster, standard library only.
 
 The batch step holds Podman's private namespace and store on the node and loads the image
-the allocation was seeded with. Each Sandbox the Host asks for runs as a job step of its
+the allocation was seeded with. Each Sandbox the engine asks for runs as a job step of its
 own, which Slurm holds to that Sandbox's CPUs, memory and GPUs; control steps overlap it.
 A Sandbox saved as a snapshot is committed to the store, where the next one boots from it.
+
+A preparation job pulls a Task's image, or builds it from its context, adds the framework
+layer and saves the result to the shared cache, from which every allocation loads it.
 
 A Sandbox's volumes are layers in the store: a Podman volume of its own, which Podman fills
 from the image, a copy of a snapshot's layer, or an overlay view of a snapshot's layers under
@@ -20,6 +23,7 @@ import fcntl
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -29,6 +33,8 @@ from pathlib import Path
 SANDBOXES = Path("sandboxes")
 SNAPSHOT_REPOSITORY = "localhost/ale-snapshot"
 LOADED_REPOSITORY = "localhost/ale-image"
+#: Below the cache: the images prepared for the cluster, each by its key.
+IMAGES = "images"
 #: Each allocation's Podman store on its node, below ``$SLURM_TMPDIR`` or ``/tmp``.
 STORE_PREFIX = "ale-slurm-"
 #: In each store, the ID of the job it belongs to.
@@ -146,9 +152,41 @@ def mount_volumes(
     return args, mounts
 
 
-def in_namespace(command: list[str], mode: str, *args: str) -> None:
-    """Run this file's ``mode`` in Podman's namespace, where its mounts and owners are."""
-    subprocess.run([*command, "unshare", "python3", "-I", __file__, mode, *args], check=True)
+def in_namespace(command: list[str], mode: str, *args: str) -> str:
+    """Run this file's ``mode`` in Podman's namespace, where its mounts and owners are; its
+    output."""
+    return output(*command, "unshare", "python3", "-I", __file__, mode, *args)
+
+
+def directories(directory: str, image: str, paths: list[str]) -> list[str]:
+    """In Podman's namespace: which of ``paths`` are directories in ``image``, read from the
+    image's own files, so nothing of it runs."""
+    command = podman(directory)
+    root = output(*command, "image", "mount", image)
+    try:
+        return directories_in(root, paths)
+    finally:
+        subprocess.run(
+            [*command, "image", "unmount", image], check=False, stdout=subprocess.DEVNULL
+        )
+
+
+def directories_in(root: str, paths: list[str]) -> list[str]:
+    """Which of the absolute ``paths`` are directories below ``root``, with no link on their
+    way."""
+    found = []
+    for path in paths:
+        current = root
+        for part in Path(path).parts[1:]:
+            current = os.path.join(current, part)
+            try:
+                if not stat.S_ISDIR(os.lstat(current).st_mode):
+                    break
+            except OSError:
+                break
+        else:
+            found.append(path)
+    return found
 
 
 def volumes(directory: str, operations: list[list[object]]) -> None:
@@ -390,29 +428,116 @@ def release(command: list[str], directory: str) -> None:
     subprocess.run(["rm", "-rf", "--one-file-system", "--", directory], check=True)
 
 
-def supervise() -> None:
-    spec = json.loads(Path("allocation.json").read_text())
+def terminated(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
+def store() -> tuple[str, list[str], Path]:
+    """This job's own Podman store on its node, and the command that uses it; the stores of
+    this account's jobs that ended on the node are removed first."""
     scratch = Path(os.getenv("SLURM_TMPDIR") or "/tmp")
     directory = tempfile.mkdtemp(prefix=STORE_PREFIX, dir=scratch)
     (Path(directory) / OWNER).write_text(os.environ["SLURM_JOB_ID"])
-    command = podman(directory)
-    steps: dict[str, subprocess.Popen[bytes]] = {}
-
-    def terminated(signum: int, frame: object) -> None:
-        raise SystemExit(128 + signum)
-
     # Slurm signals the batch step before it kills it, as a job is cancelled or preempted:
     # clean up then too.
     signal.signal(signal.SIGTERM, terminated)
+    return directory, podman(directory), scratch
+
+
+def hold_namespace(command: list[str], scratch: Path) -> None:
+    """Keep the private rootless user namespace alive until the batch step finishes cleanup,
+    including when Slurm kills every Sandbox's step, and remove the stale stores."""
+    subprocess.run([*command, "unshare", "true"], check=True)
+    for stale in stale_stores(scratch):
+        subprocess.run(
+            [*command, "unshare", "rm", "-rf", "--one-file-system", "--", str(stale)],
+            check=False,
+        )
+
+
+def clean(command: list[str], directory: str) -> None:
     try:
-        # Keep the private rootless user namespace alive until the batch step finishes
-        # cleanup, including when Slurm kills every Sandbox's step.
-        subprocess.run([*command, "unshare", "true"], check=True)
-        for store in stale_stores(scratch):
+        subprocess.run([*command, "rm", "-a", "-f", "-v", "-t", "1"], check=True)
+        release(command, directory)
+    except Exception as exc:
+        write("cleanup-error", str(exc))
+        raise
+
+
+def prepare() -> None:
+    """Pull a Task's image, or build it from its context, add the framework layer the recipe
+    describes, and save the result below the cache under the recipe's key; record what was
+    prepared in ``prepared``, or in ``error`` which step failed and why."""
+    recipe = json.loads(Path("recipe.json").read_text())
+    framework = recipe["framework"]
+    directory, command, scratch = store()
+    archive = Path.cwd().parent / IMAGES / f"{recipe['key']}.tar.gz"
+    part = archive.with_name(f"{archive.name}.{os.environ['SLURM_JOB_ID']}.part")
+    step = "pull"
+    try:
+        hold_namespace(command, scratch)
+        reference = recipe.get("reference")
+        if reference:
             subprocess.run(
-                [*command, "unshare", "rm", "-rf", "--one-file-system", "--", str(store)],
-                check=False,
+                [*command, "pull", "-q", reference], check=True, stdout=subprocess.DEVNULL
             )
+            base = output(*command, "image", "inspect", "-f", "{{.Id}}", reference)
+            digests = json.loads(
+                output(*command, "image", "inspect", "-f", "{{json .RepoDigests}}", reference)
+            )
+        else:
+            step = "build"
+            # The context was copied without what the image must not hold; its own
+            # .dockerignore still applies.
+            subprocess.run(
+                [*command, "build", "-q", "--iidfile", "built", "--file", "context/Dockerfile",
+                 "context"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )  # fmt: skip
+            base, digests = read("built"), []
+        step = "framework"
+        base = "sha256:" + base.removeprefix("sha256:")
+        tag = "localhost/ale-framework-base:" + base.removeprefix("sha256:")[:12]
+        subprocess.run([*command, "tag", base, tag], check=True)
+        user = output(*command, "image", "inspect", "-f", "{{.Config.User}}", base)
+        lines = [f"FROM {tag}", *framework["body"], *([f"USER {user}"] if user else [])]
+        Path("Framework.Dockerfile").write_text("\n".join([*lines, *framework["tail"]]) + "\n")
+        subprocess.run(
+            [*command, "build", "-q", "--iidfile", "framed",
+             "--build-context", "python=" + framework["python"],
+             "--file", "Framework.Dockerfile", framework["context"]],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )  # fmt: skip
+        framed = "sha256:" + read("framed").removeprefix("sha256:")
+        step = "save"
+        archive.parent.mkdir(mode=0o700, exist_ok=True)
+        with part.open("wb") as file:
+            saver = subprocess.Popen([*command, "save", framed], stdout=subprocess.PIPE)
+            assert saver.stdout is not None
+            gzip = subprocess.run(["gzip", "-1"], stdin=saver.stdout, stdout=file, check=False)
+            saver.stdout.close()
+            if saver.wait() or gzip.returncode:
+                raise RuntimeError(f"could not save the prepared image {framed}")
+        part.replace(archive)
+        write("prepared", dict(image=framed, base=base, repo_digests=digests))
+    except BaseException as exc:
+        write("failed", step)
+        if isinstance(exc, SystemExit):
+            write("error", f"{step}: the job was ended")
+        raise
+    finally:
+        part.unlink(missing_ok=True)
+        clean(command, directory)
+
+
+def supervise() -> None:
+    spec = json.loads(Path("allocation.json").read_text())
+    directory, command, scratch = store()
+    steps: dict[str, subprocess.Popen[bytes]] = {}
+    try:
+        hold_namespace(command, scratch)
         load(command, spec["archive"], spec["image"])
         load_layers(command, directory, spec.get("layers") or {})
         runsc = str(runtime_binary(command, spec["version"]))
@@ -459,12 +584,7 @@ def supervise() -> None:
         # The batch step outlives each Sandbox's step, including an OOM that kills every
         # process there. Keep the job's counters before the allocation goes away.
         Path("memory").write_text((job_cgroup() / "memory.events").read_text())
-        try:
-            subprocess.run([*command, "rm", "-a", "-f", "-v", "-t", "1"], check=True)
-            release(command, directory)
-        except Exception as exc:
-            write("cleanup-error", str(exc))
-            raise
+        clean(command, directory)
 
 
 def start(index: str) -> None:
@@ -510,8 +630,26 @@ def start(index: str) -> None:
     for key, value in spec["env"].items():
         flags.extend(["--env", f"{key}={value}"])
     try:
+        # A candidate is a volume only where the image has a directory.
+        candidates = spec.get("candidates") or []
+        found = (
+            json.loads(
+                in_namespace(
+                    command,
+                    "directories",
+                    ready["directory"],
+                    spec["image"],
+                    json.dumps(candidates),
+                )
+            )
+            if candidates
+            else []
+        )
         arguments, mounts = mount_volumes(
-            command, ready["directory"], index, spec.get("volumes") or []
+            command,
+            ready["directory"],
+            index,
+            [dict(path=path, kind="fresh") for path in found] + (spec.get("volumes") or []),
         )
         subprocess.run([*flags, *arguments, spec["image"]], check=True, stdout=subprocess.DEVNULL)
         if output(*command, "inspect", "--format", "{{.Image}}", name) != spec["image"]:
@@ -529,6 +667,7 @@ def start(index: str) -> None:
                 image=spec["image"],
                 devices=gpus,
                 step=os.environ["SLURM_STEP_ID"],
+                volumes=found,
             ),
         )
         while True:
@@ -639,8 +778,18 @@ def main() -> None:
                 write("error", str(exc))
             raise
         return
+    if mode == "prepare":
+        try:
+            prepare()
+        except Exception as exc:
+            write("error", str(exc))
+            raise
+        return
     if mode == "volumes":
         volumes(args[0], json.loads(args[1]))
+        return
+    if mode == "directories":
+        print(json.dumps(directories(args[0], args[1], json.loads(args[2]))))
         return
     if mode == "release":
         directory = Path(args[0]).resolve()
