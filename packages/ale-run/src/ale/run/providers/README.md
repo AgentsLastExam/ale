@@ -152,7 +152,7 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the ALE cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
 | Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the ALE cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so its profile saves none |
-| Slurm | `podman stop`, then `podman commit` to `localhost/ale-snapshot:<index>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there gets an allocation of its own, which loads the snapshot written out with `podman save` to the shared `~/.cache/ale/slurm/snapshots`; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
+| Slurm | `podman stop`, then `podman commit` to `localhost/ale-snapshot:<index>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there, or that the allocation would not last, gets an allocation of its own, which loads the snapshot written out with `podman save` to the shared `~/.cache/ale/slurm/snapshots`; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
 | Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `ale-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
 | Fleet | The Node's Provider saves it on that Node, as in its row, and Sandboxes that boot from it are placed there, on the leaf that saved it ([Placement](../../../../../../docs/specs/fleet.md#placement)). The Fleet's handle for it is `fleet:snapshot:<sandbox>`; destroying it has the Node's Provider destroy it at the Node's next heartbeat |
 
@@ -867,6 +867,7 @@ providers = ["slurm"]
 
 [sandbox.slurm]
 walltime_minutes = 180
+drain_minutes = 10
 queue_timeout_sec = 900
 
 [[sandbox.slurm.partitions]]
@@ -888,27 +889,44 @@ Each entry describes a homogeneous partition's effective per-node limits for tha
 CPU-only allocations use CPU entries; an allocation whose solver or verifier needs GPUs
 takes the first matching GPU entry, as whole cards. The provider checks each step's CPU and
 memory limits, the started image and the allocated GPU UUIDs against the devices the guest
-sees. Pending jobs have a queue deadline. Running jobs have a Slurm wall time even when ALE
-is lost, and `walltime_minutes`, within the QoS's limit, must cover every turn, validation
-round and verifier of the episode. `sandbox_id` is the job ID and the Sandbox's index in the
-job; the allocation records the compute node and runtime.
+sees. Pending jobs have a queue deadline, under which the allocation of a solver that moves
+waits too. `sandbox_id` is the job ID and the Sandbox's index in the job; the allocation
+records the compute node and runtime.
+
+Running jobs have a Slurm wall time even when ALE is lost: `walltime_minutes`, within the
+QoS's limit, is each allocation's, and the solver of an episode longer than one
+[moves](../../../../../../docs/specs/episode-protocol.md#moves) as each allocation's
+deadline comes. That deadline is what Slurm reports the allocation has left once it runs
+(`squeue -o %L`), Slurm's own count, so no two clocks need agree, less `drain_minutes`,
+which committing a solver, writing it out to the shared home and ending the allocation take;
+each profile holds a Sandbox for `walltime_minutes` less `drain_minutes` at most, so a Run
+whose verifier's limit is longer is refused before anything is prepared. A Sandbox booted
+from a snapshot starts in a running allocation only while that lasts the time its request
+names, a verifier's limit, or five minutes for a solver; otherwise the snapshot is written
+out and the Sandbox gets an allocation of its own, which waits in the queue as any does, and
+an allocation whose deadline has come ends then, rather than at its wall time, its snapshots
+written out. Where Slurm ends an allocation itself, at its wall time, for a job of a QoS
+that preempts it, or as its node fails, the Sandbox's error says which (`sacct`), and what
+the allocation held since its last snapshot written out is lost, a round's snapshot and
+verifier in it included.
 
 A snapshot is the stopped container committed to the allocation's store on its node
 ([Snapshots](#snapshots)). The verifier booted from it, a [validation
 round](../../../../../../docs/specs/episode-protocol.md#validation-rounds)'s, a separate
 verifier that views its volumes and the next turn's solver start there in steps of the same
-allocation, so nothing is copied and nothing waits in the queue again. The cost is that the
-allocation holds the larger of its solver and verifier for its whole life: a solver of one
-GPU for eight hours, verified on eight GPUs for one, holds eight for nine hours, 72
-GPU-hours, where two allocations would hold 16. A Sandbox booted from a snapshot that does
-not fit beside what runs in its allocation gets an allocation of its own, which loads the
-snapshot written out with `podman save`; a snapshot the Run keeps
-(`sandbox_retention.solver = "snapshot"`) is written out as it is saved, as its allocation
-ends with the episode, and costs that copy. `ale sandbox destroy slurm:<job name>/<index>`
-removes one; `ale sandbox list` lists those written out below the cache. A chain of 200
-commits, each booted from the one before, over a one-layer image was measured, so each
-profile saves 200 in a row; a container engine's storage is volumes, which a snapshot keeps
-as layers beside its commit. Slurm keeps no running Sandbox and limits no writable storage.
+allocation while it lasts them, so nothing is copied and nothing waits in the queue again.
+The cost is that the allocation holds the larger of its solver and verifier for its whole
+life: a solver of one GPU for eight hours, verified on eight GPUs for one, holds eight for
+nine hours, 72 GPU-hours, where two allocations would hold 16. A Sandbox booted from a
+snapshot that does not fit beside what runs in its allocation, or that it would not last,
+gets an allocation of its own, which loads the snapshot written out with `podman save`; a
+snapshot the Run keeps (`sandbox_retention.solver = "snapshot"`) is written out as it is
+saved, as its allocation ends with the episode, and costs that copy.
+`ale sandbox destroy slurm:<job name>/<index>` removes one; `ale sandbox list` lists those
+written out below the cache. A chain of 200 commits, each booted from the one before, over a
+one-layer image was measured, so each profile saves 200 in a row; a container engine's
+storage is volumes, which a snapshot keeps as layers beside its commit. Slurm keeps no
+running Sandbox and limits no writable storage.
 
 `srun --overlap --unbuffered` from the login node opens guestd's command and file sessions,
 a watcher of the Sentry's OOM kills and a tunnel, which carries the Run's Gateway, on the

@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -70,6 +72,9 @@ STEP_OVERHEAD_MB = 32
 MAX_SAVES = 200
 #: How long a Sandbox's step may take to start once its allocation runs.
 START_TIMEOUT_SEC = 900
+#: How long before its deadline an allocation still takes a Sandbox that names no duration:
+#: a solver, which moves where it lasts once its allocation's deadline comes.
+MIN_LEFT_SEC = 300
 PREFIX = "slurm:"
 #: The account an image named by its reference alone is prepared for.
 USER = "user"
@@ -88,7 +93,9 @@ def _largest_memory_mb(partition: SlurmPartition) -> int:
     return max(1, memory_mb)
 
 
-def _profiles(partition: SlurmPartition) -> tuple[CapabilityProfile, ...]:
+def _profiles(
+    partition: SlurmPartition, config: SlurmProviderConfig
+) -> tuple[CapabilityProfile, ...]:
     common = {ContainerFeature.FUSE, ContainerFeature.USER_NAMESPACES, ContainerFeature.MOUNT}
     return tuple(
         CapabilityProfile(
@@ -106,6 +113,8 @@ def _profiles(partition: SlurmPartition) -> tuple[CapabilityProfile, ...]:
             max_memory_mb=_largest_memory_mb(partition),
             container_features=frozenset(common | {feature}),
             volumes=True,
+            # An allocation's wall time, less what it keeps to drain.
+            max_duration_sec=(config.walltime_minutes - config.drain_minutes) * 60,
         )
         for feature in (ContainerFeature.RAW_SOCKETS, ContainerFeature.NESTED_CONTAINERS)
     )
@@ -213,7 +222,8 @@ class _Snapshot:
     roles: tuple[Literal["solver", "verifier"], ...]
     reason: str
     boots: int
-    """The Sandboxes its episode boots from it still, which keep its allocation."""
+    """The Sandboxes its episode is still to boot from it in its allocation, which keep the
+    allocation: a snapshot verifier, until it boots or the allocation's deadline comes."""
     stacks: dict[str, dict[str, object]] = field(default_factory=dict)
     """Each volume's layers in the allocation's store, topmost first, its root's owner and
     mode, and whether it is an engine's storage, by path."""
@@ -242,20 +252,32 @@ class _Chain:
     """The images loaded since, a separate verifier's, by the ID Podman gives them."""
     viewing: dict[str, set[str]] = field(default_factory=dict)
     """The layers each running Sandbox's views stack, which stay while it runs."""
+    deadline: datetime | None = None
+    """When ALE must begin to save what runs here, before Slurm ends the allocation at its
+    wall time, which leaves the drain to save it and write it out."""
     count: int = 0
     closed: bool = False
 
-    def reserve(self, resources: Resources) -> str | None:
-        """A new Sandbox's index in the allocation, if it fits beside what runs there."""
+    def reserve(self, resources: Resources, *, lasting: float | None = None) -> str | None:
+        """A new Sandbox's index in the allocation, if it fits beside what runs there and,
+        where it is to last ``lasting`` seconds, the allocation lasts that long."""
         size = _size(resources)
         used = [sum(held) for held in zip(*self.running.values(), strict=True)] or [0, 0, 0]
         capacity = (self.cpus, self.memory_mb, self.gpus)
         if self.closed or any(u + s > c for u, s, c in zip(used, size, capacity, strict=True)):
             return None
+        if lasting is not None and not self.lasts(lasting):
+            return None
         self.count += 1
         index = str(self.count)
         self.running[index] = size
         return index
+
+    def lasts(self, seconds: float) -> bool:
+        """Whether the allocation's deadline leaves ``seconds`` more."""
+        return self.deadline is None or (self.deadline - datetime.now(UTC)).total_seconds() >= (
+            seconds
+        )
 
     @property
     def idle(self) -> bool:
@@ -437,7 +459,9 @@ class SlurmProvider(Provider):
         self.snapshots: dict[str, tuple[_Chain, _Snapshot]] = {}
 
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
-        return tuple(profile for p in self.config.partitions for profile in _profiles(p))
+        return tuple(
+            profile for p in self.config.partitions for profile in _profiles(p, self.config)
+        )
 
     def _partition(
         self, needs: SandboxNeeds, *, separate: Resources | None = None
@@ -451,7 +475,7 @@ class SlurmProvider(Provider):
                 or memory_mb + JOB_OVERHEAD_MB > part.max_memory_mb
             ):
                 continue
-            if any(not unmet(profile, needs) for profile in _profiles(part)):
+            if any(not unmet(profile, needs) for profile in _profiles(part, self.config)):
                 return part
         return None
 
@@ -578,8 +602,11 @@ class SlurmProvider(Provider):
         specs = _volume_specs(stacks, engines, viewing=viewing)
         needed = {str(layer) for spec in specs for layer in spec.get("layers", ())}
         if chain is not None and snapshot is not None:
-            served = any(not unmet(p, request.needs) for p in _profiles(chain.job.partition))
-            booted = chain.reserve(request.resources) if served else None
+            served = any(
+                not unmet(p, request.needs) for p in _profiles(chain.job.partition, self.config)
+            )
+            lasting = request.duration_sec or MIN_LEFT_SEC
+            booted = chain.reserve(request.resources, lasting=lasting) if served else None
             if booted is not None:
                 try:
                     loaded = await self._load(chain, request.prepared_image) if viewing else image
@@ -591,6 +618,8 @@ class SlurmProvider(Provider):
                 chain.viewing[booted] = needed
                 return chain, booted, resolved, loaded, specs
             archive = snapshot.archive or await self.write_out(chain, snapshot)
+            if not chain.lasts(MIN_LEFT_SEC):
+                await self._drain(chain)
         else:
             archive = f"{SNAPSHOTS}/{name}-{index}.tar.gz"
         layers = {
@@ -640,11 +669,10 @@ class SlurmProvider(Provider):
         cpus, memory_mb, gpus = _capacity(needs, separate)
         job = Job(part)
         try:
-            loaded = image
             job.stage(
                 dict(
                     archive=archive,
-                    image=loaded.removeprefix("sha256:"),
+                    image=image.removeprefix("sha256:"),
                     version=gvisor.VERSION,
                     gpus=gpus,
                     layers=layers or {},
@@ -657,10 +685,24 @@ class SlurmProvider(Provider):
                 minutes=self.config.walltime_minutes,
             )
             ready = await job.ready(self.config.queue_timeout_sec)
+            left = await job.time_left()
         except BaseException:
             await asyncio.shield(job.stop())
             raise
-        return _Chain(job=job, ready=ready, seed=loaded, cpus=cpus, memory_mb=memory_mb, gpus=gpus)
+        deadline = None
+        if left is not None:
+            # Slurm's own count, so neither clock's offset matters.
+            drain = timedelta(minutes=self.config.drain_minutes)
+            deadline = datetime.now(UTC) + timedelta(seconds=left) - drain
+        return _Chain(
+            job=job,
+            ready=ready,
+            seed=image,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            gpus=gpus,
+            deadline=deadline,
+        )
 
     async def _start(
         self,
@@ -766,6 +808,7 @@ class SlurmProvider(Provider):
                     *(str(v["path"]) for v in volumes if not v.get("copied")),
                 ),
             )
+            sandbox.deadline = chain.deadline
             sandbox.state = SandboxState.READY
             if sealed:
                 await sandbox.close_egress()
@@ -787,11 +830,30 @@ class SlurmProvider(Provider):
     async def _close_if_idle(self, chain: _Chain) -> None:
         if chain.closed or not chain.idle:
             return
+        await self._close(chain)
+
+    async def _close(self, chain: _Chain) -> None:
+        """End the allocation; Sandboxes boot from its snapshots' written-out files now."""
         chain.closed = True
         for snapshot in chain.snapshots.values():
-            # Written out: Sandboxes boot from the file now.
             self.snapshots.pop(_handle(chain.job, snapshot.index), None)
-        await chain.job.stop()
+        await asyncio.shield(chain.job.stop())
+
+    async def _drain(self, chain: _Chain) -> None:
+        """End an allocation whose deadline has come once what it holds goes on elsewhere: no
+        Sandbox starts there any more, so its snapshots are written out and none is to boot
+        there. Its end failing fails nothing that goes on; Slurm ends it at its wall time."""
+        for snapshot in chain.snapshots.values():
+            if snapshot.archive is None:
+                await self.write_out(chain, snapshot)
+            snapshot.boots = 0
+        try:
+            await self._close_if_idle(chain)
+        except ProviderStartError as error:
+            logging.getLogger("ale.execution").warning(
+                "a drained Slurm allocation did not end; it ends at its wall time",
+                extra={"ale_data": {"job": chain.job.id, "error": str(error)}},
+            )
 
     async def write_out(self, chain: _Chain, snapshot: _Snapshot) -> str:
         """Write a snapshot to the cluster's shared file system, from which an allocation of
@@ -838,9 +900,15 @@ class SlurmProvider(Provider):
         if found is not None:
             chain, snapshot = found
             if not chain.closed:
-                # Not forced: a Sandbox booted from the snapshot still uses its layers.
-                await chain.job.control("rmi", snapshot.index)
-            del self.snapshots[handle]
+                try:
+                    # Not forced: a Sandbox booted from the snapshot still uses its layers.
+                    await chain.job.control("rmi", snapshot.index)
+                except ProviderStartError:
+                    if await chain.job.state():
+                        raise
+                    # Slurm ended the allocation, and the node's store with it.
+                    await self._close(chain)
+            self.snapshots.pop(handle, None)
             chain.snapshots.pop(index, None)
             if not chain.closed:
                 # Its volumes' layers that no other snapshot and no running view stacks.

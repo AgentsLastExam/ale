@@ -315,7 +315,19 @@ class SlurmProviderConfig(BaseModel):
     partitions: tuple[SlurmPartition, ...] = ()
     """In preference order. One Sandbox fits on one node of one partition."""
     walltime_minutes: int = Field(default=180, ge=1)
+    """Each allocation's wall time, within its QoS's limit."""
+    drain_minutes: int = Field(default=10, ge=1)
+    """What saving a solver and writing it out for the next allocation takes at most, which
+    each allocation keeps before its wall time ends."""
     queue_timeout_sec: int = Field(default=900, ge=1)
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _drains_within_its_wall_time(self) -> Self:
+        if self.drain_minutes >= self.walltime_minutes:
+            raise ValueError("sandbox.slurm.drain_minutes must be below walltime_minutes")
+        return self
 
 
 class DaytonaProviderConfig(BaseModel):

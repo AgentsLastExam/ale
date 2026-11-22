@@ -15,7 +15,12 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from ale.core.config import SlurmPartition
-from ale.core.errors import GuestUnreachableError, MemoryExhaustedError, ProviderStartError
+from ale.core.errors import (
+    AllocationEndedError,
+    GuestUnreachableError,
+    MemoryExhaustedError,
+    ProviderStartError,
+)
 from ale.core.sandbox import GpuDevice
 from ale.run.process import run
 from ale.run.providers.memory import GuestEvents
@@ -23,6 +28,9 @@ from ale.run.transport import StdioTransport
 
 #: Below the account's home, which the login node and every compute node share.
 CACHE = ".cache/ale/slurm"
+#: How Slurm records a job it ended itself: at its wall time, for a job of higher
+#: priority, or as its node failed.
+ENDED = {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "DEADLINE"}
 #: Below :data:`CACHE`: snapshots another allocation boots from, and the images prepared for
 #: the cluster, each by its key.
 SNAPSHOTS = "snapshots"
@@ -77,6 +85,18 @@ def tail(path: Path, size: int = 2000) -> str:
             return file.read().decode("utf-8", "replace")
     except FileNotFoundError:
         return ""
+
+
+def seconds(text: str) -> int | None:
+    """A time as Slurm prints it, ``[days-]hours:minutes:seconds`` or shorter, in seconds;
+    None for none."""
+    text = text.strip()
+    if text in ("", "UNLIMITED", "NOT_SET", "INVALID"):
+        return None
+    days, _, clock = text.rpartition("-")
+    parts = [int(part) for part in clock.split(":")]
+    hours, minutes, secs = [0] * (3 - len(parts)) + parts
+    return ((int(days or 0) * 24 + hours) * 60 + minutes) * 60 + secs
 
 
 class JobReady(BaseModel):
@@ -279,6 +299,16 @@ class Job:
             await asyncio.sleep(2)
         raise ProviderStartError(f"Slurm did not release job {self.name}")
 
+    async def time_left(self) -> int | None:
+        """How many seconds Slurm still holds the running job for; None without a limit."""
+        return seconds(await slurm("squeue", "-h", "-j", self.id, "-o", "%L"))
+
+    async def ended(self) -> str:
+        """How Slurm recorded the job's end, such as ``PREEMPTED`` or ``TIMEOUT``, if it
+        did."""
+        recorded = await slurm("sacct", "-nXj", self.id, "--format=State%32", "-P")
+        return recorded.split()[0] if recorded.split() else ""
+
     async def state(self) -> str:
         """The job's state, as squeue names it; empty once it ended."""
         return await slurm("squeue", "-h", "--me", f"--name={self.name}", "-o", "%T")
@@ -329,9 +359,16 @@ class JobTransport(StdioTransport):
 
     async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
         await self.watcher.settled(2)
+        job = self.steps.job
+        # First: an OOM kill the Sandbox outlived is no reason it went now.
+        with contextlib.suppress(ProviderStartError):
+            if (ended := await job.ended()) in ENDED:
+                return AllocationEndedError(
+                    f"Slurm ended job {job.id} ({ended}): what the Sandbox held since its "
+                    "last save written out is lost"
+                )
         if counted := self.watcher.oom_killed():
             return MemoryExhaustedError(f"Slurm job {self.steps.job.id}: {counted} ({error})")
-        job = self.steps.job
         counters = job.directory / "sandboxes" / self.steps.index / "memory"
         with contextlib.suppress(ProviderStartError):
             for _ in range(5):
