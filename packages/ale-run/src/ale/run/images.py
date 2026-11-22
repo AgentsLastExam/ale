@@ -32,7 +32,7 @@ from ale.core.errors import ProviderStartError
 from ale.core.ids import content_hash
 from ale.core.sandbox import ImageRef, PreparedTaskImage, ResolvedImage
 from ale.core.taskspec import ImageKind
-from ale.run.oci import MANIFEST, Reference, Registry, retrying
+from ale.run.oci import MANIFEST, Reference, Registry, api, qualified, retrying
 from ale.run.process import run
 from ale.run.sources import cache_root
 
@@ -211,8 +211,9 @@ async def classify_image(reference: str) -> ImageKind:
     A reference pinned by digest that this Host already holds, as a pulled VM disk or as a
     Docker image, is answered without the registry. Anything else is read through Buildx, as
     ``resolve_registry_reference`` reads it, so the Host's Docker credentials and Docker
-    Hub's short names apply. A tag that only the local Docker daemon knows is not an image a
-    Task can name: nothing could pin it, and no other Host could run it.
+    Hub's short names apply, or over HTTP where no Docker CLI is installed. A tag that only
+    the local Docker daemon knows is not an image a Task can name: nothing could pin it, and
+    no other Host could run it.
     """
     digest = reference.rpartition("@")[2] if "@" in reference else None
     if digest is not None:
@@ -224,7 +225,7 @@ async def classify_image(reference: str) -> ImageKind:
                 "docker", "image", "inspect", "--format", "{{.Id}}", reference, timeout=30
             )
         except OSError:
-            # No Docker CLI, so not held here; the read below says what is missing.
+            # No Docker CLI, so not held here: the registry says what it names.
             code = 1
         if code == 0:
             return ImageKind.CONTAINER
@@ -233,9 +234,12 @@ async def classify_image(reference: str) -> ImageKind:
             "docker", "buildx", "imagetools", "inspect", "--raw", reference, timeout=60
         )
     except OSError:
-        raise ProviderStartError(
-            "Reading an image's manifest requires Docker CLI with Buildx on the ALE Host"
-        ) from None
+        # No Docker CLI here, as on a Slurm login node: the registry is read over HTTP,
+        # without Docker's credentials.
+        parsed = Reference.parse(qualified(reference))
+        async with Registry(api(parsed)) as registry:
+            data, _ = await registry.manifest(parsed.digest or parsed.tag or "latest")
+        code, output = 0, data.decode("utf-8", "replace")
     if code != 0:
         # Not the CLI's own words: a credential helper may print secrets.
         raise ProviderStartError(

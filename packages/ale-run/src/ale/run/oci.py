@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import ipaddress
 import json
 import os
@@ -25,7 +26,7 @@ from yarl import URL
 from ale.core.errors import ProviderStartError
 from ale.run.process import run
 
-__all__ = ["MANIFEST", "Reference", "Registry", "retrying"]
+__all__ = ["MANIFEST", "Reference", "Registry", "api", "qualified", "retrying"]
 
 MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 
@@ -88,6 +89,23 @@ class Reference:
         tag = f":{self.tag}" if self.tag else ""
         digest = f"@{self.digest}" if self.digest else ""
         return f"{self.registry}/{self.repository}{tag}{digest}"
+
+
+def qualified(reference: str) -> str:
+    """``reference`` naming its registry, as Docker reads one that names none: Docker Hub's,
+    under ``library/`` for a name of one part."""
+    first, _, rest = reference.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        return reference
+    return "docker.io/" + (reference if rest else "library/" + reference)
+
+
+def api(reference: Reference) -> Reference:
+    """``reference`` at the host its registry serves its API on: Docker Hub's has one of its
+    own."""
+    if reference.registry in ("docker.io", "index.docker.io"):
+        return dataclasses.replace(reference, registry="registry-1.docker.io")
+    return reference
 
 
 async def retrying[T](operation: Callable[[], Awaitable[T]], what: str) -> T:

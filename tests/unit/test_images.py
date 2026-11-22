@@ -308,17 +308,46 @@ async def test_a_pinned_image_this_host_holds_is_classified_offline(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "reference", ["ghcr.io/acme/tool:1", "ghcr.io/acme/tool@sha256:" + "c" * 64]
+    ("reference", "asked"),
+    [
+        ("ghcr.io/acme/tool:1", ("ghcr.io", "acme/tool", "1")),
+        ("python:3.12", ("registry-1.docker.io", "library/python", "3.12")),
+        ("ghcr.io/acme/tool@sha256:" + "c" * 64, ("ghcr.io", "acme/tool", "sha256:" + "c" * 64)),
+    ],
 )
-async def test_classifying_without_the_docker_cli_says_what_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reference: str
+async def test_classifying_without_the_docker_cli_reads_the_registry_over_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reference: str, asked: tuple[str, ...]
 ) -> None:
+    """As on a Slurm login node, which has no container runtime: Docker Hub's short names
+    are Docker's, and its API has a host of its own."""
     from ale.run import images
 
     monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    with pytest.raises(ProviderStartError, match="requires Docker CLI with Buildx"):
-        await images.classify_image(reference)
+    read: list[tuple[str, ...]] = []
+    manifest = {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json"},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"}],
+    }
+
+    class Registry:
+        def __init__(self, parsed) -> None:  # type: ignore[no-untyped-def]
+            self.parsed = parsed
+
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        async def manifest(self, name: str) -> tuple[bytes, str]:
+            read.append((self.parsed.registry, self.parsed.repository, name))
+            return json.dumps(manifest).encode(), manifest["mediaType"]
+
+    monkeypatch.setattr(images, "Registry", Registry)
+    assert await images.classify_image(reference) is ImageKind.CONTAINER
+    assert read == [asked]
 
 
 def _disk(path: Path, identity: str) -> PreparedTaskImage:
