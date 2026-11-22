@@ -26,14 +26,15 @@ from ale.core.harness import (
     ResolvedSkill,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
+from ale.core.sandbox import ExecResult, Identity, Sandbox
+from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
 from ale.core.trace import read_jsonl
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import GatewaySession
 from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
 from ale.run.harnesses.zcode import ZCodeHarness
 from ale.run.protocol.log_mirror import LogMirror
@@ -407,6 +408,134 @@ async def _muse_skills(sandbox: Sandbox, session: HarnessSession) -> None:
     assert SKILL in {skill.get("name") for skill in listed["skills"]}
 
 
+class _Written:
+    """Keeps what a Harness writes while it stages its configuration, and runs nothing."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+
+    async def exec(self, argv: list[str], **kwargs: Any) -> ExecResult:
+        return ExecResult(exit_code=0)
+
+    async def write_file(self, path: str, data: bytes, **kwargs: Any) -> None:
+        self.files[str(path)] = data
+
+
+async def _opencode_reads(sandbox: Sandbox, session: HarnessSession, document: str) -> list[Any]:
+    """The configuration documents OpenCode reads in order, ``document`` as ALE passes it."""
+    state = f"{session.home}/.opencode-ale"
+    result = await sandbox.exec(
+        [
+            "sh",
+            "-c",
+            f'OPENCODE_CONFIG_CONTENT="$(cat {document})" opencode debug config --standalone',
+        ],
+        env={
+            "PATH": f"{session.home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "OPENCODE_CONFIG_DIR": state,
+            "OPENCODE_DISABLE_MODELS_FETCH": "1",
+            "OPENCODE_DISABLE_AUTOUPDATE": "1",
+            "NO_COLOR": "1",
+        },
+        cwd=session.start_dir,
+        identity=Identity.AGENT,
+        timeout_sec=120,
+    )
+    assert result.ok, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+def _as_read(written: dict[str, Any]) -> dict[str, Any]:
+    """A document as OpenCode shows it back: the model reference spelled out, and each MCP
+    header's value masked."""
+    provider, model = written["model"].split("/", 1)
+    servers = {
+        name: {**server, "headers": dict.fromkeys(server["headers"], "***")}
+        if "headers" in server
+        else server
+        for name, server in written["mcp"]["servers"].items()
+    }
+    return {
+        **written,
+        "model": {"providerID": provider, "model": model},
+        "mcp": {**written["mcp"], "servers": servers},
+    }
+
+
+async def _opencode_config(sandbox: Sandbox, session: HarnessSession) -> None:
+    """OpenCode drops a field it cannot decode without a word, so every field ALE writes must
+    come back from its own reading of the configuration: the run's document, and one with
+    every setting set and a stdio server with a working directory. The agent's own
+    `~/.config/opencode` is not read, and a workspace's `opencode.json` loads below ALE's."""
+    state = f"{session.home}/.opencode-ale"
+    written = json.loads(await sandbox.read_file(f"{state}/ale.json"))
+    sentinels = (
+        f"{session.home}/.config/opencode/opencode.json",
+        f"{session.start_dir}/opencode.json",
+    )
+    await sandbox.exec(["mkdir", "-p", f"{session.home}/.config/opencode"], identity=Identity.AGENT)
+    for path in sentinels:
+        await sandbox.write_file(path, b'{"share": "auto"}\n', identity=Identity.AGENT)
+    try:
+        read = await _opencode_reads(sandbox, session, f"{state}/ale.json")
+    finally:
+        await sandbox.exec(["rm", "-rf", "--", *sentinels], identity=Identity.AGENT)
+    documents = [entry for entry in read if entry.get("type") == "document"]
+    assert [entry.get("path") for entry in documents] == [sentinels[1], None]
+    assert documents[-1]["info"] == _as_read(written)
+    assert not any(entry.get("path", "").startswith(f"{session.home}/.config") for entry in read)
+
+    full = OpenCodeHarness(
+        settings={
+            "reasoning_effort": "high",
+            "context_window": 400000,
+            "max_output_tokens": 64000,
+            "input": ["text", "image", "pdf"],
+            "max_steps": 40,
+            "web_search": "tavily",
+        }
+    )
+    servers = (
+        ResolvedMcpServer(
+            name="proof",
+            server=StdioMcpServer(
+                name="proof",
+                transport="stdio",
+                command="python3",
+                args=("{home}/mcp.py",),
+                cwd=session.home,
+                environment={"PROOF": "1"},
+            ),
+            source_layers=("run",),
+            declared_sources=("mcp/proof.toml",),
+            digest="sha256:" + "c" * 64,
+            reportable=True,
+        ),
+        ResolvedMcpServer(
+            name="remote",
+            server=StreamableHttpMcpServer(
+                name="remote", transport="streamable-http", url="http://127.0.0.1:9/mcp"
+            ),
+            source_layers=("run",),
+            declared_sources=("mcp/remote.toml",),
+            digest="sha256:" + "e" * 64,
+            reportable=True,
+            headers={"X-Proof": "yes"},
+        ),
+    )
+    staged = _Written()
+    await full.install_resources(
+        staged,  # type: ignore[arg-type]
+        session,
+        EffectiveAgentResources(mcp_servers=servers, digest="sha256:" + "d" * 64),
+    )
+    complete = staged.files[f"{state}/ale.json"]
+    await sandbox.write_file(f"{state}/complete.json", complete, identity=Identity.AGENT)
+    read = await _opencode_reads(sandbox, session, f"{state}/complete.json")
+    await sandbox.exec(["rm", "-f", "--", f"{state}/complete.json"], identity=Identity.AGENT)
+    assert read[-1]["info"] == _as_read(json.loads(complete))
+
+
 async def _zcode_skills(sandbox: Sandbox, session: HarnessSession) -> None:
     result = await sandbox.exec(
         [
@@ -467,6 +596,16 @@ CASES = {
             shell=("Bash", {"command": "echo shell-proof", "description": "Print proof"}),
             mcp_tool="mcp__proof__echo",
             check_config=_zcode_skills,
+        )
+        for dialect in DIALECTS
+    },
+    **{
+        f"opencode-{dialect}": Case(
+            factory=lambda dialect: OpenCodeHarness(gateway_dialect=dialect),
+            dialect=dialect,
+            shell=("shell", {"command": "echo shell-proof"}),
+            mcp_tool="proof_echo",
+            check_config=_opencode_config,
         )
         for dialect in DIALECTS
     },

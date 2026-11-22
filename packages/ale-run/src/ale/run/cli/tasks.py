@@ -67,6 +67,7 @@ from ale.run.harnesses.hermes import HermesHarness
 from ale.run.harnesses.kimi_code import KimiCodeHarness
 from ale.run.harnesses.muse_code import MuseCodeHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
 from ale.run.harnesses.pi_cli import PiCliHarness
 from ale.run.harnesses.qwen_code import QwenCodeHarness
@@ -209,6 +210,12 @@ def _harness(settings: RunConfig) -> Harness:
                 cli_version=settings.agent.version,
                 settings=settings.agent.settings,
             )
+        case "opencode":
+            return OpenCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
         case "openhands-cli":
             return OpenHandsCliHarness(
                 cli_version=settings.agent.version,
@@ -237,7 +244,7 @@ def _harness(settings: RunConfig) -> Harness:
             raise AleError(
                 f"unknown agent {unknown!r}; try antigravity-cli, claude-code, codex-cli, "
                 "computer-use, droid, forgecode, grok-build, hermes, kimi-code, muse-code, "
-                "openclaw-cli, openhands-cli, pi-cli, qwen-code, zcode, oracle or nop"
+                "openclaw-cli, opencode, openhands-cli, pi-cli, qwen-code, zcode, oracle or nop"
             )
 
 
@@ -1003,7 +1010,7 @@ def _continuation(
         ),
         trajectory=continued.trajectory,
         attach=(
-            (lambda request: _attach_retained(handle, request, lock, providers)) if kept else None
+            partial(_attach_retained, handle, lock=lock, providers=providers) if kept else None
         ),
     )
 

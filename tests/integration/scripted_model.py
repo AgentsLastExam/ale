@@ -6,12 +6,12 @@ the call ``script[n]`` if it offers that tool, and otherwise, as past the script
 answers with ``FINAL``; so a CLI that reaches a tool through others, or sends a result's
 image in a message of its own, still follows the script. A step may instead make its call
 from the text of the last tool result, such as a file that result names. Without a
-script, it answers with
-``FINAL`` after a tool result. Otherwise, when the agent's first user message contains a
-``delegations`` marker and the request offers that rule's tool, it calls the tool with the
-rule's arguments, so a CLI can be made to spawn subagents; when the request offers a tool
-matching ``tool_pattern`` it calls that tool, filling the first command-like string
-argument with ``command``; otherwise it answers with ``FINAL``. A tool the Responses API
+script, it answers with ``FINAL`` after a tool result. Otherwise, when the agent's first
+user message contains a ``delegations`` marker, the conversation holds no tool result yet
+and the request offers that rule's tool, it calls the tool with the rule's arguments, so a
+CLI can be made to spawn subagents; when the request offers a tool matching
+``tool_pattern`` it calls that tool, filling the first command-like string argument with
+``command``; otherwise it answers with ``FINAL``. A tool the Responses API
 groups in a namespace is named ``<namespace>.<tool>``; a call names it so with
 ``dotted_namespaces``, as Meta's API does, and otherwise in OpenAI's separate
 ``namespace`` field. Every request is kept in ``requests`` for assertions.
@@ -82,7 +82,9 @@ class ScriptedModel:
             return None
         if after_result:
             return None
-        for marker, tool_pattern, arguments in self.delegations:
+        # Only a conversation that holds no tool result yet delegates: a request a finished
+        # child wakes its spawner with delegates no further.
+        for marker, tool_pattern, arguments in () if results else self.delegations:
             if marker in task:
                 call = self._matching(offered, tool_pattern)
                 if call is not None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from ale.run.harnesses.base import CONTINUE_PROMPT
 from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
+from ale.run.harnesses.opencode import OpenCodeHarness
 from ale.run.protocol.log_mirror import LogMirror
 from ale.run.providers.docker import DockerProvider
 from ale.run.recording import EpisodeRecording
@@ -30,13 +32,14 @@ CASES = (
     (GrokBuildHarness, "xai"),
     (CodexCliHarness, "openai"),
     (OpenClawCliHarness, "openai"),
+    (partial(OpenCodeHarness, gateway_dialect="openai-responses"), "openai"),
 )
 
 
 @pytest.mark.parametrize(
     ("factory", "provider"),
     CASES,
-    ids=["grok-build", "codex-cli", "openclaw-cli"],
+    ids=["grok-build", "codex-cli", "openclaw-cli", "opencode"],
 )
 async def test_real_native_resume_keeps_exact_session_and_only_new_input(
     tmp_path, factory, provider: str
@@ -242,4 +245,14 @@ def _native_turns(harness: str, logs: Path, native_id: str) -> list[dict[str, st
             )
             if text:
                 turns.append({"session_id": session_id, "message": text})
+    elif harness == "opencode":
+        # One export per invocation, each of the whole session; the newest holds every turn.
+        exports = logs / ".opencode-ale/exports" / native_id
+        newest = max(path for path in exports.iterdir() if not path.name.startswith("."))
+        data = json.loads((newest / f"{native_id}.json").read_text())
+        turns.extend(
+            {"session_id": str(data["info"]["id"]), "message": str(message["text"])}
+            for message in data["messages"]
+            if message.get("type") == "user"
+        )
     return turns

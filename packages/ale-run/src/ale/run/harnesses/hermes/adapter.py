@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -45,6 +45,10 @@ _INSTALLERS = f"https://raw.githubusercontent.com/NousResearch/hermes-agent/{COM
 #: ``HERMES_HOME``; the installer must place the checkout inside it, or the first run
 #: installs the whole dependency environment again into the home it finds.
 STATE = trajectory.STATE
+#: The episode token, which Hermes reads through the provider's ``key_cmd``. In its
+#: environment it would reach the terminal tool, whose login environment Hermes saves to a
+#: snapshot under ``cache/scratch``; ``config.yaml`` is mirrored as evidence.
+TOKEN = f"{STATE}/gateway-token"
 #: Hermes' transport for each Gateway dialect, and the base URL suffix it expects.
 _TRANSPORTS = {
     "anthropic": ("anthropic_messages", ""),
@@ -64,6 +68,7 @@ class HermesHarness(CliHarness):
     settings_type = HermesSettings
     settings: HermesSettings
     logs = (LOG_ROOT, trajectory.EXPORTS, trajectory.CONFIG, trajectory.IMAGES)
+    credentials = (TOKEN,)
 
     def __init__(
         self,
@@ -173,6 +178,9 @@ class HermesHarness(CliHarness):
                 native = {"url": server.url, **http_headers(resolved)}
             servers[resolved.name] = native
 
+        token = home / TOKEN
+        await sandbox.write_file(str(token), session.token.encode(), identity=Identity.AGENT)
+        await sandbox.exec(["chmod", "600", str(token)], identity=Identity.AGENT)
         transport, suffix = _TRANSPORTS[self.gateway_dialect]
         model: dict[str, Any] = {"provider": "ale", "default": session.model}
         if self.settings.supports_vision != "default":
@@ -184,7 +192,12 @@ class HermesHarness(CliHarness):
             "providers": {
                 "ale": {
                     "api": session.gateway_url + suffix,
-                    "key_env": "ALE_GATEWAY_TOKEN",
+                    # Run through the platform's shell.
+                    "key_cmd": (
+                        f'type "{PureWindowsPath(token)}"'
+                        if is_windows(session.home)
+                        else f"cat -- {shlex.quote(str(token))}"
+                    ),
                     "transport": transport,
                     "default_model": session.model,
                     "discover_models": False,
@@ -250,7 +263,6 @@ class HermesHarness(CliHarness):
         env = {
             **await npm_env(sandbox, session.home),
             "HERMES_HOME": str(home / STATE),
-            "ALE_GATEWAY_TOKEN": session.token,
             "NO_COLOR": "1",
         }
         # Hermes chooses a new session's ID itself, so only a resume asks for one.

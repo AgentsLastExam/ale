@@ -70,14 +70,14 @@ async def test_the_gateway_is_the_one_provider(
     sandbox = FakeSandbox()
     await HermesHarness(gateway_dialect=dialect).install_resources(
         sandbox,  # type: ignore[arg-type]
-        session(),
+        session(token="episode-token-proof"),
         resources(tmp_path),
     )
     config = yaml.safe_load(sandbox.files[f"{STATE}/config.yaml"])
     assert config["model"] == {"provider": "ale", "default": "test-model"}
     assert config["providers"]["ale"] == {
         "api": api,
-        "key_env": "ALE_GATEWAY_TOKEN",
+        "key_cmd": f"cat -- {STATE}/gateway-token",
         "transport": transport,
         "default_model": "test-model",
         "discover_models": False,
@@ -92,7 +92,25 @@ async def test_the_gateway_is_the_one_provider(
         }
     }
     assert sandbox.uploads == [(str(tmp_path / "resource-proof"), f"{STATE}/skills/resource-proof")]
-    assert b"token\n" not in sandbox.files[f"{STATE}/config.yaml"]
+    # The token is in the one file Hermes reads it from, which sanitation removes.
+    assert [path for path, data in sandbox.files.items() if b"episode-token-proof" in data] == [
+        f"{STATE}/gateway-token"
+    ]
+    assert HermesHarness.credentials == (".hermes-ale/gateway-token",)
+
+
+async def test_on_windows_the_token_is_printed_by_cmd() -> None:
+    sandbox = FakeSandbox()
+    await HermesHarness().install_resources(
+        sandbox,  # type: ignore[arg-type]
+        session(home="C:/Users/agent"),
+        EffectiveAgentResources(),
+    )
+    config = yaml.safe_load(sandbox.files["C:/Users/agent/.hermes-ale/config.yaml"])
+    assert (
+        config["providers"]["ale"]["key_cmd"]
+        == 'type "C:\\Users\\agent\\.hermes-ale\\gateway-token"'
+    )
 
 
 @pytest.mark.parametrize("supports_vision", [True, False])
@@ -135,7 +153,8 @@ async def test_command_streams_events_and_exports_the_sessions(
     )
     assert command.script.endswith('exit "$status"')
     assert command.env["HERMES_HOME"] == STATE
-    assert command.env["ALE_GATEWAY_TOKEN"] == "token"
+    # Hermes passes its environment to the terminal tool, and saves it in a snapshot.
+    assert "token" not in command.env.values()
 
 
 def events(*items: dict[str, object]) -> str:

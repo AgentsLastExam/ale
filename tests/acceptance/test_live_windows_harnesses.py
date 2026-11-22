@@ -28,7 +28,9 @@ from .trajectory import LIVE, MODELS, native_session_file
 pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_kvm, pytest.mark.needs_llm, LIVE]
 
 
-@pytest.mark.parametrize("name", ["claude-code", "codex-cli", "grok-build", "openclaw-cli"])
+@pytest.mark.parametrize(
+    "name", ["claude-code", "codex-cli", "grok-build", "openclaw-cli", "opencode"]
+)
 async def test_windows_native_harness_completes_a_file_task(
     tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -37,7 +39,7 @@ async def test_windows_native_harness_completes_a_file_task(
         pytest.skip("set ALE_TEST_WINDOWS_IMAGE to a prepared Windows base qcow2")
     config = load_run_config(preset_path=PRESET_DIR / f"{name}.toml")
     harness = _harness(config)
-    if name == "claude-code":
+    if name in {"claude-code", "opencode"}:
         launch = harness.launch
 
         async def launch_and_resume(
