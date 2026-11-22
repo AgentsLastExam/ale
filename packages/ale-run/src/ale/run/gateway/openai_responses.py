@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from ale.run.gateway.session import CallUsage
@@ -10,8 +11,10 @@ from ale.run.gateway.session import CallUsage
 __all__ = [
     "extract_usage",
     "policy_body",
+    "quota",
     "refusal_body",
     "stream_completed",
+    "stream_error",
     "usage_from_stream",
     "web_tools",
 ]
@@ -77,6 +80,39 @@ def stream_completed(events: list[bytes]) -> bool:
             return False
         terminal = terminal or event.get("type") in {"response.completed", "response.incomplete"}
     return terminal
+
+
+def stream_error(events: list[bytes]) -> dict[str, Any] | None:
+    """The error a stream failed with, in an ``error`` event or a ``response.failed``, if it
+    did."""
+    for line in b"".join(events).splitlines():
+        if not line.startswith(b"data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip() or b"{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "error":
+            return event
+        if event.get("type") == "response.failed":
+            response = event.get("response")
+            error = response.get("error") if isinstance(response, dict) else None
+            return error if isinstance(error, dict) else event
+    return None
+
+
+#: The error codes and types with which OpenAI's API and ChatGPT's backend refuse a call for
+#: the account's quota or usage limit.
+_QUOTA = frozenset({"insufficient_quota", "usage_limit_reached", "usage_not_included"})
+
+
+def quota(error: dict[str, Any], headers: Mapping[str, str]) -> bool:
+    """Whether the provider failed a call for the account's own limit, which lifts in hours
+    or with billing rather than within a retry."""
+    detail = error.get("error") if isinstance(error.get("error"), dict) else error
+    return bool({detail.get("code"), detail.get("type")} & _QUOTA)
 
 
 def web_tools(payload: dict[str, Any]) -> list[str]:

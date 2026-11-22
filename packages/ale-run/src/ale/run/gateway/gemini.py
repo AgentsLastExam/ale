@@ -8,7 +8,7 @@ body, a response or an error lives here.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,8 +21,10 @@ __all__ = [
     "extract_usage",
     "policy_body",
     "policy_refusal",
+    "quota",
     "refusal_body",
     "stream_completed",
+    "stream_error",
     "usage_from_stream",
     "web_tools",
 ]
@@ -183,6 +185,24 @@ def stream_completed(events: list[bytes]) -> bool:
             return False
         completed = completed or _stop_reason(event) is not None
     return completed
+
+
+def stream_error(events: list[bytes]) -> dict[str, Any] | None:
+    """The error object a stream failed with, if it did."""
+    return next((event for event in _events(events) if "error" in event), None)
+
+
+def quota(error: dict[str, Any], headers: Mapping[str, str]) -> bool:
+    """Whether the provider failed a call for a quota the project used up for the day, which
+    a ``QuotaFailure`` names per day and which lifts tomorrow; a per-minute quota is a rate
+    limit."""
+    detail = error.get("error") if isinstance(error.get("error"), dict) else error
+    return any(
+        "PerDay" in str(violation.get("quotaId", ""))
+        for entry in _dicts(detail.get("details"))
+        if str(entry.get("@type", "")).endswith("google.rpc.QuotaFailure")
+        for violation in _dicts(entry.get("violations"))
+    )
 
 
 def error_body(

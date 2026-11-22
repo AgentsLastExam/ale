@@ -28,6 +28,7 @@ __all__ = [
     "TransportCall",
     "TransportEvent",
     "TransportReplay",
+    "UpstreamError",
     "read_jsonl",
 ]
 
@@ -82,6 +83,12 @@ class _Event(BaseModel):
     episode_id: str
 
 
+#: How the model provider failed a call: overloaded, limiting its rate, failing, not reached
+#: or cut off in its stream, or refusing it for the account's quota. All but ``quota`` may
+#: lift within a minute.
+UpstreamError = Literal["overloaded", "rate_limited", "server_error", "unreachable", "quota"]
+
+
 class TransportCall(_Event):
     kind: Literal["call"] = "call"
     call_id: str
@@ -101,6 +108,9 @@ class TransportCall(_Event):
     disposition: Literal["forwarded", "refused", "failed"]
     refusal_limit: str | None = None
     upstream_status: int | None = None
+    upstream_error: UpstreamError | None = None
+    """How the provider failed a failed call: overloaded, limiting its rate, failing, not
+    reached, or out of the account's quota; none for a failure of the client's own."""
     purpose: Literal["agent", "judge"] = "agent"
     """Whether the evaluated agent or a verification Judge made the call."""
 
@@ -110,6 +120,8 @@ class TransportCall(_Event):
             raise ValueError("refused calls require refusal_limit")
         if self.disposition != "refused" and self.refusal_limit is not None:
             raise ValueError("refusal_limit is valid only for refused calls")
+        if self.disposition != "failed" and self.upstream_error is not None:
+            raise ValueError("upstream_error is valid only for failed calls")
         return self
 
 

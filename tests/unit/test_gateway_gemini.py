@@ -12,7 +12,13 @@ from aiohttp import ClientSession, web
 
 from ale.core.config import GatewayConfig
 from ale.core.trace import read_jsonl
-from ale.run.gateway.gemini import extract_usage, stream_completed, usage_from_stream
+from ale.run.gateway.gemini import (
+    extract_usage,
+    quota,
+    stream_completed,
+    stream_error,
+    usage_from_stream,
+)
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import CallUsage, GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
@@ -488,6 +494,7 @@ class TestLimits:
 class TestErrors:
     async def test_an_upstream_error_passes_through_and_its_retry_is_forwarded(self, stack) -> None:
         gateway, upstream, session, trace = stack
+        gateway.outage_retry_sec = 0.0  # the Gateway's own retries are tested elsewhere
         upstream.status = 503
 
         failed = await send(gateway, STREAM, BODY, token=session.token)
@@ -498,8 +505,11 @@ class TestErrors:
         assert failed.json() == {"error": {"code": 503, "message": "busy", "status": "UNAVAILABLE"}}
         assert retried.status == 200
         assert len(upstream.seen) == 2
-        dispositions = [(r["disposition"], r.get("upstream_status")) for r in records(trace)]
-        assert dispositions == [("failed", 503), ("forwarded", None)]
+        dispositions = [
+            (r["disposition"], r.get("upstream_status"), r.get("upstream_error"))
+            for r in records(trace)
+        ]
+        assert dispositions == [("failed", 503, "server_error"), ("forwarded", None, None)]
 
 
 class TestDialect:
@@ -537,3 +547,31 @@ class TestDialect:
             "from-env",
             "https://generativelanguage.googleapis.com",
         )
+
+
+def _exhausted(quota_id: str) -> dict:
+    return {
+        "error": {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED",
+            "message": "Resource has been exhausted (e.g. check quota).",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [{"quotaId": quota_id}],
+                }
+            ],
+        }
+    }
+
+
+def test_a_daily_quota_is_the_accounts_own_limit_and_a_minutes_is_a_rate_limit() -> None:
+    assert quota(_exhausted("GenerateRequestsPerDayPerProjectPerModel-FreeTier"), {})
+    assert not quota(_exhausted("GenerateRequestsPerMinutePerProjectPerModel"), {})
+    assert not quota({"error": {"code": 503, "status": "UNAVAILABLE"}}, {})
+
+
+def test_a_stream_names_the_error_it_failed_with() -> None:
+    error = {"error": {"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}}
+    assert stream_error([f"data: {json.dumps(error)}\r\n\r\n".encode()]) == error
+    assert stream_error([b'data: {"candidates": []}\r\n\r\n']) is None

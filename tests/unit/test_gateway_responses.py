@@ -9,7 +9,12 @@ import pytest
 from aiohttp import ClientSession, web
 
 from ale.core.trace import read_jsonl
-from ale.run.gateway.openai_responses import stream_completed, usage_from_stream
+from ale.run.gateway.openai_responses import (
+    quota,
+    stream_completed,
+    stream_error,
+    usage_from_stream,
+)
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import CallUsage, GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
@@ -234,3 +239,27 @@ def test_only_a_terminal_response_without_failure_completed() -> None:
     assert not stream_completed([created])
     assert not stream_completed([created, failed])
     assert not stream_completed([created, error, completed])
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ({"error": {"code": "insufficient_quota", "message": "You exceeded your quota."}}, True),
+        ({"error": {"type": "usage_limit_reached", "resets_in_seconds": 3600}}, True),
+        ({"error": {"type": "usage_not_included"}}, True),
+        ({"error": {"code": "rate_limit_exceeded", "message": "Rate limit reached"}}, False),
+        ({"error": {"code": "server_is_overloaded"}}, False),
+    ],
+)
+def test_a_quota_is_the_accounts_own_limit(error: dict, expected: bool) -> None:
+    assert quota(error, {}) is expected
+
+
+def test_a_failed_response_names_its_error() -> None:
+    failed = {
+        "type": "response.failed",
+        "response": {"error": {"code": "server_is_overloaded", "message": "busy"}},
+    }
+    events = [b'data: {"type": "response.created"}\n\n', f"data: {json.dumps(failed)}\n\n".encode()]
+    assert stream_error(events) == {"code": "server_is_overloaded", "message": "busy"}
+    assert stream_error([b'data: {"type": "response.completed"}\n\n']) is None

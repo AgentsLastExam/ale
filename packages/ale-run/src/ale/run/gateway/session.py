@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ale.core.taskspec import NetworkPolicy
+from ale.core.trace import UpstreamError
 
 __all__ = [
     "CallUsage",
@@ -29,6 +30,7 @@ __all__ = [
     "Limits",
     "SessionRegistry",
     "Upstream",
+    "UpstreamFailure",
 ]
 
 
@@ -81,7 +83,8 @@ class CallUsage:
 
 @dataclass
 class Usage:
-    """One session's forwarded calls and their tokens, with :class:`CallUsage` meanings."""
+    """One session's calls the provider answered, and the tokens of all its calls, with
+    :class:`CallUsage` meanings."""
 
     model_calls: int = 0
     input_tokens: int = 0
@@ -92,6 +95,21 @@ class Usage:
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
+
+
+@dataclass(frozen=True)
+class UpstreamFailure:
+    """How the model provider is failing a session's calls: from the first call it failed,
+    at ``since`` (the event loop's clock), until it answers one."""
+
+    kind: UpstreamError
+    status: int | None
+    """The HTTP status of the last failure; ``None`` where it was ``unreachable``."""
+    since: float
+
+    def describe(self, now: float) -> str:
+        status = "" if self.status is None else f" (HTTP {self.status})"
+        return f"{self.kind.replace('_', ' ')}{status} for {max(now - self.since, 0):.0f} s"
 
 
 @dataclass(frozen=True)
@@ -118,6 +136,8 @@ class GatewaySession:
 
     refusal: LimitReached | None = field(default=None, repr=False)
     """The first limit that refused one of this session's calls, if any."""
+    failure: UpstreamFailure | None = field(default=None, repr=False)
+    """How the model provider is failing this session's calls, until it answers one."""
     suspended: bool = False
     """Whether its calls are refused for now: an agent's from the end of its first turn, or
     of its policy rollout, except while a later turn runs; a Judge's except while a verifier
@@ -180,18 +200,39 @@ class GatewaySession:
             self._reserved_calls += 1
             return GatewayReservation()
 
-    async def commit(self, reservation: GatewayReservation, usage: CallUsage | None = None) -> int:
-        """Release a reservation and account for the forwarded call and its tokens."""
+    async def commit(
+        self,
+        reservation: GatewayReservation,
+        usage: CallUsage | None = None,
+        *,
+        answered: bool,
+    ) -> int:
+        """Release a reservation and account for the call's tokens, and for the call itself
+        where the provider ``answered`` it, a request it refused included: one it failed
+        gave the agent nothing."""
         usage = usage or CallUsage()
         async with self._lock:
             self._reserved_calls -= 1
-            self.usage.model_calls += 1
+            self.usage.model_calls += int(answered)
             self.usage.input_tokens += usage.input_tokens
             self.usage.cache_read_tokens += usage.cache_read_tokens
             self.usage.cache_write_tokens += usage.cache_write_tokens
             self.usage.output_tokens += usage.output_tokens
             self.seq += 1
             return self.seq
+
+    def upstream_failed(
+        self, kind: UpstreamError, status: int | None, now: float
+    ) -> UpstreamFailure:
+        """Record that the model provider failed a call, in the failure that began at the
+        first."""
+        since = self.failure.since if self.failure is not None else now
+        self.failure = UpstreamFailure(kind, status, since)
+        return self.failure
+
+    def upstream_answered(self) -> None:
+        """Record that the model provider answered a call, which ends its failure."""
+        self.failure = None
 
     # --- retry idempotency ---
 
