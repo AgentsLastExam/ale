@@ -1,15 +1,18 @@
-"""Rootless gVisor Sandboxes in single-node Slurm allocations.
+"""Rootless gVisor Sandboxes in single-node Slurm allocations, driven from a login node of
+the cluster, where ALE runs.
 
 A solver gets an allocation of its own, sized for it and for the verifiers its request
 names, and every Sandbox booted from one of its snapshots, or mounting views of its volumes,
 starts in that allocation while it has room, from the node's own store: a snapshot is never
-copied for its episode. The allocation ends with the last Sandbox and snapshot in it.
+copied for its episode. The allocation ends with the last Sandbox and snapshot in it. Images
+are prepared on the cluster too ([`images`](images.py)).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -39,23 +42,22 @@ from ale.core.sandbox import (
 )
 from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem, Resources
 from ale.run import guestd
-from ale.run.framework import with_framework
-from ale.run.images import resolve_container_image, resolve_prepared_container_image
 from ale.run.providers import memory, relay
 from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from ale.run.providers.docker import gvisor
-from ale.run.providers.docker import volumes as docker_volumes
 from ale.run.providers.privileges import set_and_prove_elevation
-from ale.run.providers.slurm import worker
+from ale.run.providers.slurm import images, worker
+from ale.run.providers.slurm.images import Recipe
 from ale.run.providers.slurm.job import (
-    CACHE,
     SNAPSHOTS,
     Job,
     JobReady,
     JobTransport,
-    Login,
     SandboxSteps,
     StepReady,
+    cache,
+    slurm,
+    write,
 )
 from ale.run.providers.tunnel import PROXY_PORT, GatewayTunnel, TunneledSandbox, tunnel_plan
 from ale.run.transport import GuestClient
@@ -69,6 +71,8 @@ MAX_SAVES = 200
 #: How long a Sandbox's step may take to start once its allocation runs.
 START_TIMEOUT_SEC = 900
 PREFIX = "slurm:"
+#: The account an image named by its reference alone is prepared for.
+USER = "user"
 
 
 def step_memory_mb(memory_mb: int) -> int:
@@ -169,15 +173,35 @@ def _capacity(needs: SandboxNeeds, separate: Resources | None = None) -> tuple[i
 
 
 def _handle(job: Job, index: str) -> str:
-    return f"{PREFIX}{job.host}/{job.name}/{index}"
+    return f"{PREFIX}{job.name}/{index}"
 
 
-def _parse(handle: str) -> tuple[str, str, str]:
-    host, _, rest = handle.removeprefix(PREFIX).partition("/")
-    name, _, index = rest.partition("/")
-    if not handle.startswith(PREFIX) or not (host and name.startswith("ale-") and index.isdigit()):
+def _parse(handle: str) -> tuple[str, str]:
+    name, _, index = handle.removeprefix(PREFIX).partition("/")
+    if not handle.startswith(PREFIX) or not (name.startswith("ale-") and index.isdigit()):
         raise ProviderCapabilityError(f"{handle!r} is no Slurm snapshot handle")
-    return host, name, index
+    return name, index
+
+
+def _resolved(image: PreparedTaskImage, user: str | None = None) -> ResolvedImage:
+    """An image prepared on the cluster, which the cache holds as it was prepared, with the
+    framework for ``user`` where one is asked for."""
+    record = images.recorded(image) if image.kind is ImageKind.CONTAINER else None
+    if record is None:
+        raise ProviderCapabilityError(
+            f"Slurm's cache holds no image {image.prepared_identity} prepared for the cluster"
+        )
+    if user is not None and record.get("user") != user:
+        raise ProviderCapabilityError(
+            f"{image.prepared_identity} was prepared for the account {record.get('user')!r}, "
+            f"not {user!r}"
+        )
+    return ResolvedImage(
+        kind=ImageKind.CONTAINER,
+        prepared_identity=image.prepared_identity,
+        observed_identity=image.prepared_identity,
+        observed_ref=image.runtime_ref,
+    )
 
 
 @dataclass(eq=False)
@@ -320,7 +344,7 @@ class SlurmSandbox(TunneledSandbox):
         volumes: tuple[str, ...],
     ) -> None:
         super().__init__(
-            sandbox_id=f"{chain.job.host}/{chain.job.id}.{steps.index}",
+            sandbox_id=f"{chain.job.id}.{steps.index}",
             request=request,
             resolved_image=resolved_image,
             allocation=allocation,
@@ -416,17 +440,12 @@ class SlurmProvider(Provider):
         return tuple(profile for p in self.config.partitions for profile in _profiles(p))
 
     def _partition(
-        self,
-        needs: SandboxNeeds,
-        *,
-        host: str | None = None,
-        separate: Resources | None = None,
+        self, needs: SandboxNeeds, *, separate: Resources | None = None
     ) -> SlurmPartition | None:
         cpus, memory_mb, gpus = _capacity(needs, separate)
         for part in self.config.partitions:
             if (
-                (host is not None and part.host != host)
-                or bool(gpus) != bool(part.max_gpus)
+                bool(gpus) != bool(part.max_gpus)
                 or gpus > part.max_gpus
                 or cpus > part.max_cpus
                 or memory_mb + JOB_OVERHEAD_MB > part.max_memory_mb
@@ -450,53 +469,74 @@ class SlurmProvider(Provider):
             if not needs
             else tuple(part for need in needs if (part := self._partition(need)) is not None)
         )
+        for command in ("sbatch", "srun", "squeue", "scancel", "sacct", "scontrol"):
+            if shutil.which(command) is None:
+                raise ProviderStartError(
+                    f"Slurm's {command} is not installed here: ALE runs on a login node of "
+                    "the cluster, whose home its compute nodes share"
+                )
         for part in dict.fromkeys(partitions):
-            await Login(part.host).remote(
-                "command -v sbatch srun scancel sacct >/dev/null && "
-                f"scontrol show partition {part.name} -o"
-            )
+            await slurm("scontrol", "show", "partition", part.name, "-o")
 
     async def prepare_image(self, image: ImageRef | PreparedTaskImage) -> PreparedTaskImage:
-        if image.kind is not ImageKind.CONTAINER:
-            raise ProviderCapabilityError("Slurm requires a Linux container image")
-        prepared = await resolve_container_image(image) if isinstance(image, ImageRef) else image
-        await resolve_prepared_container_image(prepared)
-        return prepared
+        """Check an image prepared for the cluster: one a Task names is prepared there from
+        its recipe (:meth:`prepare_recipe`), as no container runtime runs here."""
+        if isinstance(image, ImageRef):
+            if image.kind is not ImageKind.CONTAINER:
+                raise ProviderCapabilityError("Slurm requires a Linux container image")
+            # For the account ALE's images run their agent as.
+            pinned = await images.pin(image.reference)
+            prepared, _ = await self.prepare_recipe(
+                Recipe(
+                    key=images.key(
+                        "external-ref", reference=pinned, context=None, user=USER, keep_alive=False
+                    ),
+                    source="external-ref",
+                    reference=pinned,
+                    user=USER,
+                )
+            )
+            return prepared
+        _resolved(image)
+        return image
+
+    async def prepare_recipe(self, recipe: Recipe) -> tuple[PreparedTaskImage, bool]:
+        """Prepare an image on the cluster, once per key; return it and whether an earlier
+        preparation had."""
+        return await images.prepare(self.config, recipe)
 
     async def create(self, request: SandboxRequest) -> SlurmSandbox:
         await self.accepts(request)
         engines = _engines(request.resources)
+        candidates: tuple[str, ...] = ()
         if request.snapshot is None and request.volumes_from is None:
-            resolved = await self._framed(request)
-            image = resolved.observed_identity
-            # A candidate is a volume only where the image has a directory, which the Host's
-            # Docker, which framed the image, finds.
-            fresh = await docker_volumes.directories(image, guestd.PYTHON["linux"], request.volumes)
+            resolved = _resolved(request.prepared_image, request.user)
             # Room for the separate verifier only where a partition has it: nothing requires
             # it to boot here.
             separate = request.separate_verifier
             if separate is not None and self._partition(request.needs, separate=separate) is None:
                 separate = None
-            chain = await self._allocate(request.needs, image=image, separate=separate)
+            chain = await self._allocate(
+                request.needs,
+                image=resolved.observed_identity,
+                archive=request.prepared_image.runtime_ref,
+                separate=separate,
+            )
             index = chain.reserve(request.resources)
             assert index is not None, "an allocation holds the Sandbox it was sized for"
             loaded = chain.seed
-            specs = [dict(path=path, kind="fresh") for path in fresh] + [
-                dict(path=path, kind="fresh", copied=True) for path in engines
-            ]
+            # A candidate is a volume where the image has a directory, which the step finds.
+            candidates = request.volumes
+            specs = [dict(path=path, kind="fresh", copied=True) for path in engines]
         else:
             chain, index, resolved, loaded, specs = await self._boot(request, engines)
         try:
-            return await self._start(chain, index, request, resolved, loaded, specs)
+            return await self._start(
+                chain, index, request, resolved, loaded, specs, candidates=candidates
+            )
         except BaseException:
             await asyncio.shield(self.release(chain, index))
             raise
-
-    async def _framed(self, request: SandboxRequest) -> ResolvedImage:
-        """The request's image with the framework, as the Host's Docker holds it."""
-        resolved = await resolve_prepared_container_image(request.prepared_image)
-        image = await with_framework(resolved.observed_identity, user=request.user)
-        return resolved.model_copy(update={"observed_identity": image, "observed_ref": image})
 
     async def _boot(
         self, request: SandboxRequest, engines: Sequence[str]
@@ -507,25 +547,23 @@ class SlurmProvider(Provider):
         the snapshot or that image, and the snapshot's volume layers."""
         handle = request.snapshot or request.volumes_from
         assert handle is not None
-        host, name, index = _parse(handle)
+        name, index = _parse(handle)
         found = self.snapshots.get(handle)
         if found is not None:
             chain, snapshot = found
             image, prepared, stacks = snapshot.image, snapshot.prepared_identity, snapshot.stacks
         else:
             # Written out by an earlier process, whose allocation has ended.
-            record = await Login(host).remote(
-                f"cat {CACHE}/{SNAPSHOTS}/{name}-{index}.json 2>/dev/null || true"
-            )
-            if not record:
-                raise ProviderCapabilityError(f"Slurm holds no snapshot {handle}")
-            saved = json.loads(record)
+            try:
+                saved = json.loads((cache() / SNAPSHOTS / f"{name}-{index}.json").read_text())
+            except FileNotFoundError:
+                raise ProviderCapabilityError(f"Slurm holds no snapshot {handle}") from None
             chain, snapshot = None, None
             image, prepared = saved["image"], saved["prepared_identity"]
             stacks = dict(saved.get("stacks") or {})
         viewing = request.volumes_from is not None
         if viewing:
-            resolved = await self._framed(request)
+            resolved = _resolved(request.prepared_image, request.user)
         else:
             if prepared != request.prepared_image.prepared_identity:
                 raise ProviderCapabilityError(
@@ -544,9 +582,7 @@ class SlurmProvider(Provider):
             booted = chain.reserve(request.resources) if served else None
             if booted is not None:
                 try:
-                    loaded = (
-                        await self._load(chain, resolved.observed_identity) if viewing else image
-                    )
+                    loaded = await self._load(chain, request.prepared_image) if viewing else image
                 except BaseException:
                     chain.running.pop(booted, None)
                     raise
@@ -564,8 +600,7 @@ class SlurmProvider(Provider):
         own = await self._allocate(
             request.needs,
             image=resolved.observed_identity if viewing else image,
-            archive=None if viewing else archive,
-            host=host,
+            archive=request.prepared_image.runtime_ref if viewing else archive,
             layers=layers,
         )
         booted = own.reserve(request.resources)
@@ -573,12 +608,14 @@ class SlurmProvider(Provider):
         own.viewing[booted] = needed
         return own, booted, resolved, own.seed, specs
 
-    async def _load(self, chain: _Chain, image: str) -> str:
-        """Load ``image``, from the Host's Docker, into an allocation that runs; return the
+    async def _load(self, chain: _Chain, image: PreparedTaskImage) -> str:
+        """Load an image prepared for the cluster into an allocation that runs; return the
         ID Podman gives it."""
-        archive, loaded = await chain.job.stage_image(image)
+        loaded = image.prepared_identity
         if loaded != chain.seed and loaded not in chain.images:
-            await chain.job.control("load", archive, loaded.removeprefix("sha256:"), timeout=3600)
+            await chain.job.control(
+                "load", image.runtime_ref, loaded.removeprefix("sha256:"), timeout=3600
+            )
             chain.images.add(loaded)
         return loaded
 
@@ -587,29 +624,24 @@ class SlurmProvider(Provider):
         needs: SandboxNeeds,
         *,
         image: str,
-        archive: str | None = None,
-        host: str | None = None,
+        archive: str,
         layers: dict[str, str] | None = None,
         separate: Resources | None = None,
     ) -> _Chain:
-        """An allocation for ``needs``, and the ``separate`` verifier, seeded with ``image``:
-        a Task image sent from the Host, or a snapshot's ``archive`` already on the cluster at
-        ``host``, which Podman loads under the snapshot's own ID, and a written-out snapshot's
+        """An allocation for ``needs``, and the ``separate`` verifier, seeded with ``image``
+        from its ``archive`` below the cache: an image prepared for the cluster, or a
+        written-out snapshot, which Podman loads under its own ID, with that snapshot's
         volume ``layers``, by name, below the cache."""
-        part = self._partition(needs, host=host, separate=separate)
+        part = self._partition(needs, separate=separate)
         if part is None:
             raise ProviderCapabilityError(
-                "no configured Slurm partition"
-                + (f" on {host}" if host else "")
-                + " serves that single-node allocation"
+                "no configured Slurm partition serves that single-node allocation"
             )
         cpus, memory_mb, gpus = _capacity(needs, separate)
         job = Job(part)
         try:
             loaded = image
-            if archive is None:
-                archive, loaded = await job.stage_image(image)
-            await job.stage(
+            job.stage(
                 dict(
                     archive=archive,
                     image=loaded.removeprefix("sha256:"),
@@ -638,9 +670,12 @@ class SlurmProvider(Provider):
         resolved: ResolvedImage,
         loaded: str,
         volumes: list[dict[str, object]],
+        *,
+        candidates: Sequence[str] = (),
     ) -> SlurmSandbox:
         """Start a Sandbox in ``chain`` from the image Podman holds there as ``loaded``, with
-        ``volumes`` made in the allocation's store."""
+        ``volumes`` made in the allocation's store, and one of its own at each of the volume
+        ``candidates`` that is a directory in the image."""
         gateway, listeners, targets = tunnel_plan(request)
         resources = request.resources
         env = dict(request.env)
@@ -664,6 +699,7 @@ class SlurmProvider(Provider):
                     env=env,
                     sealed=sealed,
                     volumes=volumes,
+                    candidates=list(candidates),
                 ),
                 timeout=START_TIMEOUT_SEC,
             )
@@ -725,7 +761,10 @@ class SlurmProvider(Provider):
                 ),
                 home=home,
                 gateway=gateway,
-                volumes=tuple(str(v["path"]) for v in volumes if not v.get("copied")),
+                volumes=(
+                    *ready.volumes,
+                    *(str(v["path"]) for v in volumes if not v.get("copied")),
+                ),
             )
             sandbox.state = SandboxState.READY
             if sealed:
@@ -775,31 +814,26 @@ class SlurmProvider(Provider):
             reason=snapshot.reason,
             stacks=snapshot.stacks,
         )
-        await chain.job.remote(
-            f"umask 077 && cat > {CACHE}/{SNAPSHOTS}/{name}.json",
-            stdin=json.dumps(record).encode(),
-        )
+        write(cache() / SNAPSHOTS / f"{name}.json", json.dumps(record).encode())
         snapshot.archive = archive
         return archive
 
     async def list_retained(self) -> list[dict[str, object]]:
         records: dict[str, dict[str, object]] = {}
-        for host in dict.fromkeys(part.host for part in self.config.partitions):
-            listing = await Login(host).remote(
-                f'for f in {CACHE}/{SNAPSHOTS}/*.json; do test -f "$f" && cat "$f" && echo; '
-                "done; true"
+        for path in sorted((cache() / SNAPSHOTS).glob("*.json")):
+            try:
+                saved = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            records[saved["handle"]] = _record(
+                saved["handle"], saved["episode"], saved["roles"], saved["image"]
             )
-            for line in filter(None, listing.splitlines()):
-                saved = json.loads(line)
-                records[saved["handle"]] = _record(
-                    saved["handle"], saved["episode"], saved["roles"], saved["image"]
-                )
         for handle, (_, snapshot) in self.snapshots.items():
             records[handle] = _record(handle, snapshot.episode_id, snapshot.roles, snapshot.image)
         return sorted(records.values(), key=lambda item: str(item["handle"]))
 
     async def destroy_retained(self, handle: str) -> None:
-        host, name, index = _parse(handle)
+        name, index = _parse(handle)
         found = self.snapshots.get(handle)
         if found is not None:
             chain, snapshot = found
@@ -814,8 +848,9 @@ class SlurmProvider(Provider):
                 kept.update(layer for held in chain.viewing.values() for layer in held)
                 if dropped := sorted(snapshot.layers - kept):
                     await chain.job.control("drop", *dropped, timeout=600)
-        stem = f"{CACHE}/{SNAPSHOTS}/{name}-{index}"
-        await Login(host).remote(f"rm -f {stem}.tar.gz {stem}.*.tar {stem}.json")
+        stem = f"{name}-{index}"
+        for path in (cache() / SNAPSHOTS).glob(f"{stem}.*"):
+            path.unlink(missing_ok=True)
         if found is not None:
             await self._close_if_idle(found[0])
 

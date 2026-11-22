@@ -90,12 +90,14 @@ __all__ = [
     "MARKER",
     "MATERIALIZER_IMAGE",
     "WINDOWS_MARKER",
+    "container_framework",
     "frame_disk",
     "framed_disk",
     "framework_identity",
     "framework_on_disk",
     "macos_framework_identity",
     "macos_framework_payload",
+    "stage_container_framework",
     "windows_framework_identity",
     "with_framework",
 ]
@@ -358,7 +360,7 @@ async def with_framework(image: str, *, user: str, keep_alive: bool = False) -> 
             built = await _inspect(tag, missing_ok=True)
             if built and carries(built):
                 return built["Id"]
-            await _build(config, tag, identity, user=user, keep_alive=keep_alive)
+            await _build(config, tag, user=user, keep_alive=keep_alive)
             return (await _inspect(tag))["Id"]
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -556,34 +558,43 @@ def _explained(stderr: str, stdout: str = "") -> str:
     return " ".join(said) if said else stderr.strip()[-2000:]
 
 
-async def _build(base: dict, tag: str, identity: str, *, user: str, keep_alive: bool) -> None:
-    driver = await asyncio.to_thread(_cua_driver, "linux")
-    python = await asyncio.to_thread(_python, "linux")
+def container_framework(*, user: str, keep_alive: bool) -> tuple[list[str], list[str]]:
+    """The framework layer's instructions below its ``FROM``, which a container image builds
+    from a context :func:`stage_container_framework` laid out: those before the base's own
+    account is restored, and those after it."""
+    identity = framework_identity(user=user, vm=False)
+    body = [
+        "USER root",
+        "COPY guestd/ /opt/ale/guestd/",
+        "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver",
+        "COPY setup.sh /opt/ale/setup.sh",
+        # Mounted, not copied: a copy would land in the layer once more when setup takes it
+        # into /opt/ale/python.
+        "RUN --mount=type=bind,from=python,target=/tmp/python "
+        + json.dumps(["/bin/sh", "/opt/ale/setup.sh", user, identity, "/tmp/python"]),
+    ]
+    tail = [f"CMD {json.dumps(list(KEEP_ALIVE))}"] if keep_alive else []
+    return body, [*tail, f"LABEL {LABEL}={json.dumps(identity)}"]
+
+
+def stage_container_framework(context: Path) -> Path:
+    """Lay out the files a container image's framework layer copies in ``context``; return
+    the framework's Python, which the build mounts as the ``python`` context."""
+    _stage(context, _cua_driver("linux"), user="", vm=False)
+    return _python("linux")
+
+
+async def _build(base: dict, tag: str, *, user: str, keep_alive: bool) -> None:
     base_tag = f"ale-framework-base:{base['Id'].removeprefix('sha256:')}"
     code, _, stderr = await _run("docker", "tag", base["Id"], base_tag)
     if code != 0:
         raise ProviderStartError(f"could not reference the Task image: {stderr.strip()}")
     with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
         context = Path(temporary)
-        _stage(context, driver, user=user, vm=False)
-        lines = [
-            f"FROM {base_tag}",
-            "USER root",
-            "COPY guestd/ /opt/ale/guestd/",
-            "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver",
-            "COPY setup.sh /opt/ale/setup.sh",
-        ]
-        # Mounted, not copied: a copy would land in the layer once more when setup takes it
-        # into /opt/ale/python.
-        lines.append(
-            "RUN --mount=type=bind,from=python,target=/tmp/python "
-            + json.dumps(["/bin/sh", "/opt/ale/setup.sh", user, identity, "/tmp/python"])
-        )
-        if base.get("User"):
-            lines.append(f"USER {base['User']}")
-        if keep_alive:
-            lines.append(f"CMD {json.dumps(list(KEEP_ALIVE))}")
-        lines.append(f"LABEL {LABEL}={json.dumps(identity)}")
+        python = await asyncio.to_thread(stage_container_framework, context)
+        body, tail = container_framework(user=user, keep_alive=keep_alive)
+        restored = [f"USER {base['User']}"] if base.get("User") else []
+        lines = [f"FROM {base_tag}", *body, *restored, *tail]
         (context / "Dockerfile").write_text("\n".join(lines) + "\n")
         code, _, stderr = await _run(
             "docker", "buildx", "build", "--load", "--provenance=false", "--sbom=false",

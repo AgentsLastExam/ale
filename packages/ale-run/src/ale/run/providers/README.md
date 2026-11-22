@@ -94,7 +94,7 @@ serves it on.
 
 | Provider | Where the fixed port leads |
 |---|---|
-| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a second Slurm step to the Host, carrying only the Gateway and, under `allowlist` or `blocklist`, the episode's egress proxy |
+| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a second Slurm step to the Host, the login node ALE runs on, carrying only the Gateway and, under `allowlist` or `blocklist`, the episode's egress proxy |
 | Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)). Under rootless Docker, whose bridges are in a network namespace of rootlesskit's, the Provider listens at the Gateway's port there and relays each connection to the Host ([Docker runtimes](#docker-runtimes)) |
 | QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Firecracker | As QEMU, from the guest's tap device in the runner |
@@ -152,7 +152,7 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the ALE cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
 | Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the ALE cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so its profile saves none |
-| Slurm | `podman stop`, then `podman commit` to `localhost/ale-snapshot:<step>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there gets an allocation of its own, which loads the snapshot written out with `podman save` to the shared `~/.cache/ale/slurm/snapshots`; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
+| Slurm | `podman stop`, then `podman commit` to `localhost/ale-snapshot:<index>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there gets an allocation of its own, which loads the snapshot written out with `podman save` to the shared `~/.cache/ale/slurm/snapshots`; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
 | Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `ale-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
 | Fleet | The Node's Provider saves it on that Node, as in its row, and Sandboxes that boot from it are placed there, on the leaf that saved it ([Placement](../../../../../../docs/specs/fleet.md#placement)). The Fleet's handle for it is `fleet:snapshot:<sandbox>`; destroying it has the Node's Provider destroy it at the Node's next heartbeat |
 
@@ -210,24 +210,25 @@ there and still deletes it once booted from its snapshot, where it deletes anoth
 ### Slurm volumes
 
 A Sandbox's volumes are layers in its allocation's Podman store on the node
-([`slurm/worker.py`](slurm/worker.py)): a Podman volume of its own for each candidate the
-Host's Docker finds a directory in the framed image, and for each engine path of a Sandbox
-that asks for `nested_containers`; a view, an overlay that the step mounts in the
-allocation's rootless Podman namespace with `userxattr`, of a snapshot's stack under an
-empty layer of its own, which gVisor's gofer serves as any directory; or a copy (`cp -a
---reflink=auto`) of an engine's storage. Every layer has a short link below the store, by
-which an overlay's options name the 200 layers of [`MAX_SAVES`](#slurm) in one page. A
-snapshot records each path's stack, and a step unmounts its views before the Host hears of
-its snapshot, as a mounted upper layer is no other overlay's lower. A snapshot written out
-for an allocation of its own carries each of its layers beside its image as an uncompressed
-tar that keeps owners, whiteouts and the overlay's extended attributes, which that
-allocation unpacks before it starts anything. The allocation is sized for the separate
-verifier too where a partition holds both, and loads that verifier's image, from the Host,
-when it starts; destroying a snapshot removes its layers that no other snapshot and no
-running view stacks. Measured on OpenRSI (Linux 6.8, Podman, gVisor 0.1.4): a Podman volume
-filled from the image, a view of a stack of two layers, a deletion through it kept as a
-whiteout that the next view honours, and a container engine's images and deletions kept by a
-snapshot written out and loaded in another allocation.
+([`slurm/worker.py`](slurm/worker.py)): a Podman volume of its own for each candidate that
+is a directory in the image, with no link on its way, which the step reads from the image
+mounted in the allocation's Podman namespace before the container starts, and for each
+engine path of a Sandbox that asks for `nested_containers`; a view, an overlay that the step
+mounts in the allocation's rootless Podman namespace with `userxattr`, of a snapshot's stack
+under an empty layer of its own, which gVisor's gofer serves as any directory; or a copy
+(`cp -a --reflink=auto`) of an engine's storage. Every layer has a short link below the
+store, by which an overlay's options name the 200 layers of [`MAX_SAVES`](#slurm) in one
+page. A snapshot records each path's stack, and a step unmounts its views before the Host
+hears of its snapshot, as a mounted upper layer is no other overlay's lower. A snapshot
+written out for an allocation of its own carries each of its layers beside its image as an
+uncompressed tar that keeps owners, whiteouts and the overlay's extended attributes, which
+that allocation unpacks before it starts anything. The allocation is sized for the separate
+verifier too where a partition holds both, and loads that verifier's image, prepared for the
+cluster as the solver's is, when it starts; destroying a snapshot removes its layers that no
+other snapshot and no running view stacks. Measured on OpenRSI (Linux 6.8, Podman, gVisor
+0.1.4): a Podman volume filled from the image, a view of a stack of two layers, a deletion
+through it kept as a whiteout that the next view honours, and a container engine's images
+and deletions kept by a snapshot written out and loaded in another allocation.
 
 ## Shown stage
 
@@ -833,23 +834,32 @@ the preflight's check: about 15 s with that image.
 
 ## Slurm
 
-A Run can submit directly to Slurm over an SSH login alias. The login and compute nodes must
-share the submitting account's home. A Sandbox not booted from a snapshot, a separate
-verifier that copies included, gets a single-node batch job of its own, its allocation,
-sized for it and for the verifiers its request names, which boot from its snapshot or view
-its [volumes](#slurm-volumes) after it. Each Sandbox
-runs in its allocation as a job step of its own, which the batch step starts with `srun
---exact` and Slurm holds to the Sandbox's CPUs, memory and GPUs; a step that asks for no GPU
-sees none of the job's. The allocation ends with the last Sandbox and snapshot in it.
+ALE runs on a login node of the cluster, where Slurm's commands work and whose home every
+compute node shares, and a Run drives that one cluster. A Sandbox not booted from a
+snapshot, a separate verifier that copies included, gets a single-node batch job of its own,
+its allocation, sized for it and for the verifiers its request names, which boot from its
+snapshot or view its [volumes](#slurm-volumes) after it. Each Sandbox runs in its allocation
+as a job step of its own, which the batch step starts with `srun --exact` and Slurm holds to
+the Sandbox's CPUs, memory and GPUs; a step that asks for no GPU sees none of the job's. The
+allocation ends with the last Sandbox and snapshot in it.
 
-The Host prepares and frames images using Docker. It sends the compressed image once per
-content identity to the login user's private `~/.cache/ale/slurm`, and an allocation loads
-it once into its own Podman store on the node. Compute nodes need Python 3, rootless Podman
+The login node needs no container runtime: a Task's images are prepared on the cluster
+([`slurm/images.py`](slurm/images.py)), once per key of everything that goes into them, each
+in a job of its own on the first partition without GPUs, of 8 CPUs and 32 GiB at most. A
+named image is pinned by the digest its registry gives it now, read over HTTP, and pulled
+there; a Task's own build context, copied below the cache without `setup/`, is built there
+with Podman, whose Buildah 1.33 refuses what only BuildKit reads, such as a heredoc in
+`RUN`. A private registry's credentials are those `~/.docker/config.json` on the shared home
+saves, which both the pin and Podman read. The job adds the framework layer for the account
+the Task's image declares, or `user` for an image a caller names by reference alone, as the
+conformance suite does, and saves the result, compressed, to `~/.cache/ale/slurm/images`,
+from which each allocation loads it into its own Podman store on its node; only the Task's
+own build failing there is the Task's error. Compute nodes need Python 3, rootless Podman
 with slirp4netns, iproute2, and cgroup v2 with enforced CPU affinity, a memory limit and
 zero swap for each step. GPU partitions need NVIDIA CDI and a driver supported by the pinned
 ALE gVisor runtime. The compute node pulls the build `docker:gvisor` runs from GHCR into a
-private, versioned cache shared by the login and compute nodes. Tasks run without the login
-home, agent socket or Slurm credentials.
+private, versioned cache below the shared home. Tasks run without the login home, agent
+socket or Slurm credentials.
 
 ```toml
 [sandbox]
@@ -860,14 +870,12 @@ walltime_minutes = 180
 queue_timeout_sec = 900
 
 [[sandbox.slurm.partitions]]
-host = "cluster-login"
 name = "cpu_1"
 qos = "cpu"
 max_cpus = 42
 max_memory_mb = 204800
 
 [[sandbox.slurm.partitions]]
-host = "cluster-login"
 name = "h100_1"
 qos = "short"
 max_cpus = 166
@@ -877,14 +885,13 @@ max_gpus = 8
 ```
 
 Each entry describes a homogeneous partition's effective per-node limits for that QoS.
-Add entries with another login alias to serve another cluster. CPU-only allocations use CPU
-entries; an allocation whose solver or verifier needs GPUs takes the first matching GPU
-entry, as whole cards. The provider checks each step's CPU and memory limits, the started
-image and the allocated GPU UUIDs against the devices the guest sees. Pending jobs have a
-queue deadline. Running jobs have a Slurm wall time even when the Host is lost, and
-`walltime_minutes`, within the QoS's limit, must cover every turn, validation round and
-verifier of the episode. `sandbox_id` names the login host, job ID and step; the allocation
-records the compute node and runtime.
+CPU-only allocations use CPU entries; an allocation whose solver or verifier needs GPUs
+takes the first matching GPU entry, as whole cards. The provider checks each step's CPU and
+memory limits, the started image and the allocated GPU UUIDs against the devices the guest
+sees. Pending jobs have a queue deadline. Running jobs have a Slurm wall time even when ALE
+is lost, and `walltime_minutes`, within the QoS's limit, must cover every turn, validation
+round and verifier of the episode. `sandbox_id` is the job ID and the Sandbox's index in the
+job; the allocation records the compute node and runtime.
 
 A snapshot is the stopped container committed to the allocation's store on its node
 ([Snapshots](#snapshots)). The verifier booted from it, a [validation
@@ -895,31 +902,32 @@ allocation holds the larger of its solver and verifier for its whole life: a sol
 GPU for eight hours, verified on eight GPUs for one, holds eight for nine hours, 72
 GPU-hours, where two allocations would hold 16. A Sandbox booted from a snapshot that does
 not fit beside what runs in its allocation gets an allocation of its own, which loads the
-snapshot written out with `podman save`; a snapshot the Run keeps (`sandbox_retention.solver
-= "snapshot"`) is written out as it is saved, as its allocation ends with the episode, and
-costs that copy. `ale sandbox destroy slurm:<host>/<job name>/<step>` removes one; `ale
-sandbox list` lists those of the hosts a Run configures, and finds none without one. A chain
-of 200 commits, each booted from the one before, over a one-layer image was measured, so
-each profile saves 200 in a row; a container engine's storage is volumes, which a snapshot
-keeps as layers beside its commit. Slurm keeps no running Sandbox and limits no writable
-storage.
+snapshot written out with `podman save`; a snapshot the Run keeps
+(`sandbox_retention.solver = "snapshot"`) is written out as it is saved, as its allocation
+ends with the episode, and costs that copy. `ale sandbox destroy slurm:<job name>/<index>`
+removes one; `ale sandbox list` lists those written out below the cache. A chain of 200
+commits, each booted from the one before, over a one-layer image was measured, so each
+profile saves 200 in a row; a container engine's storage is volumes, which a snapshot keeps
+as layers beside its commit. Slurm keeps no running Sandbox and limits no writable storage.
 
-`srun --overlap --unbuffered` opens guestd's command and file sessions and a separate
-tunnel. Blocking drops packets on the sandbox's private tap outside gVisor. Opening removes
-the filters while the container keeps running. `allowlist` and `blocklist` use the same seal
-and the Host's authenticated proxy through the tunnel. The runtime modes grant nested Docker or
-raw sockets separately.
+`srun --overlap --unbuffered` from the login node opens guestd's command and file sessions,
+a watcher of the Sentry's OOM kills and a tunnel, which carries the Run's Gateway, on the
+login node, to the Sandbox. Blocking drops packets on the sandbox's private tap outside
+gVisor. Opening removes the filters while the container keeps running. `allowlist` and
+`blocklist` use the same seal and the Run's authenticated proxy through the tunnel. The
+runtime modes grant nested Docker or raw sockets separately.
 
 A Sandbox's step gets the Task's memory plus what `docker:gvisor` adds for the Sentry
 ([Docker on gVisor](#docker-on-gvisor)) and 32 MiB for the step's own process and conmon;
 the job adds 512 MiB for its batch step, Podman's namespace and every Sandbox's control
 steps. GPUs of one node talk to each other through nvproxy as on the bare node: NCCL 2.27.5
 all-reduced 1 GiB across four NVLinked H100s at 356 GB/s of bus bandwidth in a Sandbox,
-against 359 GB/s in a plain step of the same node (304 against 315 GB/s at 64 MiB). A profile's memory limit is the largest Sandbox that fits its partition with both.
-The runtime reads the limit and usage of the nearest cgroup above the step that has a
-`memory.max`, which is where Slurm limits it, so memory pressure ends a process inside the
-sandbox. Confirm a site with
-`ALE_TEST_SLURM_CONFIG=run.toml uv run pytest tests/conformance/test_provider_slurm.py`.
+against 359 GB/s in a plain step of the same node (304 against 315 GB/s at 64 MiB). A
+profile's memory limit is the largest Sandbox that fits its partition with both. The runtime
+reads the limit and usage of the nearest cgroup above the step that has a `memory.max`,
+which is where Slurm limits it, so memory pressure ends a process inside the sandbox.
+Confirm a site from its login node with
+`ALE_TEST_SLURM_CONFIG=run.toml uv run pytest -m needs_slurm tests`.
 
 ## Daytona
 

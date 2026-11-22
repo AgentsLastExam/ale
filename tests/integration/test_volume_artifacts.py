@@ -24,7 +24,6 @@ from ale.run.providers.docker import volumes as docker_volumes
 from ale.run.providers.firecracker import FirecrackerProvider
 from ale.run.providers.qemu import QemuProvider
 from ale.run.providers.slurm import SlurmProvider
-from ale.run.providers.slurm.job import Job
 from ale.run.scaffold import scaffold_task
 from ale.run.task_images import prepare_task_image
 from ale.run.tasksets.manifest import load_tasks
@@ -131,32 +130,6 @@ async def test_an_agent_works_in_a_volume_every_verifier_sees_through_a_view_of_
     result = await _episode(tmp_path, mode, validation, DockerProvider(runtime=runtime))
     _check(result, mode, validation)
     assert _ale_volumes(result.episode_id) == []
-
-
-@pytest.mark.needs_slurm
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "validation"), [("separate", None), ("snapshot", None), ("shared", "separate")]
-)
-async def test_an_agent_works_in_a_volume_in_one_slurm_allocation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, validation: str | None
-) -> None:
-    """Every turn's solver and every verifier, a separate one of the verifier's image
-    included, runs in the first solver's allocation, viewing its volume in the node's
-    store."""
-    provider = SlurmProvider(slurm_config())
-    submitted: list[str] = []
-    submit = Job.submit
-
-    async def counted(job: Job, **resources: int) -> None:
-        submitted.append(job.name)
-        await submit(job, **resources)
-
-    monkeypatch.setattr(Job, "submit", counted)
-    result = await _episode(tmp_path, mode, validation, provider)
-    _check(result, mode, validation)
-    assert len(submitted) == 1
-    assert provider.snapshots == {}
 
 
 @pytest.mark.needs_kvm

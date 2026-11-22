@@ -289,11 +289,10 @@ class DockerProviderConfig(BaseModel):
 
 
 class SlurmPartition(BaseModel):
-    """One single-node allocation a Slurm submission site offers."""
+    """One single-node allocation the cluster ALE runs on offers."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    host: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@-]*$")
     name: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
     qos: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
     max_cpus: int = Field(ge=1)

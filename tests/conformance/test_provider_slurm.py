@@ -1,4 +1,5 @@
-"""Slurm conformance on an explicitly configured cluster with a shared home directory."""
+"""Slurm conformance, run on a login node of an explicitly configured cluster, whose home
+its compute nodes share."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from ale.run.framework import framework_identity
 from ale.run.providers import missing_features
 from ale.run.providers.slurm import SlurmProvider
 
-pytestmark = [pytest.mark.conformance, pytest.mark.needs_slurm, pytest.mark.needs_docker]
+pytestmark = [pytest.mark.conformance, pytest.mark.needs_slurm]
 
 
 class TestSlurmProvider(ProviderConformance):

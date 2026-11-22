@@ -1,5 +1,24 @@
 # Slurm provider
 
+Decided: ALE runs on a login node of the cluster, never on a machine that reaches one, and a
+Run drives that one cluster; joining clusters or other machines is not this Provider's.
+OpenRSI's login nodes have no Docker, no Podman and no subordinate ID range for the account,
+so no container runs there, and images are prepared on the cluster. Measured on OpenRSI's
+compute nodes (Podman 4.9.3, Buildah 1.33.7): `COPY --chmod` and
+`RUN --mount=type=bind,from=<build context>`, which the framework layer uses, work, and a
+heredoc in `RUN`, which BuildKit reads, does not; none of the Task repositories'
+Dockerfiles, about 50, uses one. Tags are pinned by digest before the key is taken, since
+the cache keeps an image by its key and a moved tag is another image.
+
+The home is NFS (version 3, default attribute caching), whose client trusts its cached
+listing of a directory, so a file another machine just made can be missing to a lookup for
+up to a minute. Measured on the login node: a file a job wrote showed 20 s later to a plain
+lookup, and within the 0.5 s it was polled at once the directory was listed first, as
+opening a directory makes the client read it again. Every file ALE waits for in a job's
+directory is therefore looked up after its directory is listed, and a preparation job's
+result, which it writes as it ends, is still read for 90 s after the job ends before its
+absence is a failure.
+
 OpenRSI's H100 and B200 compute nodes run rootless Podman without a delegated user cgroup.
 Slurm owns resource enforcement: it limits each step of a job on its own, at
 `job_<id>/step_<n>/user` (memory, zero swap and a cpuset narrowed to the step), below the
@@ -16,9 +35,9 @@ on a busy queue. A boot that does not fit beside what runs gets an allocation of
 loading the snapshot from a `podman save` archive on the shared home, as does a snapshot the
 Run keeps, whose allocation ends with the episode.
 
-The batch step, not the Host, starts each Sandbox's step (`srun --exact`), so a dropped login
-connection never ends it; the Host only writes the request and reads the step's files on the
-shared home. With `--ignore-cgroups` alone, one allocating process could take down the entire
+The batch step, not ALE, starts each Sandbox's step (`srun --exact`), so ALE's own process
+ending never ends it; ALE only writes the request and reads the step's files on the shared
+home. With `--ignore-cgroups` alone, one allocating process could take down the entire
 Sentry, so the runtime reads the nearest cgroup above the step that has a `memory.max`,
 without joining or modifying it. The batch step holds Podman's pause namespace through
 cleanup. Each job needs private XDG, graph, run and temporary directories so concurrent jobs
@@ -47,11 +66,10 @@ honours, and a container sees the mount because Podman's containers start in tha
 Each layer is named by a short link below the store, `l/<layer>`, and the overlay is mounted
 from the store's root, so its options, which must fit in a page, name a chain of 200 layers;
 Docker's own overlay driver does the same. A container engine's storage is copied, never
-viewed, as on Docker. The Host's Docker, which framed the image, finds which candidates are
-directories, so the cluster needs no probe of the image. A snapshot written out for another
-allocation carries each layer as a tar that `tar --xattrs --xattrs-include=user.*` writes in
-the namespace, which keeps owners, whiteouts and the overlay's opaque directories; it is not
-compressed, as a volume's output often is already.
+viewed, as on Docker. A snapshot written out for another allocation carries each layer as a
+tar that `tar --xattrs --xattrs-include=user.*` writes in the namespace, which keeps owners,
+whiteouts and the overlay's opaque directories; it is not compressed, as a volume's output
+often is already.
 
 A Sandbox's `/dev/shm` is Podman's `--shm-size` of half its Task's memory
 ([`memory.shm_mb`](../memory.py)). Podman makes it a tmpfs on the node and binds it into the
@@ -78,5 +96,5 @@ Podman uses NVIDIA CDI devices by UUID. Setting NVIDIA_VISIBLE_DEVICES to void d
 the duplicate NVIDIA hook. Register the injected libraries inside the sandbox. For nested
 Docker, Podman's default capability set omits capabilities the inner Docker expects.
 
-The Slurm step carrying the host tunnel needs unbuffered binary I/O. Normal step
+The Slurm step carrying the Gateway tunnel needs unbuffered binary I/O. Normal step
 output can wait for a newline in a protocol whose first frame contains none.

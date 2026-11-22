@@ -66,6 +66,9 @@ from ale.run.providers.qemu.provider import (
     RUNNER_IMAGE,
     QemuProvider,
 )
+from ale.run.providers.slurm import SlurmProvider
+from ale.run.providers.slurm.images import Recipe, pin
+from ale.run.providers.slurm.images import key as cluster_key
 from ale.run.sources import cache_root
 from ale.run.tasksets.manifest import BUILD_SCRIPTS, SETUP_DIR, describe
 
@@ -210,6 +213,8 @@ async def prepare_task_image_result(task: Task, provider: Provider) -> ImagePrep
     folder = _task_folder(task)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, "solver", provider)
+    if isinstance(provider, SlurmProvider):
+        return await _on_cluster(task, "solver", provider)
     if spec.base_ref is not None:
         base = await _stage(
             "base-resolution",
@@ -386,6 +391,8 @@ async def prepare_verifier_image_result(
     kind = _kind(declared)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, role, provider)
+    if isinstance(provider, SlurmProvider):
+        return await _on_cluster(task, role, provider)
     if declared.ref is not None:
         image = await _stage(
             "reference-resolution",
@@ -530,6 +537,79 @@ def _on_fleet(task: Task, role: ImageRole, provider: FleetProvider) -> ImagePrep
         prepared,
         ImagePreparationStep("fleet", "deferred", key, "prepared on each Node that runs it"),
     )
+
+
+async def _on_cluster(
+    task: Task, role: ImageRole, provider: SlurmProvider
+) -> ImagePreparationResult:
+    """One of a Task's images as the Slurm Provider prepares it, on the cluster, from what
+    the Task declares, as no container runtime runs where ALE does: a named image pinned by
+    the digest its registry gives it now, or the Task's own build, with the framework layer.
+
+    Its key covers what goes into it: the pinned name, or the build context as
+    ``_context_identity`` observes it, and the framework for its account and command.
+    """
+    image = {
+        "solver": task.spec.image,
+        "verifier": task.spec.verify.image,
+        "validation": task.spec.validation_spec.image,
+    }[role]
+    assert image is not None
+    if _kind(image) is not ImageKind.CONTAINER or task.spec.os is not OperatingSystem.LINUX:
+        raise TaskDefinitionError("Slurm runs Linux container images only")
+    folder = _task_folder(task)
+    reference: str | None = None
+    context: Path | None = None
+    exclude: tuple[str, ...] = ()
+    source: Literal["solver-local", "verifier-local", "validation-local", "external-ref"]
+    if image.ref is not None:
+        reference = await _stage("reference-resolution", pin(image.ref))
+        source, source_identity = "external-ref", None
+    elif role == "solver":
+        context, exclude = folder.environment_dir, (SETUP_DIR,)
+        source, source_identity = "solver-local", task.image_source_digest
+    elif role == "validation" and task.validation_image_source_digest is not None:
+        context = folder.root / "validation"
+        source, source_identity = "validation-local", task.validation_image_source_digest
+    else:
+        context = folder.root / "tests"
+        source, source_identity = "verifier-local", task.verifier_image_source_digest
+    if context is not None and (source_identity is None or not (context / "Dockerfile").is_file()):
+        raise TaskDefinitionError(f"the {role} image has no Dockerfile to build")
+    key = cluster_key(
+        source,
+        reference=reference,
+        context=_context_identity(context, exclude=exclude) if context else None,
+        user=image.user,
+        keep_alive=image.keep_alive,
+    )
+    prepared, reused = await _stage(
+        "slurm-preparation",
+        provider.prepare_recipe(
+            Recipe(
+                key=key,
+                source=source,
+                reference=reference,
+                context=context,
+                exclude=exclude,
+                source_identity=source_identity,
+                user=image.user,
+                keep_alive=image.keep_alive,
+                timeout_sec=image.build_timeout_sec,
+            )
+        ),
+    )
+    steps = [
+        ImagePreparationStep(
+            "slurm-preparation",
+            "reused" if reused else "executed",
+            prepared.prepared_identity,
+            reference or "built from the Task's context on the cluster",
+        )
+    ]
+    if reference is not None:
+        steps.insert(0, ImagePreparationStep("reference-resolution", "executed", None, reference))
+    return _result(task, role, prepared, *steps)
 
 
 def _result(
