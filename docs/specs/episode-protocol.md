@@ -30,7 +30,8 @@ provision -> setup -> agent/oracle -> final evidence capture
 ```
 
 An agent that receives [validation rounds](#validation-rounds) repeats one step:
-`agent -> save, validate, boot` once per round, before its last turn.
+`agent -> save, validate, boot` once per round, before its last turn. A turn whose Sandbox
+reaches its deadline [moves](#moves), `save, boot`, and goes on.
 
 Every phase is timed and attributed independently. Agent and verify default to the Task's
 `[agent].timeout_sec` and `[verifier].timeout_sec`. Setup has a fixed framework bound of
@@ -243,7 +244,8 @@ agent receives rounds; the oracle never does. A turn ends when the Harness's pro
 finishes normally, exiting zero with no limit, timeout or failure, so the agent submits by
 ending its turn and needs no command in the Sandbox to do it, and any Harness that resumes
 its session can take part. A turn that anything else ends, or that leaves none of the
-agent's time, is the last, and its state is verified as any stopped agent's is. Each round,
+agent's time, is the last, and its state is verified as any stopped agent's is, but for one
+its Sandbox's deadline cuts, which [moves](#moves) and goes on. Each round,
 whatever the verification mode:
 
 1. copies the agent's logs, as the final copy does, converts its trajectory of the turns
@@ -278,7 +280,8 @@ session is closed ([Security](security.md#5-answers-are-absent-not-hidden)). The
 solver is sealed as soon as it boots, and a boot that finds no room, as when another Run
 took its GPUs while the round's verifier ran, is tried again every 10 s for up to 30
 minutes, a framework bound outside the agent's time. A round whose verifier produces no
-score, by failing, timing out or losing its Sandbox, is recorded with its failure and given
+score, by failing, timing out or losing its Sandbox, but for a loss a [move](#moves) runs
+again, is recorded with its failure and given
 to the agent as unscored, and the episode goes on; a save or boot that fails ends the
 episode without a score, as a failed save for a snapshot verifier does.
 
@@ -299,6 +302,52 @@ plans ([Provider selection](sandbox-image.md#provider-selection)) and, for a sha
 snapshot verifier, serves the round's verifier too. A Run giving rounds to a Harness without
 native resume is refused before provisioning, and one that no leaf serves before anything is
 prepared; either can set `validation_rounds = 0`.
+
+### Moves
+
+A Provider that holds a Sandbox only until a set time, as a scheduler holds an allocation
+for its wall time, gives the Sandbox a deadline: the latest time to begin saving it, which
+leaves what the save and writing it where another Sandbox can boot from it take
+([Providers](../../packages/ale-run/src/ale/run/providers/README.md#slurm)), and declares
+how long it holds one at most. A run of the agent is bounded, as it launches, by that
+deadline less 120 s for stopping the agent, copying its logs and sanitizing the solver, as
+by the agent's time. Where the deadline ends a run first, the turn is not over: the solver
+moves, so that an episode can be longer than any one Sandbox lasts.
+
+1. The agent's logs are copied as a turn's end copies them, and the solver is sanitized as
+   for retention and saved as a snapshot, which stops it and every process in it.
+2. A solver boots from the snapshot where its Provider holds it, with the solver's resources
+   and network, without running setup again, as the next turn's solver of a round boots, and
+   the snapshot is released once the next save succeeds.
+3. The Harness resumes the session the cut run left with a framework prompt, neutral as the
+   rounds' are: the work was interrupted and moved to another machine, the files are as the
+   agent left them, every process and any command in progress was stopped, and the time
+   left.
+
+The run's time until the cut is the agent's; the save, any wait for the next solver's room,
+such as in a scheduler's queue, and its boot are not. A move ends no turn, so no round
+follows it and none is spent, and the agent is told of none before one happens. A turn that
+would start with less than a minute before its bound moves first, and one whose moved solver
+then has as little ends the episode, as its Provider holds no Sandbox long enough. A run
+that leaves no native session, as from a Harness without native resume, cannot go on, and
+its agent did not run out of its time: the episode ends with the environment's error,
+unscored.
+
+Each verifier is held for its limit: selection gives a Sandbox that runs one, or whose
+snapshot one boots from on the same leaf, only a leaf that holds a Sandbox that long, and a
+verifier's request names its limit, so that such a Provider starts it where it lasts that
+long. A shared verifier, which runs in the solver, first moves the solver, as above, to a
+Sandbox that lasts that long, where it would not; a limit the Run leaves unlimited bounds
+nothing. A round's verifier that its Sandbox's scheduler ended, rather than its own failure,
+runs once more on the round's snapshot where that outlived it, and only that run is the
+round's. A Sandbox lost without warning, to a preemption or its node's failure, ends the
+episode as a guest that stopped replying does, without verification, its error saying how it
+was lost; episode retries start the episode again.
+
+The result records each solver Sandbox the agent worked in as a
+[segment](trace.md#result-and-run-status), the agent's phase that a move cut as `moved`, and
+the trajectory marks the prompt that resumed it with `extra.ale.moved`, the segment it
+resumed in.
 
 ## Reverification
 

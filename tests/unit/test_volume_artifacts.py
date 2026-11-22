@@ -20,6 +20,7 @@ from tests.support import (
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
 from ale.core.capability import CapabilityProfile, round_verifier_resources
+from ale.core.config import RunTimeouts
 from ale.core.errors import ProviderCapabilityError
 from ale.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
 from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources, VerificationMode
@@ -106,7 +107,7 @@ def test_a_separate_validation_verifier_shares_the_tasks_verifier_provider(
     )
     task.validations = 1
     (solver_role, _, solver, _), (verifier_role, _, verifier, image) = _sandboxes(
-        task, snapshot=False, solver=True
+        task, snapshot=False, solver=True, timeouts=RunTimeouts()
     )
     assert image == "validation"
     assert (solver_role, verifier_role) == (SandboxRole.SHARED, SandboxRole.VERIFIER)
@@ -121,7 +122,7 @@ def test_a_separate_validation_verifier_shares_the_tasks_verifier_provider(
         },
     )
     snapshot.validations = 1
-    ((_, _, booted, _),) = _sandboxes(snapshot, snapshot=False, solver=True)
+    ((_, _, booted, _),) = _sandboxes(snapshot, snapshot=False, solver=True, timeouts=RunTimeouts())
     assert booted.verifier is not None and booted.verifier.resources.cpus == 3
     resources = round_verifier_resources(snapshot.spec)
     assert resources is not None and resources.cpus == 3

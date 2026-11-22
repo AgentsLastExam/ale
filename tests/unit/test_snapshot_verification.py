@@ -748,7 +748,7 @@ async def test_a_snapshot_stays_while_a_sandbox_that_could_not_be_destroyed_runs
     lease = _lease(provider)
     solver = await lease.acquire(_solver_request())
     lease.mark_sanitized(solver, succeeded=True)
-    handle = await lease.snapshot(solver, validation=True)
+    handle = await lease.snapshot(solver, carried="round")
     booted = await lease.acquire(
         _solver_request().model_copy(update={"snapshot": handle, "snapshot_verifier": None})
     )

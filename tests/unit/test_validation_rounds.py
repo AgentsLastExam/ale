@@ -1361,16 +1361,29 @@ async def test_a_rounds_verifier_that_cannot_be_destroyed_ends_the_episode(
 
 
 @pytest.mark.asyncio
-async def test_each_round_records_the_allocation_of_the_solver_it_booted(
+async def test_each_solver_the_agent_works_in_is_a_segment_of_its_episode(
     tmp_path: Path, verifiers: Verifiers
 ) -> None:
+    """The first solver, and each a round booted, with its allocation and the agent's time it
+    spent; together they spend what the agent did."""
     provider = RoundsProvider()
     result = await _run(tmp_path, provider, _task(tmp_path, rounds=2), TurnsHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     solvers = [item for item in provider.sandboxes if item.request.role is SandboxRole.SHARED]
-    assert [item.solver_allocation for item in result.record.validation_rounds] == [
-        solver.allocation for solver in solvers[1:]
+    segments = result.record.segments
+    assert [(item.index, item.began, item.round) for item in segments] == [
+        (1, "provisioned", None),
+        (2, "round", 1),
+        (3, "round", 2),
     ]
+    assert [item.allocation for item in segments] == [solver.allocation for solver in solvers]
+    assert [item.sandbox_id for item in segments] == [solver.sandbox_id for solver in solvers]
+    assert segments[0].booted_from is None
+    assert all(item.booted_from is not None for item in segments[1:])
+    assert all(item.ended_at is not None and item.ended_at >= item.started_at for item in segments)
+    progress = json.loads((result.run_dir / "progress.json").read_text())
+    assert progress["rounds"] == 2 and len(progress["segments"]) == 3
+    assert progress["agent_used_sec"] == pytest.approx(sum(item.agent_sec for item in segments))
     lock = json.loads((result.run_dir / "lock.json").read_text())
     assert lock["resources"]["effective"]["provider"] == solvers[0].allocation.provider
 
@@ -1429,14 +1442,19 @@ async def test_feedback_holding_a_judges_token_fails_and_other_credentials_are_r
 
 
 def test_a_rounds_prompt_the_session_lacks_is_a_parse_issue() -> None:
-    from ale.run.protocol.episode_protocol import _with_validation_rounds
+    from ale.run.protocol.episode_protocol import _with_marked_prompts
 
     builder = TrajectoryBuilder(
         trajectory_id="t", session_id="s", agent=AtifAgent(name="turns", version="1")
     )
     for message in ("the instruction", "round one", "answer"):
         builder.add(source="user" if message != "answer" else "agent", message=message)
-    marked = _with_validation_rounds(builder.build(), {1: "round one", 2: "round two"})
+    marked = _with_marked_prompts(
+        builder.build(),
+        {1: "round one", 2: "round two"},
+        key="validation_round",
+        what="validation round",
+    )
     rounds = [(step.extra or {}).get("ale", {}).get("validation_round") for step in marked.steps]
     assert rounds == [None, 1, None]
     issues = (marked.extra or {})["ale"]["parse_issues"]

@@ -220,6 +220,11 @@ turns. Each Harness declares the files in which its program keeps credentials
 (`Harness.credentials`), which ALE removes, every Harness's, before a solver is saved or
 kept ([Security](security.md#5-answers-are-absent-not-hidden)).
 
+A [move](episode-protocol.md#moves) resumes the session a run cut by its limit left, in the
+solver booted from the moved one's snapshot, so a cut run reports that session with its
+timeout (`PhaseTimeoutError.native_session_id`): the ID the adapter gave the program, or
+the one its stream named before the cut. One that names none cannot be moved.
+
 An adapter must never use a "latest session" selector, replay the transcript, copy a
 session into another Sandbox, or silently start a new conversation.
 

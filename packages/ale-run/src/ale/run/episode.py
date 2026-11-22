@@ -179,14 +179,15 @@ class _LeaseEntry:
     sanitation: Literal["not-run", "succeeded", "failed"] = "not-run"
     sanitation_reason: str | None = None
     saved: RetainedSandbox | None = None
-    """The snapshot of its disk a verifier, or a validation round and the next turn's
-    solver, boots from, once saved; its Sandbox is gone then, and this is what remains of
-    it."""
+    """The snapshot of its disk a verifier, a validation round and the next turn's solver,
+    or the solver a move boots, boots from, once saved; its Sandbox is gone then, and this is
+    what remains of it."""
     booted_from: _LeaseEntry | None = None
     """The saved solver whose snapshot this Sandbox booted from, which outlasts it: a snapshot
-    verifier's, or a validation round's verifier's or next solver's."""
-    validation: bool = False
-    """Saved for a validation round: its snapshot holds the agent's state between turns."""
+    verifier's, a validation round's verifier's or next solver's, or a moved solver's."""
+    carried: bool = False
+    """Saved for the next solver, after a validation round or for a move: its snapshot holds
+    the agent's state in the middle of its episode."""
 
 
 class _Lease:
@@ -324,31 +325,32 @@ class _Lease:
             return
         await self._destroy(entry, outcome="destroyed")
 
-    async def snapshot(self, sandbox: Sandbox, *, validation: bool = False) -> str:
+    async def snapshot(
+        self, sandbox: Sandbox, *, carried: Literal["round", "move"] | None = None
+    ) -> str:
         """Save a sanitized solver's disk as the snapshot its verifier boots from, destroy
-        the solver, and return the snapshot's handle. A ``validation`` round's snapshot,
-        which the next turn's solver boots from too, is destroyed whatever the Run's
-        retention, which concerns the final solver only."""
+        the solver, and return the snapshot's handle. One ``carried`` to the next solver, a
+        validation ``round``'s, which the next turn's solver boots from too, or a ``move``'s,
+        which the solver goes on in, is destroyed whatever the Run's retention, which
+        concerns the final solver only."""
         entry = self._find(sandbox)
         assert entry is not None, "only a leased Sandbox is saved"
+        purpose = {
+            "round": "a validation round and the next turn boot from",
+            "move": "the solver moves to",
+            None: "its verifier boots from",
+        }[carried]
         if entry.sanitation != "succeeded":
             raise RetentionFinalizationError(
-                "could not sanitize the solver for the snapshot "
-                + (
-                    "a validation round and the next turn boot from"
-                    if validation
-                    else "its verifier boots from"
-                )
-                + f": {entry.sanitation_reason or 'sanitation did not run'}"
+                f"could not sanitize the solver for the snapshot {purpose}: "
+                + (entry.sanitation_reason or "sanitation did not run")
             )
         try:
             entry.saved = await sandbox.snapshot(
                 roles=entry.roles,
-                reason="saved for a validation round and the next turn"
-                if validation
-                else "requested by sandbox_retention run configuration"
-                if entry.requested == "snapshot"
-                else "saved for the verifier that boots from it",
+                reason=f"saved as the snapshot {purpose}"
+                if carried or entry.requested != "snapshot"
+                else "requested by sandbox_retention run configuration",
             )
         except BaseException as exc:
             # Never tried again, as the episode ends: the solver goes as a retention that
@@ -356,14 +358,12 @@ class _Lease:
             entry.sanitation = "failed"
             entry.sanitation_reason = str(exc) or "the save was cut short"
             raise
-        if validation:
+        if carried:
             # The Run's retention concerns the final solver: this one's snapshot goes once
             # nothing runs on it.
-            entry.requested, entry.validation = "destroy", True
+            entry.requested, entry.carried = "destroy", True
         logging.getLogger("ale.execution").info(
-            "the solver was saved as a snapshot for a validation round"
-            if validation
-            else "the solver was saved as a snapshot for its verifier",
+            f"the solver was saved as the snapshot {purpose}",
             extra={"ale_data": {"handle": entry.saved.handle}},
         )
         # The snapshot stopped the Sandbox; only the snapshot is left. A Sandbox that
@@ -484,9 +484,10 @@ class _Lease:
 
         Only once that succeeds does the entry go, recorded destroyed, so a later call tries
         again; the ``last`` call records a snapshot it cannot destroy as the snapshot it is,
-        with why, so that it is found and removed by hand rather than lost. A validation
-        round's is recorded as not destroyed instead: the agent's state between turns is no
-        state a Run continues from.
+        with why, so that it is found and removed by hand rather than lost. One carried to
+        the next solver, a validation round's or a move's, is recorded as not destroyed
+        instead: the agent's state in the middle of its episode is no state a Run continues
+        from.
         """
         saved = entry.saved
         assert saved is not None
@@ -514,7 +515,7 @@ class _Lease:
                 self.live.remove(entry)
                 kept = _retained_outcome(entry, saved).model_copy(
                     update={
-                        "outcome": "not-destroyed" if entry.validation else "snapshotted",
+                        "outcome": "not-destroyed" if entry.carried else "snapshotted",
                         "reason": entry.sanitation_reason,
                     }
                 )
@@ -1223,6 +1224,7 @@ async def run_episode(
         sandboxes=tuple(lease.outcomes),
         continuation=ctx.agent_run.continuation if ctx.agent_run is not None else None,
         validation_rounds=tuple(ctx.validation_rounds),
+        segments=tuple(ctx.segments),
     )
     recording.write_result(record)
     recording.execution.append(

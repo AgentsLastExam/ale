@@ -20,7 +20,7 @@ from ale.core.blob import BlobSink
 from ale.core.config import LoggingPolicy, VerificationConfig
 from ale.core.harness import AgentRun, EffectiveAgentResources, HarnessSession
 from ale.core.lock import AleVerifyProvenance, LimitTermination, ResumedFrom, SandboxProvenance
-from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome, ValidationRound
+from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome, Segment, ValidationRound
 from ale.core.sandbox import (
     PreparedTaskImage,
     ResolvedImage,
@@ -276,6 +276,11 @@ class EpisodeContext:
     validation_prompts: dict[int, str] = field(default_factory=dict)
     """The prompt that gave the agent each round's result, by round, which marks where the
     round falls in its trajectory."""
+    segments: list[Segment] = field(default_factory=list)
+    """Each solver Sandbox the agent worked in so far; copied into the terminal result."""
+    move_prompts: dict[int, str] = field(default_factory=dict)
+    """The prompt that resumed the agent's turn a move cut, by the segment it resumed in,
+    which marks where the move falls in its trajectory."""
     ale_verify_provenance: AleVerifyProvenance | None = None
     verifier_resolved_image: ResolvedImage | None = None
     verifier_resource_allocation: ResourceAllocation | None = None

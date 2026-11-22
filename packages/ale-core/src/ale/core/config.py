@@ -28,7 +28,7 @@ from ale.core.capability import GpuModel
 from ale.core.errors import ConfigError
 from ale.core.ids import content_hash
 from ale.core.sandbox import DesktopResolution
-from ale.core.taskspec import McpSource, SkillSource
+from ale.core.taskspec import McpSource, SkillSource, TaskSpec
 
 __all__ = [
     "GPU_MEMORY_MARGIN_MB",
@@ -391,6 +391,13 @@ class RunTimeouts(BaseModel):
 
     agent: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
     verify: Annotated[float, Field(gt=0, allow_inf_nan=False)] | Literal["unlimited"] | None = None
+
+    def verification(self, spec: TaskSpec, *, validation: bool = False) -> float | None:
+        """The limit of ``spec``'s verifier of ``tests/``, or of its validation rounds: this
+        Run's, which holds for both, or else the Task's own; None where unlimited."""
+        if self.verify == "unlimited":
+            return None
+        return self.verify or (spec.validation_timeout if validation else spec.timeouts.verify)
 
 
 class RunConfig(BaseModel):
