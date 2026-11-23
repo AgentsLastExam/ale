@@ -1,5 +1,10 @@
 # Codex CLI
 
+For Linux x86-64 Task images without npm, `agent.settings.native_package_archive`
+selects the full official Codex 0.170.0 release package staged on the Host. Orbit
+verifies the pinned archive digest and records it as the Harness integrity. The
+archive includes Codex and its built-in tool runtime. Other configurations use npm.
+
 Runs `codex exec --json`, or `codex exec resume <thread id>`, with `-` reading the prompt
 from stdin. The rollout lives in `.codex-orbit/sessions/**/rollout-<time>-<thread
 id>.jsonl`.

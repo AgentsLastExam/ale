@@ -41,7 +41,7 @@ Orbit integrates these official upstream agent programs:
 |---------|----------------|-----------------|-----------------|
 | `claude-code` | `@anthropic-ai/claude-code@2.1.227` | Anthropic Messages | `max_turns`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `append_system_prompt`, `effort` |
 | `grok-build` | `@xai-official/grok@0.2.112` | OpenAI Responses by default; Messages, Chat Completions, or Responses configurable | `max_turns`, `reasoning_effort`, `disabled_tools` |
-| `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
+| `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search`, `native_package_archive` |
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params`, `input` |
 
 Each integration installs its program's official distribution; Orbit does not install a fork

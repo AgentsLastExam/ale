@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -15,3 +16,5 @@ class CodexCliSettings(BaseModel):
     ] = "default"
     #: OpenAI's hosted web search, used only when the Task's network is open.
     web_search: bool = True
+    #: A Host-local official Codex 0.170.0 Linux x86-64 package archive.
+    native_package_archive: Path | None = None
