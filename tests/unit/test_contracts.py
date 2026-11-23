@@ -8,8 +8,8 @@ import pytest
 from pydantic import ValidationError
 from tests.support import MINIMAL_TASK_CONFIG, merged_config
 
-from ale.core.ids import TaskId, canonical_json, content_hash, in_ale_form, task_component
-from ale.core.taskspec import (
+from orbit.core.ids import TaskId, canonical_json, content_hash, in_orbit_form, task_component
+from orbit.core.taskspec import (
     SCHEMA_VERSION,
     Artifact,
     ImageKind,
@@ -30,7 +30,7 @@ from ale.core.taskspec import (
     VerifySpec,
     host_listed,
 )
-from ale.core.verdict import Status, Verdict
+from orbit.core.verdict import Status, Verdict
 
 pytestmark = pytest.mark.unit
 IMAGE = "ghcr.io/acme/image:v1"
@@ -196,8 +196,8 @@ def test_task_ids_are_org_and_name_and_one_safe_component() -> None:
     # Harbor's characters, both cases and '.', are read as written; a component is lowercase.
     assert TaskId("SWE-smith/vuejs__core.d0b513eb") == "SWE-smith/vuejs__core.d0b513eb"
     assert task_component(TaskId("Org/Demo.v1")) == "org.demo.v1"
-    assert in_ale_form("agentslastexam/demo_hello")
-    assert not any(in_ale_form(name) for name in ("Org/demo", "org/demo.v1"))
+    assert in_orbit_form("agentslastexam/demo_hello")
+    assert not any(in_orbit_form(name) for name in ("Org/demo", "org/demo.v1"))
     for invalid in ("demo", "a/b/c", "org/", "/demo", "-org/demo", ".org/demo", "org/a..b"):
         with pytest.raises(ValueError, match="org/name"):
             TaskId(invalid)
@@ -236,10 +236,10 @@ def test_harbor_s_versions_or_none_make_a_harbor_task(version: str | None, harbo
     assert (task.agent_user, task.agent_sudo) == (("root", True) if harbor else ("user", False))
 
 
-# ALE's earlier label among them: only ALE's current format and Harbor's are read.
-@pytest.mark.parametrize("version", ["1.4+ale.1", "1.4.0", "0.1.1", "2.0"])
+# Orbit's earlier label among them: only Orbit's current format and Harbor's are read.
+@pytest.mark.parametrize("version", ["1.4+orbit.1", "1.4.0", "0.1.1", "2.0"])
 def test_any_other_format_is_refused(version: str) -> None:
-    with pytest.raises(ValidationError, match=f'"{re.escape(version)}" is neither ALE'):
+    with pytest.raises(ValidationError, match=f'"{re.escape(version)}" is neither Orbit'):
         config({"schema_version": version})
 
 
@@ -249,14 +249,14 @@ def test_a_harbor_task_s_own_account_and_elevation_win() -> None:
     named = config(harbor, {"agent": {"user": "agent"}})
     assert (named.agent_user, named.agent_sudo) == ("agent", False)
     assert config(harbor, {"agent": {"user": "agent", "sudo": True}}).agent_sudo is True
-    # Root that may not elevate cannot be, in a Harbor Task as in an ALE one.
+    # Root that may not elevate cannot be, in a Harbor Task as in an Orbit one.
     with pytest.raises(ValidationError, match="account is root"):
         config(harbor, {"agent": {"sudo": False}})
-    # Harbor has no macOS and runs Windows in containers, so ALE's defaults stay there.
+    # Harbor has no macOS and runs Windows in containers, so Orbit's defaults stay there.
     windows = config(harbor, {"environment": {"os": "windows", "image": "/disk.qcow2"}})
     assert (windows.agent_user, windows.agent_sudo) == ("user", False)
-    ale = config({"agent": {"user": "root", "sudo": True}})
-    assert (ale.harbor, ale.agent_user, ale.agent_sudo) == (False, "root", True)
+    orbit = config({"agent": {"user": "root", "sudo": True}})
+    assert (orbit.harbor, orbit.agent_user, orbit.agent_sudo) == (False, "root", True)
 
 
 def test_a_root_agent_is_elevated_without_saying_so() -> None:
@@ -291,15 +291,15 @@ def test_harbor_s_original_version_key_is_the_schema_version() -> None:
         ({"artifacts": [{"source": "/o", "service": "db"}]}, "artifact service"),
     ],
 )
-def test_harbor_keys_ale_does_not_implement_say_so(layer: dict[str, object], key: str) -> None:
-    with pytest.raises(ValidationError, match=f"{key} (is|are) not supported by ALE"):
+def test_harbor_keys_orbit_does_not_implement_say_so(layer: dict[str, object], key: str) -> None:
+    with pytest.raises(ValidationError, match=f"{key} (is|are) not supported by Orbit"):
         config(layer)
 
 
 def test_task_config_rejects_unknown_keys() -> None:
     for layer in (
         {"domain": "demo"},
-        {"ale": {"sudo": True}},
+        {"orbit": {"sudo": True}},
         {"task": {"org": "x"}},
         {"environment": {"vm": True}},
     ):
@@ -343,8 +343,8 @@ def test_an_artifact_destination_is_harbor_s_relative_host_path() -> None:
         (["a/../b"], "relative path"),
         (["a\\b"], "relative path"),
         (["."], "relative path"),
-        (["0001/x"], "takes a name ALE keeps"),
-        (["snapshot.json"], "takes a name ALE keeps"),
+        (["0001/x"], "takes a name Orbit keeps"),
+        (["snapshot.json"], "takes a name Orbit keeps"),
         (["out", "out/inner"], "overlap"),
         (["same", "same"], "overlap"),
     ):
@@ -477,7 +477,7 @@ def test_docker_image_is_harbor_s_name_for_image() -> None:
                 ({"X Bad": "1"}, "not an HTTP header name"),
                 ({"X-Region": "a\nb"}, "line break"),
                 ({"X-Region": "${region"}, "must start"),
-                ({"X-Region": "${ALE_REGION}"}, "cannot refer"),
+                ({"X-Region": "${ORBIT_REGION}"}, "cannot refer"),
             )
         ),
         (
@@ -549,7 +549,7 @@ def test_a_blocklist_admits_every_host_but_the_listed_ones() -> None:
 @pytest.mark.parametrize(
     ("agent", "environment", "expected"),
     [
-        # Nothing named: ALE's default.
+        # Nothing named: Orbit's default.
         ({}, {}, NetworkPolicy(mode=NetworkMode.BLOCK)),
         # [environment] is Harbor's baseline, which the agent gets unless it names its own.
         ({}, {"network_mode": "public"}, NetworkPolicy(mode=NetworkMode.OPEN)),
@@ -567,7 +567,7 @@ def test_a_blocklist_admits_every_host_but_the_listed_ones() -> None:
             {"allow_internet": True, "network_mode": "no-network"},
             NetworkPolicy(mode=NetworkMode.BLOCK),
         ),
-        # ALE's blocklist resolves as Harbor's modes do.
+        # Orbit's blocklist resolves as Harbor's modes do.
         ({}, {**_BLOCK_GITHUB}, _NO_GITHUB),
         ({**_BLOCK_GITHUB}, {**_ALLOW_PYPI}, _NO_GITHUB),
         ({**_ALLOW_PYPI}, {**_BLOCK_GITHUB}, _PYPI),
@@ -583,7 +583,7 @@ def test_the_agent_s_network_resolves_as_harbor_s_does(
 @pytest.mark.parametrize(
     ("verifier", "environment", "expected"),
     [
-        # Nothing named: open, ALE's default for verification.
+        # Nothing named: open, Orbit's default for verification.
         ({}, {}, _OPEN),
         # [verifier]'s own policy wins in every topology.
         ({"network_mode": "no-network"}, {"network_mode": "public"}, _BLOCK),

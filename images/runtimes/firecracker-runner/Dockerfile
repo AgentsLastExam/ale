@@ -1,6 +1,6 @@
 # The container that hosts a Firecracker microVM.
 #
-# As with the QEMU runner, ALE does not run the VMM on the host. The container gives each
+# As with the QEMU runner, Orbit does not run the VMM on the host. The container gives each
 # microVM a network namespace of its own, where its tap device and egress rules live, so
 # the Host needs nothing but Docker, /dev/kvm and /dev/net/tun, and nothing a sandbox does
 # reaches the Host's own netfilter. The same image converts a Task's exported OCI rootfs
@@ -8,7 +8,7 @@
 # Host needs no e2fsprogs either.
 #
 # Published under each engine version by .github/workflows/images.yml; `images/build.sh
-# ale-firecracker-runner` builds a version not yet published.
+# orbit-firecracker-runner` builds a version not yet published.
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 RUN apt-get update \
@@ -27,13 +27,13 @@ RUN tar -xzf /tmp/firecracker.tgz -C /tmp \
     && rm -rf /tmp/firecracker.tgz /tmp/release-*
 ADD --checksum=sha256:e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2 \
     https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155 \
-    /opt/ale/vmlinux
+    /opt/orbit/vmlinux
 
-COPY entrypoint.sh /usr/local/bin/ale-firecracker-entrypoint
-RUN chmod 0755 /usr/local/bin/ale-firecracker-entrypoint /opt/ale && chmod 0644 /opt/ale/vmlinux
+COPY entrypoint.sh /usr/local/bin/orbit-firecracker-entrypoint
+RUN chmod 0755 /usr/local/bin/orbit-firecracker-entrypoint /opt/orbit && chmod 0644 /opt/orbit/vmlinux
 
-LABEL org.opencontainers.image.source="https://github.com/AgentsLastExam/ale" \
-      org.opencontainers.image.description="Hosts an ALE Linux sandbox as a Firecracker microVM" \
-      ale.role="firecracker-runner"
+LABEL org.opencontainers.image.source="https://github.com/AgentsLastExam/orbit" \
+      org.opencontainers.image.description="Hosts an Orbit Linux sandbox as a Firecracker microVM" \
+      orbit.role="firecracker-runner"
 
-ENTRYPOINT ["/usr/local/bin/ale-firecracker-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/orbit-firecracker-entrypoint"]

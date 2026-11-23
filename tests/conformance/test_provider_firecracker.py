@@ -2,7 +2,7 @@
 
 It runs the container base itself, not a VM disk: the point of this backend is that a
 container Task needs nothing new to run as a microVM. Needs KVM, ``/dev/net/tun``, Docker
-and the runner image (``images/build.sh ale-firecracker-runner``).
+and the runner image (``images/build.sh orbit-firecracker-runner``).
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ from collections.abc import Iterator
 import pytest
 from tests.support import CONTAINER_BASE, LIST_POLICIES, check_a_sealed_list
 
-from ale.core.errors import GuestUnreachableError, ProviderCapabilityError
-from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.core.testkit import ProviderConformance
-from ale.run.framework import framework_identity
-from ale.run.providers import missing_features
-from ale.run.providers.firecracker import FirecrackerProvider
+from orbit.core.errors import GuestUnreachableError, ProviderCapabilityError
+from orbit.core.sandbox import Identity, ImageRef, PreparedTaskImage, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from orbit.core.testkit import ProviderConformance
+from orbit.run.framework import framework_identity
+from orbit.run.providers import missing_features
+from orbit.run.providers.firecracker import FirecrackerProvider
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_kvm, pytest.mark.needs_docker]
 

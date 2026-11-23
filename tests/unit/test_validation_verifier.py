@@ -18,16 +18,16 @@ from tests.support import (
 from tests.unit.test_contracts import _BLOCK, _OPEN, _PYPI, config
 from tests.unit.test_validation_rounds import _run, _task
 
-from ale.core.config import RunTimeouts
-from ale.core.errors import TaskDefinitionError
-from ale.core.sandbox import SandboxRole
-from ale.core.taskspec import NetworkMode, ValidationTable, VerificationMode
-from ale.core.verdict import Status
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.scaffold import scaffold_task
-from ale.run.secrets import resolve_task_variables
-from ale.run.task_images import shares_verifier_image
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from orbit.core.config import RunTimeouts
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.sandbox import SandboxRole
+from orbit.core.taskspec import NetworkMode, ValidationTable, VerificationMode
+from orbit.core.verdict import Status
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.scaffold import scaffold_task
+from orbit.run.secrets import resolve_task_variables
+from orbit.run.task_images import shares_verifier_image
+from orbit.run.tasksets.manifest import ManifestTask, load_tasks
 
 pytestmark = pytest.mark.unit
 
@@ -335,7 +335,7 @@ def test_validation_dockerfile_builds_its_image_whatever_image_the_verifier_name
 async def test_a_proxied_network_of_the_rounds_alone_starts_the_egress_proxy(
     tmp_path: Path,
 ) -> None:
-    from ale.run.cli.tasks import _egress_proxy
+    from orbit.run.cli.tasks import _egress_proxy
 
     task = rounds_task(
         tmp_path,
@@ -375,8 +375,8 @@ async def test_a_run_prepares_the_image_of_a_separate_validation_verifier_alone(
     from tests.support import provider_registry
     from tests.unit.test_validation_rounds import IMAGE
 
-    from ale.run import cli
-    from ale.run.task_images import ImagePreparationResult
+    from orbit.run import cli
+    from orbit.run.task_images import ImagePreparationResult
 
     asked: list[str] = []
 
@@ -424,7 +424,7 @@ def test_a_validation_verifier_of_its_own_built_image_is_a_sandbox_to_select_and
     tmp_path: Path,
 ) -> None:
     """Placed as tests/'s separate verifier is, but of the image validation/Dockerfile builds."""
-    from ale.run.providers import _sandboxes
+    from orbit.run.providers import _sandboxes
 
     task = _folder(
         tmp_path,

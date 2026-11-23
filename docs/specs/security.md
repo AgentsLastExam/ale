@@ -41,8 +41,8 @@ episode's ports on the Host's address, and only from the sandbox's own addresses
 root in such a sandbox may write any frame. The filters are the boundary, outside the
 sandbox; what the framework sets inside it only makes blocked traffic fail at once, and
 root in the sandbox that undoes it slows its own failures and still reaches nothing
-([Kata](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers),
-[gVisor](../../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
+([Kata](../../packages/orbit-run/src/orbit/run/providers/README.md#docker-on-kata-containers),
+[gVisor](../../packages/orbit-run/src/orbit/run/providers/README.md#docker-on-gvisor)).
 
 This is why the address is read from the network rather than assumed: Docker's
 `host-gateway` alias does not work on an internal bridge, and a wrong assumption here
@@ -55,7 +55,7 @@ episode's egress token, and every command, the agent's and a verifier's, receive
 variables naming that relay; on a desktop the agent account's system proxy names it too, for
 the programs that take their proxy from there, a browser above all. The proxy still decides
 every connection, and direct traffic remains blocked
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#egress-relay)).
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#egress-relay)).
 
 Each phase applies its own policy: the agent's for its turns and the oracle, the verifier's
 for `tests/` and `validation/` ([Task authoring](task-authoring.md#resources-and-network)).
@@ -83,7 +83,7 @@ between the VM and the Mac's network, which admits only the episode's ports on t
 address and the control channel the Mac opens into the VM. Its rules change while the VM
 runs; a change that restarts the VM fails the episode instead, because the restarted VM no
 longer holds what the agent or the framework left running in it
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#restricted-networking)).
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#restricted-networking)).
 A Mac without that filter refuses restricted Tasks before provisioning.
 
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A Task must
@@ -136,7 +136,7 @@ provider:
   the episode, so it would:
   - be visible to, and usable by, any later episode on the same credential, so episodes
     would no longer be independent;
-  - outlive the episode, leaving ALE to track and delete it and a crashed run to leave it
+  - outlive the episode, leaving Orbit to track and delete it and a crashed run to leave it
     behind;
   - consume storage that the Gateway's call and token records do not measure.
 
@@ -161,7 +161,7 @@ provider:
 
 A policy refusal is recorded as a `refused` call naming the policy and, unlike a limit,
 does not end the episode. Each dialect's routes, authentication and policies are in the
-[Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md).
+[Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md).
 
 In subscription mode the provider CLI still runs in the Sandbox, but it receives only
 the episode token and model Gateway URL. The Host Gateway reads checkout-local auth,
@@ -208,16 +208,16 @@ also:
 
 ## 3. Provider credentials stay on the Host
 
-In API-key mode the provider key lives in the host's gitignored `.env`, which `ale` reads
+In API-key mode the provider key lives in the host's gitignored `.env`, which `orbit` reads
 once when it starts, for every command; a variable already set in the environment (an
-explicit `KEY=… ale run`, or a CI secret) takes precedence. Every credential and endpoint
-ALE reads carries an `ALE_` prefix, so a checkout's values and the variables the
+explicit `KEY=… orbit run`, or a CI secret) takes precedence. Every credential and endpoint
+Orbit reads carries an `ORBIT_` prefix, so a checkout's values and the variables the
 operator's own tools read, such as `ANTHROPIC_BASE_URL` for their own Claude Code, never
 override each other.
 
 The upstream follows the model provider. A Harness preset names it with
 `gateway.provider`, and the Gateway sends
-`ALE_<PROVIDER>_API_KEY` to `ALE_<PROVIDER>_BASE_URL`, or to the provider's own API when
+`ORBIT_<PROVIDER>_API_KEY` to `ORBIT_<PROVIDER>_BASE_URL`, or to the provider's own API when
 that URL is unset. Both names derive from the provider so that a key is only ever paired
 with its own provider's endpoint, and a run that changes provider cannot carry another
 provider's key along. `--base-url` and `--api-key-env` (`gateway.base_url`,
@@ -229,9 +229,9 @@ The Sandbox receives a URL and a bearer token that is worthless anywhere else an
 revoked when the episode ends — verified by `test_a_revoked_session_loses_its_egress`.
 
 Subscription access and refresh credentials remain in checkout-local Host state:
-`ALE_CLAUDE_CODE_OAUTH_TOKEN` in `.env`, and `.ale/auth/<harness>/auth.json` for Codex and
-Grok. They go only to the provider's own subscription endpoint, never to
-`ALE_<PROVIDER>_BASE_URL`. The Gateway replaces the episode token with current provider
+`ORBIT_CLAUDE_CODE_OAUTH_TOKEN` in `.env`, and `.orbit/auth/<harness>/auth.json` for Codex
+and Grok. They go only to the provider's own subscription endpoint, never to
+`ORBIT_<PROVIDER>_BASE_URL`. The Gateway replaces the episode token with current provider
 authorization only after authenticating the session. Framework-authored result, trace,
 and RunLock fields contain neither raw credential nor profile path.
 
@@ -239,7 +239,7 @@ Verification is a separate trusted phase after solver exit. `[verification.llm]`
 `[verification.agent]` name a model provider, model and reasoning effort at run level, and
 the LLM Judge also its dialect; their keys and endpoints resolve by the same provider rule
 as the Gateway's. Each episode opens one Gateway session per configured Judge holding that
-key. The verifier receives only the Gateway's address and the session's token, which ALE
+key. The verifier receives only the Gateway's address and the session's token, which Orbit
 injects only for the OS-specific verification entry, registers for output/transcript
 redaction, and revokes when the episode ends. The key itself never enters a Sandbox and is
 absent from provisioning, setup, the solver and verification environments, staged
@@ -252,15 +252,15 @@ The one credential a Sandbox can receive beyond episode tokens is one its Task d
 `env` table, such as a token for a service the Task itself uses
 ([Task authoring](task-authoring.md#variables)). It comes from the checkout's `.env` only,
 reaches only the commands its table names, is redacted from every record, and can neither
-refer to an `ALE_` variable nor equal a Host credential, so no model or Judge key leaves the
-Gateway this way. `[environment].env` reaches the agent, and the agent can read it.
+refer to an `ORBIT_` variable nor equal a Host credential, so no model or Judge key leaves
+the Gateway this way. `[environment].env` reaches the agent, and the agent can read it.
 
 ## 4. The agent cannot change what it is measured under
 
 The agent runs as the account the image declares, and so does the oracle that stands in for
 it during calibration. Framework work runs as root on Linux and macOS and Administrator on
 Windows. Windows guestd stays in the interactive session but launches agent commands with
-the desktop's limited token. Only the Host's SMBIOS `ale-sudo` marker, supplied for
+the desktop's limited token. Only the Host's SMBIOS `orbit-sudo` marker, supplied for
 `request.sudo`, permits elevated agent commands. The Provider verifies both tokens before
 Task code runs; image builds request elevation explicitly. Material visibility still follows
 phase ordering. See [Permissions](sandbox-image.md#permissions).
@@ -270,7 +270,7 @@ timeouts are measured against, or the guest service driving its own sandbox. Non
 needs malice to matter: a result obtained under conditions the subject could alter is not
 a measurement.
 
-The oracle sharing the agent's limits is the load-bearing half. `ale calibrate` runs every
+The oracle sharing the agent's limits is the load-bearing half. `orbit calibrate` runs every
 [calibration case](task-authoring.md#calibration) as the oracle, and an oracle with more
 privilege would pass exactly the tasks a real agent then fails on access alone.
 
@@ -287,7 +287,7 @@ Host account can reach through the forwarded port. Each connection must therefor
 present the sandbox's token, which the framework's first connection to the freshly booted
 guest claims; anything else is refused before an operation runs. The claim is sound because
 nothing but trusted image services runs in a cold-booted guest before that connection. Linux
-keeps the claimed token in root-only `/run/ale/guestd-token`, so a restarted guest service
+keeps the claimed token in root-only `/run/orbit/guestd-token`, so a restarted guest service
 stays claimed while a reboot or a saved disk carries none; Windows keeps it in memory.
 Container guest services are `docker exec` sessions with no listener, and a macOS VM's are
 `--stdio` sessions over Orchard's authenticated exec, which listen on nothing.
@@ -299,9 +299,9 @@ proves that as the agent before handing the sandbox out. An agent that may eleva
 nothing from it, and with `[agent].sudo` can lift the block, as it can any rule.
 
 The verifier writes its result to Harbor's `/logs/verifier` (`C:\logs\verifier`, macOS
-`/opt/ale/logs/verifier`), a path the agent can create beforehand: with sudo on Linux and
+`/opt/orbit/logs/verifier`), a path the agent can create beforehand: with sudo on Linux and
 macOS, as any account on Windows. Before every
-verification attempt ALE therefore removes a link or file at either level instead of
+verification attempt Orbit therefore removes a link or file at either level instead of
 following it, makes the parent the framework's and writable by it alone, and recreates the
 verifier directory empty and accessible only to the framework. A result the agent planted
 is gone, and nothing it left running can write or redirect one.
@@ -348,7 +348,7 @@ the agent's episode token: code run during validation, and a `tests/` that runs 
 program, cannot use the agent's model session outside its time limit, whatever credential
 files a Harness leaves on disk. A Judge's session is open only while a verifier runs, so a
 Judge's token that reaches the agent, in feedback or from a verifier's process, is refused
-in its later turns. Before a solver is saved or kept, between turns included, ALE removes
+in its later turns. Before a solver is saved or kept, between turns included, Orbit removes
 the credential files every Harness declares, whichever Harness ran. A refused call is traced
 as refused, `session_suspended`. The round's verifier has the network of the verifier of
 validation rounds, `[verifier.validation]`'s or else `[verifier]`'s, open unless the Task
@@ -375,7 +375,7 @@ API-key and subscription token and model-call ceilings are enforced by the Gatew
 refusing the next call with an error the client does not retry, a 429 unless a dialect's
 clients retry that regardless, and an agent phase that fails after a refusal ends as
 `budget_exceeded` for every Harness and authentication mode. Some subscription endpoints expose less request-side
-control; in particular, Codex rejects `max_output_tokens`, so ALE accounts the completed
+control; in particular, Codex rejects `max_output_tokens`, so Orbit accounts the completed
 response and refuses a later call after the ceiling. Harness-native limits and phase
 deadlines remain additional layers. Teardown is cancellation-shielded, so a killed phase
 still reclaims its sandbox.
@@ -389,7 +389,7 @@ and that no container outlives its episode.
 
 Judge failure follows the same rule. Missing credentials/configuration, provider
 failures, timeouts, refusals and invalid structured responses raise exceptions. Unhandled
-exceptions fail the episode; ALE never invents a zero reward. A Task may explicitly handle
+exceptions fail the episode; Orbit never invents a zero reward. A Task may explicitly handle
 a Judge failure according to its own scoring policy.
 
 ## 7. A result carries what produced it
@@ -417,7 +417,7 @@ Task source contract.
 
 ## 8. Agent resources are declared, not discovered
 
-ALE never copies ambient host agent state. Host Skills, MCP configuration, and
+Orbit never copies ambient host agent state. Host Skills, MCP configuration, and
 subscription profiles are outside the Task resource model.
 
 A Task's Skills and MCP servers are in its image, which the RunLock identifies. Only what
@@ -469,13 +469,13 @@ A later episode may hand the solver to another evaluated agent, which must not f
 verification there. Subscription credentials stay in the
 checkout-local Host profile and therefore require no retained-Sandbox cleanup.
 
-Every Docker sandbox, QEMU runner and Daytona sandbox is labeled with ALE ownership,
+Every Docker sandbox, QEMU runner and Daytona sandbox is labeled with Orbit ownership,
 episode, role and requested retention (Docker and QEMU also with allocated GPU identity).
 Daytona's organization may be shared, so listing and destroying act only on sandboxes that
-carry ALE's labels, and every snapshot records the same. Retained sandboxes and snapshots
-remain discoverable through `ale sandbox list` and removable only through an ALE-managed
-handle, which ALE checks before it acts.
-Live labels also prevent a retained GPU from being assigned to another ALE sandbox.
+carry Orbit's labels, and every snapshot records the same. Retained sandboxes and snapshots
+remain discoverable through `orbit sandbox list` and removable only through an Orbit-managed
+handle, which Orbit checks before it acts.
+Live labels also prevent a retained GPU from being assigned to another Orbit sandbox.
 Retention does not change rewards or verification records.
 
 ---
@@ -488,8 +488,8 @@ security claims rot.
 **A malicious task author.** A Task folder's setup and verification entries run as trusted
 framework-controlled code, and a Task may declare `[agent].sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
-*agent*, not a host from its Task. The gates that exist (`ale lint`, `ale calibrate`, CI,
-PR review) are aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host
+*agent*, not a host from its Task. The gates that exist (`orbit lint`, `orbit calibrate`,
+CI, PR review) are aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host
 Gateway; a malicious verifier can only spend its episode's Judge session while that episode
 runs.
 
@@ -499,7 +499,7 @@ each have a kernel of their own, a VM's or one in user space, puts that kernel b
 exploit and the Host's, so listing such leaves first in `sandbox.providers`, or only them,
 keeps Tasks off the Host's kernel; still put nothing on that Host you would mind losing.
 Which leaf gives which kernel, and how a GPU reaches each, is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#provider-ids-and-profiles).
 Each [container feature](task-authoring.md#container-features) a Task names exposes more of
 the kernel its Sandbox runs on; no Provider widens a Sandbox for a feature it did not
 name. On Daytona, Daytona itself sees everything in the sandbox and in the image pushed
@@ -531,7 +531,7 @@ content. A Transport Trace proves routing and accounting; it is not a content po
 provenance, so a change is *detectable*. Nothing verifies that its base or authored
 build was benign to begin with.
 
-**Processes the agent leaves running.** ALE does not stop processes the agent started,
+**Processes the agent leaves running.** Orbit does not stop processes the agent started,
 because a Task may ask the agent to deploy a service that verification then checks, except
 at the end of a turn a validation round follows: saving the solver stops every process in
 it, and the next turn's solver boots without them, setup's included. In shared verification
@@ -550,10 +550,10 @@ reaches `tests/` in any mode.
 
 **Programs on the agent's disk.** A shared or snapshot verifier runs as root on the disk the
 agent left. With `[agent].sudo` the agent could change any program there, the image's
-Python that `ALE_VERIFY_PYTHON` selects included, and so what the verifier computes; without
-it, only what its account can write. A Task whose verifier must not run agent-changed code
-withholds sudo or uses separate verification, on its own image or the solver's, which
-restores only the declared artifacts into a fresh Sandbox.
+Python that `ORBIT_VERIFY_PYTHON` selects included, and so what the verifier computes;
+without it, only what its account can write. A Task whose verifier must not run
+agent-changed code withholds sudo or uses separate verification, on its own image or the
+solver's, which restores only the declared artifacts into a fresh Sandbox.
 
 **Unscored rather than low.** With `[agent].sudo` the agent can also make what runs on its
 disk after it fail under snapshot verification: the sanitation before the solver's save, the
@@ -563,9 +563,9 @@ Episode then ends without a score, as an environment or Task error, rather than 
 one; a sanitation that fails before a retention only forces the Sandbox's destruction. A
 Task where that difference matters withholds sudo.
 
-**Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and ALE-managed
+**Resource exhaustion by a co-tenant.** CPU, memory, writable storage, and Orbit-managed
 physical GPUs, whole or by device memory, are admitted per sandbox or rejected. Network
-bandwidth and resources consumed by processes outside ALE are not reserved; concurrent
+bandwidth and resources consumed by processes outside Orbit are not reserved; concurrent
 workloads can still starve each other. On a GPU that Sandboxes share, one can take another's
 device memory: where nothing limits it, for the seconds until its Provider's watchdog kills
 the process while a Run holds the Sandbox, and for as long as it likes once the Sandbox is

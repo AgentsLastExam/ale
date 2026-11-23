@@ -34,7 +34,7 @@ def test_real_harness_uses_task_skill_and_task_mcp(
     tmp_path, harness: str, model: str, version: str
 ) -> None:
     task = task_path(
-        "ALE_LIVE_RESOURCE_TASK",
+        "ORBIT_LIVE_RESOURCE_TASK",
         WORKSPACE_ROOT / "ale-tasks-base/tasks/demo/resource_injection",
     )
     episode = run_task(

@@ -7,10 +7,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ale.core.result import ResultRecord
-from ale.core.taskspec import ImageSpec, TaskSpec
-from ale.core.verdict import Status
-from ale.run.ledger import Ledger
+from orbit.core.result import ResultRecord
+from orbit.core.taskspec import ImageSpec, TaskSpec
+from orbit.core.verdict import Status
+from orbit.run.ledger import Ledger
 
 pytestmark = pytest.mark.integration
 

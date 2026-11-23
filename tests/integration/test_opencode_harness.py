@@ -1,4 +1,4 @@
-"""OpenCode searches a sealed Sandbox with the ripgrep ALE installed for it.
+"""OpenCode searches a sealed Sandbox with the ripgrep Orbit installed for it.
 
 OpenCode downloads ripgrep on its first search unless it finds one where it looks; with the
 network sealed that download fails and so would the search.
@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.sandbox import Identity
-from ale.core.taskspec import OperatingSystem
-from ale.run.harnesses.opencode import OpenCodeHarness
+from orbit.core.sandbox import Identity
+from orbit.core.taskspec import OperatingSystem
+from orbit.run.harnesses.opencode import OpenCodeHarness
 from tests.integration.scripted_model import ScriptedModel
 from tests.integration.test_scripted_cli_harnesses import Case, mirrored_trajectory, scripted
 from tests.support import cli_os
@@ -24,7 +24,7 @@ pytestmark = [
     pytest.mark.needs_orchard if cli_os() is OperatingSystem.MACOS else pytest.mark.needs_docker,
 ]
 
-PROOF = "ale-search-proof"
+PROOF = "orbit-search-proof"
 
 
 async def test_opencode_searches_files_with_the_network_sealed(tmp_path: Path) -> None:

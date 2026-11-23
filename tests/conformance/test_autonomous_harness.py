@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from ale.core.episode import EpisodeContext
-from ale.core.errors import AgentUnsupportedError
-from ale.core.harness import (
+from orbit.core.episode import EpisodeContext
+from orbit.core.errors import AgentUnsupportedError
+from orbit.core.harness import (
     AgentRun,
     AutonomousHarness,
     EffectiveAgentResources,
@@ -17,12 +17,12 @@ from ale.core.harness import (
     ResolvedSkill,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import Sandbox
-from ale.core.task import Task
-from ale.core.taskspec import OperatingSystem, TaskSpec
-from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.recording import BlobStore
+from orbit.core.sandbox import Sandbox
+from orbit.core.task import Task
+from orbit.core.taskspec import OperatingSystem, TaskSpec
+from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 

@@ -10,19 +10,19 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession, web
 
-from ale.core.config import GatewayConfig
-from ale.core.trace import read_jsonl
-from ale.run.gateway.gemini import (
+from orbit.core.config import GatewayConfig
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway.gemini import (
     extract_usage,
     quota,
     stream_completed,
     stream_error,
     usage_from_stream,
 )
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import CallUsage, GatewaySession, Limits
-from ale.run.recording import EpisodeRecording
-from ale.run.secrets import provider_credentials
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import CallUsage, GatewaySession, Limits
+from orbit.run.recording import EpisodeRecording
+from orbit.run.secrets import provider_credentials
 
 pytestmark = pytest.mark.unit
 
@@ -277,7 +277,7 @@ class TestAuthentication:
             ) as response,
         ):
             assert response.status == 403
-            assert (await response.json())["error"]["type"] == "ale_session_suspended"
+            assert (await response.json())["error"]["type"] == "orbit_session_suspended"
 
         google_error(reply, 403, "PERMISSION_DENIED")
         assert upstream.seen == []
@@ -304,7 +304,7 @@ class TestPolicy:
 
         error = google_error(reply, 400, "FAILED_PRECONDITION")
         assert "need a Task with open network" in error["message"]
-        assert error["details"][0]["reason"] == "ALE_WEB_TOOLS"
+        assert error["details"][0]["reason"] == "ORBIT_WEB_TOOLS"
         assert upstream.seen == []
         (record,) = records(trace)
         assert (record["disposition"], record["refusal_limit"]) == ("refused", "web_tools")
@@ -539,8 +539,8 @@ class TestDialect:
         assert extract_usage({"candidates": []}) == (CallUsage(), None)
 
     def test_the_gemini_provider_defaults_to_googles_api(self, monkeypatch) -> None:
-        monkeypatch.setenv("ALE_GEMINI_API_KEY", "from-env")
-        monkeypatch.delenv("ALE_GEMINI_BASE_URL", raising=False)
+        monkeypatch.setenv("ORBIT_GEMINI_API_KEY", "from-env")
+        monkeypatch.delenv("ORBIT_GEMINI_BASE_URL", raising=False)
         config = GatewayConfig(provider="gemini", dialect="gemini")
         assert (config.provider, config.dialect) == ("gemini", "gemini")
         assert provider_credentials("gemini") == (

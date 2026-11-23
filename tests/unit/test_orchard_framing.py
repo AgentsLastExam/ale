@@ -8,12 +8,12 @@ import subprocess
 
 import pytest
 
-from ale.core.errors import ProviderStartError
-from ale.core.sandbox import DesktopResolution, ImageKind, PreparedTaskImage
-from ale.run.framework import MACOS_FRAMER
-from ale.run.providers.orchard import client as orchard_client
-from ale.run.providers.orchard import framing as orchard_framing
-from ale.run.providers.orchard.client import LocalOrchard, OrchardExecResult, OwnedVM
+from orbit.core.errors import ProviderStartError
+from orbit.core.sandbox import DesktopResolution, ImageKind, PreparedTaskImage
+from orbit.run.framework import MACOS_FRAMER
+from orbit.run.providers.orchard import client as orchard_client
+from orbit.run.providers.orchard import framing as orchard_framing
+from orbit.run.providers.orchard.client import LocalOrchard, OrchardExecResult, OwnedVM
 
 pytestmark = pytest.mark.unit
 
@@ -156,7 +156,7 @@ async def test_an_image_is_framed_offline_booted_once_and_then_reused():
     framed = await orchard_framing.frame_image(local, IMAGE, user="admin")
     clone, delete = local.tarts[0], local.tarts[-1]
     # A reference Tart's cache lacks is pulled onto the cached image it shares most with.
-    assert clone[:3] == ("clone", "--deduplicate", REF) and clone[3].startswith("ale-frame-")
+    assert clone[:3] == ("clone", "--deduplicate", REF) and clone[3].startswith("orbit-frame-")
     assert local.framed == [(clone[3], "admin", framed.identity)]
     (vm,) = controller.created
     assert vm["image"] == clone[3]
@@ -191,7 +191,7 @@ async def test_each_resolution_boots_its_own_clone_of_the_framed_image():
     name = await orchard_framing.at_resolution(local, framed, DesktopResolution())
     assert name == f"{framed.name}-1024x768"
     clone, display, rename = local.tarts
-    assert clone[:2] == ("clone", framed.name) and clone[2].startswith("ale-frame-")
+    assert clone[:2] == ("clone", framed.name) and clone[2].startswith("orbit-frame-")
     assert display == ("set", clone[2], "--display", "1024x768pt")
     assert rename == ("rename", clone[2], name)
 
@@ -205,7 +205,7 @@ async def test_each_resolution_boots_its_own_clone_of_the_framed_image():
 async def test_framing_again_deletes_the_clones_of_the_earlier_framing():
     local = Local(Controller())
     framed = await orchard_framing.frame_image(local, IMAGE, user="admin")
-    local.images = {f"{framed.name}-1024x768", f"{framed.name}-1366x768", "ale-framed-other-1"}
+    local.images = {f"{framed.name}-1024x768", f"{framed.name}-1366x768", "orbit-framed-other-1"}
     local.tarts.clear()
     again = await orchard_framing.frame_image(local, IMAGE, user="admin")
     assert again.name == framed.name
@@ -224,7 +224,7 @@ async def test_a_clone_whose_display_cannot_be_set_is_deleted():
             return ""
 
     local = Refusing(Controller())
-    framed = orchard_framing.FramedImage("ale-framed-x", "sha256:" + "0" * 64, "/Users/a", 501)
+    framed = orchard_framing.FramedImage("orbit-framed-x", "sha256:" + "0" * 64, "/Users/a", 501)
     with pytest.raises(ProviderStartError, match="tart set failed"):
         await orchard_framing.at_resolution(local, framed, DesktopResolution())
     assert local.tarts[-1] == ("delete", local.tarts[0][2])
@@ -236,7 +236,7 @@ async def test_a_local_image_is_cloned_without_a_pull():
         source="solver-local",
         input_identity=DIGEST,
         image_source_identity=DIGEST,
-        runtime_ref="ale-built-" + "b" * 32,
+        runtime_ref="orbit-built-" + "b" * 32,
         prepared_identity=DIGEST,
         base_materials=(DIGEST,),
         builder_identity=DIGEST,
@@ -244,7 +244,7 @@ async def test_a_local_image_is_cloned_without_a_pull():
     local = Local(Controller())
     await orchard_framing.frame_image(local, built, user="admin")
     clone = local.tarts[0]
-    assert clone[:2] == ("clone", built.runtime_ref) and clone[2].startswith("ale-frame-")
+    assert clone[:2] == ("clone", built.runtime_ref) and clone[2].startswith("orbit-frame-")
 
 
 async def test_a_failed_pull_keeps_nothing():
@@ -287,7 +287,7 @@ async def test_a_first_login_that_never_settles_keeps_nothing(monkeypatch):
 
 
 async def test_a_failed_framer_deletes_the_clone_and_keeps_nothing():
-    local = Local(Controller(), frame_error=ProviderStartError("ALE: no Data volume"))
+    local = Local(Controller(), frame_error=ProviderStartError("Orbit: no Data volume"))
     with pytest.raises(ProviderStartError, match="no Data volume"):
         await orchard_framing.frame_image(local, IMAGE, user="admin")
     assert not local.controller.created and not local.saved
@@ -318,13 +318,13 @@ async def test_a_stopped_vm_is_saved_by_cloning_its_tart_vm(tmp_path):
     async def tart(*args, timeout_sec=600):
         calls.append(args)
         if args[0] == "list":
-            names = ["orchard-ale-1-uid-1-0", "orchard-ale-10-uid-9-0", "ale-framed-old"]
+            names = ["orchard-orbit-1-uid-1-0", "orchard-orbit-10-uid-9-0", "orbit-framed-old"]
             return json.dumps([{"Name": name} for name in names])
         return ""
 
     local.__dict__["tart"] = tart
-    await local.save(OwnedVM("ale-1", "uid-1"), "ale-built-new")
-    assert calls[-1] == ("clone", "--overwrite", "orchard-ale-1-uid-1-0", "ale-built-new")
+    await local.save(OwnedVM("orbit-1", "uid-1"), "orbit-built-new")
+    assert calls[-1] == ("clone", "--overwrite", "orchard-orbit-1-uid-1-0", "orbit-built-new")
 
 
 class Process:
@@ -359,18 +359,18 @@ def framer(tmp_path, monkeypatch):
 async def test_the_framer_runs_through_sudo_with_the_payload(framer):
     local, installed, runs, answer = framer
     answer(0, b'{"agent_home": "/Users/admin", "agent_uid": 501}\n')
-    facts = await local.frame_disk("ale-frame-1", user="admin", identity=DIGEST, payload=b"tar")
+    facts = await local.frame_disk("orbit-frame-1", user="admin", identity=DIGEST, payload=b"tar")
     assert facts == {"agent_home": "/Users/admin", "agent_uid": 501}
-    disk = str(local.tart_home / "vms" / "ale-frame-1" / "disk.img")
+    disk = str(local.tart_home / "vms" / "orbit-frame-1" / "disk.img")
     assert runs[0].argv == ("/usr/bin/sudo", "-n", str(installed), disk, "admin", "admin", DIGEST)
     assert runs[0].input == b"tar"
 
 
 async def test_the_framer_reason_is_reported(framer):
     local, _, _, answer = framer
-    answer(1, b"", b"ALE: the image does not sign 'admin' in automatically\n")
+    answer(1, b"", b"Orbit: the image does not sign 'admin' in automatically\n")
     with pytest.raises(ProviderStartError, match="does not sign 'admin' in automatically"):
-        await local.frame_disk("ale-frame-1", user="admin", identity=DIGEST, payload=b"")
+        await local.frame_disk("orbit-frame-1", user="admin", identity=DIGEST, payload=b"")
 
 
 async def test_a_stale_installed_framer_is_refused(framer):
@@ -378,7 +378,7 @@ async def test_a_stale_installed_framer_is_refused(framer):
     answer(0, b"{}")
     installed.write_bytes(b"#!/bin/sh\nexit 0\n")
     with pytest.raises(ProviderStartError, match=r"setup_macos\.py"):
-        await local.frame_disk("ale-frame-1", user="admin", identity=DIGEST, payload=b"")
+        await local.frame_disk("orbit-frame-1", user="admin", identity=DIGEST, payload=b"")
     assert not runs
 
 
@@ -387,7 +387,7 @@ def test_the_framer_is_valid_sh():
 
 
 def test_driver_archive_rejects_wrong_checksum(monkeypatch, tmp_path):
-    from ale.run import framework
+    from orbit.run import framework
 
     monkeypatch.setattr(framework, "cache_root", lambda: tmp_path)
     monkeypatch.setattr(
@@ -414,7 +414,7 @@ def stopping_local(tmp_path, states):
 
     async def tart(*args, timeout_sec=600):
         state = states.pop(0) if len(states) > 1 else states[0]
-        return json.dumps([{"Name": "orchard-ale-1-uid-1-0", "State": state}])
+        return json.dumps([{"Name": "orchard-orbit-1-uid-1-0", "State": state}])
 
     local.__dict__["tart"] = tart
     return local
@@ -423,7 +423,7 @@ def stopping_local(tmp_path, states):
 async def test_a_kept_disk_is_shut_down_by_its_guest(tmp_path, monkeypatch):
     monkeypatch.setattr(orchard_client.asyncio, "sleep", _no_wait)
     local = stopping_local(tmp_path, ["running", "running", "stopped"])
-    client, owned = Shutdown(), OwnedVM("ale-1", "uid-1")
+    client, owned = Shutdown(), OwnedVM("orbit-1", "uid-1")
     await local.shut_down(client, owned)
     assert client.argv == ["sudo", "-n", "/sbin/shutdown", "-h", "now"]
     assert owned.stopped
@@ -433,7 +433,7 @@ async def test_a_refused_shutdown_is_reported(tmp_path):
     local = stopping_local(tmp_path, ["running"])
     client = Shutdown(OrchardExecResult(1, b"", b"sudo: a password is required"))
     with pytest.raises(ProviderStartError, match="password is required"):
-        await local.shut_down(client, OwnedVM("ale-1", "uid-1"))
+        await local.shut_down(client, OwnedVM("orbit-1", "uid-1"))
 
 
 async def test_a_guest_that_never_stops_fails(tmp_path, monkeypatch):
@@ -441,4 +441,4 @@ async def test_a_guest_that_never_stops_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(orchard_client, "SHUTDOWN_TIMEOUT_SEC", 0)
     local = stopping_local(tmp_path, ["running"])
     with pytest.raises(ProviderStartError, match="did not shut down"):
-        await local.shut_down(Shutdown(), OwnedVM("ale-1", "uid-1"))
+        await local.shut_down(Shutdown(), OwnedVM("orbit-1", "uid-1"))

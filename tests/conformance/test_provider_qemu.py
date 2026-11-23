@@ -5,7 +5,7 @@ contract is real" a claim rather than an aspiration, and what turns the future O
 roadmap into "swap the guest image".
 
 The disk is the current VM base, pulled once per host, without the framework: the
-Provider adds it, as Docker adds it to the container base. Set ``ALE_QEMU_IMAGE`` to run
+Provider adds it, as Docker adds it to the container base. Set ``ORBIT_QEMU_IMAGE`` to run
 the suite on another Linux disk. Needs KVM and Docker.
 """
 
@@ -23,13 +23,13 @@ from pathlib import Path
 import pytest
 from tests.support import CONTAINER_BASE, VM_BASE
 
-from ale.core.sandbox import Identity, ImageRef, Sandbox, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.core.testkit import ProviderConformance
-from ale.run.framework import framework_identity
-from ale.run.images import resolve_vm_image
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.qemu import QemuProvider
+from orbit.core.sandbox import Identity, ImageRef, Sandbox, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from orbit.core.testkit import ProviderConformance
+from orbit.run.framework import framework_identity
+from orbit.run.images import resolve_vm_image
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.qemu import QemuProvider
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_kvm]
 
@@ -37,7 +37,7 @@ pytestmark = [pytest.mark.conformance, pytest.mark.needs_kvm]
 @pytest.fixture(scope="module")
 def vm_disk() -> Path:
     """The disk every VM in this module boots, the same for every run of one engine."""
-    if override := os.environ.get("ALE_QEMU_IMAGE"):
+    if override := os.environ.get("ORBIT_QEMU_IMAGE"):
         return Path(override)
     if not os.access("/dev/kvm", os.R_OK | os.W_OK):
         pytest.skip("/dev/kvm is unavailable")
@@ -82,7 +82,7 @@ class TestQemuProvider(ProviderConformance):
         try:
             release = await first.exec(["sh", "-c", ". /etc/os-release; echo $VERSION_ID"])
             assert release.stdout.strip() == "24.04"
-            assert (await first.exec(["systemctl", "is-active", "ale-guestd"])).ok
+            assert (await first.exec(["systemctl", "is-active", "orbit-guestd"])).ok
             assert (await first.exec(["systemctl", "is-active", "gdm3"])).ok
             assert (await first.exec(["pgrep", "-x", "gnome-shell"], identity=Identity.AGENT)).ok
             assert (await first.screenshot()).startswith(b"\x89PNG")
@@ -125,7 +125,7 @@ async def test_cli_manages_multiple_mixed_retained_sandboxes(vm_disk: Path) -> N
 
     def cli(*args: str) -> str:
         result = subprocess.run(
-            [str(Path(sys.executable).parent / "ale"), "sandbox", *args],
+            [str(Path(sys.executable).parent / "orbit"), "sandbox", *args],
             check=False,
             capture_output=True,
             text=True,

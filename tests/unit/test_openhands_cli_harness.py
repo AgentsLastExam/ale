@@ -8,18 +8,18 @@ from pathlib import Path, PurePosixPath
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, ConfigError
-from ale.core.harness import EffectiveAgentResources, TrajectoryParseContext
-from ale.core.taskspec import OperatingSystem
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
-from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
-from ale.run.recording import BlobStore
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, TrajectoryParseContext
+from orbit.core.taskspec import OperatingSystem
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
+from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-STATE = "/home/agent/.openhands-ale"
+STATE = "/home/agent/.openhands-orbit"
 SESSION_ID = "0b7c5f1e6f394f0a9d476a0f0c8f3a11"
 
 
@@ -56,7 +56,7 @@ async def test_the_gateway_is_the_model_route_the_sdk_takes(
     dialect: str, model: str, llm_model: str, base_url: str
 ) -> None:
     command = await OpenHandsCliHarness(gateway_dialect=dialect).prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(model=model),
         native_session_id=None,
@@ -108,7 +108,7 @@ async def test_command_resumes_or_creates_one_exact_conversation(
     native_session_id: str | None,
 ) -> None:
     command = await OpenHandsCliHarness().prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(model="claude"),
         native_session_id=native_session_id,
@@ -118,7 +118,7 @@ async def test_command_resumes_or_creates_one_exact_conversation(
     argv = shlex.split(invocation)
     assert argv[:5] == ["openhands", "--headless", "--json", "--override-with-envs", "--resume"]
     assert argv[5] == command.session_id and len(argv[5]) == 32
-    assert argv[6:] == ["--file", "/home/agent/.ale-harness/prompt.md"]
+    assert argv[6:] == ["--file", "/home/agent/.orbit-harness/prompt.md"]
     assert native_session_id is None or command.session_id == native_session_id
 
 
@@ -162,7 +162,7 @@ async def test_exit_zero_with_a_conversation_error_fails() -> None:
 
 def test_session_files_are_the_conversations_events_and_state() -> None:
     harness = OpenHandsCliHarness()
-    root = PurePosixPath(".openhands-ale/conversations", SESSION_ID)
+    root = PurePosixPath(".openhands-orbit/conversations", SESSION_ID)
     assert harness.is_session_file(root / "base_state.json", SESSION_ID)
     assert harness.is_session_file(root / "events/event-00001-x.json", SESSION_ID)
     assert not harness.is_session_file(root / "events/.eventlog.lock", SESSION_ID)
@@ -185,7 +185,7 @@ def recorded_context(root: Path, **updates: object) -> TrajectoryParseContext:
 
 
 def write_events(root: Path, *events: dict[str, object], below: str = "") -> None:
-    directory = root / ".openhands-ale/conversations" / SESSION_ID / below / "events"
+    directory = root / ".openhands-orbit/conversations" / SESSION_ID / below / "events"
     directory.mkdir(parents=True, exist_ok=True)
     for index, event in enumerate(events):
         (directory / f"event-{index:05d}-e{index}.json").write_text(json.dumps(event))
@@ -216,7 +216,7 @@ def text(source: str, value: str, **fields: object) -> dict[str, object]:
 
 def framed(prompt: str) -> str:
     return (
-        "Starting this session with file context.\n\nFile path: /home/agent/.ale-harness/"
+        "Starting this session with file context.\n\nFile path: /home/agent/.orbit-harness/"
         f"prompt.md\n\nFile contents:\n{'-' * 20}\n{prompt}\n{'-' * 20}\n"
     )
 
@@ -246,8 +246,8 @@ def terminal(call_id: str, response: str, at: str) -> list[dict[str, object]]:
 
 def test_mcp_names_and_errors_convert(tmp_path: Path) -> None:
     record(tmp_path, "Use the server.")
-    (tmp_path / ".openhands-ale/mcp.json").parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".openhands-ale/mcp.json").write_text(
+    (tmp_path / ".openhands-orbit/mcp.json").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".openhands-orbit/mcp.json").write_text(
         json.dumps({"mcpServers": {"task-proof": {}, "other": {}}})
     )
     write_events(
@@ -276,9 +276,9 @@ def test_mcp_names_and_errors_convert(tmp_path: Path) -> None:
     agent = trajectory.steps[1]
     assert agent.reasoning_content == "plan"
     (call,) = agent.tool_calls or ()
-    assert call.extra == {"ale": {"mcp": {"server": "task-proof", "tool": "derive"}}}
+    assert call.extra == {"orbit": {"mcp": {"server": "task-proof", "tool": "derive"}}}
     (failed,) = agent.observation.results  # type: ignore[union-attr]
-    assert failed.content == "bad arguments" and failed.extra == {"ale": {"is_error": True}}
+    assert failed.content == "bad arguments" and failed.extra == {"orbit": {"is_error": True}}
     assert not trajectory.extra
 
 
@@ -308,7 +308,7 @@ def task_result(call_id: str, task_id: str, at: str) -> dict[str, object]:
 
 
 def state(below: str, tasks: dict[str, list[str]], root: Path) -> None:
-    path = root / ".openhands-ale/conversations" / SESSION_ID / below / "base_state.json"
+    path = root / ".openhands-orbit/conversations" / SESSION_ID / below / "base_state.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     usage = {
         f"task:{task}": {"token_usages": [{"response_id": r} for r in responses]}
@@ -416,8 +416,8 @@ def test_nested_delegations_link_by_metrics_inside_each_call(tmp_path: Path) -> 
         if step.tool_calls and step.tool_calls[0].tool_call_id in {"c2", "c3"}
     )
     assert stale.subagent_trajectory_ref is None and killed.subagent_trajectory_ref is None
-    root = f".openhands-ale/conversations/{SESSION_ID}/subagents"
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    root = f".openhands-orbit/conversations/{SESSION_ID}/subagents"
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unlinked_subagent", "source": f"{root}/killed"},
         {"reason": "unlinked_subagent", "source": f"{root}/late"},
     ]
@@ -466,10 +466,10 @@ def test_a_launch_and_its_resume_convert_in_native_order(tmp_path: Path) -> None
 
 def test_without_the_conversation_each_turn_comes_from_its_json_events(tmp_path: Path) -> None:
     write_resumed_run(tmp_path)
-    shutil.rmtree(tmp_path / ".openhands-ale/conversations")
+    shutil.rmtree(tmp_path / ".openhands-orbit/conversations")
     trajectory = OpenHandsCliHarness().parse_trajectory(recorded_context(tmp_path))
 
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "native_session_unavailable", "session_id": SESSION_ID}
     ]
     assert [(step.source, step.message) for step in trajectory.steps] == RESUMED_STEPS

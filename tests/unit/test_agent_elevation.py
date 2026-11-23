@@ -12,18 +12,18 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import ProviderCapabilityError, TaskDefinitionError
-from ale.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
-from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
-from ale.run import guestd
-from ale.run.providers.privileges import set_and_prove_elevation, set_elevation, verify_identities
+from orbit.core.errors import ProviderCapabilityError, TaskDefinitionError
+from orbit.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
+from orbit.core.taskspec import NetworkPolicy, OperatingSystem, Resources
+from orbit.run import guestd
+from orbit.run.providers.privileges import set_and_prove_elevation, set_elevation, verify_identities
 
 pytestmark = pytest.mark.unit
 
 LINUX, MACOS = OperatingSystem.LINUX, OperatingSystem.MACOS
 #: An account every Linux host has, so the script can look it up, and that is not root.
 USER = "nobody"
-MARK = "# ALE: the agent's elevation in this sandbox, set at every start"
+MARK = "# Orbit: the agent's elevation in this sandbox, set at every start"
 
 
 class Guest:

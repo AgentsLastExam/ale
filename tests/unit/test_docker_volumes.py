@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from ale.run.providers.docker import volumes
+from orbit.run.providers.docker import volumes
 
 pytestmark = pytest.mark.unit
 
@@ -96,7 +96,7 @@ ROOT = volumes.Root(1000, 1000, 0o755)
 @pytest.mark.asyncio
 async def test_only_a_candidate_that_is_a_directory_in_the_image_is_a_volume(docker) -> None:
     docker.directories = ["/work"]
-    found = await volumes.directories("image", "/opt/ale/python/bin/python3", ["/work", "/x.txt"])
+    found = await volumes.directories("image", "/opt/orbit/python/bin/python3", ["/work", "/x.txt"])
     assert found == ("/work",)
 
 
@@ -170,4 +170,4 @@ async def test_a_meter_counts_what_was_written_since_the_sandbox_started(docker)
     docker.measured = (4096, 0)
     assert await meter.written() == 0
     await meter.stop()
-    assert docker.calls[-1] == ("rm", "-f", "ale-meter-s1")
+    assert docker.calls[-1] == ("rm", "-f", "orbit-meter-s1")

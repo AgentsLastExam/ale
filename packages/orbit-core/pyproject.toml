@@ -1,0 +1,15 @@
+[project]
+name = "orbit-core"
+version = "0.2.0"
+description = "Orbit core contracts: task specs, environments, harnesses, traces, provenance"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.9"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# `orbit` is a PEP 420 namespace package shared with orbit-run and orbit-fleet: there is
+# deliberately no src/orbit/__init__.py in any of them.
+[tool.hatch.build.targets.wheel]
+packages = ["src/orbit"]

@@ -11,18 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.sandbox import Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
-from ale.run.providers.qemu import QemuProvider
+from orbit.core.sandbox import Identity, ImageRef, SandboxRequest
+from orbit.core.taskspec import NetworkPolicy, Resources
+from orbit.run.providers.qemu import QemuProvider
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
 
 
 @pytest.mark.asyncio
 async def test_windows_upload_permissions_ignore_host_modes(tmp_path: Path) -> None:
-    disk = os.environ.get("ALE_TEST_WINDOWS_IMAGE")
+    disk = os.environ.get("ORBIT_TEST_WINDOWS_IMAGE")
     if not disk:
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to a prepared VM disk")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to a prepared VM disk")
     provider = QemuProvider(image=Path(disk), overlay_dir=tmp_path / "overlays")
     image = ImageRef(kind="vm", reference="local/upload-permissions")
 
@@ -34,14 +34,14 @@ async def test_windows_upload_permissions_ignore_host_modes(tmp_path: Path) -> N
     request = SandboxRequest(
         episode_id=f"upload-{uuid.uuid4().hex[:8]}",
         os="windows",
-        user=os.environ.get("ALE_TEST_WINDOWS_USER", "user"),
+        user=os.environ.get("ORBIT_TEST_WINDOWS_USER", "user"),
         sudo=False,
         prepared_image=await provider.prepare_image(image),
         resources=Resources(cpus=2, memory_mb=8192),
         network=NetworkPolicy(mode="open"),
     )
     async with await provider.create(request) as sandbox:
-        target = r"C:\ProgramData\ALE\setup"
+        target = r"C:\ProgramData\Orbit\setup"
         # Re-upload over existing paths, changing both Host modes and destination ownership.
         for identity, mode in [(Identity.AGENT, 0o777), (Identity.FRAMEWORK, 0o600)]:
             for path in source.rglob("*"):

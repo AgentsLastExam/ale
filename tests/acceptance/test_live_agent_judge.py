@@ -7,19 +7,19 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import AgentJudgeConfig, RunConfig, VerificationConfig
-from ale.core.harness import EffectiveAgentResources
-from ale.core.lock import TaskSource
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import DockerProvider
-from ale.run.secrets import provider_endpoint
-from ale.run.tasksets.manifest import load_tasks
-from ale_verify import _agents
+from orbit.core.config import AgentJudgeConfig, RunConfig, VerificationConfig
+from orbit.core.harness import EffectiveAgentResources
+from orbit.core.lock import TaskSource
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.secrets import provider_endpoint
+from orbit.run.tasksets.manifest import load_tasks
+from orbit_verify import _agents
 from tests.support import provider_registry, sibling_checkout
 
 from .trajectory import MODELS
@@ -28,8 +28,8 @@ pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm]
 
 TASKS = sibling_checkout("ale-tasks-base")
 CASES = (
-    ("codex-cli", "ALE_LIVE_CODEX_CLI_VERSION", "openai"),
-    ("claude-code", "ALE_LIVE_CLAUDE_CODE_VERSION", "anthropic"),
+    ("codex-cli", "ORBIT_LIVE_CODEX_CLI_VERSION", "openai"),
+    ("claude-code", "ORBIT_LIVE_CLAUDE_CODE_VERSION", "anthropic"),
 )
 
 

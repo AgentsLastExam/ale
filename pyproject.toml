@@ -1,9 +1,9 @@
 [project]
-name = "ale-workspace"
+name = "orbit-workspace"
 version = "0.0.0"
-description = "ALE engine workspace root (never published)"
+description = "Orbit engine workspace root (never published)"
 requires-python = ">=3.12"
-dependencies = ["ale-core", "ale-fleet", "ale-run", "ale-verify"]
+dependencies = ["orbit-core", "orbit-fleet", "orbit-run", "orbit-verify"]
 
 [dependency-groups]
 dev = [
@@ -21,10 +21,10 @@ dev = [
 package = false
 
 [tool.uv.sources]
-ale-core = { workspace = true }
-ale-fleet = { workspace = true }
-ale-run = { workspace = true }
-ale-verify = { workspace = true }
+orbit-core = { workspace = true }
+orbit-fleet = { workspace = true }
+orbit-run = { workspace = true }
+orbit-verify = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -33,11 +33,11 @@ members = ["packages/*"]
 line-length = 100
 target-version = "py312"
 src = [
-    "packages/ale-core/src",
-    "packages/ale-fleet/src",
-    "packages/ale-run/src",
-    "packages/ale-verify/src",
-    "packages/ale-verify/tests",
+    "packages/orbit-core/src",
+    "packages/orbit-fleet/src",
+    "packages/orbit-run/src",
+    "packages/orbit-verify/src",
+    "packages/orbit-verify/tests",
     "tests",
 ]
 

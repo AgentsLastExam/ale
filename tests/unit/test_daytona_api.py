@@ -10,9 +10,9 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
-from ale.run.providers.daytona import api as daytona_api
-from ale.run.providers.daytona.api import DaytonaApi, DaytonaError
+from orbit.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
+from orbit.run.providers.daytona import api as daytona_api
+from orbit.run.providers.daytona.api import DaytonaApi, DaytonaError
 
 pytestmark = pytest.mark.unit
 
@@ -194,9 +194,9 @@ async def test_listing_follows_pages_and_filters_by_labels(
         return web.json_response({"items": [{"id": "1"}], "nextCursor": "next"})
 
     fake.on("GET", "/sandbox", page)
-    found = await api.list_sandboxes({"ale.managed": "true"})
+    found = await api.list_sandboxes({"orbit.managed": "true"})
     assert [item["id"] for item in found] == ["1", "2"]
-    assert json.loads(fake.calls[0][2]["labels"]) == {"ale.managed": "true"}
+    assert json.loads(fake.calls[0][2]["labels"]) == {"orbit.managed": "true"}
 
 
 async def test_a_network_change_the_tier_forbids_says_so(
@@ -217,8 +217,8 @@ async def test_no_message_carries_the_key(daytona: tuple[DaytonaApi, Fake]) -> N
 
 
 def test_the_key_comes_from_the_named_variable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ALE_DAYTONA_API_KEY", raising=False)
-    with pytest.raises(ConfigError, match="ALE_DAYTONA_API_KEY"):
+    monkeypatch.delenv("ORBIT_DAYTONA_API_KEY", raising=False)
+    with pytest.raises(ConfigError, match="ORBIT_DAYTONA_API_KEY"):
         DaytonaApi.from_environment()
     monkeypatch.setenv("OTHER_KEY", " abc ")
     assert DaytonaApi.from_environment("OTHER_KEY")._key == "abc"

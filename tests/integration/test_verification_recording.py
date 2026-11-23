@@ -7,18 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.harness import EffectiveAgentResources
-from ale.core.lock import TaskSource
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import DockerProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
-from ale_verify import (
+from orbit.core.config import RunConfig
+from orbit.core.harness import EffectiveAgentResources
+from orbit.core.lock import TaskSource
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
+from orbit_verify import (
     JudgeAttempt,
     JudgeInvocation,
 )
@@ -123,7 +123,7 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
         from pathlib import Path
         record = {{"event":"completed", "invocation":{asdict(invocation)!r}}}
         transcript = {{"event":"response", "attempt":1,"stdout":"sanitized","stderr":""}}
-        Path(os.environ["ALE_AGENT_JUDGE_LOG_PATH"]).write_text(
+        Path(os.environ["ORBIT_AGENT_JUDGE_LOG_PATH"]).write_text(
             json.dumps(transcript)+"\\n"+json.dumps(record)+"\\n"
         )
         Path("/logs/verifier/reward.json").write_text(json.dumps({{"reward":1.0}}))
@@ -145,6 +145,6 @@ async def test_agent_transcript_and_judge_provenance_are_collected_after_exit(
     assert not (result.run_dir / "llm-judge.jsonl").exists()
     assert not list((result.run_dir / "logs").rglob("*judge.jsonl"))
     assert result.lock is not None
-    assert result.lock.ale_verify is not None
+    assert result.lock.orbit_verify is not None
     assert result.lock.judges[0].adapter == "codex-cli"
     assert result.lock.judges[0].attempts == 1

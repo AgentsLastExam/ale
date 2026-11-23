@@ -13,19 +13,19 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import SandboxRetentionConfig
-from ale.core.errors import AgentError
-from ale.core.harness import AgentRun, HarnessSession
-from ale.core.result import ResultRecord
-from ale.core.sandbox import Sandbox
-from ale.core.trace import read_jsonl
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.episode import EpisodeResult, run_episode, run_episode_with_retries
-from ale.run.harnesses.builtin import NopHarness, OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import SandboxRetentionConfig
+from orbit.core.errors import AgentError
+from orbit.core.harness import AgentRun, HarnessSession
+from orbit.core.result import ResultRecord
+from orbit.core.sandbox import Sandbox
+from orbit.core.trace import read_jsonl
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.episode import EpisodeResult, run_episode, run_episode_with_retries
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import CONTAINER_BASE, provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -137,7 +137,7 @@ async def test_agent_never_sees_verification_material(
     probe.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /home/user/input /home/user/output\n"
         "printf 'world' > /home/user/input/word.txt\n"
-        "for p in /opt/ale/tests /opt/ale/validation /home/user/reference; do\n"
+        "for p in /opt/orbit/tests /opt/orbit/validation /home/user/reference; do\n"
         '  if [ -e "$p" ]; then echo "LEAK: $p" >&2; exit 17; fi\n'
         "done\n"
     )
@@ -228,7 +228,7 @@ async def test_failed_episode_retries_in_a_new_sandbox_and_preserves_records(
     assert all(sandbox.outcome == "destroyed" for sandbox in result.record.sandboxes)
     for sandbox_id in harness.sandbox_ids:
         listed = subprocess.run(
-            ["docker", "ps", "-aq", "--filter", f"name=^/ale-{sandbox_id}$"],
+            ["docker", "ps", "-aq", "--filter", f"name=^/orbit-{sandbox_id}$"],
             check=True,
             capture_output=True,
             text=True,

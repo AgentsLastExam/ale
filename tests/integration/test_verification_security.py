@@ -6,17 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import LLMJudgeConfig, VerificationConfig
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.recording import Redactor
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
-from ale_verify._io import EvidenceError, read_text_evidence
+from orbit.core.config import LLMJudgeConfig, VerificationConfig
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.recording import Redactor
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
+from orbit_verify._io import EvidenceError, read_text_evidence
 from tests.support import edit_task_config, provider_registry
 
 pytestmark = pytest.mark.integration
@@ -43,7 +43,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     secret = "verify-only-provider-secret"
-    monkeypatch.setenv("ALE_OPENAI_API_KEY", secret)
+    monkeypatch.setenv("ORBIT_OPENAI_API_KEY", secret)
     task_root = scaffold_task(tmp_path / "scope")
     (task_root / "environment" / "setup").mkdir()
     (task_root / "instruction.md").write_text("Do nothing.\n")
@@ -51,7 +51,7 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
-        'test -z "${ALE_OPENAI_API_KEY-}${ALE_LLM_JUDGE_TOKEN-}"\n'
+        'test -z "${ORBIT_OPENAI_API_KEY-}${ORBIT_LLM_JUDGE_TOKEN-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
     (task_root / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
@@ -60,14 +60,14 @@ async def test_credential_exists_only_during_verify_and_is_redacted(
     )
     (task_root / "tests" / "verify.py").write_text(
         "import os, sys\n"
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['setup_scope'] = checks.text_equals('/home/user/output/setup-key', 'absent')['score']\n"
-        "v['verify_scope'] = float(bool(os.environ.get('ALE_LLM_JUDGE_TOKE"
-        "N')) and 'ALE_OPENAI_API_KEY' not in os.environ)\n"
+        "v['verify_scope'] = float(bool(os.environ.get('ORBIT_LLM_JUDGE_TOKE"
+        "N')) and 'ORBIT_OPENAI_API_KEY' not in os.environ)\n"
         "v['no_host_callback'] = float(not any((name in os.environ for nam"
-        "e in ('ALE_VERIFICATION_URL', 'ALE_VERIFICATION_TOKEN'))))\n"
-        "sys.stderr.write(os.environ['ALE_LLM_JUDGE_TOKEN'])\n"
+        "e in ('ORBIT_VERIFICATION_URL', 'ORBIT_VERIFICATION_TOKEN'))))\n"
+        "sys.stderr.write(os.environ['ORBIT_LLM_JUDGE_TOKEN'])\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
@@ -109,7 +109,7 @@ async def test_record_containing_a_verify_credential_is_not_collected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     secret = "record-leak-provider-secret"
-    monkeypatch.setenv("ALE_OPENAI_API_KEY", secret)
+    monkeypatch.setenv("ORBIT_OPENAI_API_KEY", secret)
     task_root = scaffold_task(tmp_path / "leak")
     (task_root / "environment" / "setup").mkdir()
     (task_root / "instruction.md").write_text("Do nothing.\n")
@@ -122,9 +122,9 @@ async def test_record_containing_a_verify_credential_is_not_collected(
     )
     (task_root / "tests" / "verify.py").write_text(
         "import os\n"
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         "v = {}\n"
-        "v['score'] = {'score': 1.0, 'raw_value': os.environ['ALE_OPENAI_API_KEY']}['score']\n"
+        "v['score'] = {'score': 1.0, 'raw_value': os.environ['ORBIT_OPENAI_API_KEY']}['score']\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
@@ -179,7 +179,7 @@ PLANTED = {
 OBSERVING_VERIFIER = """
 import os, stat
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 parent, verifier = os.lstat('/logs'), os.lstat('/logs/verifier')
 trap = Path('/home/user/trap')
 write({

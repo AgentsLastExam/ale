@@ -8,8 +8,9 @@
 - A fact about one implementation does not belong in a spec, however important it is to
   that implementation. It goes in the owning module's README, and the spec states at most
   the general rule and links there:
-  - one Provider's platform behavior → `packages/ale-run/src/ale/run/providers/README.md`;
-  - one Gateway dialect's routes, statuses and quirks → `packages/ale-run/src/ale/run/gateway/README.md`;
+  - one Provider's platform behavior →
+    `packages/orbit-run/src/orbit/run/providers/README.md`;
+  - one Gateway dialect's routes, statuses and quirks → `packages/orbit-run/src/orbit/run/gateway/README.md`;
   - one Harness's or agent program's behavior → its adapter's `README.md`.
 - Before adding a sentence to a spec, ask whether another module or a Task author needs
   to obey or know it. If not, it goes in the owning README, or in a guide when an

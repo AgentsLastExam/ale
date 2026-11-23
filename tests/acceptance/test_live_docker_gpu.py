@@ -8,22 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.capability import GpuHold
-from ale.core.config import RunConfig, SandboxRetentionConfig
-from ale.core.errors import ProviderCapacityError
-from ale.core.harness import EffectiveAgentResources
-from ale.core.lock import TaskSource
-from ale.core.sandbox import PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.process import run
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import DockerProvider, DockerSandbox
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.capability import GpuHold
+from orbit.core.config import RunConfig, SandboxRetentionConfig
+from orbit.core.errors import ProviderCapacityError
+from orbit.core.harness import EffectiveAgentResources
+from orbit.core.lock import TaskSource
+from orbit.core.sandbox import PreparedTaskImage, SandboxRequest
+from orbit.core.taskspec import NetworkPolicy, Resources
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.process import run
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers.docker import DockerProvider, DockerSandbox
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import (
     CONTAINER_BASE,
     edit_task_config,
@@ -36,15 +36,15 @@ pytestmark = [
     pytest.mark.needs_docker,
     pytest.mark.needs_gpu,
     pytest.mark.skipif(
-        os.environ.get("ALE_TEST_DOCKER_GPU") != "1",
-        reason="set ALE_TEST_DOCKER_GPU=1 on a qualified NVIDIA Docker host",
+        os.environ.get("ORBIT_TEST_DOCKER_GPU") != "1",
+        reason="set ORBIT_TEST_DOCKER_GPU=1 on a qualified NVIDIA Docker host",
     ),
 ]
 
 
 def _gpu_image_reference() -> str:
-    image = os.environ.get("ALE_TEST_DOCKER_GPU_IMAGE")
-    tag = os.environ.get("ALE_TEST_DOCKER_GPU_TAG")
+    image = os.environ.get("ORBIT_TEST_DOCKER_GPU_IMAGE")
+    tag = os.environ.get("ORBIT_TEST_DOCKER_GPU_TAG")
     if image is None and tag is None:
         return CONTAINER_BASE
     return f"{image or CONTAINER_BASE.rsplit(':', 1)[0]}:{tag or 'latest'}"
@@ -56,7 +56,7 @@ def _linker_cache_names(listing: str) -> set[str]:
 
 @pytest.mark.asyncio
 async def test_live_docker_gpu_operation_and_exclusive_lease() -> None:
-    index = int(os.environ.get("ALE_TEST_DOCKER_GPU_INDEX", "0"))
+    index = int(os.environ.get("ORBIT_TEST_DOCKER_GPU_INDEX", "0"))
     provider = DockerProvider(gpus=(index,))
     prepared = await prepare_reference(provider, _gpu_image_reference())
     request = SandboxRequest(
@@ -85,7 +85,7 @@ async def test_live_docker_gpu_sandbox_has_rendering_drivers() -> None:
     host = subprocess.run(["/sbin/ldconfig", "-p"], check=True, capture_output=True, text=True)
     if "libEGL_nvidia.so.0" not in _linker_cache_names(host.stdout):
         pytest.skip("the Host driver has no graphics libraries")
-    index = int(os.environ.get("ALE_TEST_DOCKER_GPU_INDEX", "0"))
+    index = int(os.environ.get("ORBIT_TEST_DOCKER_GPU_INDEX", "0"))
     provider = DockerProvider(gpus=(index,))
     prepared = await prepare_reference(provider, _gpu_image_reference())
     sandbox = await provider.create(
@@ -161,7 +161,7 @@ def _separate_gpu_task(root: Path) -> Path:
     )
     (task / "tests/verify.py").write_text(
         "import subprocess\n"
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         "solver = open('/home/user/output/solver-gpu.txt').read().strip()\n"
         "verifier = subprocess.check_output(['nvidia-smi', '--query-gpu=uu"
         "id', '--format=csv,noheader'], text=True).strip()\n"
@@ -260,7 +260,7 @@ for mib in map(int, sys.argv[2:]):
         assert cu.cuMemsetD8_v2(pointer, ctypes.c_ubyte(0x5A), ctypes.c_size_t(mib << 20)) == 0
         held.append(pointer)
     print(f"cuMemAlloc {mib} MiB: {name(code)}", flush=True)
-open("/tmp/ale-cuda-held", "w").close()
+open("/tmp/orbit-cuda-held", "w").close()
 time.sleep(float(sys.argv[1]))
 """
 
@@ -281,7 +281,7 @@ _PREPARED: dict[int, PreparedTaskImage] = {}
 async def _provider(runtime: str) -> tuple[DockerProvider, int]:
     if runtime == "gvisor":
         skip_without_gvisor()
-    index = int(os.environ.get("ALE_TEST_DOCKER_GPU_INDEX", "0"))
+    index = int(os.environ.get("ORBIT_TEST_DOCKER_GPU_INDEX", "0"))
     provider = DockerProvider(gpus=(index,), runtime=runtime)
     _PREPARED[index] = await prepare_reference(provider, _gpu_image_reference())
     return provider, index
@@ -326,7 +326,7 @@ async def test_live_docker_gpu_is_shared_by_memory_and_refused_past_its_headroom
             assert code == 0
             print(f"{sandbox.container} labels and annotations: {shown.strip()}", flush=True)
             labels, annotations = (json.loads(part) for part in shown.split(" ", 1))
-            assert labels["ale.gpu_memory_mb"] == str(_RESERVED)
+            assert labels["orbit.gpu_memory_mb"] == str(_RESERVED)
             limit = (annotations or {}).get("dev.gvisor.flag.nvproxy-gpu-memory-limit")
             assert limit == (str(_RESERVED << 20) if runtime == "gvisor" else None)
             holding.append(
@@ -336,7 +336,7 @@ async def test_live_docker_gpu_is_shared_by_memory_and_refused_past_its_headroom
             )
             # The command holds the session it runs on; the file session is free.
             for _ in range(240):
-                if await sandbox.list_files("/tmp/ale-cuda-held"):
+                if await sandbox.list_files("/tmp/orbit-cuda-held"):
                     break
                 await asyncio.sleep(0.5)
             else:

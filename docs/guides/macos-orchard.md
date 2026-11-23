@@ -1,13 +1,13 @@
 # macOS Tasks
 
-macOS Tasks run in fresh macOS VMs on the Mac that runs ALE, through a local Orchard
+macOS Tasks run in fresh macOS VMs on the Mac that runs Orbit, through a local Orchard
 controller and Tart worker. A Task with `os = "macos"` goes there with no run settings.
 Supported capabilities and cleanup behavior follow the
 [sandbox contract](../specs/sandbox-image.md#runtime-behavior).
 
 ## Start the local Orchard
 
-On Apple Silicon, run the setup script from the ALE checkout and leave it running:
+On Apple Silicon, run the setup script from the Orbit checkout and leave it running:
 
 ```bash
 uv run scripts/setup_macos.py
@@ -23,7 +23,7 @@ Setup pins Orchard **0.58.0**, Tart **2.41.1** and Softnet **0.25.0**, verifies 
 checksums, and starts an isolated controller and worker. Once the pinned releases are in
 place it stops services an earlier pin started, and refuses while their controller holds VMs
 or their worker runs without its controller. Their state, credentials and images live in
-`~/.local/share/ale/macos`, where ALE finds them; existing services and system trust
+`~/.local/share/orbit/macos`, where Orbit finds them; existing services and system trust
 settings are unchanged. The worker is a child of the setup command, which stays in the
 foreground: macOS's Local Network privacy lets a program started from a Terminal or SSH
 login reach the VMs only while it descends from that login, and a worker left behind fails
@@ -32,25 +32,25 @@ again to restart it, including after a reboot. To reuse installed binaries at th
 versions, pass `--orchard-path` and `--tart-path`. Setup does not bypass macOS signature
 checks.
 
-Setup also installs ALE's macOS framer, which frames images offline as root:
-`framework_macos.sh` as `/usr/local/libexec/ale/framework-macos`, owned by root, and the
-sudoers rule `/etc/sudoers.d/ale-framework-macos`, which lets the account that runs setup
+Setup also installs Orbit's macOS framer, which frames images offline as root:
+`framework_macos.sh` as `/usr/local/libexec/orbit/framework-macos`, owned by root, and the
+sudoers rule `/etc/sudoers.d/orbit-framework-macos`, which lets the account that runs setup
 run that one program as root without a password. sudo asks for the account's password the
-first time and whenever the framer changes; ALE refuses to frame with an outdated copy.
+first time and whenever the framer changes; Orbit refuses to frame with an outdated copy.
 
 On macOS 26 or later, setup also installs Softnet, the packet filter that seals the VMs of
 `no-network`, `allowlist` and `blocklist` Tasks on this Mac, as
-`/usr/local/libexec/ale/softnet`, owned by root and set-user-ID because it sets a VM's network
+`/usr/local/libexec/orbit/softnet`, owned by root and set-user-ID because it sets a VM's network
 up as root, and puts it on the worker's PATH; sudo asks for the password for that too.
 `--check` says whether the worker has it. Without it, as on macOS before 26, only `public` Tasks run. Softnet sets the DHCP
 lease time for VM networks to 10 minutes, for every VM and Internet Sharing on the Mac, and
 that setting stays after cleanup
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#restricted-networking)).
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#restricted-networking)).
 
 ## Choose an image
 
 Name any Tart OCI image in `task.toml` as `[environment].image`, by SHA-256 digest or by a
-tag that does not move (`ale lint` warns about `latest`):
+tag that does not move (`orbit lint` warns about `latest`):
 
 ```toml
 schema_version = "0.2"
@@ -71,7 +71,7 @@ network_mode = "no-network"
 sudo = true
 ```
 
-The first time a VM runs an image for an account, ALE frames it on this Mac: it clones the
+The first time a VM runs an image for an account, Orbit frames it on this Mac: it clones the
 image, installs the framework into the clone's disk without starting it (guestd, its own
 Python, and Cua Driver with the Screen Recording and Accessibility grants macOS otherwise
 takes only through System Settings), boots the clone once so macOS finishes the account's
@@ -88,16 +88,16 @@ The image needs:
 - FileVault off, so its disk can be framed;
 - the applications and licenses the Task uses, with no preexisting model credentials.
   To install them on a stock image instead, name it the same way and add
-  `environment/build.sh`, which ALE runs once as root in a VM of the base framed for
+  `environment/build.sh`, which Orbit runs once as root in a VM of the base framed for
   `admin`, so the base must sign `admin` in, and keeps; the result is framed for the
   Task's account when a sandbox first uses it, so the build may create that account
   ([Task authoring](../specs/task-authoring.md#environment)).
 
 `[agent].sudo` is applied at every boot, as on Linux: a last sudoers rule gives the account
-passwordless sudo, or with `false` denies it every command, and ALE also takes it out of the
-`admin` group. `admin` keeps passwordless sudo for ALE itself, so a Task that runs as
+passwordless sudo, or with `false` denies it every command, and Orbit also takes it out of
+the `admin` group. `admin` keeps passwordless sudo for Orbit itself, so a Task that runs as
 `admin` must declare `sudo = true`; for a Task without it, create and sign in another
-account in `build.sh`: add it with `sysadminctl` and its home at `$ALE_HOME`, set
+account in `build.sh`: add it with `sysadminctl` and its home at `$ORBIT_HOME`, set
 `autoLoginUser` in `/Library/Preferences/com.apple.loginwindow` and its password in
 `/etc/kcpassword`, and mark the account's Setup Assistant panes seen.
 
@@ -107,10 +107,10 @@ private registries. Digest-pinned references need neither, and Tart pulls the im
 Every `network_mode` is supported; the sealed modes need Softnet, and their setup and
 verification reach IPv4 addresses only. Use the
 [standard Task layout](../specs/task-authoring.md) with `.sh` stage entries; the reward
-goes to `/opt/ale/logs/verifier`, because the macOS root volume is read-only. Every
+goes to `/opt/orbit/logs/verifier`, because the macOS root volume is read-only. Every
 shipped Harness supports macOS. The npm-installed CLIs need Node/npm at the
 [required runtime version](../specs/autonomous-harness.md#shipped-integrations) in the
-image, and Hermes and OpenHands CLI need Git, which the ALE bases provide on Linux and
+image, and Hermes and OpenHands CLI need Git, which the Orbit bases provide on Linux and
 Windows. The `computer-use` Harness needs an Anthropic-compatible Gateway and a model
 endpoint that accepts its computer tool schema.
 
@@ -118,16 +118,16 @@ endpoint that accepts its computer tool schema.
 Driver screenshot, clicks, types and saves in TextEdit, and its verifier checks the file.
 The click matters: a window in front does not hold the keyboard until its document is
 clicked. `tests/fixtures/tasks/macos-unprivileged` builds an administrator with passwordless
-sudo on the base, with its home and a file in it at `ALE_HOME`, and signs it in; with
+sudo on the base, with its home and a file in it at `ORBIT_HOME`, and signs it in; with
 `sudo = false`, its oracle finds the account out of the `admin` group, without sudo, and the
 file its build left.
 
 ## Run and check
 
 ```bash
-uv run ale lint /absolute/path/to/task
-uv run ale prepare /absolute/path/to/task
-uv run ale run /absolute/path/to/task --agent oracle
+uv run orbit lint /absolute/path/to/task
+uv run orbit prepare /absolute/path/to/task
+uv run orbit run /absolute/path/to/task --agent oracle
 ```
 
 `prepare` resolves tags, records image identity and, for a Task with `environment/build.sh`,
@@ -135,7 +135,7 @@ builds its image; the oracle run frames the image if needed, creates a VM and ex
 setup, output collection and verification.
 
 For Provider conformance tests, run
-`ALE_TEST_ORCHARD=1 uv run pytest tests/conformance/test_provider_orchard.py`. The suite
+`ORBIT_TEST_ORCHARD=1 uv run pytest tests/conformance/test_provider_orchard.py`. The suite
 builds `macos-unprivileged` on this Mac the first time, so its sudo=false cases run as an
 account other than `admin`, then creates fresh VMs of it, sealed as `no-network` unless a
 case asks otherwise, and checks cleanup. The CLI
@@ -143,8 +143,8 @@ Harness integration tests run in macOS VMs as well ([Tests](../../tests/README.m
 
 ## Clean up
 
-ALE tears down episode VMs. Kept VMs and snapshots are listed by `ale sandbox list` and
-stay until `ale sandbox destroy <handle>`; until then, `scripts/setup_macos.py --cleanup`
+Orbit tears down episode VMs. Kept VMs and snapshots are listed by `orbit sandbox list` and
+stay until `orbit sandbox destroy <handle>`; until then, `scripts/setup_macos.py --cleanup`
 refuses. If a teardown fails, inspect the reported VM name and UID in Orchard before
 reconciling it; do not delete a same-name replacement. Uncollected guest logs and outputs
 can be lost when execution is interrupted.

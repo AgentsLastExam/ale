@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Prepare a private local Orchard controller and Tart worker for ALE.
+"""Prepare a private local Orchard controller and Tart worker for Orbit.
 
 Run with uv; this script uses only Python's standard library. It never changes
 Homebrew, launchd, system trust, desktop permissions, or the shared Tart home. With sudo,
-which asks for this account's password, it installs ALE's macOS framer: a root-owned copy of
-``framework_macos.sh`` and a sudoers rule that lets this account run that program alone as
-root, which framing an image offline needs. On macOS 26 or later it also installs Softnet
-root-owned and set-user-ID as the worker's ``softnet``, which a VM whose network ALE
+which asks for this account's password, it installs Orbit's macOS framer: a root-owned copy
+of ``framework_macos.sh`` and a sudoers rule that lets this account run that program alone
+as root, which framing an image offline needs. On macOS 26 or later it also installs Softnet
+root-owned and set-user-ID as the worker's ``softnet``, which a VM whose network Orbit
 restricts runs on.
 
 It stays in the foreground as the worker's parent. macOS's Local Network privacy lets a
@@ -40,20 +40,20 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
-OWNER = "ale-local-orchard-v1"
+OWNER = "orbit-local-orchard-v1"
 #: The Orchard Provider reads the controller, its credentials and Tart from here.
-STATE_DIR = Path.home() / ".local/share/ale/macos"
-#: Local Tart images ALE keeps as a cache, which cleanup removes with the rest.
-CACHED_IMAGES = ("ale-framed-", "ale-built-")
+STATE_DIR = Path.home() / ".local/share/orbit/macos"
+#: Local Tart images Orbit keeps as a cache, which cleanup removes with the rest.
+CACHED_IMAGES = ("orbit-framed-", "orbit-built-")
 #: The framer the Orchard Provider runs through sudo, and the rule that allows only it.
-FRAMER = Path("/usr/local/libexec/ale/framework-macos")
+FRAMER = Path("/usr/local/libexec/orbit/framework-macos")
 FRAMER_SOURCE = (
-    Path(__file__).resolve().parents[1] / "packages/ale-run/src/ale/run/framework_macos.sh"
+    Path(__file__).resolve().parents[1] / "packages/orbit-run/src/orbit/run/framework_macos.sh"
 )
-FRAMER_RULE = Path("/etc/sudoers.d/ale-framework-macos")
-#: Softnet, which Tart runs for a VM whose network ALE restricts, and which needs root to set
+FRAMER_RULE = Path("/etc/sudoers.d/orbit-framework-macos")
+#: Softnet, which Tart runs for a VM whose network Orbit restricts, and which needs root to set
 #: the VM's network up; the Orchard Provider looks for it here.
-SOFTNET = Path("/usr/local/libexec/ale/softnet")
+SOFTNET = Path("/usr/local/libexec/orbit/softnet")
 #: Its release archive and the SHA-256 of the archive and of the program in it.
 SOFTNET_RELEASE = (
     "0.25.0",
@@ -116,7 +116,7 @@ def load_state(root: Path) -> dict:
         state = json.loads((root / "state.json").read_text())
     except (OSError, ValueError) as exc:
         raise SetupError(
-            "No owned ALE setup state here; initialize an empty directory first"
+            "No owned Orbit setup state here; initialize an empty directory first"
         ) from exc
     if state.get("owner") != OWNER:
         raise SetupError("Directory is not owned by this setup script")
@@ -373,7 +373,7 @@ def initialize(
         state = {
             "owner": OWNER,
             "port": port,
-            "worker": "ale-local-" + secrets.token_hex(4),
+            "worker": "orbit-local-" + secrets.token_hex(4),
             "processes": {},
         }
         save_state(root, state)
@@ -684,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
                 install_framer()
                 install_softnet()
                 worker = initialize(root, args.orchard_path, args.tart_path)
-                print("Ready. In another shell, run macOS Tasks with: uv run ale run TASK")
+                print("Ready. In another shell, run macOS Tasks with: uv run orbit run TASK")
         if worker is not None:
             hold(worker)
         return 0

@@ -7,20 +7,20 @@ import pytest
 import yaml
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, ConfigError, HarnessLimitError
-from ale.core.harness import EffectiveAgentResources, TrajectoryParseContext
-from ale.core.taskspec import OperatingSystem
-from ale.core.trajectory import AtifTrajectory
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
-from ale.run.harnesses.hermes import HermesHarness
-from ale.run.harnesses.hermes.adapter import COMMIT
-from ale.run.recording import BlobStore
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, ConfigError, HarnessLimitError
+from orbit.core.harness import EffectiveAgentResources, TrajectoryParseContext
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
+from orbit.run.harnesses.hermes import HermesHarness
+from orbit.run.harnesses.hermes.adapter import COMMIT
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-STATE = "/home/agent/.hermes-ale"
+STATE = "/home/agent/.hermes-orbit"
 SESSION_ID = "local-0348e9898df56a45c55bf29ac2e74de9de357de000438db7a45146582053fb20"
 
 
@@ -74,8 +74,8 @@ async def test_the_gateway_is_the_one_provider(
         resources(tmp_path),
     )
     config = yaml.safe_load(sandbox.files[f"{STATE}/config.yaml"])
-    assert config["model"] == {"provider": "ale", "default": "test-model"}
-    assert config["providers"]["ale"] == {
+    assert config["model"] == {"provider": "orbit", "default": "test-model"}
+    assert config["providers"]["orbit"] == {
         "api": api,
         "key_cmd": f"cat -- {STATE}/gateway-token",
         "transport": transport,
@@ -96,7 +96,7 @@ async def test_the_gateway_is_the_one_provider(
     assert [path for path, data in sandbox.files.items() if b"episode-token-proof" in data] == [
         f"{STATE}/gateway-token"
     ]
-    assert HermesHarness.credentials == (".hermes-ale/gateway-token",)
+    assert HermesHarness.credentials == (".hermes-orbit/gateway-token",)
 
 
 async def test_on_windows_the_token_is_printed_by_cmd() -> None:
@@ -106,10 +106,10 @@ async def test_on_windows_the_token_is_printed_by_cmd() -> None:
         session(home="C:/Users/agent"),
         EffectiveAgentResources(),
     )
-    config = yaml.safe_load(sandbox.files["C:/Users/agent/.hermes-ale/config.yaml"])
+    config = yaml.safe_load(sandbox.files["C:/Users/agent/.hermes-orbit/config.yaml"])
     assert (
-        config["providers"]["ale"]["key_cmd"]
-        == 'type "C:\\Users\\agent\\.hermes-ale\\gateway-token"'
+        config["providers"]["orbit"]["key_cmd"]
+        == 'type "C:\\Users\\agent\\.hermes-orbit\\gateway-token"'
     )
 
 
@@ -134,7 +134,7 @@ async def test_command_streams_events_and_exports_the_sessions(
     command = await HermesHarness(
         settings={"max_turns": 50, "reasoning_effort": "low"}
     ).prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=native_session_id,
@@ -143,12 +143,12 @@ async def test_command_streams_events_and_exports_the_sessions(
     # A background gateway an earlier invocation started would serve with its old token.
     assert command.script.startswith("/home/agent/.local/bin/hermes gateway stop < /dev/null")
     assert (
-        "/home/agent/.local/bin/hermes chat --query-file /home/agent/.ale-harness/prompt.md "
+        "/home/agent/.local/bin/hermes chat --query-file /home/agent/.orbit-harness/prompt.md "
         "--format stream-json --yolo"
     ) in command.script
     assert ("--resume " + SESSION_ID in command.script) is (native_session_id is not None)
     assert "--max-turns 50 --reasoning low < /dev/null" in command.script
-    assert "/home/agent/.local/bin/hermes sessions export /home/agent/.hermes-ale/exports/" in (
+    assert "/home/agent/.local/bin/hermes sessions export /home/agent/.hermes-orbit/exports/" in (
         command.script
     )
     assert command.script.endswith('exit "$status"')
@@ -188,7 +188,7 @@ async def test_a_failed_turn_fails_and_the_turn_limit_is_typed() -> None:
 
 def test_session_files_are_the_sessions_exports() -> None:
     harness = HermesHarness()
-    exports = PurePosixPath(".hermes-ale/exports")
+    exports = PurePosixPath(".hermes-orbit/exports")
     assert harness.is_session_file(exports / SESSION_ID / "20261026T000000Z.jsonl", SESSION_ID)
     assert not harness.is_session_file(exports / f"{SESSION_ID}.jsonl", SESSION_ID)
     assert not harness.is_session_file(exports / SESSION_ID / "x.json", SESSION_ID)
@@ -226,7 +226,7 @@ def record(root: Path, *prompts: str, stdout: str | list[str]) -> None:
 
 
 def write_export(root: Path, *sessions: dict[str, object]) -> None:
-    path = root / ".hermes-ale/exports" / SESSION_ID / "20261026T000000Z.jsonl"
+    path = root / ".hermes-orbit/exports" / SESSION_ID / "20261026T000000Z.jsonl"
     path.parent.mkdir(parents=True)
     path.write_text("".join(json.dumps(item) + "\n" for item in sessions))
 
@@ -278,8 +278,8 @@ def refs(trajectory: AtifTrajectory) -> list[str]:
 
 
 def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
-    (tmp_path / ".hermes-ale/config.yaml").parent.mkdir(parents=True)
-    (tmp_path / ".hermes-ale/config.yaml").write_text(
+    (tmp_path / ".hermes-orbit/config.yaml").parent.mkdir(parents=True)
+    (tmp_path / ".hermes-orbit/config.yaml").write_text(
         yaml.safe_dump({"mcp_servers": {"task-proof": {"command": "x"}}})
     )
     trajectory = parse(
@@ -313,7 +313,7 @@ def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
     step = trajectory.steps[1]
     assert step.reasoning_content == "plan"
     _, derive = step.tool_calls or ()
-    assert derive.extra == {"ale": {"mcp": {"server": "task-proof", "tool": "derive"}}}
+    assert derive.extra == {"orbit": {"mcp": {"server": "task-proof", "tool": "derive"}}}
     delegated, mcp = step.observation.results  # type: ignore[union-attr]
     (ref,) = delegated.subagent_trajectory_ref or ()
     assert (ref.session_id, ref.trajectory_id) == ("child", "hermes-trajectory-subagent-child")
@@ -324,8 +324,8 @@ def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
 
 
 def test_one_deferred_call_is_the_call_it_made(tmp_path: Path) -> None:
-    (tmp_path / ".hermes-ale/config.yaml").parent.mkdir(parents=True)
-    (tmp_path / ".hermes-ale/config.yaml").write_text(
+    (tmp_path / ".hermes-orbit/config.yaml").parent.mkdir(parents=True)
+    (tmp_path / ".hermes-orbit/config.yaml").write_text(
         yaml.safe_dump({"mcp_servers": {"task-proof": {"command": "x"}}})
     )
     one = [{"name": "mcp__task_proof__derive", "arguments": {"n": 1}}]
@@ -353,7 +353,7 @@ def test_one_deferred_call_is_the_call_it_made(tmp_path: Path) -> None:
     assert (single.function_name, single.arguments, single.extra) == (
         "mcp__task_proof__derive",
         {"n": 1},
-        {"ale": {"native_tool": "tool_call", "mcp": {"server": "task-proof", "tool": "derive"}}},
+        {"orbit": {"native_tool": "tool_call", "mcp": {"server": "task-proof", "tool": "derive"}}},
     )
     assert (batch.function_name, batch.extra) == ("tool_call", None)
     results = trajectory.steps[1].observation.results  # type: ignore[union-attr]
@@ -362,12 +362,12 @@ def test_one_deferred_call_is_the_call_it_made(tmp_path: Path) -> None:
 
 
 def test_an_image_a_result_names_is_the_results_image(tmp_path: Path) -> None:
-    cached = tmp_path / ".hermes-ale/cache/images/img_1.png"
+    cached = tmp_path / ".hermes-orbit/cache/images/img_1.png"
     cached.parent.mkdir(parents=True)
     cached.write_bytes(b"\x89PNG shot")
     # As Hermes wraps it: the tool's output as JSON, the path ending at a quote.
     named = json.dumps(
-        {"result": "Screenshot captured\nMEDIA:/home/agent/.hermes-ale/cache/images/img_1.png"}
+        {"result": "Screenshot captured\nMEDIA:/home/agent/.hermes-orbit/cache/images/img_1.png"}
     )
     trajectory = parse(
         tmp_path,
@@ -433,7 +433,7 @@ def test_nested_delegations_embed_in_their_spawners(tmp_path: Path) -> None:
     assert leaf.trajectory_id == "hermes-trajectory-subagent-plan-subagent-leaf"
     assert refs(plan) == [leaf.trajectory_id]
     assert [step.message for step in leaf.steps] == ["Leaf.", "Leafed."]
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unlinked_subagent", "session_id": "twin-a"},
         {"reason": "unlinked_subagent", "session_id": "twin-b"},
         {"reason": "unlinked_subagent", "session_id": "twin-leaf"},
@@ -485,7 +485,7 @@ def test_compression_continuations_continue_the_conversation(tmp_path: Path) -> 
     ]
     assert refs(trajectory) == ["hermes-trajectory-subagent-helper"]
     # All four prompts are in the conversation; only the delegated child is a subagent.
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unlinked_subagent", "session_id": "late-helper"}
     ]
 
@@ -564,7 +564,7 @@ def test_without_an_export_each_turn_comes_from_its_events(tmp_path: Path) -> No
     assert trajectory.steps[1].observation.results[0].content == "a"  # type: ignore[union-attr]
     assert trajectory.final_metrics is not None
     assert trajectory.final_metrics.total_prompt_tokens == 22
-    assert trajectory.extra["ale"]["parse_issues"][0]["reason"] == "native_session_unavailable"  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"][0]["reason"] == "native_session_unavailable"  # type: ignore[index]
 
 
 def test_a_launch_and_its_resume_convert_in_native_order(tmp_path: Path) -> None:
@@ -701,17 +701,17 @@ async def test_windows_runs_the_launcher_the_installer_publishes() -> None:
     class WindowsSandbox(FakeSandbox):
         async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             if list(argv)[:2] == ["python", "-c"]:
-                from ale.core.sandbox import ExecResult
+                from orbit.core.sandbox import ExecResult
 
                 return ExecResult(exit_code=0, stdout="C:/Windows/System32")
             return await super().exec(argv, **kwargs)
 
     command = await HermesHarness().prepare_command(
-        "C:/Users/agent/.ale-harness/prompt.md",
+        "C:/Users/agent/.orbit-harness/prompt.md",
         WindowsSandbox(),  # type: ignore[arg-type]
         session(home="C:/Users/agent", os=OperatingSystem.WINDOWS),
         native_session_id=None,
     )
     # gateway stop, chat and sessions export.
-    assert command.script.count("C:/Users/agent/.hermes-ale/bin/hermes.exe ") == 3
-    assert command.env["HERMES_HOME"] == "C:/Users/agent/.hermes-ale"
+    assert command.script.count("C:/Users/agent/.hermes-orbit/bin/hermes.exe ") == 3
+    assert command.env["HERMES_HOME"] == "C:/Users/agent/.hermes-orbit"

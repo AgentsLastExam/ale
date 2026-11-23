@@ -15,7 +15,7 @@ beside the files of the stage that reads them, at these roots of a
 | `calibration/<case>/assets/` | the oracle of that further [case](task-authoring.md#calibration) |
 
 To the runtime they are ordinary files of their stage, uploaded with it and read through
-relative paths such as `assets/reference.json` or `.\assets\seed.json`; `ALE_STAGE_DIR`
+relative paths such as `assets/reference.json` or `.\assets\seed.json`; `ORBIT_STAGE_DIR`
 gives a subprocess the stage's absolute path. A stage's assets are therefore as visible as
 the stage: the image build places what the agent sees, and tests, validation and
 calibration assets are absent while the evaluated agent works. Setup has no asset root:
@@ -57,7 +57,7 @@ not consolidate software into a repository-level directory.
 
 Each Task source repository has one Hugging Face dataset named
 `<namespace>/<source-repository-name>`, in that namespace's `assets` collection. The
-namespace is `agents-last-exam` unless `ALE_ASSETS_NAMESPACE` names another organization
+namespace is `agents-last-exam` unless `ORBIT_ASSETS_NAMESPACE` names another organization
 or user, so a Task repository maintained elsewhere keeps its assets in its own namespace.
 The source repository name comes from its `origin` URL, falling back to the main Git
 directory. A linked worktree's directory name is never the dataset name. Dataset paths
@@ -69,18 +69,19 @@ administrator approves can download a file, so contributors request access on th
 page rather than joining the namespace, which would open its other private datasets to them.
 It is gated before it becomes public, so tests, solutions and licensed software are never
 downloadable by anyone not approved. The collection starts private. The checkpoint does not
-upload Task files. An existing dataset keeps the settings its owner chose, and ALE treats a
-public, gated or private one alike. Commands pass `ALE_HF_TOKEN` from the checkout's `.env` explicitly to every Hugging Face
-call and Git request; without it they are anonymous, which is enough to pull a public dataset.
-The operator's own `HF_TOKEN` or cached Hugging Face login is never used, so the checkout alone
-decides which account ALE acts as. Credentials never enter a remote Git URL or the Task
-definition. Git and Git LFS must be installed for local checkpoints and uploads. Pull does not
-read the collection. `ALE_ASSETS_COLLECTION` or `--collection`, when supplied for manual push,
-must identify the namespace's collection titled `assets`; otherwise it is discovered.
+upload Task files. An existing dataset keeps the settings its owner chose, and Orbit treats
+a public, gated or private one alike. Commands pass `ORBIT_HF_TOKEN` from the checkout's
+`.env` explicitly to every Hugging Face call and Git request; without it they are anonymous,
+which is enough to pull a public dataset. The operator's own `HF_TOKEN` or cached Hugging
+Face login is never used, so the checkout alone decides which account Orbit acts as.
+Credentials never enter a remote Git URL or the Task definition. Git and Git LFS must be
+installed for local checkpoints and uploads. Pull does not read the collection.
+`ORBIT_ASSETS_COLLECTION` or `--collection`, when supplied for manual push, must identify
+the namespace's collection titled `assets`; otherwise it is discovered.
 
 ## Local versions
 
-ALE keeps one Git/LFS clone under the source repository's common Git directory and a
+Orbit keeps one Git/LFS clone under the source repository's common Git directory and a
 separate branch and worktree per Job. Concurrent Jobs cannot overwrite each other's
 working files. Accepted asset changes are committed locally. Unchanged content reuses
 its commit; no per-attempt asset archives or separate content-hash manifests are stored.
@@ -102,13 +103,13 @@ of a case the Task has but they are absent, the Task counts as dirty.
 The public CLI for an orchestrator is:
 
 ```bash
-ale assets checkpoint TASK --workspace JOB_ASSET_WORKTREE --branch brew/JOB --output REF.json
-ale assets check TASK --checkpoint REF.json
-ale assets restore TASK --checkpoint REF.json
-ale assets diff --before BEFORE.json --after AFTER.json
-ale assets materialize --checkpoint REF.json --output EMPTY_DIRECTORY
-ale assets publish --checkpoint REF.json --title 'Build example' --description BODY.md --output PUBLICATION.json
-ale assets comment-pr --checkpoint REF.json --publication PUBLICATION.json --message-file SOURCE_PR_LINK.md
+orbit assets checkpoint TASK --workspace JOB_ASSET_WORKTREE --branch brew/JOB --output REF.json
+orbit assets check TASK --checkpoint REF.json
+orbit assets restore TASK --checkpoint REF.json
+orbit assets diff --before BEFORE.json --after AFTER.json
+orbit assets materialize --checkpoint REF.json --output EMPTY_DIRECTORY
+orbit assets publish --checkpoint REF.json --title 'Build example' --description BODY.md --output PUBLICATION.json
+orbit assets comment-pr --checkpoint REF.json --publication PUBLICATION.json --message-file SOURCE_PR_LINK.md
 ```
 
 `diff` emits a JSON array of Task-relative paths, such as `tests/assets/expected.json`.
@@ -133,15 +134,15 @@ retained and no empty PR is created. Removing previously published assets is a r
 change and does create a deletion PR. Publication records include `repo_id`, `commit`,
 `pr_number`, `pr_url`, and `status` (`no_assets`, `unchanged`, `pending`, or `published`).
 
-Manual `ale assets push TASK` explicitly publishes selected assets to `main`, using the
+Manual `orbit assets push TASK` explicitly publishes selected assets to `main`, using the
 same local Git/LFS implementation and requiring a fast-forward. Brew uses `publish`
 instead, leaving both source and assets as draft PRs for administrator review.
 
 ```bash
-ale assets status TASK
-ale assets pull TASK                       # current main
-ale assets pull TASK --revision HF_SHA     # fixed published version
-ale assets push TASK                       # explicit manual sync to main
+orbit assets status TASK
+orbit assets pull TASK                       # current main
+orbit assets pull TASK --revision HF_SHA     # fixed published version
+orbit assets push TASK                       # explicit manual sync to main
 ```
 
 Pull refuses any existing selected asset root, including empty or clean roots;

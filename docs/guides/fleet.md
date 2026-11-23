@@ -3,10 +3,10 @@
 A Fleet pools the Sandbox capacity of several machines behind one control plane; the
 contract is [the Fleet spec](../specs/fleet.md). Every machine involved runs this engine at
 the same framework identity and shares one Fleet token. Put the token in each checkout's
-`.env`, which every `ale` and `ale-fleet` command reads:
+`.env`, which every `orbit` and `orbit-fleet` command reads:
 
 ```bash
-ALE_FLEET_TOKEN=<a long random string>
+ORBIT_FLEET_TOKEN=<a long random string>
 ```
 
 Connect the machines however suits you, one LAN or Tailscale: every Node and every Run's
@@ -19,10 +19,10 @@ private network.
 On one always-on machine:
 
 ```bash
-uv run ale-fleet serve
+uv run orbit-fleet serve
 ```
 
-It listens on port 7470 and keeps its ledger in `~/.local/state/ale/fleet/fleet.db`
+It listens on port 7470 and keeps its ledger in `~/.local/state/orbit/fleet/fleet.db`
 (`--db` to move it); a restart resumes from it.
 
 ## Add a Linux Node
@@ -30,7 +30,7 @@ It listens on port 7470 and keeps its ledger in `~/.local/state/ale/fleet/fleet.
 On a machine with Docker, and KVM for VMs:
 
 ```bash
-uv run ale-fleet node --control-plane http://CONTROL:7470 --address http://NODE:7471
+uv run orbit-fleet node --control-plane http://CONTROL:7470 --address http://NODE:7471
 ```
 
 `--address` is where every Run's machine reaches this agent. The control plane connects back
@@ -40,8 +40,8 @@ itself. The agent offers the machine's CPUs and memory less `--reserve-cpus` and
 `--reserve-memory-mb`. It prepares the images it serves itself, as a local Run would, so it
 pulls bases from GHCR and builds Task images with the machine's own Docker and KVM. Its
 images, the build contexts Runs send and its upload scratch space live under
-`$ALE_CACHE_DIR`, which belongs on local SSD for the same reason as
-[VM overlays](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
+`$ORBIT_CACHE_DIR`, which belongs on local SSD for the same reason as
+[VM overlays](../../packages/orbit-run/src/orbit/run/providers/README.md#qemu).
 
 The agent lends each of `docker:runc`, `qemu` and `orchard` whose preflight passes.
 `--provider` names the leaves to lend instead, by provider id, most preferred first, and
@@ -50,19 +50,19 @@ Placement takes a Node's first leaf that serves a Sandbox, so this Node keeps Ka
 Tasks that need a container feature runc lacks:
 
 ```bash
-uv run ale-fleet node --control-plane http://CONTROL:7470 --address http://NODE:7471 \
+uv run orbit-fleet node --control-plane http://CONTROL:7470 --address http://NODE:7471 \
   --provider docker:runc --provider docker:kata --provider qemu
 ```
 
 Its Docker leaves take the settings a Run's `[sandbox.docker]` gives a local Run's:
 `--gpu INDEX` (repeat) names the Host GPUs they may lease, all of them by default, and
 `--gpu-memory-margin-mb` the memory a GPU must keep free beyond a shared Sandbox's
-`gpu_memory_mb` ([GPU memory](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory)).
+`gpu_memory_mb` ([GPU memory](../../packages/orbit-run/src/orbit/run/providers/README.md#gpu-memory)).
 
 Stopping the agent destroys every Sandbox it holds, apart from retained ones. If the agent
 crashes instead, start it again with the same options: it drives again the Sandboxes whose
 Runs still hold them, keeps the retained ones and the snapshots, and destroys the rest, from
-the journal it keeps in `$ALE_CACHE_DIR/fleet`. A process supervisor that restarts it
+the journal it keeps in `$ORBIT_CACHE_DIR/fleet`. A process supervisor that restarts it
 (systemd's `Restart=on-failure`, launchd's `KeepAlive`) does this unattended.
 
 ## Add a Mac Node
@@ -75,15 +75,15 @@ Run `uv run scripts/setup_macos.py` once from a login, which installs the framer
 sudo, then stop it. Both the Orchard worker and the node agent then run as LaunchDaemons:
 macOS's Local Network privacy exempts them, so the worker reaches its VMs without a login
 session, and both start at boot. As root, write
-`/Library/LaunchDaemons/org.agentslastexam.ale.orchard.plist`, with `ACCOUNT` the account and
-`CHECKOUT` its ALE checkout:
+`/Library/LaunchDaemons/org.agentslastexam.orbit.orchard.plist`, with `ACCOUNT` the account and
+`CHECKOUT` its Orbit checkout:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>org.agentslastexam.ale.orchard</string>
+  <key>Label</key><string>org.agentslastexam.orbit.orchard</string>
   <key>UserName</key><string>ACCOUNT</string>
   <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/ACCOUNT</string></dict>
   <key>WorkingDirectory</key><string>CHECKOUT</string>
@@ -94,18 +94,18 @@ session, and both start at boot. As root, write
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/ACCOUNT/Library/Logs/ale-orchard.log</string>
-  <key>StandardErrorPath</key><string>/Users/ACCOUNT/Library/Logs/ale-orchard.log</string>
+  <key>StandardOutPath</key><string>/Users/ACCOUNT/Library/Logs/orbit-orchard.log</string>
+  <key>StandardErrorPath</key><string>/Users/ACCOUNT/Library/Logs/orbit-orchard.log</string>
 </dict>
 </plist>
 ```
 
-and `org.agentslastexam.ale.fleet-node.plist` the same way, with its own label and log and
+and `org.agentslastexam.orbit.fleet-node.plist` the same way, with its own label and log and
 these arguments:
 
 ```xml
     <string>/Users/ACCOUNT/.local/bin/uv</string><string>run</string>
-    <string>ale</string><string>fleet</string><string>node</string>
+    <string>orbit</string><string>fleet</string><string>node</string>
     <string>--control-plane</string><string>http://CONTROL:7470</string>
     <string>--address</string><string>http://NODE:7471</string>
     <string>--provider</string><string>orchard</string>
@@ -114,16 +114,16 @@ these arguments:
 Then load both:
 
 ```bash
-sudo launchctl bootstrap system /Library/LaunchDaemons/org.agentslastexam.ale.orchard.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/org.agentslastexam.orbit.orchard.plist
 ```
 
 ```bash
-sudo launchctl bootstrap system /Library/LaunchDaemons/org.agentslastexam.ale.fleet-node.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/org.agentslastexam.orbit.fleet-node.plist
 ```
 
 After an engine update that changes the framer, stop the Orchard daemon
-(`sudo launchctl bootout system/org.agentslastexam.ale.orchard`) and run setup from a login
-once more, since only then can sudo ask for the password.
+(`sudo launchctl bootout system/org.agentslastexam.orbit.orchard`) and run setup from a
+login once more, since only then can sudo ask for the password.
 
 ## Run on the Fleet
 
@@ -140,7 +140,7 @@ url = "http://CONTROL:7470"
 ```
 
 ```bash
-uv run ale run TASK --agent claude-code --set 'sandbox.providers=["fleet"]' \
+uv run orbit run TASK --agent claude-code --set 'sandbox.providers=["fleet"]' \
   --set sandbox.fleet.url=http://CONTROL:7470
 ```
 
@@ -172,7 +172,7 @@ for room while the Node is full, which counts against its `[verifier].timeout_se
 Task. To list or destroy them, name the control plane:
 
 ```bash
-ALE_FLEET_URL=http://CONTROL:7470 uv run ale sandbox list
+ORBIT_FLEET_URL=http://CONTROL:7470 uv run orbit sandbox list
 ```
 
 ## Watch the Fleet
@@ -181,10 +181,10 @@ Open `http://CONTROL:7470/?token=TOKEN` once; the page then remembers the token 
 refreshes itself. From a shell:
 
 ```bash
-uv run ale-fleet status --control-plane http://CONTROL:7470
+uv run orbit-fleet status --control-plane http://CONTROL:7470
 ```
 
-`--json` prints the document the page is drawn from, and `ALE_FLEET_URL` saves repeating the
-address. `ale-fleet drain NODE` stops new placements on a Node before maintenance, and
-`ale-fleet resume NODE` ends that; `ale-fleet destroy SANDBOX` and `ale-fleet cancel RUN`
-clean up after a Run that cannot.
+`--json` prints the document the page is drawn from, and `ORBIT_FLEET_URL` saves repeating
+the address. `orbit-fleet drain NODE` stops new placements on a Node before maintenance, and
+`orbit-fleet resume NODE` ends that; `orbit-fleet destroy SANDBOX` and `orbit-fleet cancel
+RUN` clean up after a Run that cannot.

@@ -7,8 +7,8 @@ import math
 import pytest
 from pydantic import ValidationError
 
-from ale.core.result import FailureInfo, PhaseTiming, ResultRecord, SandboxOutcome
-from ale.core.verdict import Status, Verdict
+from orbit.core.result import FailureInfo, PhaseTiming, ResultRecord, SandboxOutcome
+from orbit.core.verdict import Status, Verdict
 
 pytestmark = pytest.mark.unit
 
@@ -89,8 +89,8 @@ def test_v2_result_round_trips_retained_sandbox_handle() -> None:
         requested="keep",
         outcome="retained",
         provider="docker",
-        handle="ale-demo",
-        cleanup_command="ale sandbox destroy ale-demo",
+        handle="orbit-demo",
+        cleanup_command="orbit sandbox destroy orbit-demo",
     )
     result = completed(sandboxes=(outcome,))
     assert ResultRecord.model_validate_json(result.model_dump_json()).sandboxes == (outcome,)

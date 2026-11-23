@@ -12,13 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.errors import TaskError
-from ale.core.sandbox import ExecResult, Identity
-from ale.core.taskspec import OperatingSystem, TaskSpec
-from ale.run import artifact_files
-from ale.run.artifact_files import inspect, read
-from ale.run.episode import _Artifacts
-from ale.run.framework import MACOS_PYTHON
+from orbit.core.errors import TaskError
+from orbit.core.sandbox import ExecResult, Identity
+from orbit.core.taskspec import OperatingSystem, TaskSpec
+from orbit.run import artifact_files
+from orbit.run.artifact_files import inspect, read
+from orbit.run.episode import _Artifacts
+from orbit.run.framework import MACOS_PYTHON
 
 pytestmark = pytest.mark.unit
 
@@ -197,7 +197,7 @@ def test_exclude_matches_as_tar_does_and_never_walks_what_it_leaves_out(tmp_path
     excluded = inspect(str(project), [".venv", "*.pyc", "logs/*.tmp"])
     assert _kept(excluded, project) == {"keep.txt", "src/keep.py"}
     # Nothing below a left-out directory counts against the traversal limit.
-    monkeypatch.setattr("ale.run.artifact_files.MAX_ENTRIES", 8)
+    monkeypatch.setattr("orbit.run.artifact_files.MAX_ENTRIES", 8)
     assert inspect(str(project), [".venv"])["truncated"] is False
     assert inspect(str(project))["truncated"] is True
 
@@ -220,7 +220,7 @@ async def test_a_truncated_artifact_is_never_handed_to_a_verifier(tmp_path, monk
     )
     limited = tmp_path / "limited.py"
     limited.write_text(source)
-    monkeypatch.setattr("ale.run.episode.artifact_files", SimpleNamespace(__file__=str(limited)))
+    monkeypatch.setattr("orbit.run.episode.artifact_files", SimpleNamespace(__file__=str(limited)))
     sink = _Artifacts(tmp_path / "run")
     await sink.collect(LocalSandbox(), str(project), "project")
     assert sink.truncated == [str(project)]

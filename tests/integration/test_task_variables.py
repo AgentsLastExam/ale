@@ -15,18 +15,18 @@ from typing import Any
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.lock import RunLock, TaskSource
-from ale.core.trace import read_jsonl
-from ale.core.verdict import Status
-from ale.run.episode import EpisodeResult, run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers import ProviderRegistry
-from ale.run.providers.qemu import QemuProvider
-from ale.run.secrets import resolve_task_variables
-from ale.run.tasksets.manifest import ManifestTask, load_task_folder
+from orbit.core.config import RunConfig
+from orbit.core.lock import RunLock, TaskSource
+from orbit.core.trace import read_jsonl
+from orbit.core.verdict import Status
+from orbit.run.episode import EpisodeResult, run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.secrets import resolve_task_variables
+from orbit.run.tasksets.manifest import ManifestTask, load_task_folder
 from tests.support import CONTAINER_BASE, VM_BASE, VM_RESOURCES, provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -35,11 +35,11 @@ NAMES = ("PLAIN", "REGION", "SERVICE_TOKEN", "SHARED", "VERIFY_DATA", "SOLUTION_
 OBSERVE = (
     "import json, os, sys\n"
     f"seen = {{name: os.environ.get(name) for name in {NAMES!r}}}\n"
-    "print('ALE-ENV ' + json.dumps({'stage': sys.argv[1], 'env': seen}, sort_keys=True))\n"
+    "print('ORBIT-ENV ' + json.dumps({'stage': sys.argv[1], 'env': seen}, sort_keys=True))\n"
 )
 VERIFY = (
     "import os\n"
-    "from ale_verify import write\n"
+    "from orbit_verify import write\n"
     "write({'reward': 1.0, 'seen': os.environ.get('SERVICE_TOKEN', '')})\n"
 )
 LINUX = {
@@ -50,7 +50,7 @@ LINUX = {
     "solution/solve.sh": ("#!/usr/bin/env bash\nset -euo pipefail\npython3 observe.py oracle\n"),
     "tests/test.sh": (
         "#!/usr/bin/env bash\nset -euo pipefail\npython3 observe.py verify\n"
-        'exec "$ALE_VERIFY_PYTHON" verify.py\n'
+        'exec "$ORBIT_VERIFY_PYTHON" verify.py\n'
     ),
 }
 WINDOWS = {
@@ -61,7 +61,7 @@ WINDOWS = {
     "solution/solve.ps1": "python.exe .\\observe.py oracle\nexit $LASTEXITCODE\n",
     "tests/test.ps1": (
         "python.exe .\\observe.py verify\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\n"
-        "& $env:ALE_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
+        "& $env:ORBIT_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
     ),
 }
 ENVIRONMENT = {
@@ -117,8 +117,8 @@ def _observed(result: EpisodeResult) -> dict[str, dict[str, str]]:
         if record.get("kind") != "command_finished":
             continue
         for line in (record["stdout"].get("inline") or "").splitlines():
-            if line.startswith("ALE-ENV "):
-                event = json.loads(line.removeprefix("ALE-ENV "))
+            if line.startswith("ORBIT-ENV "):
+                event = json.loads(line.removeprefix("ORBIT-ENV "))
                 seen[event["stage"]] = {k: v for k, v in event["env"].items() if v is not None}
     return seen
 
@@ -134,9 +134,9 @@ def _holding(root: Path, secret: str) -> list[str]:
 def _registry(kind: str, tmp_path: Path) -> ProviderRegistry:
     if kind != "windows":
         return ProviderRegistry(RunConfig())
-    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to an Orbit Windows base disk")
     return provider_registry(QemuProvider(image=image, overlay_dir=tmp_path / "qemu"))
 
 
@@ -185,7 +185,7 @@ async def test_each_command_receives_its_tables_and_no_record_keeps_the_secret(
     secret = f"tok-{uuid.uuid4().hex}"
     env_file = tmp_path / "checkout.env"
     env_file.write_text(f"SERVICE_TOKEN={secret}\nVERIFY_DATA=verify-data\nREGION=\n")
-    monkeypatch.setenv("ALE_ENV_FILE", str(env_file))
+    monkeypatch.setenv("ORBIT_ENV_FILE", str(env_file))
     task = _task(tmp_path / "task", kind, verifier)
     resolve_task_variables([task], oracle=True, protected={})
     harness = OracleHarness()
@@ -227,7 +227,7 @@ async def test_a_failure_message_does_not_carry_the_secret(
     secret = f"tok-{uuid.uuid4().hex}"
     env_file = tmp_path / "checkout.env"
     env_file.write_text(f"SERVICE_TOKEN={secret}\nVERIFY_DATA=verify-data\n")
-    monkeypatch.setenv("ALE_ENV_FILE", str(env_file))
+    monkeypatch.setenv("ORBIT_ENV_FILE", str(env_file))
     task = _task(tmp_path / "task", "container", {})
     (task.folder.root / "environment/setup/setup.sh").write_text(
         '#!/usr/bin/env bash\necho "cannot reach the service with ${SERVICE_TOKEN}" >&2\nexit 3\n'

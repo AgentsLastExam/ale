@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from ale.run.harnesses.base import STDOUT_PATH
+from orbit.run.harnesses.base import STDOUT_PATH
 
 from .trajectory import (
     LIVE,
@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
 def test_real_claude_uses_task_skill_and_task_mcp(tmp_path) -> None:
     task = task_path(
-        "ALE_LIVE_RESOURCE_TASK",
+        "ORBIT_LIVE_RESOURCE_TASK",
         WORKSPACE_ROOT / "ale-tasks-base/tasks/demo/resource_injection",
     )
     assert task.is_dir()

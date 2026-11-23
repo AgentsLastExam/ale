@@ -94,7 +94,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-groups
-      - run: uv run pytest packages/ale-verify/tests
+      - run: uv run pytest packages/orbit-verify/tests
 
   # The three backend suites are slow and rarely affected by ordinary changes: a pull request
   # runs the fast checks above, and these run on main and on demand
@@ -115,7 +115,7 @@ jobs:
       - run: uv sync --frozen --all-groups
       # The images this engine uses: pulled once published, built here while a new
       # version is still under review.
-      - run: images/build.sh container-ubuntu22-base ale-qemu-runner
+      - run: images/build.sh container-ubuntu22-base orbit-qemu-runner
       # One -m, not two: a second `-m` replaces the first rather than intersecting, so
       # the earlier form silently ran every non-KVM test including the unit suite.
       # The desktop image is tens of gigabytes, so it stays out of hosted CI. Four workers,
@@ -139,13 +139,13 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv sync --frozen --all-groups
       # The Firecracker suite runs the container base as a microVM. The VM base is a disk,
-      # which ALE downloads into the runner's cache when a Task first names it.
+      # which Orbit downloads into the runner's cache when a Task first names it.
       - run: >-
-          images/build.sh container-ubuntu22-base ale-vm-materializer ale-qemu-runner
-          ale-firecracker-runner
+          images/build.sh container-ubuntu22-base orbit-vm-materializer orbit-qemu-runner
+          orbit-firecracker-runner
       # Preparing the fixture VM Task downloads the VM base once and builds the Task's
       # layer on it, or reuses both from the runner's cache.
-      - run: uv run ale prepare tests/fixtures/tasks/vm-smoke
+      - run: uv run orbit prepare tests/fixtures/tasks/vm-smoke
       - run: uv run pytest -m needs_kvm
 
   # The desktop image is far too large for hosted runners, so GUI coverage runs where
@@ -162,5 +162,5 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv sync --frozen --all-groups
-      - run: images/build.sh container-ubuntu22-base ale-qemu-runner
+      - run: images/build.sh container-ubuntu22-base orbit-qemu-runner
       - run: uv run pytest -m needs_gui

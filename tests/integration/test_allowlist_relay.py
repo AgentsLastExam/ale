@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, Provider, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.task_images import prepare_task_image, resolve_image_kinds
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.sandbox import Identity, ImageRef, PreparedTaskImage, Provider, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.session import GatewaySession, SessionRegistry
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.task_images import prepare_task_image, resolve_image_kinds
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import CONTAINER_BASE, VM_BASE, VM_RESOURCES, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -138,7 +138,7 @@ async def test_a_sealed_container_desktop_names_the_relay_in_its_gnome_settings(
     provider = DockerProvider()
     image = await prepare_reference(provider, CONTAINER_BASE)
     await _check_linux_desktop(
-        provider, image, Resources(cpus=2, memory_mb=2048), "ale-gateway.internal", policy
+        provider, image, Resources(cpus=2, memory_mb=2048), "orbit-gateway.internal", policy
     )
 
 
@@ -184,16 +184,16 @@ def _fetch(url: str) -> list[str]:
 async def test_a_sealed_windows_agent_reaches_its_list_through_the_system_proxy(
     tmp_path: Path, policy: NetworkPolicy
 ) -> None:
-    disk = os.environ.get("ALE_TEST_WINDOWS_IMAGE")
+    disk = os.environ.get("ORBIT_TEST_WINDOWS_IMAGE")
     if not disk or not Path(disk).is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to an Orbit Windows base disk")
     provider = QemuProvider(image=Path(disk), overlay_dir=tmp_path / "overlays")
     settings = [*POWERSHELL, OWN_SETTINGS]
     async with _proxy(policy) as (proxy, token):
         request = SandboxRequest(
             episode_id=f"allowlist-{uuid.uuid4().hex[:8]}",
             os=OperatingSystem.WINDOWS,
-            user=os.environ.get("ALE_TEST_WINDOWS_USER", "user"),
+            user=os.environ.get("ORBIT_TEST_WINDOWS_USER", "user"),
             sudo=False,
             prepared_image=await provider.prepare_image(ImageRef(kind="vm", reference=disk)),
             resources=Resources(cpus=2, memory_mb=8192),

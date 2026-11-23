@@ -1,8 +1,8 @@
 """Opt-in macOS Harness acceptance on disposable Orchard VMs.
 
 Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running. Set
-ALE_RUN_LIVE_ACCEPTANCE=1, ALE_LIVE_MACOS_CONFIG to a private run TOML, and
-ALE_ORCHARD_TEST_IMAGE / ALE_ORCHARD_TEST_USER to an image that logs that account in
+ORBIT_RUN_LIVE_ACCEPTANCE=1, ORBIT_LIVE_MACOS_CONFIG to a private run TOML, and
+ORBIT_ORCHARD_TEST_IMAGE / ORBIT_ORCHARD_TEST_USER to an image that logs that account in
 automatically, such as ``tests.support.MACOS_BASE`` and ``admin``; the Task adds the
 Node.js the CLI integration tests' image has. The TOML supplies the API-key Gateway
 configuration; credentials stay in the environment. Select one Harness with pytest -k and
@@ -19,19 +19,19 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import LoggingPolicy, load_run_config
-from ale.core.harness import EffectiveAgentResources
-from ale.core.taskspec import OperatingSystem
-from ale.core.verdict import Status
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.episode import run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import Limits
-from ale.run.harnesses.base import STDOUT_PATH
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.secrets import provider_credentials
-from ale.run.tasksets.manifest import load_task_folder
-from ale.run.tools import resolved_cua_desktop
+from orbit.core.config import LoggingPolicy, load_run_config
+from orbit.core.harness import EffectiveAgentResources
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.verdict import Status
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.episode import run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import Limits
+from orbit.run.harnesses.base import STDOUT_PATH
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.secrets import provider_credentials
+from orbit.run.tasksets.manifest import load_task_folder
+from orbit.run.tools import resolved_cua_desktop
 from tests.support import MACOS_RUNTIME_BUILD, provider_registry, write_task
 
 from .trajectory import LIVE, native_session_file, trajectory_mcp_calls
@@ -48,13 +48,13 @@ def _write_task(root: Path, image: str, user: str, *, policy: bool) -> Path:
         setup += f"sudo -u {shlex.quote(user)} open -a TextEdit {output}/result.txt\n"
         instruction = (
             "Use the visible TextEdit window on macOS. Take a screenshot, type exactly "
-            "ALE macOS verified into the empty result.txt document, save with Command+S, "
+            "Orbit macOS verified into the empty result.txt document, save with Command+S, "
             "and take a screenshot to confirm. Do not use a terminal."
         )
     else:
         instruction = (
             "Use the cua-desktop MCP screenshot tool to inspect the macOS desktop. "
-            f"Then use your file or shell tools to write exactly ALE macOS verified to "
+            f"Then use your file or shell tools to write exactly Orbit macOS verified to "
             f"{home}/output/result.txt. Confirm the saved content and finish."
         )
     task = write_task(
@@ -67,25 +67,26 @@ def _write_task(root: Path, image: str, user: str, *, policy: bool) -> Path:
         },
         dockerfile=None,
         instruction=instruction + "\n",
-        test='#!/bin/sh\nset -eu\nexec "$ALE_VERIFY_PYTHON" verify.py\n',
-        solve=f"#!/bin/sh\nset -eu\nprintf 'ALE macOS verified\\n' > {output}/result.txt\n",
+        test='#!/bin/sh\nset -eu\nexec "$ORBIT_VERIFY_PYTHON" verify.py\n',
+        solve=f"#!/bin/sh\nset -eu\nprintf 'Orbit macOS verified\\n' > {output}/result.txt\n",
     )
     (task / "environment" / "setup").mkdir(parents=True)
     (task / "environment" / "build.sh").write_text(MACOS_RUNTIME_BUILD)
     (task / "environment" / "setup" / "setup.sh").write_text(setup)
     (task / "tests" / "verify.py").write_text(
-        "from pathlib import Path\nfrom ale_verify import write\n"
+        "from pathlib import Path\nfrom orbit_verify import write\n"
         f"p = Path({f'{home}/output/result.txt'!r})\n"
-        "write({'reward': float(p.is_file() and p.read_text().strip() == 'ALE macOS verified')})\n"
+        "text = p.read_text().strip() if p.is_file() else ''\n"
+        "write({'reward': float(text == 'Orbit macOS verified')})\n"
     )
     return task
 
 
 @pytest.mark.parametrize("name", ["grok-build", "openclaw-cli", "opencode", "computer-use"])
 async def test_macos_harness_completes_task_and_records_tools(tmp_path: Path, name: str) -> None:
-    config_path = os.environ.get("ALE_LIVE_MACOS_CONFIG")
-    image = os.environ.get("ALE_ORCHARD_TEST_IMAGE")
-    user = os.environ.get("ALE_ORCHARD_TEST_USER")
+    config_path = os.environ.get("ORBIT_LIVE_MACOS_CONFIG")
+    image = os.environ.get("ORBIT_ORCHARD_TEST_IMAGE")
+    user = os.environ.get("ORBIT_ORCHARD_TEST_USER")
     if not config_path or not image or not user:
         pytest.skip("set the explicit macOS acceptance configuration, image and user")
     preset = PRESET_DIR / f"{name}.toml"
@@ -131,7 +132,7 @@ async def test_macos_harness_completes_task_and_records_tools(tmp_path: Path, na
     steps = trajectory["steps"]
     if policy:
         calls = [call for step in steps for call in step.get("tool_calls") or ()]
-        kinds = {call["extra"]["ale"]["normalized_action"]["type"] for call in calls}
+        kinds = {call["extra"]["orbit"]["normalized_action"]["type"] for call in calls}
         assert {"screenshot", "type", "key"} <= kinds
     else:
         screenshots = [
@@ -141,7 +142,7 @@ async def test_macos_harness_completes_task_and_records_tools(tmp_path: Path, na
         ]
         assert any(
             shot["result"] is not None
-            and not shot["result"].get("extra", {}).get("ale", {}).get("is_error")
+            and not shot["result"].get("extra", {}).get("orbit", {}).get("is_error")
             for shot in screenshots
         ), "no successful desktop screenshot call"
         if name == "openclaw-cli":

@@ -17,18 +17,18 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          repository: AgentsLastExam/ale
+          repository: AgentsLastExam/orbit
           ref: main
-          path: ale-engine
+          path: orbit-engine
           persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: ale-engine/uv.lock
+          cache-dependency-glob: orbit-engine/uv.lock
       - name: Lint Task structure
         working-directory: task-repo
-        run: uv run --project ../ale-engine --frozen --no-dev ale lint .
+        run: uv run --project ../orbit-engine --frozen --no-dev orbit lint .
       - name: Guest code parses on Python 3.12
         working-directory: task-repo
         run: uv run --no-project --python 3.12 python -I -m compileall -q tasks

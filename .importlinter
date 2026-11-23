@@ -3,50 +3,50 @@
 
 [importlinter]
 root_packages =
-    ale.core
-    ale.fleet
-    ale.run
-    ale_verify
+    orbit.core
+    orbit.fleet
+    orbit.run
+    orbit_verify
 include_external_packages = True
 
 [importlinter:contract:core-independent]
-name = ale.core never depends on the orchestrator or the Fleet
+name = orbit.core never depends on the orchestrator or the Fleet
 type = forbidden
 source_modules =
-    ale.core
+    orbit.core
 forbidden_modules =
-    ale.fleet
-    ale.run
-    ale_verify
+    orbit.fleet
+    orbit.run
+    orbit_verify
 
 [importlinter:contract:verify-independent]
-name = ale_verify is independent of engine packages
+name = orbit_verify is independent of engine packages
 type = forbidden
 source_modules =
-    ale_verify
+    orbit_verify
 forbidden_modules =
-    ale.core
-    ale.fleet
-    ale.run
+    orbit.core
+    orbit.fleet
+    orbit.run
 
 [importlinter:contract:gateway-provider-decoupling]
 name = the gateway knows nothing about providers (its only interface is a URL + token)
 type = forbidden
 source_modules =
-    ale.run.gateway
+    orbit.run.gateway
 forbidden_modules =
-    ale.run.providers
-    ale.run.protocol
+    orbit.run.providers
+    orbit.run.protocol
 
 [importlinter:contract:guestd-stdlib-only]
 name = the guest service imports neither engine code nor third-party packages
 type = forbidden
 source_modules =
-    ale.run.guestd
+    orbit.run.guestd
 forbidden_modules =
-    ale.core
-    ale.run.gateway
-    ale.run.providers
+    orbit.core
+    orbit.run.gateway
+    orbit.run.providers
     aiohttp
     pydantic
     typer
@@ -56,12 +56,12 @@ forbidden_modules =
 name = the microVM init runs in the guest and imports neither engine code nor third-party packages
 type = forbidden
 source_modules =
-    ale.run.providers.firecracker.guest_init
+    orbit.run.providers.firecracker.guest_init
 forbidden_modules =
-    ale.core
-    ale.run.gateway
-    ale.run.guestd
-    ale.run.providers.firecracker.provider
+    orbit.core
+    orbit.run.gateway
+    orbit.run.guestd
+    orbit.run.providers.firecracker.provider
     aiohttp
     pydantic
     typer
@@ -71,13 +71,13 @@ forbidden_modules =
 name = the container feature probe and the iptables writer run in the guest and import neither engine code nor third-party packages
 type = forbidden
 source_modules =
-    ale.run.capprobe
-    ale.run.iptables
+    orbit.run.capprobe
+    orbit.run.iptables
 forbidden_modules =
-    ale.core
-    ale.run.gateway
-    ale.run.guestd
-    ale.run.providers
+    orbit.core
+    orbit.run.gateway
+    orbit.run.guestd
+    orbit.run.providers
     aiohttp
     pydantic
     typer
@@ -87,27 +87,27 @@ forbidden_modules =
 name = harnesses talk to sandboxes through the contract, not through a provider
 type = forbidden
 source_modules =
-    ale.run.harnesses
+    orbit.run.harnesses
 forbidden_modules =
-    ale.run.providers
+    orbit.run.providers
 
 [importlinter:contract:run-fleet-independent]
-name = the engine reaches the Fleet only as a Provider and never imports ale.fleet
+name = the engine reaches the Fleet only as a Provider and never imports orbit.fleet
 type = forbidden
 source_modules =
-    ale.run
+    orbit.run
 forbidden_modules =
-    ale.fleet
+    orbit.fleet
 
 [importlinter:contract:fleet-control-plane-decoupling]
 name = the Fleet control plane places data and never imports a Provider
 type = forbidden
 source_modules =
-    ale.fleet.control
-    ale.fleet.page
-    ale.fleet.placement
-    ale.fleet.server
-    ale.fleet.status
-    ale.fleet.store
+    orbit.fleet.control
+    orbit.fleet.page
+    orbit.fleet.placement
+    orbit.fleet.server
+    orbit.fleet.status
+    orbit.fleet.store
 forbidden_modules =
-    ale.run.providers
+    orbit.run.providers

@@ -1,6 +1,6 @@
-# ALE Framework Constitution
+# Orbit Framework Constitution
 
-Project: `ale` — the Agents' Last Exam orchestration and evaluation framework.
+Project: `orbit` — the Agents' Last Exam orchestration and evaluation framework.
 
 ## Scope
 
@@ -28,7 +28,7 @@ covered by conformance tests. An external implementation MUST NOT become an impl
 dependency of unrelated core behavior.
 
 Rationale: implementations change more often than the agreements between them.
-Explicit ownership and versioning let ALE evolve without making stored results,
+Explicit ownership and versioning let Orbit evolve without making stored results,
 task repositories, or integrations ambiguous.
 
 ### II. Clear Ownership and Dependency Direction
@@ -84,7 +84,7 @@ measured performance prevents corrupted results from looking legitimate.
 
 ### V. Minimal Surface and Evidence-Based Generalization
 
-ALE MUST keep the mandatory task-author and operator surface as small as the current
+Orbit MUST keep the mandatory task-author and operator surface as small as the current
 requirements allow. Existing language, platform, and repository capabilities MUST be
 preferred over new abstractions, dependencies, configuration, or extension points.
 
@@ -118,7 +118,7 @@ at the correct level of authority.
 
 ## Governance
 
-- Authority: this constitution supersedes ad-hoc practice across ALE engine and task
+- Authority: this constitution supersedes ad-hoc practice across Orbit engine and task
   repositories. Normative specifications MAY impose stronger local
   requirements but MUST NOT weaken these principles.
 - Amendments: a constitutional amendment MUST change a durable project-wide principle,

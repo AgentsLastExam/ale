@@ -7,22 +7,22 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import SandboxRetentionConfig
-from ale.core.sandbox import ImageRef, PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import ImageKind, ImageSpec, NetworkMode, NetworkPolicy, VerifySpec
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.firecracker import FirecrackerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.task_images import (
+from orbit.core.config import SandboxRetentionConfig
+from orbit.core.sandbox import ImageRef, PreparedTaskImage, SandboxRequest
+from orbit.core.taskspec import ImageKind, ImageSpec, NetworkMode, NetworkPolicy, VerifySpec
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.firecracker import FirecrackerProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.task_images import (
     _OciBuild,
     prepare_verifier_image_result,
 )
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import (
     CONTAINER_BASE,
     VM_BASE,
@@ -44,12 +44,12 @@ def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     async def layer(image: str, *, user: str, keep_alive: bool = False) -> str:
         return image if image.startswith("sha256:") else DIGEST
 
-    monkeypatch.setattr("ale.run.task_images.with_framework", layer)
+    monkeypatch.setattr("orbit.run.task_images.with_framework", layer)
 
     async def disk(image, **kwargs):
         return image, True
 
-    monkeypatch.setattr("ale.run.task_images.framed_disk", disk)
+    monkeypatch.setattr("orbit.run.task_images.framed_disk", disk)
 
 
 DIGEST = "sha256:" + "d" * 64
@@ -60,7 +60,7 @@ def _prepared(kind: ImageKind, source: str = "solver-local") -> PreparedTaskImag
         "kind": kind,
         "source": source,
         "input_identity": DIGEST,
-        "runtime_ref": "ale:local" if kind is ImageKind.CONTAINER else "/tmp/disk.qcow2",
+        "runtime_ref": "orbit:local" if kind is ImageKind.CONTAINER else "/tmp/disk.qcow2",
         "prepared_identity": DIGEST,
     }
     if source == "external-ref":
@@ -194,12 +194,12 @@ async def test_local_separate_verifier_builds_a_container(
         }
     )
     task.verifier_image_source_digest = DIGEST
-    build = _OciBuild(DIGEST, DIGEST, "ale:verifier", DIGEST, ())
+    build = _OciBuild(DIGEST, DIGEST, "orbit:verifier", DIGEST, ())
 
     async def build_oci(**_kwargs: object) -> _OciBuild:
         return build
 
-    monkeypatch.setattr("ale.run.task_images._build_oci", build_oci)
+    monkeypatch.setattr("orbit.run.task_images._build_oci", build_oci)
     result = await prepare_verifier_image_result(task, _Provider(ImageKind.CONTAINER))  # type: ignore[arg-type]
     assert result is not None
     assert result.image.kind is ImageKind.CONTAINER
@@ -210,13 +210,13 @@ async def test_local_separate_verifier_builds_a_container(
 async def test_task_local_helper_and_framework_package_are_importable(tmp_path: Path) -> None:
     task_path = scaffold_task(tmp_path / "local-helper")
     (task_path / "tests" / "helper.py").write_text(
-        "from ale_verify import checks\n"
+        "from orbit_verify import checks\n"
         "\n"
         "def result():\n"
         "    return checks.text_equals('/home/user/output/result.txt', 'hello\\n')\n"
     )
     (task_path / "tests" / "verify.py").write_text(
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         "from helper import result\n"
         "v = {}\n"
         "v['local'] = result()['score']\n"
@@ -252,14 +252,14 @@ async def test_tests_assets_are_withheld_then_available_by_relative_path(
     setup = task / "environment/setup"
     setup.mkdir()
     (setup / "setup.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\ntest ! -e /opt/ale/tests/assets/reference.txt\n"
+        "#!/usr/bin/env bash\nset -euo pipefail\ntest ! -e /opt/orbit/tests/assets/reference.txt\n"
     )
     (setup / "setup.sh").chmod(0o755)
     reference = task / "tests/assets/reference.txt"
     reference.parent.mkdir(parents=True)
     reference.write_text("withheld")
     (task / "tests" / "verify.py").write_text(
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['reference'] = checks.text_equals('assets/reference.txt', 'withheld')['score']\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"
@@ -275,7 +275,7 @@ async def test_no_assets_verifier_does_not_receive_a_synthetic_asset_root(tmp_pa
     task = scaffold_task(tmp_path / "no-assets")
     (task / "tests" / "verify.py").write_text(
         "from pathlib import Path\n"
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         "v = {}\n"
         "v['absent'] = float(not Path('assets').exists())\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"
@@ -308,7 +308,7 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     edit_task_config(
         task,
         {
-            "artifacts": ["/home/user/output/result.json", "/var/lib/ale-report"],
+            "artifacts": ["/home/user/output/result.json", "/var/lib/orbit-report"],
             "environment": {"memory_mb": 512},
             "verifier": {"environment": {"cpus": 1, "memory_mb": 512}},
         },
@@ -316,21 +316,21 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     (task / "instruction.md").write_text("Produce both declared outputs.\n")
     (task / "environment/Dockerfile").write_text(
         f"FROM {CONTAINER_BASE}\n"
-        "RUN mkdir -p /home/user/output /var/lib/ale-report "
+        "RUN mkdir -p /home/user/output /var/lib/orbit-report "
         "&& printf '{}\\n' > /home/user/output/result.json "
-        "&& chown -R user:user /home/user/output /var/lib/ale-report\n"
+        "&& chown -R user:user /home/user/output /var/lib/orbit-report\n"
     )
     (task / "tests/Dockerfile").write_text(f"FROM {CONTAINER_BASE}\n")
     (task / "solution/solve.sh").write_text(
         "#!/bin/sh\nset -eu\n"
         'printf \'{"status":"ok"}\\n\' > /home/user/output/result.json\n'
-        "printf ready > /var/lib/ale-report/state.txt\n"
+        "printf ready > /var/lib/orbit-report/state.txt\n"
     )
     (task / "tests/verify.py").write_text(
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['file'] = checks.json_value('/home/user/output/result.json', 'status', 'ok')['score']\n"
-        "v['directory'] = checks.text_equals('/var/lib/ale-report/state.txt', 'ready')['score']\n"
+        "v['directory'] = checks.text_equals('/var/lib/orbit-report/state.txt', 'ready')['score']\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
@@ -345,7 +345,7 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
     ]
     snapshot = result.run_dir / "artifacts/snapshot.json"
     if collect:
-        assert '"source": "/var/lib/ale-report"' in snapshot.read_text()
+        assert '"source": "/var/lib/orbit-report"' in snapshot.read_text()
     else:
         assert not snapshot.parent.exists()
 
@@ -376,7 +376,7 @@ async def test_separate_verifier_image_sources_restore_identically_without_setup
     )
     (task / "tests/verify.py").write_text(
         "from pathlib import Path\n"
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['content'] = checks.text_equals('/home/user/output/result.txt', 'hello\\n')['score']\n"
         "v['fresh'] = float(not Path('/tmp/solver-setup-ran').exists())\n"
@@ -419,7 +419,7 @@ async def test_privileged_artifacts_glob_and_never_follow_links(tmp_path, mode):
     (task / "tests/verify.py").write_text(
         "import os\n"
         "from pathlib import Path\n"
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         "assert os.geteuid() == 0\n"
         "v = {}\n"
         # A link the agent left is never followed, so the protected file it points at
@@ -453,7 +453,7 @@ import os
 import pwd
 import sys
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 
 def cgroup(name):
     return Path('/sys/fs/cgroup', name).read_text().split()
@@ -461,7 +461,7 @@ def cgroup(name):
 runtime, memory = sys.argv[1], int(sys.argv[2])
 v = {}
 v['checkpoint'] = float(Path('/home/user/checkpoints/step-1000.bin').read_text() == 'weights')
-v['setup'] = float(not any(Path('/opt/ale/setup').glob('*')))
+v['setup'] = float(not any(Path('/opt/orbit/setup').glob('*')))
 v['account'] = float(pwd.getpwnam('user').pw_dir == '/home/user')
 if runtime == 'runc':
     v['cpus'] = float(cgroup('cpu.max') == ['200000', '100000'])
@@ -521,7 +521,7 @@ async def test_a_snapshot_verifier_sees_the_solvers_disk_with_its_own_resources(
     )
     (task / "tests/test.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
-        f'exec "$ALE_VERIFY_PYTHON" verify.py {runtime} {2 * memory}\n'
+        f'exec "$ORBIT_VERIFY_PYTHON" verify.py {runtime} {2 * memory}\n'
     )
     (task / "tests/verify.py").write_text(_SNAPSHOT_VERIFY)
 
@@ -548,7 +548,7 @@ async def test_a_snapshot_verifier_sees_the_solvers_disk_with_its_own_resources(
             for record in trace
             if "handle" in (record.get("data") or {}) and record["phase"] == "agent"
         }
-        image = handle.replace("docker:snapshot:", "ale-snapshot:")
+        image = handle.replace("docker:snapshot:", "orbit-snapshot:")
         by_role = {outcome.roles: outcome for outcome in result.record.sandboxes}
         assert by_role[("verifier",)].outcome == "destroyed"
         listed = {str(item["handle"]) for item in await provider.list_retained()}
@@ -578,7 +578,7 @@ async def test_a_snapshot_verifier_sees_the_solvers_disk_with_its_own_resources(
 _VM_SNAPSHOT_VERIFY = """\
 import os
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 
 def memory_mb():
     if os.name == 'nt':
@@ -622,10 +622,10 @@ async def test_a_snapshot_verifier_boots_a_vm_of_its_own_size_on_the_solvers_dis
     root = tmp_path / "snapshot-vm"
     verifier = {"environment_mode": "snapshot", "environment": {"cpus": 4, "memory_mb": 6144}}
     if guest == "windows":
-        image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+        image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
         if not image.is_file():
-            pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
-        monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
+            pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+        monkeypatch.setattr("orbit.run.task_images.cache_root", lambda: tmp_path / "cache")
         provider = QemuProvider(
             image=image, overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots"
         )
@@ -657,7 +657,7 @@ async def test_a_snapshot_verifier_boots_a_vm_of_its_own_size_on_the_solvers_dis
             "Set-Content -NoNewline -Value weights C:\\Users\\user\\checkpoints\\step-1000.bin\n"
         )
         (root / "tests/test.ps1").write_text(
-            "& $env:ALE_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
+            "& $env:ORBIT_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
         )
     else:
         provider = QemuProvider(overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots")

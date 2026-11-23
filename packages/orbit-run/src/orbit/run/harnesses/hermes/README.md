@@ -1,0 +1,64 @@
+# Hermes Agent
+
+Runs one `hermes chat --query-file <prompt> --format stream-json --yolo` per invocation.
+Hermes is distributed only by its installer: upstream refuses wheels and has no PyPI
+package. Orbit runs the official `install.sh` from commit `bf0203a7` (v0.22.5) with
+`--commit` pinned, so the checkout is exact and its Python dependencies install
+hash-verified from that commit's `uv.lock`; the installer also fetches its own uv,
+CPython, ffmpeg, node and ripgrep, which takes minutes per fresh Sandbox. The checkout
+lives inside `HERMES_HOME`, `.hermes-orbit`: placed elsewhere, the first run installs the
+dependency environment again. The Anthropic dialect also installs the lockfile's
+`anthropic` extra. On Windows the same commit's `install.ps1` runs from Git Bash with the
+same choices and publishes `hermes.exe` in `.hermes-orbit/bin`. Upstream supports native
+Windows, so the Harness declares it, but the Windows path is unverified until a Windows
+guest runs it. On macOS `install.sh` takes its Darwin path; the image must provide Git.
+
+`config.yaml` makes the episode Gateway the one custom provider, with Hermes' transport for
+the Gateway dialect, and turns off update checks, the model catalog, shared telemetry,
+logins adopted from other agents and installs during the run. The provider's `key_cmd`
+prints the episode token from `.hermes-orbit/gateway-token`, the Harness's credential file.
+Hermes would pass a key variable in its environment on to its terminal tool, whose login
+environment it saves to a snapshot under `.hermes-orbit/cache/scratch`. The
+`supports_vision` setting is `model.supports_vision`.
+Unset, Hermes looks the model up on models.dev, which it does for a custom provider only
+through a catalog provider Orbit does not name, so it takes the model to be text-only: a
+tool's image, such as an MCP screenshot, then reaches the model only as a `MEDIA:` file
+path. Over Chat Completions Hermes sends a tool's image in the tool message, which
+OpenAI's API refuses, taking images in user messages only; Hermes then retries with a text
+summary. Hermes still probes several model-information paths at start; the Gateway
+answers them 404 and Hermes continues.
+
+Each turn runs in a background `hermes gateway run` that the first chat starts and that
+outlives it with that chat's environment, Gateway token included, so every invocation first
+runs `hermes gateway stop` and the chat starts one of its own. A session freezes its route,
+the Gateway URL among it, and `--resume` refuses a different `--model` or `--base-url`; a
+continuing episode reaches it because every Sandbox sees its Gateway at the same address.
+
+Hermes keeps sessions in SQLite and chooses a new session's ID itself, which the
+invocation's `result` event reports; `--resume` continues that exact session. After every
+invocation `hermes sessions export` writes every session of the episode home to
+`.hermes-orbit/exports/<session id>/<time>.jsonl`. The parser reads the newest export, and
+the invocation's stream-json supplies failures and any turn the export lacks. A tool's
+image is not in the export: Hermes keeps it in `.hermes-orbit/cache/images`, and the result
+names it as `MEDIA:<path>`, which the parser records as the result's image. The export
+holds every stored row with its `active` and `compacted` flags, and the parser keeps the
+rows Hermes' transcript keeps. A row removed by a rewind, or superseded by a newer copy,
+has neither flag. An in-place compaction keeps the turns it summarized as `compacted`
+rows and stores its summary (`_compressed_summary`) and the messages it carries forward
+again. The summary becomes a system step, a message stored more than once appears once,
+and a message the summary was folded into follows it. When a compaction instead
+continues the conversation in a new session, whose parent ended for `compression`, that
+session's messages follow on in the same trajectory.
+
+A session records its origin, never the call that caused it: a `delegate_task` child has
+`parent_session_id` and an equal `_delegate_from` in its `model_config`. It becomes a
+subagent trajectory, embedded in its spawner's, when its first message is the goal of
+exactly one task the parent's calls name (from `tasks`, possibly sent as a JSON string,
+or the single `goal`) and no other child of that parent starts with the same goal.
+Every other delegated session under the episode's conversation is left unconverted with an
+`unlinked_subagent` issue; branched, reset and tool sessions are not subagents. MCP tools
+are `mcp__<server>__<tool>` with other characters replaced by `_`; the declared server
+name is restored from `config.yaml`. Hermes defers them: `tool_describe` loads one and
+`tool_call` calls it. A `tool_call` of one tool is recorded as the call it made, noting the
+wrapper; one of several stays the wrapper. The settings are `max_turns`,
+`reasoning_effort` and `supports_vision`.

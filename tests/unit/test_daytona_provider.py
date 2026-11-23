@@ -13,14 +13,14 @@ from typing import Any
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.errors import (
+from orbit.core.config import RunConfig
+from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     Identity,
     PreparedTaskImage,
@@ -28,20 +28,20 @@ from ale.core.sandbox import (
     ResourceAllocation,
     SandboxRequest,
 )
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
-from ale.run import guestd
-from ale.run.guestd import tunnel as guest_tunnel
-from ale.run.providers import RETAINING_PROVIDERS, ProviderRegistry, provider_named
-from ale.run.providers.daytona import image as daytona_image
-from ale.run.providers.daytona import provider as daytona_module
-from ale.run.providers.daytona.api import DaytonaError
-from ale.run.providers.daytona.image import (
+from orbit.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, Resources
+from orbit.run import guestd
+from orbit.run.guestd import tunnel as guest_tunnel
+from orbit.run.providers import RETAINING_PROVIDERS, ProviderRegistry, provider_named
+from orbit.run.providers.daytona import image as daytona_image
+from orbit.run.providers.daytona import provider as daytona_module
+from orbit.run.providers.daytona.api import DaytonaError
+from orbit.run.providers.daytona.image import (
     ImageConfig,
     ImagePublisher,
     PublishedImage,
     image_config,
 )
-from ale.run.providers.daytona.provider import (
+from orbit.run.providers.daytona.provider import (
     PROXY_PORT,
     DaytonaProvider,
     DaytonaSandbox,
@@ -59,7 +59,7 @@ from ale.run.providers.daytona.provider import (
     _SshHost,
     _start_image_command,
 )
-from ale.run.providers.tunnel import GatewayTunnel, tunnel_plan
+from orbit.run.providers.tunnel import GatewayTunnel, tunnel_plan
 
 pytestmark = pytest.mark.unit
 
@@ -109,7 +109,7 @@ def test_the_registry_builds_daytona_with_its_settings() -> None:
 
 def test_the_api_key_is_named_not_stored() -> None:
     config = RunConfig.model_validate({"sandbox": {"providers": ["daytona"]}})
-    assert config.sandbox.daytona.api_key_env == "ALE_DAYTONA_API_KEY"
+    assert config.sandbox.daytona.api_key_env == "ORBIT_DAYTONA_API_KEY"
     assert "dtn" not in config.model_dump_json()
 
 
@@ -215,7 +215,7 @@ def network_sandbox(api: NetworkApi, policy: NetworkPolicy) -> tuple[DaytonaSand
             kind=ImageKind.CONTAINER,
             prepared_identity=DIGEST,
             observed_identity=DIGEST,
-            observed_ref=f"registry/ale-task@{DIGEST}",
+            observed_ref=f"registry/orbit-task@{DIGEST}",
         ),
         allocation=ResourceAllocation(
             cpus=2,
@@ -266,7 +266,12 @@ def test_guestd_starts_without_the_runners_proxy_variables() -> None:
     words = shlex.split(_guestd_command("user", {"PATH": "/usr/bin", "HTTPS_PROXY": "http://p"}))
     # In the root directory, on the framework's Python isolated from the image's variables.
     assert words[:5] == ["cd", "/", "&&", "exec", "env"]
-    assert words[-4:] == ["/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/main.py", "--stdio"]
+    assert words[-4:] == [
+        "/opt/orbit/python/bin/python3",
+        "-I",
+        "/opt/orbit/guestd/main.py",
+        "--stdio",
+    ]
     removed = {words[i + 1] for i, word in enumerate(words) if word == "-u"}
     assert removed == {
         "HTTP_PROXY",
@@ -279,7 +284,7 @@ def test_guestd_starts_without_the_runners_proxy_variables() -> None:
     # env applies assignments after removals, so the image's or Task's own value survives.
     first_assignment = next(i for i, word in enumerate(words) if "=" in word)
     assert max(i for i, word in enumerate(words) if word == "-u") < first_assignment
-    assert "HTTPS_PROXY=http://p" in words and "ALE_AGENT_USER=user" in words
+    assert "HTTPS_PROXY=http://p" in words and "ORBIT_AGENT_USER=user" in words
 
 
 async def test_a_setting_daytona_did_not_store_stops_the_phase() -> None:
@@ -323,7 +328,7 @@ def test_what_daytona_gave_is_what_the_lock_records() -> None:
 
 
 def test_names_and_failure_classification() -> None:
-    assert _sandbox_name("Episode_7-ab12") == "ale-episode-7-ab12"
+    assert _sandbox_name("Episode_7-ab12") == "orbit-episode-7-ab12"
     assert len(_sandbox_name("x" * 200)) <= 60
     assert _image_unavailable("failed to resolve source metadata ... 401 Unauthorized")
     assert _image_unavailable("manifest unknown")
@@ -337,7 +342,7 @@ def test_every_sandbox_of_a_long_named_task_gets_its_own_name() -> None:
     )
     first = _sandbox_name(f"{episode}-1a2b3c")
     second = _sandbox_name(f"{episode}-4d5e6f")
-    assert first == "ale-grounded-intelligence-ini-photo-oracle-fcda5c5a-1a2b3c"
+    assert first == "orbit-grounded-intelligence-i-photo-oracle-fcda5c5a-1a2b3c"
     assert second != first
     assert len(first) <= 60 and len(second) <= 60
 
@@ -453,7 +458,7 @@ def gpu_request(gpus: int = 1, gpu_types: tuple[str, ...] = ("H100",)) -> Sandbo
 
 
 async def test_a_gpu_request_names_the_task_s_models_daytona_offers_and_is_never_spot() -> None:
-    published = PublishedImage(f"registry/ale-task@{DIGEST}", DIGEST, "framed", DIGEST)
+    published = PublishedImage(f"registry/orbit-task@{DIGEST}", DIGEST, "framed", DIGEST)
     provider = DaytonaProvider()
     body = provider._body(gpu_request(2), published, "s", None)
     assert (body["gpu"], body["gpuType"], body["spot"]) == (2, ["H100"], False)
@@ -590,7 +595,7 @@ class FakeRegistryApi:
         }
 
     async def registries(self) -> list[dict[str, Any]]:
-        return [{"id": "reg-1", "name": "ale-transient"}] if self.existing else []
+        return [{"id": "reg-1", "name": "orbit-transient"}] if self.existing else []
 
     async def create_registry(self, body: dict[str, Any]) -> dict[str, Any]:
         self.created.append(body)
@@ -612,12 +617,12 @@ def docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeDocker:
 async def test_the_image_is_adapted_pushed_by_digest_and_registered(docker: FakeDocker) -> None:
     api = FakeRegistryApi()
     published = await ImagePublisher(api).publish(DIGEST)  # type: ignore[arg-type]
-    assert published.ref == f"cr.example.io/transient/ale-task@sha256:{'c' * 64}"
+    assert published.ref == f"cr.example.io/transient/orbit-task@sha256:{'c' * 64}"
     assert published.digest == f"sha256:{'c' * 64}"
     assert published.adapted_id == "sha256:" + "b" * 64
     # The layer that lets Daytona's root-run daemon serve the framework, and nothing else.
     assert "USER root" in docker.dockerfile and "iptables" in docker.dockerfile
-    assert api.created[0]["name"] == "ale-transient" and api.created[0]["project"] == "transient"
+    assert api.created[0]["name"] == "orbit-transient" and api.created[0]["project"] == "transient"
     login = next(call for call in docker.calls if call[0] == "login")
     assert "registry-secret" not in " ".join(login)  # the secret goes in on stdin
     config = docker.environments[docker.calls.index(login)]["DOCKER_CONFIG"]  # type: ignore[index]
@@ -685,7 +690,8 @@ def free_port() -> int:
 async def test_the_tunnel_runs_isolated_in_the_root_directory() -> None:
     tunnel = GatewayTunnel(LocalRelay(), listeners=[(7412, 0)], targets=[("127.0.0.1", 1)])  # type: ignore[arg-type]
     assert shlex.split(tunnel._command)[:7] == [
-        "cd", "/", "&&", "exec", "/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/tunnel.py"
+        "cd", "/", "&&", "exec",
+        "/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/tunnel.py",
     ]  # fmt: skip
 
 
@@ -759,12 +765,12 @@ def test_the_relay_the_provider_starts_ships_in_every_framework_layer() -> None:
 
 class ListingApi:
     async def list_sandboxes(self, labels: dict[str, str]) -> list[dict[str, Any]]:
-        assert labels == {"ale.run.managed": "true", "ale.run.retention": "keep"}
+        assert labels == {"orbit.run.managed": "true", "orbit.run.retention": "keep"}
         return [
             {
                 "id": "live",
                 "state": "started",
-                "labels": {"ale.run.episode": "e", "ale.run.role": "solver"},
+                "labels": {"orbit.run.episode": "e", "orbit.run.role": "solver"},
             },
             {"id": "going", "state": "destroying", "labels": {}},
             {"id": "gone", "state": "destroyed", "labels": {}},
@@ -774,7 +780,7 @@ class ListingApi:
 async def test_a_sandbox_daytona_is_deleting_is_no_longer_retained(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ALE_DAYTONA_API_KEY", "key")
+    monkeypatch.setenv("ORBIT_DAYTONA_API_KEY", "key")
     provider = DaytonaProvider()
     provider._api_client = ListingApi()  # type: ignore[assignment]
     records = await provider.list_retained()
@@ -785,12 +791,12 @@ async def test_a_sandbox_daytona_is_deleting_is_no_longer_retained(
 async def test_without_a_key_there_is_nothing_of_daytonas_to_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ALE_DAYTONA_API_KEY", raising=False)
+    monkeypatch.delenv("ORBIT_DAYTONA_API_KEY", raising=False)
     assert await DaytonaProvider().list_retained() == []
 
 
 class SharedOrganizationApi:
-    """A sandbox another tool made, which wears labels that look like ALE's."""
+    """A sandbox another tool made, which wears labels that look like Orbit's."""
 
     def __init__(self) -> None:
         self.deleted: list[str] = []
@@ -798,7 +804,11 @@ class SharedOrganizationApi:
     async def get_sandbox(self, sandbox_id: str) -> dict[str, Any]:
         return {
             "id": sandbox_id,
-            "labels": {"ale.managed": "true", "ale.retention": "keep", "ale.native.operation": "x"},
+            "labels": {
+                "orbit.managed": "true",
+                "orbit.retention": "keep",
+                "orbit.native.operation": "x",
+            },
         }
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
@@ -834,7 +844,7 @@ class StartingApi:
 
 class PublishedImages:
     async def publish(self, framed_id: str, *, force: bool = False) -> PublishedImage:
-        return PublishedImage(f"registry/ale-task@{DIGEST}", DIGEST, framed_id, DIGEST)
+        return PublishedImage(f"registry/orbit-task@{DIGEST}", DIGEST, framed_id, DIGEST)
 
 
 def starting(api: StartingApi) -> DaytonaProvider:
@@ -867,7 +877,7 @@ async def test_a_sandbox_someone_elses_tool_made_is_never_destroyed() -> None:
     api = SharedOrganizationApi()
     provider = DaytonaProvider()
     provider._api_client = api  # type: ignore[assignment]
-    with pytest.raises(ProviderCapabilityError, match="not an ALE-retained"):
+    with pytest.raises(ProviderCapabilityError, match="not an Orbit-retained"):
         await provider.destroy_retained("daytona:their-sandbox")
     with pytest.raises(ProviderCapabilityError, match="not a Daytona sandbox handle"):
         await provider.destroy_retained("docker:their-sandbox")

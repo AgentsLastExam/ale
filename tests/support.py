@@ -16,10 +16,10 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from ale.core.capability import CapabilityProfile, SandboxNeeds
-from ale.core.config import RunConfig, SandboxConfig, SlurmProviderConfig
-from ale.core.errors import ProviderStartError
-from ale.core.harness import (
+from orbit.core.capability import CapabilityProfile, SandboxNeeds
+from orbit.core.config import RunConfig, SandboxConfig, SlurmProviderConfig
+from orbit.core.errors import ProviderStartError
+from orbit.core.harness import (
     AgentRun,
     AutonomousHarness,
     HarnessSession,
@@ -27,7 +27,7 @@ from ale.core.harness import (
     ResumeSupport,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     ExecResult,
     Identity,
     ImageRef,
@@ -37,7 +37,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.taskspec import (
+from orbit.core.taskspec import (
     SCHEMA_VERSION,
     ContainerFeature,
     ImageKind,
@@ -46,18 +46,18 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
-from ale.core.trace import ExecutionLog
-from ale.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
-from ale.run import ale_image
-from ale.run.harnesses.base import CliHarness
-from ale.run.providers import ProviderRegistry, machine_arch
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from orbit.core.trace import ExecutionLog
+from orbit.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
+from orbit.run import orbit_image
+from orbit.run.harnesses.base import CliHarness
+from orbit.run.providers import ProviderRegistry, machine_arch
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import ManifestTask, load_tasks
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
-#: The current ALE bases, for images a test builds or runs.
-CONTAINER_BASE = ale_image("container-ubuntu22-base")
-VM_BASE = ale_image("vm-ubuntu24-base")
+#: The current Orbit bases, for images a test builds or runs.
+CONTAINER_BASE = orbit_image("container-ubuntu22-base")
+VM_BASE = orbit_image("vm-ubuntu24-base")
 #: What a Linux VM Task asks for. The VM base boots a GNOME desktop, which in a container
 #: Task's 512 MB spends its time paging and can miss a phase deadline.
 VM_RESOURCES: dict[str, Any] = {"cpus": 2, "memory_mb": 4096}
@@ -67,7 +67,7 @@ def skip_without_kata() -> None:
     """Skip unless this host starts Kata microVMs: KVM, and Kata's shim on Docker's PATH.
 
     The shim is looked up on this process's PATH, which holds the same system directories
-    as the daemon's on a host that runs ``ale`` beside its Docker daemon.
+    as the daemon's on a host that runs ``orbit`` beside its Docker daemon.
     """
     if not Path("/dev/kvm").exists():
         pytest.skip("/dev/kvm is missing")
@@ -76,10 +76,10 @@ def skip_without_kata() -> None:
 
 
 def skip_without_gvisor() -> None:
-    """Skip unless Docker here registers ALE's build of gVisor's runtime, as ``runsc``,
+    """Skip unless Docker here registers Orbit's build of gVisor's runtime, as ``runsc``,
     ``runsc-net-raw`` and ``runsc-nested``
-    ([Providers](../packages/ale-run/src/ale/run/providers/README.md))."""
-    from ale.run.providers.docker import gvisor
+    ([Providers](../packages/orbit-run/src/orbit/run/providers/README.md))."""
+    from orbit.run.providers.docker import gvisor
 
     try:
         shown = subprocess.run(
@@ -100,15 +100,15 @@ def skip_without_gvisor() -> None:
     except (OSError, subprocess.TimeoutExpired) as error:
         pytest.skip(f"{path} does not run here: {error}")
     if gvisor.BUILD not in version.stdout:
-        pytest.skip(f"{path} is not ALE's build {gvisor.BUILD}: {version.stdout.strip()}")
+        pytest.skip(f"{path} is not Orbit's build {gvisor.BUILD}: {version.stdout.strip()}")
 
 
 def slurm_config() -> SlurmProviderConfig:
-    """The cluster ``$ALE_TEST_SLURM_CONFIG`` names: a Run TOML with ``sandbox.slurm``
+    """The cluster ``$ORBIT_TEST_SLURM_CONFIG`` names: a Run TOML with ``sandbox.slurm``
     settings, whose partitions' login hosts share the account's home with their nodes."""
-    path = os.environ.get("ALE_TEST_SLURM_CONFIG")
+    path = os.environ.get("ORBIT_TEST_SLURM_CONFIG")
     if not path:
-        pytest.skip("set ALE_TEST_SLURM_CONFIG to a Run TOML with sandbox.slurm settings")
+        pytest.skip("set ORBIT_TEST_SLURM_CONFIG to a Run TOML with sandbox.slurm settings")
     settings = tomllib.loads(Path(path).read_text())["sandbox"]["slurm"]
     return SlurmProviderConfig.model_validate(settings)
 
@@ -127,7 +127,7 @@ def provider_registry(*providers: Provider, only: bool = False) -> ProviderRegis
     ``only``."""
     if not providers:
         return ProviderRegistry(RunConfig())
-    from ale.run.providers.slurm import SlurmProvider
+    from orbit.run.providers.slurm import SlurmProvider
 
     ids = [provider.id for provider in providers]
     order = ids + ([] if only else [name for name in SandboxConfig().providers if name not in ids])
@@ -181,8 +181,8 @@ async def check_a_sealed_list(
     """Sealed under ``policy``, one of :data:`LIST_POLICIES`, a Linux agent reaches
     example.com through guestd's relay to the Host's egress proxy, is refused www.iana.org,
     and reaches nothing directly. ``request`` is the suite's request factory."""
-    from ale.run.gateway.proxy import EgressProxy
-    from ale.run.gateway.session import GatewaySession, SessionRegistry
+    from orbit.run.gateway.proxy import EgressProxy
+    from orbit.run.gateway.session import GatewaySession, SessionRegistry
 
     sessions = SessionRegistry()
     session = sessions.open(
@@ -310,7 +310,7 @@ MACOS_BASE = (
     "ghcr.io/cirruslabs/macos-tahoe-base@sha256:"
     "4aaa751fa7538902d73c767f27a066fc87e83f183069da4e4b5022863abd4c77"
 )
-#: ``environment/build.sh`` of a macOS image with the runtimes the ALE bases provide CLIs:
+#: ``environment/build.sh`` of a macOS image with the runtimes the Orbit bases provide CLIs:
 #: the Node.js they pin, and the base's own Git and Python.
 MACOS_RUNTIME_BUILD = """\
 set -euo pipefail
@@ -330,10 +330,10 @@ python3 --version
 def cli_os() -> OperatingSystem:
     """The system CLI integration tests run their programs on.
 
-    Linux, in a container of the current base; or macOS with ``ALE_TEST_CLI_OS=macos`` on
+    Linux, in a container of the current base; or macOS with ``ORBIT_TEST_CLI_OS=macos`` on
     a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running.
     """
-    return OperatingSystem(os.environ.get("ALE_TEST_CLI_OS", "linux"))
+    return OperatingSystem(os.environ.get("ORBIT_TEST_CLI_OS", "linux"))
 
 
 @asynccontextmanager
@@ -347,8 +347,8 @@ async def cli_sandbox(
     """
     registry = ProviderRegistry(RunConfig())
     if cli_os() is OperatingSystem.MACOS:
-        from ale.run.task_images import prepare_task_image
-        from ale.run.tasksets.manifest import load_tasks
+        from orbit.run.task_images import prepare_task_image
+        from orbit.run.tasksets.manifest import load_tasks
 
         folder = work / "cli-runtime"
         write_task(
@@ -501,7 +501,7 @@ class MemorySandbox(Sandbox):
     """A Sandbox held in memory: commands echo their arguments, files live in a dict."""
 
     def __init__(self, provider: MemoryProvider, request: SandboxRequest) -> None:
-        from ale.core.sandbox import ResolvedImage, ResourceAllocation
+        from orbit.core.sandbox import ResolvedImage, ResourceAllocation
 
         image = request.prepared_image
         super().__init__(
@@ -563,7 +563,7 @@ class MemorySandbox(Sandbox):
         return data[offset:] if length is None else data[offset : offset + length]
 
     async def list_files(self, path):  # type: ignore[no-untyped-def]
-        from ale.core.sandbox import SandboxFile
+        from orbit.core.sandbox import SandboxFile
 
         return tuple(
             SandboxFile(path=name, size=len(data))
@@ -602,7 +602,7 @@ class MemorySandbox(Sandbox):
         return f"memory:{self.sandbox_id}"
 
     async def retain(self, *, roles, reason):  # type: ignore[no-untyped-def]
-        from ale.core.sandbox import RetainedSandbox
+        from orbit.core.sandbox import RetainedSandbox
 
         self.provider.kept[self.handle] = self
         return RetainedSandbox(
@@ -611,11 +611,11 @@ class MemorySandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {self.handle}",
+            cleanup_command=f"orbit sandbox destroy {self.handle}",
         )
 
     async def snapshot(self, *, roles, reason):  # type: ignore[no-untyped-def]
-        from ale.core.sandbox import RetainedSandbox
+        from orbit.core.sandbox import RetainedSandbox
 
         # A Sandbox's first snapshot is named by its id, each later one by a number too.
         handle = f"memory:snapshot:{self.sandbox_id}"
@@ -629,7 +629,7 @@ class MemorySandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
         )
 
     async def destroy(self) -> None:
@@ -689,7 +689,7 @@ class MemoryProvider(Provider):
         return [{"handle": handle} for handle in [*self.kept, *self.snapshots]]
 
     async def destroy_retained(self, handle: str) -> None:
-        from ale.core.errors import ProviderStartError
+        from orbit.core.errors import ProviderStartError
 
         if handle in self.snapshots:
             # As every Provider's: never under a Sandbox booted from it.
@@ -708,7 +708,7 @@ class MemoryProvider(Provider):
         """The retained Sandbox, driven for a later episode with that episode's request."""
         import asyncio
 
-        from ale.core.errors import ProviderStartError
+        from orbit.core.errors import ProviderStartError
 
         await asyncio.sleep(self.attach_delay)
         sandbox = self.kept.get(handle)
@@ -732,7 +732,7 @@ class MemoryProvider(Provider):
 
     async def reattach(self, handle, request, allocation, image):  # type: ignore[no-untyped-def]
         """The Sandbox this Provider still runs under ``handle``, as another process finds it."""
-        from ale.core.errors import ProviderStartError
+        from orbit.core.errors import ProviderStartError
 
         for sandbox in self.sandboxes:
             if sandbox.handle == handle and not sandbox.destroyed:
@@ -781,7 +781,7 @@ class ScriptedCliHarness(CliHarness):
     default_version = "1"
     settings_type = _NoSettings
     supported_os = (OperatingSystem.LINUX, OperatingSystem.WINDOWS)
-    logs = (".ale-harness", ".scripted-cli")
+    logs = (".orbit-harness", ".scripted-cli")
 
     async def install(self, sandbox: Sandbox) -> str:
         return self.version()
@@ -795,7 +795,7 @@ class ScriptedCliHarness(CliHarness):
     async def prepare_command(  # type: ignore[no-untyped-def]
         self, prompt_path, sandbox, session, *, native_session_id
     ):
-        from ale.run.harnesses.base import CliCommand
+        from orbit.run.harnesses.base import CliCommand
 
         session_id = native_session_id or "scripted"
         home = shlex.quote(session.home)
@@ -807,7 +807,7 @@ for process in /proc/[0-9]*; do
   fi
 done
 (setsid sleep 9999 > /dev/null 2>&1 &)
-for leaked in /opt/ale/validation /opt/ale/tests /logs/verifier/feedback.md; do
+for leaked in /opt/orbit/validation /opt/orbit/tests /logs/verifier/feedback.md; do
   if [ -e "$leaked" ]; then echo "turn $turn: $leaked" >> {home}/leaks; fi
 done
 if [ -r /opt/validation/verify.py ]; then echo "turn $turn" >> {home}/shown; fi
@@ -827,7 +827,7 @@ printf '{{"session_id": "%s", "result": "turn %s"}}\\n' {shlex.quote(session_id)
         return CliCommand(script.strip(), {}, session_id)
 
     def read_result(self, stdout: str):  # type: ignore[no-untyped-def]
-        from ale.run.harnesses.base import NativeResult
+        from orbit.run.harnesses.base import NativeResult
 
         for line in reversed(stdout.splitlines()):
             try:
@@ -839,8 +839,8 @@ printf '{{"session_id": "%s", "result": "turn %s"}}\\n' {shlex.quote(session_id)
 
     def parse_trajectory(self, context):  # type: ignore[no-untyped-def]
         """Each turn's prompt as a user message and its result as the agent's answer."""
-        from ale.core.trajectory import AtifAgent, TrajectoryBuilder
-        from ale.run.harnesses.base import invocations
+        from orbit.core.trajectory import AtifAgent, TrajectoryBuilder
+        from orbit.run.harnesses.base import invocations
 
         builder = TrajectoryBuilder(
             trajectory_id=context.trajectory_id,
@@ -870,7 +870,7 @@ class WorkingCliHarness(ScriptedCliHarness):
     async def prepare_command(  # type: ignore[no-untyped-def]
         self, prompt_path, sandbox, session, *, native_session_id
     ):
-        from ale.run.harnesses.base import CliCommand
+        from orbit.run.harnesses.base import CliCommand
 
         session_id = native_session_id or "scripted"
         home = shlex.quote(session.home)
@@ -1026,8 +1026,8 @@ class Verifiers:
         self.failing: set[int] = set()
         self.seen: Callable[[MemorySandbox], None] = lambda sandbox: None
         self.feedback: dict[str, str] = {
-            "/opt/ale/validation": "{lines} lines; write more",
-            "/opt/ale/tests": "hidden test detail",
+            "/opt/orbit/validation": "{lines} lines; write more",
+            "/opt/orbit/tests": "hidden test detail",
         }
         self.runs: list[tuple[str, str]] = []
         self.envs: list[dict[str, str]] = []
@@ -1038,7 +1038,7 @@ class Verifiers:
             return True
         self.runs.append((cwd, sandbox.sandbox_id))
         self.envs.append(dict(options.get("env") or {}))
-        if cwd == "/opt/ale/validation":
+        if cwd == "/opt/orbit/validation":
             self.seen(sandbox)
             if sum(stage == cwd for stage, _ in self.runs) in self.failing:
                 return False

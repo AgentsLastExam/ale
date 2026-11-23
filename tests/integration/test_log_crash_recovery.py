@@ -8,8 +8,8 @@ import textwrap
 
 import pytest
 
-from ale.core.taskspec import ImageSpec, TaskSpec
-from ale.run.ledger import Ledger
+from orbit.core.taskspec import ImageSpec, TaskSpec
+from orbit.run.ledger import Ledger
 
 pytestmark = pytest.mark.integration
 
@@ -28,8 +28,8 @@ def test_reopen_marks_stale_attempt_interrupted_and_preserves_retry(tmp_path) ->
         f"""
         import os
         from pathlib import Path
-        from ale.core.taskspec import ImageSpec, TaskSpec
-        from ale.run.ledger import Ledger
+        from orbit.core.taskspec import ImageSpec, TaskSpec
+        from orbit.run.ledger import Ledger
 
         task = TaskSpec(
             name="agentslastexam/demo-crash",

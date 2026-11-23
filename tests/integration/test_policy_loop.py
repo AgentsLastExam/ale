@@ -13,14 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.trace import DesktopAction
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import ScriptedPolicyHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.trace import DesktopAction
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import ScriptedPolicyHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]

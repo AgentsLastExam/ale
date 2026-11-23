@@ -8,15 +8,15 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from ale.core.config import RunConfig, load_run_config, select_agent_name
-from ale.core.errors import ConfigError
-from ale.run.cli.tasks import PRESET_DIR, _config
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.provenance import agent_provenance
-from ale.run.secrets import provider_credentials, provider_endpoint
+from orbit.core.config import RunConfig, load_run_config, select_agent_name
+from orbit.core.errors import ConfigError
+from orbit.run.cli.tasks import PRESET_DIR, _config
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.provenance import agent_provenance
+from orbit.run.secrets import provider_credentials, provider_endpoint
 
 pytestmark = pytest.mark.unit
-main = import_module("ale.run.cli.main")
+main = import_module("orbit.run.cli.main")
 
 
 def test_selecting_claude_loads_the_complete_preset() -> None:
@@ -92,7 +92,7 @@ def test_cli_inherits_runtime_configuration_with_explicit_overrides(
     )
     explicit_config = tmp_path / "explicit.toml"
     explicit_config.write_text(runtime_config.read_text().replace("runtime-judge", "explicit"))
-    monkeypatch.setenv("ALE_RUN_CONFIG", str(runtime_config))
+    monkeypatch.setenv("ORBIT_RUN_CONFIG", str(runtime_config))
     captured: list[RunConfig] = []
 
     async def workflow(*args: object) -> int:
@@ -122,7 +122,7 @@ def test_bad_runtime_configuration_fails_without_starting_calibration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime_config = tmp_path / "missing.toml"
-    monkeypatch.setenv("ALE_RUN_CONFIG", str(runtime_config))
+    monkeypatch.setenv("ORBIT_RUN_CONFIG", str(runtime_config))
     result = CliRunner().invoke(main.app, ["calibrate", "tasks/example"])
     assert result.exit_code == 3
     assert "configuration error: config file not found" in result.output
@@ -159,22 +159,25 @@ def test_preset_and_effective_settings_are_recorded() -> None:
 def test_a_provider_key_pairs_only_with_that_providers_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ALE_ANTHROPIC_API_KEY", "anthropic-key")
-    monkeypatch.delenv("ALE_ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("ALE_OPENAI_API_KEY", "openai-key")
-    monkeypatch.setenv("ALE_OPENAI_BASE_URL", "https://gateway.example/")
-    monkeypatch.delenv("ALE_XAI_API_KEY", raising=False)
+    monkeypatch.setenv("ORBIT_ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.delenv("ORBIT_ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ORBIT_OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("ORBIT_OPENAI_BASE_URL", "https://gateway.example/")
+    monkeypatch.delenv("ORBIT_XAI_API_KEY", raising=False)
 
-    assert provider_endpoint("anthropic") == ("ALE_ANTHROPIC_API_KEY", "https://api.anthropic.com")
+    assert provider_endpoint("anthropic") == (
+        "ORBIT_ANTHROPIC_API_KEY",
+        "https://api.anthropic.com",
+    )
     assert provider_credentials("anthropic") == ("anthropic-key", "https://api.anthropic.com")
     assert provider_credentials("openai") == ("openai-key", "https://gateway.example")
-    with pytest.raises(ConfigError, match="ALE_XAI_API_KEY is not set"):
+    with pytest.raises(ConfigError, match="ORBIT_XAI_API_KEY is not set"):
         provider_credentials("xai")
 
 
 def test_a_one_off_endpoint_must_name_its_own_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ALE_ANTHROPIC_API_KEY", "default-key")
-    monkeypatch.setenv("ALE_ANTHROPIC_BASE_URL", "https://gateway.example")
+    monkeypatch.setenv("ORBIT_ANTHROPIC_API_KEY", "default-key")
+    monkeypatch.setenv("ORBIT_ANTHROPIC_BASE_URL", "https://gateway.example")
     monkeypatch.setenv("PROXY_KEY", "proxy-key")
 
     with pytest.raises(ConfigError, match="api-key-env"):

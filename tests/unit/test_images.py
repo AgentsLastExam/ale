@@ -16,11 +16,11 @@ from aiohttp import web
 from tests.support import FakeQemuImg, write_qcow2
 from typer.testing import CliRunner
 
-from ale.core.errors import ProviderStartError
-from ale.core.sandbox import ImageRef, PreparedTaskImage
-from ale.core.taskspec import ImageKind
-from ale.run.cli.main import app
-from ale.run.images import (
+from orbit.core.errors import ProviderStartError
+from orbit.core.sandbox import ImageRef, PreparedTaskImage
+from orbit.core.taskspec import ImageKind
+from orbit.run.cli.main import app
+from orbit.run.images import (
     _select_repo_digest,
     acquire_lock,
     base_layer,
@@ -108,7 +108,7 @@ async def test_local_vm_ref_tracks_bytes_and_rejects_dependent_disks(
         assert argv[0] == "qemu-img", "A local image must never reach a registry"
         return 0, json.dumps(metadata), ""
 
-    monkeypatch.setattr("ale.run.images._run", fake_run)
+    monkeypatch.setattr("orbit.run.images._run", fake_run)
     ref = ImageRef(kind="vm", reference=str(disk))
     first = await resolve_vm_image(ref)
     assert first.runtime_ref == str(disk)
@@ -126,7 +126,7 @@ async def test_local_vm_ref_tracks_bytes_and_rejects_dependent_disks(
 
 @pytest.mark.asyncio
 async def test_registry_tag_resolves_metadata_without_pulling_layers(monkeypatch):
-    from ale.run import images
+    from orbit.run import images
 
     calls = []
     digest = "sha256:" + "b" * 64
@@ -158,7 +158,7 @@ async def test_registry_tag_resolves_metadata_without_pulling_layers(monkeypatch
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["missing", "denied", "invalid", "timeout"])
 async def test_registry_resolution_reports_safe_actionable_errors(monkeypatch, failure):
-    from ale.run import images
+    from orbit.run import images
 
     async def run(*argv, **kwargs):
         if failure == "missing":
@@ -178,7 +178,7 @@ async def test_registry_resolution_reports_safe_actionable_errors(monkeypatch, f
 _VM_DISK_MANIFEST = {
     "schemaVersion": 2,
     "mediaType": "application/vnd.oci.image.manifest.v1+json",
-    "artifactType": "application/vnd.ale.vm-disk.v1",
+    "artifactType": "application/vnd.orbit.vm-disk.v1",
     "config": {"mediaType": "application/vnd.oci.empty.v1+json"},
 }
 
@@ -218,7 +218,7 @@ _VM_DISK_MANIFEST = {
 async def test_an_image_is_classified_by_its_manifest_alone(
     monkeypatch: pytest.MonkeyPatch, manifest: dict[str, object], kind: ImageKind
 ) -> None:
-    from ale.run import images
+    from orbit.run import images
 
     calls: list[tuple[str, ...]] = []
 
@@ -237,7 +237,7 @@ async def test_an_image_is_classified_by_its_manifest_alone(
     [
         (
             (0, json.dumps({**_VM_DISK_MANIFEST, "artifactType": "application/x-other"}), ""),
-            r"neither a container image nor an ALE VM disk \(application/x-other\)",
+            r"neither a container image nor an Orbit VM disk \(application/x-other\)",
         ),
         (
             (
@@ -265,7 +265,7 @@ async def test_an_image_is_classified_by_its_manifest_alone(
 async def test_an_image_that_is_neither_kind_is_refused_by_its_type(
     monkeypatch: pytest.MonkeyPatch, answer: tuple[int, str, str], message: str
 ) -> None:
-    from ale.run import images
+    from orbit.run import images
 
     async def run(*argv: str, **_: object) -> tuple[int, str, str]:
         return answer
@@ -280,9 +280,9 @@ async def test_an_image_that_is_neither_kind_is_refused_by_its_type(
 async def test_a_pinned_image_this_host_holds_is_classified_offline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ale.run import images
+    from orbit.run import images
 
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path))
     pulled, local = "sha256:" + "a" * 64, "sha256:" + "b" * 64
     calls: list[tuple[str, ...]] = []
 
@@ -320,9 +320,9 @@ async def test_classifying_without_the_docker_cli_reads_the_registry_over_http(
 ) -> None:
     """As on a Slurm login node, which has no container runtime: Docker Hub's short names
     are Docker's, and its API has a host of its own."""
-    from ale.run import images
+    from orbit.run import images
 
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     read: list[tuple[str, ...]] = []
     manifest = {
@@ -370,8 +370,8 @@ async def test_a_base_is_copied_once_and_a_layer_is_known_by_its_whole_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     qemu = FakeQemuImg()
-    monkeypatch.setattr("ale.run.images._run", qemu)
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr("orbit.run.images._run", qemu)
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "cache"))
     published = "sha256:" + "b" * 64
     source = _disk(write_qcow2(tmp_path / "published.qcow2", data=b"windows"), published)
 
@@ -389,7 +389,7 @@ async def test_a_base_is_copied_once_and_a_layer_is_known_by_its_whole_chain(
     with pytest.raises(ProviderStartError, match="changed"):
         await resolve_prepared_vm_image(_disk(task, published))
 
-    # Another base at the same path is refused, though ALE recorded it too.
+    # Another base at the same path is refused, though Orbit recorded it too.
     base.with_suffix(".json").write_text(
         json.dumps({"parent": None, "identity": "sha256:" + "c" * 64})
     )
@@ -401,7 +401,7 @@ async def test_a_base_is_copied_once_and_a_layer_is_known_by_its_whole_chain(
 async def test_a_chain_survives_a_move_and_containers_see_it_at_host_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
+    monkeypatch.setattr("orbit.run.images._run", FakeQemuImg())
     published = "sha256:" + "b" * 64
     builds = tmp_path / "cache" / "vm-builds"
     base = write_qcow2(builds / "base.qcow2", data=b"windows")
@@ -443,8 +443,8 @@ async def test_a_chain_survives_a_move_and_containers_see_it_at_host_paths(
 async def test_a_disk_another_cached_disk_builds_on_is_never_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr("orbit.run.images._run", FakeQemuImg())
     published = "sha256:" + "b" * 64
     source = _disk(write_qcow2(tmp_path / "published.qcow2", data=b"windows"), published)
     base = await base_layer(source)
@@ -570,10 +570,10 @@ class _Registry:
 @pytest.fixture
 def chunked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> int:
     """Four 64 KiB blocks per chunk read in 16 KiB pieces, a fake qemu-img, no login."""
-    from ale.run import images
+    from orbit.run import images
 
     monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path / "no-docker-config"))
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(images, "_run", FakeQemuImg())
     monkeypatch.setattr(images, "CHUNK_SIZE", 4 * images._SPARSE)
     monkeypatch.setattr(images, "_BLOCK", 16 << 10)
@@ -591,7 +591,7 @@ def _chunked_disk(path: Path, chunk: int) -> bytes:
 async def test_vm_disk_round_trip_is_chunked_verified_and_sparse(
     tmp_path: Path, chunked: int
 ) -> None:
-    from ale.run import images
+    from orbit.run import images
 
     source = tmp_path / "base.qcow2"
     data = _chunked_disk(source, chunked)
@@ -602,14 +602,14 @@ async def test_vm_disk_round_trip_is_chunked_verified_and_sparse(
         manifest = registry.manifest("1.0.0")
         assert manifest["artifactType"] == images.VM_DISK
         assert manifest["annotations"] == {
-            "ale.vm-disk.size": str(len(data)),
-            "ale.vm-disk.chunk-size": str(chunked),
+            "orbit.vm-disk.size": str(len(data)),
+            "orbit.vm-disk.chunk-size": str(chunked),
         }
         layers = manifest["layers"]
         assert [layer["mediaType"] for layer in layers] == [images.VM_DISK_CHUNK] * 4
         for index, layer in enumerate(layers):
             piece = data[index * chunked : (index + 1) * chunked]
-            content = layer["annotations"]["ale.vm-disk.chunk.digest"]
+            content = layer["annotations"]["orbit.vm-disk.chunk.digest"]
             assert content == f"sha256:{hashlib.sha256(piece).hexdigest()}"
             assert zstandard.ZstdDecompressor().decompress(registry.blobs[layer["digest"]]) == piece
 
@@ -640,7 +640,7 @@ async def test_vm_disk_round_trip_is_chunked_verified_and_sparse(
 async def test_vm_disk_pull_resumes_kept_chunks_and_interrupted_reads(
     tmp_path: Path, chunked: int
 ) -> None:
-    from ale.run import images
+    from orbit.run import images
 
     source = tmp_path / "base.qcow2"
     data = _chunked_disk(source, chunked)
@@ -667,7 +667,7 @@ async def test_vm_disk_pull_resumes_kept_chunks_and_interrupted_reads(
 async def test_vm_disk_pull_rejects_wrong_bytes_and_foreign_manifests(
     tmp_path: Path, chunked: int
 ) -> None:
-    from ale.run import images
+    from orbit.run import images
 
     source = tmp_path / "base.qcow2"
     _chunked_disk(source, chunked)
@@ -687,7 +687,7 @@ async def test_vm_disk_pull_rejects_wrong_bytes_and_foreign_manifests(
         with pytest.raises(ProviderStartError, match="could not write"):
             await images.pull_vm_image(reference, tmp_path / "directory")
         altered = registry.manifest("1.0.0")
-        altered["layers"][1]["annotations"]["ale.vm-disk.chunk.digest"] = f"sha256:{'1' * 64}"
+        altered["layers"][1]["annotations"]["orbit.vm-disk.chunk.digest"] = f"sha256:{'1' * 64}"
         registry.manifests["altered"] = json.dumps(altered).encode()
         with pytest.raises(ProviderStartError, match="failed verification"):
             await images.pull_vm_image(
@@ -706,14 +706,14 @@ async def test_vm_disk_pull_rejects_wrong_bytes_and_foreign_manifests(
                 "layers": [],
             }
         ).encode()
-        with pytest.raises(ProviderStartError, match="not an ALE VM disk"):
+        with pytest.raises(ProviderStartError, match="not an Orbit VM disk"):
             await images.pull_vm_image(f"{registry.host}/acme/windows:docker-image", tmp_path / "x")
     assert not (tmp_path / "disk.qcow2").exists()
 
 
 @pytest.mark.asyncio
 async def test_vm_disk_resolution_caches_by_manifest_digest(tmp_path: Path, chunked: int) -> None:
-    from ale.run import images
+    from orbit.run import images
 
     source = tmp_path / "base.qcow2"
     data = _chunked_disk(source, chunked)
@@ -758,7 +758,7 @@ async def test_vm_disk_resolution_caches_by_manifest_digest(tmp_path: Path, chun
 async def test_vm_disk_publish_refuses_layers_and_compressed_disks(
     tmp_path: Path, chunked: int
 ) -> None:
-    from ale.run import images
+    from orbit.run import images
 
     qemu = images._run
     assert isinstance(qemu, FakeQemuImg)
@@ -780,7 +780,7 @@ async def test_vm_disk_publish_refuses_layers_and_compressed_disks(
 async def test_registry_uses_docker_credentials_for_its_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: str
 ) -> None:
-    from ale.run.oci import Reference, Registry
+    from orbit.run.oci import Reference, Registry
 
     async with _Registry() as registry:
         login = "Basic " + base64.b64encode(b"robot:secret").decode()
@@ -811,7 +811,7 @@ async def test_registry_uses_docker_credentials_for_its_token(
 
 
 def test_vm_disk_references_name_their_registry() -> None:
-    from ale.run.oci import Reference, _on_this_machine
+    from orbit.run.oci import Reference, _on_this_machine
 
     parsed = Reference.parse("localhost:5000/team/disk:1.0@sha256:" + "a" * 64)
     assert (parsed.registry, parsed.repository, parsed.tag) == (

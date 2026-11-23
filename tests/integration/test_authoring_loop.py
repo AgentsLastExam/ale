@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import NopHarness, OracleHarness
-from ale.run.lint import lint_repository
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness
+from orbit.run.lint import lint_repository
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -73,7 +73,7 @@ async def test_dynamic_setup_runs_before_oracle(tmp_path: Path) -> None:
     entry.chmod(0o755)
     check = task / "tests" / "verify.py"
     check.write_text(
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['setup'] = checks.text_equals('/home/user/output/service-ready', 'ready')['score']\n"
         "v['content'] = checks.text_equals('/home/user/output/result.txt', 'hello\\n')['score']\n"

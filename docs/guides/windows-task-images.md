@@ -1,6 +1,6 @@
 # Windows Task images
 
-Each Task deploys its software and configuration through `environment/build.ps1`; ALE
+Each Task deploys its software and configuration through `environment/build.ps1`; Orbit
 caches the resulting image locally and starts each episode in a fresh writable VM overlay.
 Follow the [cross-platform software rules](../specs/task-assets.md#offline-software) to decide whether
 to install directly or prepare offline assets. For software requiring repackaging on Windows,
@@ -8,13 +8,13 @@ prefer MSIX; an existing suitable unattended offline installer can be reused dir
 
 ## Define and build the image
 
-Declare the published ALE Windows base in `task.toml`; an absolute path to a local copy of a
-base works too:
+Declare the published Orbit Windows base in `task.toml`; an absolute path to a local copy of
+a base works too:
 
 ```toml
 [environment]
 os = "windows"
-image = "ghcr.io/agentslastexam/vm-windows10-base:0.1.3"
+image = "ghcr.io/agentslastexam/vm-windows10-base:0.1.4"
 ```
 
 Keep software materials under `environment/assets/softwares/editor_1/` and deployment
@@ -24,7 +24,7 @@ The Task's materialized folder contains its build inputs; the build does not dep
 Task, a Host installation or a browser session. HF acquisition happens on the Host before build.
 Check native command exit codes and follow the [Windows build rules](../specs/task-authoring.md#environment).
 
-`ale prepare TASK` boots a temporary VM on the base with ALE's guestd and Cua Driver
+`orbit prepare TASK` boots a temporary VM on the base with Orbit's guestd and Cua Driver
 already installed, stages `environment/` less `setup/`, executes the script, removes build
 inputs, and keeps the VM's disk as a cached layer on the base. Stable installation belongs
 here; only per-episode initialization belongs in `environment/setup/`.
@@ -52,12 +52,12 @@ implemented. Share software only where its license permits.
 
 ## Check the Task
 
-From the ALE checkout, run against a complete Task:
+From the Orbit checkout, run against a complete Task:
 
 ```bash
-uv run ale lint /absolute/path/to/task
-uv run ale prepare /absolute/path/to/task
-uv run ale calibrate /absolute/path/to/task
+uv run orbit lint /absolute/path/to/task
+uv run orbit prepare /absolute/path/to/task
+uv run orbit calibrate /absolute/path/to/task
 ```
 
 On a fresh base, verify unattended deployment with only the declared inputs and dependencies.

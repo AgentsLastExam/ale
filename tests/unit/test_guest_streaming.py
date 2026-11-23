@@ -16,10 +16,10 @@ from typing import Any
 
 import pytest
 
-import ale.run.guestd.main as guestd_main
-from ale.core.errors import OutputStreamError
-from ale.run.guestd.main import Handler, _Descriptor, _Server, _TCPHandler
-from ale.run.transport import GuestClient
+import orbit.run.guestd.main as guestd_main
+from orbit.core.errors import OutputStreamError
+from orbit.run.guestd.main import Handler, _Descriptor, _Server, _TCPHandler
+from orbit.run.transport import GuestClient
 
 pytestmark = pytest.mark.unit
 
@@ -283,8 +283,8 @@ async def test_acknowledged_exec_waits_for_the_sink_and_drains_after_sink_error(
 async def test_acknowledged_guest_streams_large_stdout_and_stderr() -> None:
     from pathlib import Path
 
-    from ale.run.guestd import main as guest_main
-    from ale.run.transport import StdioTransport
+    from orbit.run.guestd import main as guest_main
+    from orbit.run.transport import StdioTransport
 
     transport = StdioTransport([sys.executable, str(Path(guest_main.__file__)), "--stdio"])
     await transport.start()
@@ -322,8 +322,8 @@ async def test_guest_timeout_interrupts_ack_wait_and_accepts_the_late_ack(tmp_pa
     import os
     from pathlib import Path
 
-    from ale.run.guestd import main as guest_main
-    from ale.run.transport import StdioTransport
+    from orbit.run.guestd import main as guest_main
+    from orbit.run.transport import StdioTransport
 
     transport = StdioTransport([sys.executable, str(Path(guest_main.__file__)), "--stdio"])
     await transport.start()
@@ -368,9 +368,9 @@ async def test_ack_failure_terminates_the_child_without_an_orphan(tmp_path, disc
     import os
     from pathlib import Path
 
-    from ale.core.errors import GuestUnreachableError
-    from ale.run.guestd import main as guest_main
-    from ale.run.transport import StdioTransport
+    from orbit.core.errors import GuestUnreachableError
+    from orbit.run.guestd import main as guest_main
+    from orbit.run.transport import StdioTransport
 
     transport = StdioTransport([sys.executable, str(Path(guest_main.__file__)), "--stdio"])
     await transport.start()
@@ -444,7 +444,7 @@ async def test_acknowledged_output_cancellation_does_not_ack_an_unconsumed_block
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sequence", [None, 0, 2, True])
 async def test_acknowledged_output_rejects_missing_or_wrong_sequence(sequence) -> None:
-    from ale.core.errors import GuestUnreachableError
+    from orbit.core.errors import GuestUnreachableError
 
     transport = FakeTransport(
         [
@@ -465,7 +465,7 @@ def test_a_stdio_reply_arrives_whole_when_a_pipe_takes_part_of_each_write(
     def short(descriptor: int, data: bytes | memoryview) -> int:
         return real_write(descriptor, bytes(data[: 64 * 1024]))
 
-    monkeypatch.setattr("ale.run.guestd.main.os.write", short)
+    monkeypatch.setattr("orbit.run.guestd.main.os.write", short)
     read_end, write_end = os.pipe()
     received = bytearray()
 

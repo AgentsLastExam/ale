@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import TrajectoryConversionError
-from ale.run.protocol.episode_protocol import _exact_token_metrics
+from orbit.core.errors import TrajectoryConversionError
+from orbit.run.protocol.episode_protocol import _exact_token_metrics
 
 pytestmark = pytest.mark.unit
 
@@ -33,7 +33,7 @@ def test_exact_token_evidence_is_consumed_without_retokenization(tmp_path: Path)
     assert metrics.completion_token_ids == [3]
     assert metrics.logprobs == [-0.1]
     assert metrics.extra == {
-        "ale": {
+        "orbit": {
             "sampled_mask": [False, False, True],
             "temperature": 0.7,
         }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Make ALE's Linux VM base disk: /input/rootfs.tar, with /input/initrd.img, becomes a
-# bootable disk (mkosi), written uncompressed to /output/disk.qcow2. `ale vm-image push`
+# Make Orbit's Linux VM base disk: /input/rootfs.tar, with /input/initrd.img, becomes a
+# bootable disk (mkosi), written uncompressed to /output/disk.qcow2. `orbit vm-image push`
 # compresses each chunk for the registry, and a Host builds Task layers on the pulled disk
 # as it is, where compressed clusters would slow every read.
 set -euo pipefail

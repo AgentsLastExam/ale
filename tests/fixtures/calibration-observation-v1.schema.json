@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ALE Calibration Observation",
+  "title": "Orbit Calibration Observation",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "engine", "tasks"],

@@ -1,0 +1,491 @@
+"""Synchronize Task-local assets with same-named Hugging Face datasets."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import shutil
+import tempfile
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from orbit.core.config import resolve_asset_collection
+from orbit.core.errors import AssetError
+from orbit.core.task import CALIBRATION_DIR, Task, TaskAssetObservation, TaskSourceContext
+from orbit.run.secrets import hf_token
+
+if TYPE_CHECKING:
+    from huggingface_hub import HfApi
+
+    from orbit.run.tasksets.manifest import TaskFolder
+
+#: Where every Task keeps assets, relative to its folder: beside the files that read them.
+#: The reference solution's are ``solution/assets``; each further calibration case has one
+#: more, ``calibration/<case>/assets``; ``asset_roots`` lists them all.
+ASSET_ROOTS: tuple[str, ...] = (
+    "environment/assets",
+    "tests/assets",
+    "validation/assets",
+    "solution/assets",
+)
+DEFAULT_NAMESPACE = "agents-last-exam"
+
+__all__ = [
+    "ASSET_ROOTS",
+    "AssetRepositorySelection",
+    "AssetSyncResult",
+    "asset_roots",
+    "asset_status",
+    "observe_task_assets",
+    "pull_assets",
+    "push_assets",
+    "select_asset_repositories",
+]
+
+
+@dataclass(frozen=True)
+class AssetLocation:
+    folder: TaskFolder
+
+    @property
+    def source(self) -> TaskSourceContext:
+        return self.folder.source
+
+
+@dataclass(frozen=True)
+class AssetRepositorySelection:
+    repository_name: str
+    repository_root: Path
+    tasks: tuple[AssetLocation, ...]
+
+
+@dataclass(frozen=True)
+class AssetSyncResult:
+    repository: str
+    remote_repo_id: str
+    commit: str
+    tasks: tuple[TaskAssetObservation, ...]
+
+
+def asset_roots(task_root: Path) -> tuple[str, ...]:
+    """The asset roots of the Task folder at ``task_root``, relative to it, whether or not
+    they exist: one for each fixed root and one for each calibration case directory there.
+
+    The Task loader leaves them out of source digests, so it imports this from here.
+    """
+    cases = sorted(path.name for path in (task_root / CALIBRATION_DIR).glob("*/"))
+    return (*ASSET_ROOTS, *(f"{CALIBRATION_DIR}/{case}/assets" for case in cases))
+
+
+def _held_roots(task_root: Path) -> list[str]:
+    """The asset roots that hold files below ``task_root``, as an asset commit's tree does."""
+    return [root for root in asset_roots(task_root) if (task_root / root).is_dir()]
+
+
+def _asset_roots(task: Task | AssetLocation) -> tuple[Path, ...]:
+    if task.folder is None:
+        return ()
+    root = task.folder.root
+    validate_asset_paths(root)
+    return tuple(path for relative in asset_roots(root) if (path := root / relative).is_dir())
+
+
+def _task_path(task: AssetLocation) -> str:
+    if task.source.task_relative_path is None:
+        raise AssetError("asset commands require Tasks inside a Git repository")
+    return task.source.task_relative_path
+
+
+def observe_task_assets(task: Task | AssetLocation) -> TaskAssetObservation | None:
+    if task.folder is None:
+        return None
+    roots = _asset_roots(task)
+    source = task.source
+    if not source.repository_root or not source.repository_name or not source.task_relative_path:
+        return TaskAssetObservation("", str(task.folder.root), None, True) if roots else None
+    with _repository_lock(source.repository_root, exclusive=True):
+        state = _read_state(source.repository_root, source.repository_name)
+        markers = state["tasks"]
+        assert isinstance(markers, dict)
+        marker = markers.get(source.task_relative_path)
+        if not roots and not isinstance(marker, dict):
+            return None
+        inventory = _asset_inventory(task)
+        # The commit may hold a case's assets that were not placed because the Task had no
+        # such case then; once it has, they are missing.
+        held = marker.get("held", []) if isinstance(marker, dict) else []
+        applicable = asset_roots(task.folder.root)
+        missing = any(
+            root in applicable and not (task.folder.root / root).is_dir() for root in held
+        )
+        dirty = not isinstance(marker, dict) or marker.get("inventory") != inventory or missing
+        commit = marker.get("commit") if isinstance(marker, dict) else None
+        observation = TaskAssetObservation(
+            source.repository_name,
+            source.task_relative_path,
+            commit if isinstance(commit, str) else None,
+            dirty,
+        )
+        if isinstance(marker, dict) and marker.get("dirty") != dirty:
+            marker["dirty"] = dirty
+            _write_state(source.repository_root, state)
+        return observation
+
+
+def asset_status(paths: Sequence[Path]) -> tuple[TaskAssetObservation, ...]:
+    return tuple(
+        observation
+        for selection in select_asset_repositories(paths)
+        for task in selection.tasks
+        if (observation := observe_task_assets(task)) is not None
+    )
+
+
+def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySelection, ...]:
+    from orbit.run.tasksets.manifest import load_tasks
+
+    tasks_by_root: dict[Path, AssetLocation] = {}
+    for path in paths:
+        for task in load_tasks(path.expanduser().resolve()):
+            tasks_by_root[task.folder.root] = AssetLocation(task.folder)
+
+    repositories: dict[Path, list[AssetLocation]] = {}
+    names: dict[str, Path] = {}
+    for task in tasks_by_root.values():
+        source = task.source
+        if not source.repository_root or not source.repository_name:
+            raise AssetError("asset commands require Tasks inside a Git repository")
+        previous = names.get(source.repository_name)
+        if previous is not None and previous != source.repository_root:
+            raise AssetError(f"ambiguous Task repository name {source.repository_name!r}")
+        names[source.repository_name] = source.repository_root
+        repositories.setdefault(source.repository_root, []).append(task)
+    return tuple(
+        AssetRepositorySelection(
+            items[0].source.repository_name or root.name,
+            root,
+            tuple(sorted(items, key=_task_path)),
+        )
+        for root, items in sorted(repositories.items(), key=lambda item: str(item[0]))
+    )
+
+
+def pull_assets(
+    paths: Sequence[Path],
+    *,
+    force: bool = False,
+    revision: str | None = None,
+) -> tuple[AssetSyncResult, ...]:
+    from huggingface_hub import HfApi, snapshot_download
+    from huggingface_hub.errors import HfHubHTTPError
+
+    selections = select_asset_repositories(paths)
+    if not force:
+        for selection in selections:
+            _require_absent_assets(selection.tasks)
+    api = HfApi(token=hf_token())
+    results: list[AssetSyncResult] = []
+    for selection in selections:
+        remote_repo_id = asset_repo_id(selection.repository_name)
+        try:
+            info = api.repo_info(remote_repo_id, repo_type="dataset", revision=revision or "main")
+        except HfHubHTTPError as exc:
+            raise AssetError(f"could not read dataset {remote_repo_id}: {exc}") from exc
+        commit = info.sha
+        if not commit:
+            raise AssetError(f"dataset {remote_repo_id} has no resolved commit")
+        with tempfile.TemporaryDirectory(prefix="orbit-assets-pull-") as temporary:
+            downloaded = Path(temporary)
+            try:
+                snapshot_download(
+                    repo_id=remote_repo_id,
+                    token=hf_token(),
+                    repo_type="dataset",
+                    revision=commit,
+                    # HF's ``*`` matches ``/`` too, so the case pattern also takes deeper
+                    # paths, which no asset root holds.
+                    allow_patterns=[
+                        pattern
+                        for task in selection.tasks
+                        for pattern in (
+                            *(f"{_task_path(task)}/{root}/**" for root in ASSET_ROOTS),
+                            f"{_task_path(task)}/{CALIBRATION_DIR}/*/assets/**",
+                        )
+                    ],
+                    local_dir=downloaded,
+                )
+                with _repository_lock(selection.repository_root, exclusive=True):
+                    if not force:
+                        _require_absent_assets(selection.tasks)
+                    _replace_selected_assets(selection.tasks, downloaded)
+                    observations = _mark_clean(selection, commit, downloaded)
+            except AssetError:
+                raise
+            except Exception as exc:
+                raise AssetError(
+                    f"could not pull assets for {selection.repository_name}: {exc}"
+                ) from exc
+        results.append(
+            AssetSyncResult(
+                selection.repository_name,
+                remote_repo_id,
+                commit,
+                observations,
+            )
+        )
+    return tuple(results)
+
+
+def _require_absent_assets(tasks: Sequence[AssetLocation]) -> None:
+    for task in tasks:
+        for relative in asset_roots(task.folder.root):
+            root = task.folder.root / relative
+            if root.exists() or root.is_symlink():
+                raise AssetError(
+                    f"local assets already exist at {root}; pass --force to replace them"
+                )
+
+
+def push_assets(
+    paths: Sequence[Path], *, collection: str | None = None
+) -> tuple[AssetSyncResult, ...]:
+    from orbit.run.asset_git import checkpoint_assets, publish_assets
+
+    results: list[AssetSyncResult] = []
+    for selection in select_asset_repositories(paths):
+        for task in selection.tasks:
+            name = task.folder.root.name
+            workspace = (
+                selection.repository_root / ".orbit-cache/asset-worktrees" / _task_path(task)
+            )
+            checkpoint = checkpoint_assets(
+                task.folder.root,
+                workspace=workspace,
+                branch=f"manual/{_task_path(task)}",
+                collection=collection,
+            )
+            if checkpoint.commit is None:
+                continue
+            publish_assets(
+                checkpoint,
+                title=f"Update {name} assets",
+                description="",
+                output=workspace.with_suffix(".publication.json"),
+                target_main=True,
+            )
+            results.append(
+                AssetSyncResult(
+                    selection.repository_name,
+                    checkpoint.repo_id,
+                    checkpoint.commit,
+                    asset_status([task.folder.root]),
+                )
+            )
+    return tuple(results)
+
+
+def asset_namespace() -> str:
+    """The Hugging Face organization or user that owns asset datasets and their collection."""
+    return os.environ.get("ORBIT_ASSETS_NAMESPACE", "").strip() or DEFAULT_NAMESPACE
+
+
+def asset_repo_id(repository_name: str) -> str:
+    return f"{asset_namespace()}/{repository_name}"
+
+
+def asset_collection(api: HfApi, collection: str | None = None) -> str:
+    """Resolve the namespace's assets collection without depending on the caller's account."""
+    namespace = asset_namespace()
+    configured = collection or os.environ.get("ORBIT_ASSETS_COLLECTION", "").strip()
+    if configured:
+        slug = resolve_asset_collection(configured).collection_slug
+        item = api.get_collection(slug)
+        if not slug.startswith(f"{namespace}/") or item.title != "assets":
+            raise AssetError(f"asset collection must be {namespace}'s assets collection")
+        return slug
+    matches = [item for item in api.list_collections(owner=namespace) if item.title == "assets"]
+    if len(matches) == 1:
+        return matches[0].slug
+    if not matches:
+        return api.create_collection(
+            "assets", namespace=namespace, private=True, exists_ok=True
+        ).slug
+    raise AssetError(f"{namespace} must have exactly one assets collection")
+
+
+def ensure_asset_repository(repository_name: str, collection: str | None = None) -> tuple[str, str]:
+    """The Task repository's asset dataset, in the namespace's assets collection.
+
+    A missing one is created public with manual gated access, and gated before it is public, so
+    it is never open. An existing one keeps the settings its owner chose.
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=hf_token())
+    repo_id = asset_repo_id(repository_name)
+    if not api.repo_exists(repo_id, repo_type="dataset"):
+        api.create_repo(repo_id, repo_type="dataset", private=True, exist_ok=True)
+        api.update_repo_settings(repo_id, repo_type="dataset", gated="manual")
+        api.update_repo_settings(repo_id, repo_type="dataset", private=False)
+    slug = asset_collection(api, collection)
+    api.add_collection_item(slug, repo_id, "dataset", exists_ok=True)
+    return repo_id, slug
+
+
+def _replace_selected_assets(tasks: Sequence[AssetLocation], downloaded: Path) -> None:
+    """Replace each Task's asset roots with ``downloaded``'s; a calibration case's only
+    when the Task has that case's directory."""
+    entries: list[tuple[Path, Path, Path]] = []
+    for task in tasks:
+        task_path = _task_path(task)
+        validate_asset_paths(task.folder.root)
+        validate_asset_paths(downloaded / task_path)
+        for root in asset_roots(task.folder.root):
+            source = downloaded / task_path / root
+            destination = task.folder.root / root
+            backup = destination.with_name(f".{destination.name}.orbit-backup")
+            if source.is_dir():
+                list(_regular_files(source))
+            entries.append((source, destination, backup))
+
+    for _, _, backup in entries:
+        shutil.rmtree(backup, ignore_errors=True)
+    try:
+        for _, destination, backup in entries:
+            if destination.exists():
+                destination.rename(backup)
+        for source, destination, _ in entries:
+            if source.is_dir():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(source, destination)
+    except Exception:
+        for _, destination, backup in entries:
+            shutil.rmtree(destination, ignore_errors=True)
+            if backup.exists():
+                backup.rename(destination)
+        raise
+    for _, _, backup in entries:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _mark_clean(
+    selection: AssetRepositorySelection, commit: str, tree: Path | None = None
+) -> tuple[TaskAssetObservation, ...]:
+    """Record each Task's assets as the clean state of ``commit``.
+
+    ``tree`` holds the commit's files at their dataset paths; without it, the commit holds
+    what each Task now has. A marker records the roots the commit holds, so a case's assets
+    left out for want of its directory count as missing once the case is there.
+    """
+    state = _read_state(selection.repository_root, selection.repository_name)
+    markers = state["tasks"]
+    assert isinstance(markers, dict)
+    observations: list[TaskAssetObservation] = []
+    for task in selection.tasks:
+        task_path = _task_path(task)
+        held = _held_roots(task.folder.root if tree is None else tree / task_path)
+        if _asset_roots(task) or held:
+            markers[task_path] = {
+                "commit": commit,
+                "dirty": False,
+                "held": held,
+                "inventory": _asset_inventory(task),
+            }
+            observations.append(
+                TaskAssetObservation(selection.repository_name, task_path, commit, False)
+            )
+        else:
+            markers.pop(task_path, None)
+    _write_state(selection.repository_root, state)
+    return tuple(observations)
+
+
+def _asset_inventory(task: Task | AssetLocation) -> list[dict[str, int | str]]:
+    if task.folder is None:
+        return []
+    task_root = task.folder.root
+    inventory: list[dict[str, int | str]] = []
+    for root in _asset_roots(task):
+        for path in (root, *sorted(root.rglob("*"))):
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise AssetError(f"Task assets support only regular files and directories: {path}")
+            stat = path.stat()
+            inventory.append(
+                {
+                    "path": path.relative_to(task_root).as_posix(),
+                    "type": "file" if path.is_file() else "directory",
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "executable": stat.st_mode & 0o111,
+                }
+            )
+    return inventory
+
+
+def validate_asset_paths(task_root: Path) -> None:
+    """Each asset root and every directory above it must be a real directory."""
+    paths = {
+        task_root / path for root in asset_roots(task_root) for path in (root, *Path(root).parents)
+    }
+    for path in sorted(paths):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise AssetError(f"asset directory must be a real directory: {path}")
+
+
+def _regular_files(root: Path) -> Iterator[Path]:
+    if root.is_symlink():
+        raise AssetError(f"Task assets support only regular files and directories: {root}")
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+            raise AssetError(f"Task assets support only regular files and directories: {path}")
+        if path.is_file():
+            yield path
+
+
+def _state_path(repository_root: Path) -> Path:
+    return repository_root / ".orbit-cache" / "assets.json"
+
+
+def _read_state(repository_root: Path, repository: str) -> dict[str, object]:
+    path = _state_path(repository_root)
+    if not path.is_file():
+        return {"schema_version": 1, "repository": repository, "tasks": {}}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AssetError(f"invalid asset state {path}: {exc}") from exc
+    if value.get("schema_version") != 1 or value.get("repository") != repository:
+        raise AssetError(f"incompatible asset state {path}")
+    if not isinstance(value.setdefault("tasks", {}), dict):
+        raise AssetError(f"invalid asset state {path}: tasks must be an object")
+    return value
+
+
+def _write_state(repository_root: Path, state: dict[str, object]) -> None:
+    path = _state_path(repository_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+@contextmanager
+def _repository_lock(repository_root: Path, *, exclusive: bool) -> Iterator[None]:
+    lock = repository_root / ".orbit-cache" / "assets.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Reference final state for calibrating the outcome verifier, not a desktop rollout.
-test "$ALE_HOME" = /Users/admin
+test "$ORBIT_HOME" = /Users/admin
 cat > /Users/admin/output/notice.rtf <<'RTF'
 {\rtf1\ansi\deff0{\fonttbl{\f0 Helvetica;}}
 \pard\qc\f0\fs48\b Community Design Meetup\b0\par

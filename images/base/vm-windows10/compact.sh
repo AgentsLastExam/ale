@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Finish a prepared Windows base offline (finalize.py, in ALE's VM builder), then rewrite
-# it without its zeroed clusters, uncompressed: `ale vm-image push` compresses each chunk
+# Finish a prepared Windows base offline (finalize.py, in Orbit's VM builder), then rewrite
+# it without its zeroed clusters, uncompressed: `orbit vm-image push` compresses each chunk
 # for the registry, and a Host builds Task layers on the pulled disk as it is. INPUT is
 # finished in place.
 set -euo pipefail
@@ -11,9 +11,9 @@ if [[ $# -ne 2 ]]; then
 fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
-tools="$here/../../../packages/ale-run/src/ale/run"
+tools="$here/../../../packages/orbit-run/src/orbit/run"
 input="$(realpath "$1")"
-builder="$(uv run python -c 'from ale.run.framework import MATERIALIZER_IMAGE; print(MATERIALIZER_IMAGE)')"
+builder="$(uv run python -c 'from orbit.run.framework import MATERIALIZER_IMAGE; print(MATERIALIZER_IMAGE)')"
 
 qemu-img check "$input"
 docker run --rm --runtime runc --device=/dev/kvm --network=none \

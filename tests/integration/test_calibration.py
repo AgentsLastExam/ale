@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.run.cli.tasks import _calibrate
+from orbit.core.config import RunConfig
+from orbit.run.cli.tasks import _calibrate
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -36,11 +36,11 @@ async def test_calibration_checks_every_case_against_its_expectation(
     (task / "solution/only-in-solution.txt").write_text("only the solution holds this")
     (task / "tests" / "verify.py").write_text(
         "from pathlib import Path\n"
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         "path = Path('/home/user/output/result.txt')\n"
         "text = path.read_text() if path.is_file() else ''\n"
         "reward = 1.0 if text == 'hello world' else 0.5 if text.startswith('hello') else 0.0\n"
-        "staged = Path('/home/user/.ale-solution/only-in-solution.txt').is_file()\n"
+        "staged = Path('/home/user/.orbit-solution/only-in-solution.txt').is_file()\n"
         "write({'reward': reward, 'length': len(text), 'solution_only': int(staged)})\n"
     )
     # A partial answer from the case's own asset root, and one that skips reading the input
@@ -49,7 +49,7 @@ async def test_calibration_checks_every_case_against_its_expectation(
     (partial / "assets").mkdir(parents=True)
     (partial / "assets" / "answer.txt").write_text("hello")
     (partial / "solve.sh").write_text(
-        'cp "$ALE_STAGE_DIR/assets/answer.txt" /home/user/output/result.txt\n'
+        'cp "$ORBIT_STAGE_DIR/assets/answer.txt" /home/user/output/result.txt\n'
     )
     hardcoded = task / "calibration" / "hardcoded-output"
     hardcoded.mkdir()
@@ -105,7 +105,7 @@ async def test_calibration_respects_artifact_policy_for_shared_verification(
         "result = {'reward':score,'details':{'raw':score}}\n"
     )
     if writer == "sdk":
-        script += "from ale_verify import write\nwrite(result)\n"
+        script += "from orbit_verify import write\nwrite(result)\n"
     else:
         script += (
             "Path('/logs/verifier/verification.json').write_text(json.dumps(result))\n"

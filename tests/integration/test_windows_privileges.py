@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.qemu import QemuProvider
-from ale.run.tasksets.manifest import load_task_folder
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.tasksets.manifest import load_task_folder
 from tests.support import provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
@@ -22,16 +22,16 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.nee
 async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admin(
     tmp_path: Path, mode: str
 ) -> None:
-    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to an Orbit Windows base disk")
     task = write_task(
         tmp_path / "task",
         name="agentslastexam/windows-privileges",
         config={
             "artifacts": [
-                r"C:\ale-copy\*.sgf",
-                r"C:\ale-copy\directory.json",
+                r"C:\orbit-copy\*.sgf",
+                r"C:\orbit-copy\directory.json",
                 r"C:\missing",
                 {"source": "kept", "exclude": ["*.tmp"]},
             ],
@@ -55,13 +55,13 @@ async def test_windows_framework_copies_protected_artifacts_and_verifies_as_admi
         r"""$ErrorActionPreference = 'Stop'
 python.exe -c "import ctypes; assert ctypes.windll.shell32.IsUserAnAdmin()"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-New-Item C:\ale-copy\directory.json -ItemType Directory -Force | Out-Null
-Set-Content C:\ale-copy\game.sgf 'protected' -NoNewline
-& icacls.exe C:\ale-copy\game.sgf /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' |
+New-Item C:\orbit-copy\directory.json -ItemType Directory -Force | Out-Null
+Set-Content C:\orbit-copy\game.sgf 'protected' -NoNewline
+& icacls.exe C:\orbit-copy\game.sgf /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' |
     Out-Null
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-New-Item C:\ale-copy\directory.json\loop -ItemType SymbolicLink `
-    -Target C:\ale-copy\directory.json | Out-Null
+New-Item C:\orbit-copy\directory.json\loop -ItemType SymbolicLink `
+    -Target C:\orbit-copy\directory.json | Out-Null
 New-Item C:\Users\user\Documents\kept -ItemType Directory -Force | Out-Null
 Set-Content C:\Users\user\Documents\kept\note.txt 'kept' -NoNewline
 Set-Content C:\Users\user\Documents\kept\scratch.tmp 'left' -NoNewline
@@ -74,7 +74,7 @@ Set-Content C:\Users\user\Documents\kept\scratch.tmp 'left' -NoNewline
     )
     (task / "solution/check.py").write_text(
         "from pathlib import Path\n"
-        "try: Path(r'C:\\ale-copy\\game.sgf').read_text()\n"
+        "try: Path(r'C:\\orbit-copy\\game.sgf').read_text()\n"
         "except PermissionError: pass\n"
         "else: raise AssertionError('agent could read Administrator-only output')\n"
     )
@@ -82,12 +82,12 @@ Set-Content C:\Users\user\Documents\kept\scratch.tmp 'left' -NoNewline
     (task / "tests/verify.py").write_text(
         "import ctypes\n"
         "from pathlib import Path\n"
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         "assert ctypes.windll.shell32.IsUserAnAdmin()\n"
         "v = {}\n"
-        "content = Path('C:\\\\ale-copy\\\\game.sgf').read_text()\n"
+        "content = Path('C:\\\\orbit-copy\\\\game.sgf').read_text()\n"
         "v['protected'] = float(content == 'protected')\n"
-        "v['directory'] = float(Path('C:\\\\ale-copy\\\\directory.json').is_dir())\n"
+        "v['directory'] = float(Path('C:\\\\orbit-copy\\\\directory.json').is_dir())\n"
         "v['missing'] = float(not Path('C:\\\\missing').exists())\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"

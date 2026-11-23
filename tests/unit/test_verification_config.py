@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from ale.core.config import RunConfig
+from orbit.core.config import RunConfig
 
 pytestmark = pytest.mark.unit
 
@@ -128,25 +128,25 @@ def test_sandbox_retention_is_run_owned_and_defaults_to_destroy() -> None:
     [
         ("linux", "linux", "/logs/verifier"),
         ("win32", "windows", "C:/logs/verifier"),
-        ("darwin", "macos", "/opt/ale/logs/verifier"),
+        ("darwin", "macos", "/opt/orbit/logs/verifier"),
     ],
 )
 def test_engine_and_verifier_write_to_the_same_platform_directory(
     platform, operating_system, directory
 ):
-    from ale.core.taskspec import OperatingSystem
-    from ale.run.protocol.episode_protocol import _verifier_dir, _verifier_dir_command
+    from orbit.core.taskspec import OperatingSystem
+    from orbit.run.protocol.episode_protocol import _verifier_dir, _verifier_dir_command
 
     # Reload only the verifier package in an isolated child; do not change the
     # test runner's platform or write any framework directory on the Host.
     code = """
 import importlib,json,sys
-import ale_verify
+import orbit_verify
 sys.platform=sys.argv[1]
-importlib.reload(ale_verify)
+importlib.reload(orbit_verify)
 written=[]
-ale_verify.atomic_json=lambda path, data: written.append(path.as_posix())
-ale_verify.write({'reward':0.5})
+orbit_verify.atomic_json=lambda path, data: written.append(path.as_posix())
+orbit_verify.write({'reward':0.5})
 print(json.dumps(written))
 """
     written = json.loads(subprocess.check_output([sys.executable, "-I", "-c", code, platform]))
@@ -164,7 +164,7 @@ print(json.dumps(written))
 @pytest.mark.skipif(os.name != "posix", reason="POSIX verifier directory commands")
 @pytest.mark.parametrize("entry", ["stale", "parent-link", "verifier-link"])
 def test_posix_verifier_reset_and_remove_on_native_tools(tmp_path: Path, entry: str) -> None:
-    from ale.run.protocol.episode_protocol import _POSIX_VERIFIER_REMOVE, _POSIX_VERIFIER_RESET
+    from orbit.run.protocol.episode_protocol import _POSIX_VERIFIER_REMOVE, _POSIX_VERIFIER_RESET
 
     parent, verifier = tmp_path / "logs", tmp_path / "logs/verifier"
     outside = tmp_path / "outside"

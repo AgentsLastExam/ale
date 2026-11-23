@@ -10,9 +10,9 @@ from threading import Barrier
 import pytest
 from pydantic import ValidationError
 
-from ale.core.blob import BlobRef, InlineText, MediaClass
-from ale.run import recording
-from ale.run.recording import INLINE_TEXT_LIMIT, BlobStore, EpisodeRecording, copy_trajectory
+from orbit.core.blob import BlobRef, InlineText, MediaClass
+from orbit.run import recording
+from orbit.run.recording import INLINE_TEXT_LIMIT, BlobStore, EpisodeRecording, copy_trajectory
 
 pytestmark = pytest.mark.unit
 
@@ -142,7 +142,7 @@ def test_recording_verifies_referenced_blob_bytes(tmp_path: Path) -> None:
                         "step_id": 1,
                         "source": "user",
                         "message": "x",
-                        "extra": {"ale": {"attachments": [ref.model_dump()]}},
+                        "extra": {"orbit": {"attachments": [ref.model_dump()]}},
                     }
                 ],
             }
@@ -174,7 +174,7 @@ def test_copied_trajectory_brings_the_blobs_it_references(tmp_path: Path) -> Non
                 "message": [
                     {"type": "image", "source": {"media_type": "image/png", "path": image.path}}
                 ],
-                "extra": {"ale": {"attachments": [output.model_dump()]}},
+                "extra": {"orbit": {"attachments": [output.model_dump()]}},
             }
         )
     )

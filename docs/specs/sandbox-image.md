@@ -10,25 +10,25 @@ an image named alone is used directly ([Source selection](#source-selection-and-
 A Linux Task may build from any x86-64 image with glibc that has:
 
 - the agent account the Task names with `[agent].user`, with a home; a VM build's base must
-  have it already, since ALE installs the framework for it before the build runs;
-- for a container, a long-lived command that ALE does not replace;
+  have it already, since Orbit installs the framework for it before the build runs;
+- for a container, a long-lived command that Orbit does not replace;
 - for a VM, a qcow2 disk of a bootable systemd system (the VM base is one);
 - for GUI work, a running desktop session, such as an X server with a window manager,
   that starts at the [desktop resolution](#desktop-resolution) it is given.
 
-Everything ALE itself needs it adds when it prepares the image, as one more layer on top
+Everything Orbit itself needs it adds when it prepares the image, as one more layer on top
 of the Task's own build or the image it names (the framework layer):
 
 - guestd, the guest service every sandbox operation goes through, under root-only
-  `/opt/ale`, so it always speaks the protocol of the engine driving it;
+  `/opt/orbit`, so it always speaks the protocol of the engine driving it;
 - the framework's own Python at a pinned version, which guestd runs on whatever Python the
-  image has (or lacks): `/opt/ale/python` on Linux and macOS, `C:\ProgramData\ALE\python` on
-  Windows. guestd runs it isolated (`-I`), in a directory only the framework writes, and so
-  does every root process guestd starts on it, so neither the image's `PYTHON*` variables,
-  which a container's exec inherits, nor the agent's files change their modules or the
-  buffering of guestd's replies. Only the framework's identity can run it, except on macOS,
-  where the agent's desktop tool and Harness helpers run it too; the agent's PATH never
-  includes it;
+  image has (or lacks): `/opt/orbit/python` on Linux and macOS,
+  `C:\ProgramData\Orbit\python` on Windows. guestd runs it isolated (`-I`), in a directory
+  only the framework writes, and so does every root process guestd starts on it, so neither
+  the image's `PYTHON*` variables, which a container's exec inherits, nor the agent's files
+  change their modules or the buffering of guestd's replies. Only the framework's identity
+  can run it, except on macOS, where the agent's desktop tool and Harness helpers run it
+  too; the agent's PATH never includes it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation, which
   every account may run, because the agent's `cua-desktop` MCP server runs it too;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
@@ -38,8 +38,8 @@ of the Task's own build or the image it names (the framework layer):
 - sudo, installed with the image's package manager when the image lacks it, so that any
   sandbox can be granted elevation; the grant itself is never part of the image
   ([Permissions](#permissions));
-- a marker file recording which framework the image carries: `/opt/ale/framework` on
-  Linux and macOS, `C:\ProgramData\ALE\framework` on Windows.
+- a marker file recording which framework the image carries: `/opt/orbit/framework` on
+  Linux and macOS, `C:\ProgramData\Orbit\framework` on Windows.
 
 A Linux or Windows VM disk, used directly or as a build's base, gets the same pieces,
 installed offline into a layer on the disk by the VM builder's libguestfs, so nothing on the
@@ -64,15 +64,15 @@ once its window manager or shell runs.
 
 ## What a Windows image needs
 
-A Windows Task builds `environment/build.ps1` on an ALE Windows base. The base signs its agent
+A Windows Task builds `environment/build.ps1` on an Orbit Windows base. The base signs its agent
 account in to a desktop automatically, with UAC on, and carries none of the framework; the
-Python it installs for all users is for Tasks and agents. ALE installs the framework offline
-into the build VM's disk, a layer on the base, before it boots, so the build talks to the
-same guestd as every later sandbox, and the Task's script cannot replace the framework's
-pieces:
+Python it installs for all users is for Tasks and agents. Orbit installs the framework
+offline into the build VM's disk, a layer on the base, before it boots, so the build talks
+to the same guestd as every later sandbox, and the Task's script cannot replace the
+framework's pieces:
 
-- the current guestd under `C:\ProgramData\ALE\guestd`, Cua Driver at the pinned version
-  under `C:\ProgramData\ALE\cua-driver`, and the framework's own Python;
+- the current guestd under `C:\ProgramData\Orbit\guestd`, Cua Driver at the pinned version
+  under `C:\ProgramData\Orbit\cua-driver`, and the framework's own Python;
 - a boot service, running as the system on that Python, that starts guestd and Cua
   Driver in the agent's session with the account's elevated token, so Cua Driver can reach
   elevated windows. The service limits those files to the system and Administrators,
@@ -82,27 +82,27 @@ pieces:
   Startup), each failing with the one thing it lacks.
 
 Elevation for `[agent].sudo` is granted per boot by the Host, not built into the disk, as
-on Linux ([Permissions](#permissions)). A Windows sandbox has a desktop for ALE to drive
+on Linux ([Permissions](#permissions)). A Windows sandbox has a desktop for Orbit to drive
 exactly when its image carries the framework's Cua Driver, so the Provider waits for a
 screenshot in every sandbox it boots.
 How the install works, and what it costs, is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#qemu).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#qemu).
 
 ## What a macOS image needs
 
 A macOS Task may use any Tart image that signs the Task's account in to its desktop
-automatically. ALE adds the framework as it does to a Linux or Windows disk, offline into
+automatically. Orbit adds the framework as it does to a Linux or Windows disk, offline into
 a copy of the image, once per image, framework and account: guestd, a Python of the
 framework's own, since a stock macOS has none recent enough, and Cua Driver with the
 privacy grants macOS otherwise takes only through its settings. The copy is booted once so
 macOS finishes the account's first login, whose one-time notices would otherwise appear in
 every sandbox, and kept as the local image every sandbox starts from. A Task's `build.sh`
-runs as root in a VM of its base framed for `admin`, the account ALE controls the VM
+runs as root in a VM of its base framed for `admin`, the account Orbit controls the VM
 through, and the image it leaves is framed in turn for the Task's account, which the build
 may create. Every macOS sandbox the agent works in shows that account's desktop.
 Elevation for `[agent].sudo` is granted or taken away at each boot, as on Linux
 ([Permissions](#permissions)). What else the image must allow is in the
-[Orchard Provider](../../packages/ale-run/src/ale/run/providers/README.md#orchard).
+[Orchard Provider](../../packages/orbit-run/src/orbit/run/providers/README.md#orchard).
 
 ## Desktop resolution
 
@@ -114,9 +114,9 @@ refuses a desktop that reports another size, and records it with the allocation 
 RunLock. A container's desktop is its image's own X server, so the image must start it at
 the size `VNC_RESOLUTION` names, a name VNC desktop images share that asks for no VNC; a VM's
 desktop starts at its display's preferred mode. How each Provider sets them is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#desktop-resolution).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#desktop-resolution).
 
-## ALE base images
+## Orbit base images
 
 - `container-ubuntu22-base` provides an Ubuntu 22.04 GNOME desktop container and the
   `user` account.
@@ -127,7 +127,7 @@ desktop starts at its display's preferred mode. How each Provider sets them is i
 - The Windows 10 base provides a logged-in desktop, system Python, WinGet, Chocolatey, and
   the runtimes required by autonomous agents.
 
-No base carries guestd or Cua Driver; ALE installs both when it prepares a Task image or
+No base carries guestd or Cua Driver; Orbit installs both when it prepares a Task image or
 boots a disk. The bases do not contain domain stacks, benchmark data, databases, robotics
 suites, or Task-specific tools.
 
@@ -142,7 +142,7 @@ Repository sources are separated by responsibility:
 
 ## Versions
 
-Every ALE image is published once per version and never overwritten: the publishing
+Every Orbit image is published once per version and never overwritten: the publishing
 workflow skips a version the registry already has, and no `latest` tag is published, since
 a tag that every change overwrote would change every checkout's next build behind its back.
 
@@ -150,12 +150,12 @@ The VM builder and the QEMU runner run the engine's own logic, so they are publi
 the engine's version, such as `0.2.0`; an engine runs exactly those of its own version, and
 a changed one ships with the next engine version. A base carries no part of the framework,
 so nothing in it depends on the engine: each base has its own version, raised when the base
-itself changes, and any engine runs any version of it. A container runtime that ALE builds
+itself changes, and any engine runs any version of it. A container runtime that Orbit builds
 for Hosts to install depends on no engine either and has a version of its own.
 
-A Task may build from any image. Task repositories maintained with ALE name an exact
-version of an ALE base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps
-building from the same base until its author moves it; `ale new-task` writes the base's
+A Task may build from any image. Task repositories maintained with Orbit name an exact
+version of an Orbit base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps
+building from the same base until its author moves it; `orbit new-task` writes the base's
 current version.
 
 ## Task image
@@ -175,19 +175,19 @@ RUN mkdir -p /home/user/output \
     && chown -R user:user /home/user/input /home/user/output
 ```
 
-The final stage starts directly from an ALE base. General third-party builder stages are
-allowed, but a Task never inherits another Task's final image or an ALE domain image.
+The final stage starts directly from an Orbit base. General third-party builder stages are
+allowed, but a Task never inherits another Task's final image or an Orbit domain image.
 There is no Image Tree. Docker layer caching handles repeated installation without adding
 a cross-Task contract.
 
 `COPY .` cannot expose `setup/`, `tests/`, `solution/` or `calibration/`: the last three are outside the
-build context, and ALE excludes `setup/` after the Task's own `.dockerignore`
+build context, and Orbit excludes `setup/` after the Task's own `.dockerignore`
 rules, so a Task cannot bring it back. Files in the context, its asset root included, use
-ordinary relative `COPY`; ALE creates no generated view or named BuildKit context.
+ordinary relative `COPY`; Orbit creates no generated view or named BuildKit context.
 
 ## Source selection and identity
 
-Before any solver model call, ALE prepares the Task's image; failure is terminal. The Task
+Before any solver model call, Orbit prepares the Task's image; failure is terminal. The Task
 folder decides how:
 
 - `environment/Dockerfile` builds a Linux container. Its `FROM` names its base, so
@@ -199,7 +199,7 @@ folder decides how:
 The Task folder decides every image's kind as the Task loads, so loading reads nothing
 else: Windows and macOS images are VMs, a Linux absolute path is a VM disk, and only a Linux
 image named alone by a registry reference may be either. Its manifest decides: an OCI
-manifest whose `artifactType` is `application/vnd.ale.vm-disk.v1` is an ALE VM disk, a
+manifest whose `artifactType` is `application/vnd.orbit.vm-disk.v1` is an Orbit VM disk, a
 container image's manifest or index (OCI or Docker) is a container, and anything else is
 refused, naming its type. The Run reads each such manifest once, with the Host's Docker
 credentials, before it selects a Provider, places a Sandbox or records anything about the
@@ -212,12 +212,12 @@ both recorded immutably.
 On Linux and Windows, `[environment].image` may also be an absolute host path to a
 standalone qcow2; a macOS image is always a Tart OCI reference. Local disks are structurally
 checked and their actual file bytes are SHA-256 hashed at preparation, without contacting a
-registry. Disks with backing or external data files are rejected: ALE knows a layer's parent
-only for the layers it makes, so a disk it is handed must hold its whole content. The
+registry. Disks with backing or external data files are rejected: Orbit knows a layer's
+parent only for the layers it makes, so a disk it is handed must hold its whole content. The
 operator must keep prepared local disks unchanged while they are in use.
 
 Any other Linux or Windows VM image names a VM disk published to an OCI registry with
-`ale vm-image push`, and its identity is the manifest digest. The standalone qcow2 travels
+`orbit vm-image push`, and its identity is the manifest digest. The standalone qcow2 travels
 as fixed-size chunks, each compressed alone as one layer, because a whole disk in one layer
 approaches registries' documented limits on a layer and an upload, and downloads over a
 single connection, which reaches about half the throughput of several. Every chunk is
@@ -225,13 +225,14 @@ checked against the digest of its uncompressed bytes, and a downloaded one also 
 layer digest, before the disk is used. The published qcow2 is itself uncompressed, so the
 one copy a Host pulls, once per manifest digest, is also the base of the layers every Task
 builds on it, read without decompressing. Its format is in the
-[Providers README](../../packages/ale-run/src/ale/run/providers/README.md#registry-disks).
+[Providers README](../../packages/orbit-run/src/orbit/run/providers/README.md#registry-disks).
 
 A Provider may keep a prepared VM disk as a chain of layers, each holding only what changed
 on the one below, rather than flattening it, so a Host stores a base once under all the
 Tasks built on it; the QEMU Provider keeps a Linux or Windows Task image and a snapshot
-that way ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#disk-layers)).
-A layer's identity is the hash of its parent's identity and the SHA-256 of its own bytes, as
+that way
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#disk-layers)). A
+layer's identity is the hash of its parent's identity and the SHA-256 of its own bytes, as
 an OCI ChainID is; the bottom disk's is the identity it was resolved under, whatever form a
 Host stores it in. Each layer is hashed once, when it is made, and a chain in which a layer
 sits on another parent than the one it recorded is refused, so the top layer's identity
@@ -260,7 +261,7 @@ without its `[solution]` and `[[calibration]]` tables, computed once per Task fo
 of these reaches an evaluated agent unless `tests/` validated its rounds, so changing
 verification, the reference solution or another calibration case keeps a retained solver
 reverifiable. `validation/` is part of the digest, because the agent receives its results.
-The asset roots and engine-owned `.ale-cache` are excluded, so loading a Task never reads
+The asset roots and engine-owned `.orbit-cache` are excluded, so loading a Task never reads
 asset bytes. File timestamps do not enter this hash. Reverification requires this digest to
 match the source episode and the Task's asset observation to equal the source RunLock's: the
 same repository, Task path and commit, clean on both sides. Any outside change, any asset
@@ -269,7 +270,7 @@ source evidence requires a fresh solver run, and so does a source whose rounds `
 validated once the Task has changed at all, since its agent received `tests/`'s results.
 This also protects direct CLI use.
 
-When only verification changed, ALE does not build or resolve the solver image again.
+When only verification changed, Orbit does not build or resolve the solver image again.
 It attaches the retained solver using the source RunLock's exact image identity, takes the
 image's kind from that RunLock rather than the registry, and prepares only a separate
 verifier image when needed. A solver image declared otherwise than in the source RunLock
@@ -282,21 +283,21 @@ not mutable tags that concurrent builds can overwrite.
 ## VM preparation
 
 A Linux or Windows Task image is built in a temporary VM whose disk is a framed layer on
-the resolved base. ALE stages only `environment/` less `setup/` and executes `build.sh` or
+the resolved base. Orbit stages only `environment/` less `setup/` and executes `build.sh` or
 `build.ps1` there under the framework's identity, with network access for unattended
 installation. The script has `build_timeout_sec`, one hour by default, for installation,
-integrity checks and extraction; Host-to-VM staging happens before that timer starts. ALE
+integrity checks and extraction; Host-to-VM staging happens before that timer starts. Orbit
 removes the build materials, shuts down the VM, and keeps its disk as the Task's layer on
 the base. Linux and Windows share this one path, its cache and its layers, and a Task never
 assembles boot or a disk itself. Reuse covers the whole build and is keyed by base,
 framework, builder, and every file staged; there is no per-command cache or new recipe
 language. Authoring details belong to [Task authoring](task-authoring.md#environment).
 
-Windows 10 has no public ISO build path in ALE. The current Windows base starts from the GCP
-image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
-recipe installs and pins ALE's cross-platform components, and `compact.sh` checks the
+Windows 10 has no public ISO build path in Orbit. The current Windows base starts from the
+GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
+recipe installs and pins Orbit's cross-platform components, and `compact.sh` checks the
 resulting qcow2 and rewrites it uncompressed. Episodes always cold-boot a fresh overlay,
-over a retention snapshot when they continue one. ALE creates no ready snapshot or warm
+over a retention snapshot when they continue one. Orbit creates no ready snapshot or warm
 pool; the [Fleet](fleet.md) places Sandboxes on other machines but starts none before a
 request.
 
@@ -309,7 +310,7 @@ An episode overlay isolates disk changes while preserving Windows permissions an
 execution rules. Use each asset's qualified deployment recipe; see the
 [Windows Task image guide](../guides/windows-task-images.md).
 
-For assets downloaded by the image script, ALE hashes the authored reference, not unseen remote
+For assets downloaded by the image script, Orbit hashes the authored reference, not unseen remote
 bytes. Pin and verify the expected digest before deployment; changing that pin invalidates reuse.
 
 GUI image qualification includes a real visual agent completing a task whose decisive
@@ -344,8 +345,8 @@ reset/seeding, generated values, writable copies, dynamic service start/reset, a
 checks. Setup is not a second image builder.
 
 Small static data may be committed anywhere in the build context. Large data is a
-[Task asset](task-assets.md) restored by `ale assets pull`, then the same image build path.
-Runtime never downloads it.
+[Task asset](task-assets.md) restored by `orbit assets pull`, then the same image build
+path. Runtime never downloads it.
 
 ## Verifier images
 
@@ -375,8 +376,8 @@ same rules, from `[verifier.validation.environment].image` or `validation/Docker
 `validation/` as context, or else the image it inherits: a separate verifier's of `tests/`,
 prepared once for both, else the solver's.
 
-Any verifier image must satisfy the same guest contract and permit ALE to stage
-`ale_verify`. Verification runs as framework-controlled Task code.
+Any verifier image must satisfy the same guest contract and permit Orbit to stage
+`orbit_verify`. Verification runs as framework-controlled Task code.
 
 ## Runtime behavior
 
@@ -409,28 +410,28 @@ Given a conforming image, the Docker Provider:
 - observes the resulting image, runtime and resource allocation, and refuses a container
   that ran otherwise than its leaf asked, so a Host's defaults never stand in for what the
   RunLock records
-  ([Providers](../../packages/ale-run/src/ale/run/providers/README.md#docker-runtimes));
-- labels every ALE container with episode, physical role, requested retention, GPU
+  ([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#docker-runtimes));
+- labels every Orbit container with episode, physical role, requested retention, GPU
   identity and, on a GPU it shares, the memory it reserved there;
 - destroys by default, or after framework sanitation returns a retained handle or saves a
   snapshot.
 
 The QEMU Provider applies the same retention contract to its runner container and the
 episode qcow2 overlay mounted into it. `keep` leaves both alive and discoverable;
-`ale sandbox destroy HANDLE` removes both. `snapshot` keeps the guest's disk as a layer on
+`orbit sandbox destroy HANDLE` removes both. `snapshot` keeps the guest's disk as a layer on
 its Task's disk. Provider-qualified QEMU handles prevent the runner from being mistaken
 for a container sandbox.
 
 QEMU and Firecracker enforce Task egress in the runner network namespace, outside the
-guest. The guest does not need an OS-specific firewall implementation for ALE policy.
+guest. The guest does not need an OS-specific firewall implementation for Orbit policy.
 
 The Firecracker Provider runs a container Task's prepared image as a microVM with its own
 kernel, under the same contract as the Docker Provider; how is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#firecracker).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#firecracker).
 
 The Daytona Provider runs Linux container images, with or without GPUs, on Daytona's
 cloud under the same contract; how it meets it there is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#daytona). Two of its
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#daytona). Two of its
 differences reach other modules: the RunLock's observed image is the digest pushed to
 Daytona's registry, and memory and writable storage must be whole GiB, refused rather
 than rounded.
@@ -441,14 +442,14 @@ Retained handles are always provider-qualified: `docker:<runtime-id>` for contai
 for a Sandbox kept on the [Fleet](fleet.md#lifecycle), whichever leaf its Node used.
 Unqualified handles are rejected. Listing, destroying and attaching are Provider
 operations, routed by the Provider a handle or RunLock names, so a new backend needs no CLI
-change, apart from the Fleet, which `ale sandbox` reaches at `$ALE_FLEET_URL` and
+change, apart from the Fleet, which `orbit sandbox` reaches at `$ORBIT_FLEET_URL` and
 `--continue-from` through the Run's own Fleet connection.
 
 GPU workload libraries such as CUDA, PyTorch, and simulators, and the Vulkan ICD and GLVND
 EGL vendor files a renderer loads, remain the Task image's responsibility: not every
 injection path mounts those files. Tasks request a count and the models they accept
 ([GPUs](task-authoring.md#gpus)). Provider configuration may narrow the devices a Provider
-leases, such as Docker host indices, but never widens the models a Task accepts; ALE
+leases, such as Docker host indices, but never widens the models a Task accepts; Orbit
 records actual UUIDs and models. QEMU GPU passthrough remains a Provider capability, not a
 Task image declaration.
 
@@ -457,7 +458,7 @@ has each part (CUDA, Vulkan, EGL, the video codecs), registered with the sandbox
 so a Task finds the same driver whichever backend runs it. The Provider, not the image,
 decides which Host driver files enter the sandbox, because an image would otherwise choose
 what of the Host reaches it. How each Provider does it is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-driver-capabilities).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#gpu-driver-capabilities).
 
 ### GPU memory
 
@@ -483,14 +484,14 @@ whole GPUs gives it only such a model. A leaf that shares a GPU:
   past a share is memory another Sandbox was admitted with, and going past it is the
   Sandbox's own doing, so the episode goes on with what the agent makes of it rather than
   ending in an environment error that would rerun or unscore it. Where a limit's
-  accounting fails, which is ALE's failure, it stops the Sandbox and the episode ends in an
-  environment error that says what used how much. Every selection says which leaves only
+  accounting fails, which is Orbit's failure, it stops the Sandbox and the episode ends in
+  an environment error that says what used how much. Every selection says which leaves only
   watch, and for how many Sandboxes;
 - records in the RunLock what it reserved on each GPU, how the Sandbox is held to it, and
   each GPU's total and free memory when it admitted the Sandbox.
 
 How each leaf does it is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#gpu-memory).
 
 ## Permissions
 
@@ -512,7 +513,7 @@ are framework-chosen paths and resolve normally.
 
 Solver and oracle use the image's agent account. Windows guestd runs elevated in that
 account's interactive session and launches agent commands with the desktop's limited
-token, unless the Host supplies the existing SMBIOS `ale-sudo` grant. UAC and a limited
+token, unless the Host supplies the existing SMBIOS `orbit-sudo` grant. UAC and a limited
 desktop session are required; the Provider checks both framework and agent privileges
 before Task execution. A Windows Task image is rebuilt when the framework changes, and a
 disk named directly by `[environment].image` is framed like any other.
@@ -523,7 +524,7 @@ and without `[agent].sudo`, its solver and its verifier alike, and a Sandbox con
 a snapshot gets what its own request asks for. On Linux and macOS the root guestd grants the
 agent's account elevation, or revokes every way up through sudo and the groups that make
 administrators; how is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#agent-elevation-on-linux-and-macos).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#agent-elevation-on-linux-and-macos).
 Nothing can keep a root account from elevating, so a root agent is elevated: its
 `[agent].sudo` is true unless written, a Task writing it false fails to load, and the agent
 needs no sudo program. Grants, and their absence, are verified and recorded: a
@@ -531,7 +532,7 @@ Linux or macOS sandbox the agent works in is refused when its guest service is n
 when a requested grant does not work, or when an agent that did not request one can still
 use sudo.
 
-ALE does not pre-create artifacts or repair their ownership: image/setup/agent code owns
+Orbit does not pre-create artifacts or repair their ownership: image/setup/agent code owns
 their type and existence.
 
 ## Provider selection
@@ -558,7 +559,7 @@ artifacts, when its Task has any. One rule compares needs with a profile, naming
 the profile misses, wherever a Provider or Node is chosen: in a Run's selection, in every
 leaf's `create`, and in the Fleet's placement, so a Sandbox is accepted or refused the same
 way wherever it is asked for. A leaf may also refuse by rules no profile states
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#provider-ids-and-profiles)
 lists them); they hold wherever it runs, so selection asks them of a leaf, and of the leaves
 a scheduler would use, by the method `create` asks. A request that `create` would refuse is
 thus refused before the Run starts.
@@ -631,10 +632,10 @@ Task content (the engine).
 | Every Sandbox reaches its Gateway at the same fixed port, whatever port the Host serves it on, and a reattached Sandbox reaches a later run's Gateway there: an agent may keep the address in its native session | Provider, outside the agent's reach | `test_a_sealed_sandbox_reaches_its_gateway_and_nothing_else`, `test_a_reattached_sandbox_reaches_a_later_gateway_at_the_same_address` |
 | Resources are applied or rejected; the RunLock records the observed image and allocation, with the Provider selected for the Sandbox and the leaf whose profile served it | Provider | `test_ready_sandbox_reports_observed_image_and_resources`, `test_rejects_a_request_it_cannot_serve` |
 | A container Sandbox that asks for the container features a profile declares has each of them, as root | Provider in `create`; the Run's preflight on the Host | `test_gives_every_container_feature_it_declares` |
-| A process past the memory the Task declares is ended alone where the kernel can, and the Sandbox goes on; a Sandbox, or its guest service, lost after an OOM kill in it since it started raises `MemoryExhaustedError`, whether the kill was for the Sandbox's memory or the Host's, with what showed it; where nothing records the kill, the loss is a lost guest ([how each Provider tells](../../packages/ale-run/src/ale/run/providers/README.md#memory)) | Provider, explaining a lost guest connection | `test_one_process_past_the_sandboxs_memory_dies_alone`, `test_a_sandbox_lost_to_its_own_memory_says_so` |
-| A Sandbox that names `storage_mb` is held to it, or refused: by writable storage of its own, at least that size, where a write past it fails as on a full disk and the Sandbox goes on; or by measuring from outside the Sandbox, never by asking it, all that has been written over its image, and ending it once that passes `storage_mb`, after which its calls raise `StorageExhaustedError` ([how each Provider does](../../packages/ale-run/src/ale/run/providers/README.md#provider-ids-and-profiles)) | Provider, outside the agent's reach | `test_a_sandbox_is_held_to_its_storage` |
+| A process past the memory the Task declares is ended alone where the kernel can, and the Sandbox goes on; a Sandbox, or its guest service, lost after an OOM kill in it since it started raises `MemoryExhaustedError`, whether the kill was for the Sandbox's memory or the Host's, with what showed it; where nothing records the kill, the loss is a lost guest ([how each Provider tells](../../packages/orbit-run/src/orbit/run/providers/README.md#memory)) | Provider, explaining a lost guest connection | `test_one_process_past_the_sandboxs_memory_dies_alone`, `test_a_sandbox_lost_to_its_own_memory_says_so` |
+| A Sandbox that names `storage_mb` is held to it, or refused: by writable storage of its own, at least that size, where a write past it fails as on a full disk and the Sandbox goes on; or by measuring from outside the Sandbox, never by asking it, all that has been written over its image, and ending it once that passes `storage_mb`, after which its calls raise `StorageExhaustedError` ([how each Provider does](../../packages/orbit-run/src/orbit/run/providers/README.md#provider-ids-and-profiles)) | Provider, outside the agent's reach | `test_a_sandbox_is_held_to_its_storage` |
 | Destroy is idempotent; retained sandboxes can be listed and destroyed through their Provider | Provider | `test_destroy_is_idempotent`, `test_a_retained_sandbox_can_be_listed_and_destroyed` |
-| A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/ale-run/src/ale/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
+| A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/orbit-run/src/orbit/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
 | A snapshot holds the disk, any number of Sandboxes boot from it, each with its own request's role and resources, its `storage_mb` counting what the snapshot holds, and it is listed and destroyed through its Provider, never under a Sandbox booted from it; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | A Provider that holds a Sandbox only until a set time declares the longest it holds one (`max_duration_sec`), gives each the latest time to begin saving it (`deadline`), starts one whose request names a `duration_sec` only where it lasts that long, and explains a Sandbox its scheduler ended with `AllocationEndedError` ([Moves](episode-protocol.md#moves)) | Provider in `create`; the Run's selection | Slurm's unit tests and `tests/integration/test_slurm_segments.py` |
 | A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |
@@ -645,11 +646,11 @@ Task content (the engine).
 backend run the agent, or a verifier, with the network while its RunLock said `block`. A
 backend that cannot change policy at runtime raises there, and one that cannot apply a policy
 leaves its mode out of its profiles. A Provider is complete when it passes
-`ale.core.testkit.ProviderConformance`; an escape the suite cannot observe, such as a
+`orbit.core.testkit.ProviderConformance`; an escape the suite cannot observe, such as a
 platform's own in-sandbox service, is that Provider's to close and to check in `create`.
 
 ## Base-image changes
 
-Base build sources live in the ALE engine repository and are Provider-conformance tested.
+Base build sources live in the Orbit engine repository and are Provider-conformance tested.
 Changing them changes every Task foundation and requires image contract tests. Task
-contributors add dependencies to their own `environment/` rather than adding domain bases to ALE.
+contributors add dependencies to their own `environment/` rather than adding domain bases to Orbit.

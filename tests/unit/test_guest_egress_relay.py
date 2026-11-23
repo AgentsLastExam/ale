@@ -12,10 +12,10 @@ from typing import Any
 
 import pytest
 
-from ale.core.taskspec import NetworkMode, NetworkPolicy
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.guestd import egress
+from orbit.core.taskspec import NetworkMode, NetworkPolicy
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.session import GatewaySession, SessionRegistry
+from orbit.run.guestd import egress
 
 pytestmark = pytest.mark.unit
 

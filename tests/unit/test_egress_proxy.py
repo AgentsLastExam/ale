@@ -16,11 +16,11 @@ from collections.abc import AsyncIterator
 import pytest
 from aiohttp import ClientSession
 
-from ale.core.taskspec import NetworkMode, NetworkPolicy
-from ale.run.gateway import proxy as proxy_module
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, SessionRegistry
+from orbit.core.taskspec import NetworkMode, NetworkPolicy
+from orbit.run.gateway import proxy as proxy_module
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession, SessionRegistry
 
 pytestmark = pytest.mark.unit
 

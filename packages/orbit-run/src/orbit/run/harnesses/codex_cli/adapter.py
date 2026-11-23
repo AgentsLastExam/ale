@@ -1,0 +1,155 @@
+"""Codex CLI configuration and invocation."""
+
+from __future__ import annotations
+
+import json
+import shlex
+from pathlib import PurePosixPath
+
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses.base import (
+    LOG_ROOT,
+    CliCommand,
+    CliHarness,
+    NativeResult,
+    install_skills,
+)
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+
+from . import trajectory
+from .settings import CodexCliSettings
+
+DEFAULT_CLI_VERSION = "0.146.0"
+
+
+class CodexCliHarness(CliHarness):
+    """Runs Codex CLI's non-interactive ``exec`` mode inside the sandbox."""
+
+    name = "codex-cli"
+    package = "@openai/codex"
+    binary = "codex"
+    default_version = DEFAULT_CLI_VERSION
+    settings_type = CodexCliSettings
+    settings: CodexCliSettings
+    logs = (LOG_ROOT, ".codex-orbit/sessions", trajectory.TRACES)
+    # Its CODEX_HOME, where a login keeps its credentials.
+    credentials = (".codex-orbit/auth.json",)
+
+    async def install_resources(
+        self,
+        sandbox: Sandbox,
+        session: HarnessSession,
+        resources: EffectiveAgentResources,
+    ) -> None:
+        codex_home = agent_path(session.home) / ".codex-orbit"
+        skills_root = codex_home / "skills"
+        await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
+        await install_skills(sandbox, session, resources, skills_root)
+
+        lines = [
+            'model_provider = "orbit"',
+            f"model = {json.dumps(session.model)}",
+            "check_for_update_on_startup = false",
+            'approval_policy = "never"',
+            'sandbox_mode = "danger-full-access"',
+            # Codex searches by default, on OpenAI's side.
+            f"web_search = {json.dumps(self._web_search(session))}",
+        ]
+        if self.settings.reasoning_effort != "default":
+            lines.append(f"model_reasoning_effort = {json.dumps(self.settings.reasoning_effort)}")
+        lines.extend(
+            [
+                "",
+                "[model_providers.orbit]",
+                'name = "Orbit Gateway"',
+                f"base_url = {json.dumps(session.gateway_url + '/v1')}",
+                'env_key = "ORBIT_GATEWAY_TOKEN"',
+                'wire_api = "responses"',
+                "",
+            ]
+        )
+        for resolved in resources.mcp_servers:
+            server = resolved.server
+            if resolved.name == CUA_DESKTOP_NAME:
+                await stage_cua_desktop(sandbox, session.home)
+            lines.append(f"[mcp_servers.{json.dumps(resolved.name)}]")
+            if isinstance(server, StdioMcpServer):
+                lines.append(
+                    f"command = {json.dumps(server.command.replace('{home}', session.home))}"
+                )
+                args = [arg.replace("{home}", session.home) for arg in server.args]
+                lines.append(f"args = [{', '.join(json.dumps(arg) for arg in args)}]")
+                if server.cwd:
+                    lines.append(f"cwd = {json.dumps(server.cwd.replace('{home}', session.home))}")
+                if server.environment:
+                    rendered = ", ".join(
+                        f"{json.dumps(key)} = {json.dumps(value.replace('{home}', session.home))}"
+                        for key, value in sorted(server.environment.items())
+                    )
+                    lines.append(f"env = {{ {rendered} }}")
+            else:
+                lines.append(f"url = {json.dumps(server.url)}")
+                if resolved.headers:
+                    rendered = ", ".join(
+                        f"{json.dumps(key)} = {json.dumps(value)}"
+                        for key, value in sorted(resolved.headers.items())
+                    )
+                    lines.append(f"http_headers = {{ {rendered} }}")
+            lines.append("")
+        await sandbox.write_file(
+            codex_home / "config.toml",
+            ("\n".join(lines) + "\n").encode(),
+            identity=Identity.AGENT,
+        )
+
+    def _web_search(self, session: HarnessSession) -> str:
+        return "live" if self.settings.web_search and session.provider_web_tools else "disabled"
+
+    async def prepare_command(
+        self,
+        prompt_path: str,
+        sandbox: Sandbox,
+        session: HarnessSession,
+        *,
+        native_session_id: str | None,
+    ) -> CliCommand:
+        argv = [
+            "codex",
+            "exec",
+            "--json",
+            "--model",
+            session.model,
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+        ]
+        if native_session_id is not None:
+            argv.extend(["resume", native_session_id])
+        # `-` reads the prompt from stdin.
+        argv.append("-")
+        script = (
+            "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN; "
+            f"{shlex.join(argv)} < {shlex.quote(prompt_path)}"
+        )
+        env = {
+            **await npm_env(sandbox, session.home),
+            "CODEX_HOME": str(agent_path(session.home) / ".codex-orbit"),
+            # The rollout keeps no record of a code-mode script's shell commands; this does.
+            "CODEX_ROLLOUT_TRACE_ROOT": str(agent_path(session.home) / trajectory.TRACES),
+            "NO_COLOR": "1",
+            "ORBIT_GATEWAY_TOKEN": session.token,
+        }
+        # Codex chooses a new thread's ID itself, so only a resume asks for one.
+        return CliCommand(script, env, native_session_id)
+
+    def read_result(self, stdout: str) -> NativeResult:
+        return trajectory.read_result(stdout)
+
+    def is_session_file(self, path: PurePosixPath, session_id: str) -> bool:
+        return trajectory.is_session_file(path, session_id)
+
+    def parse_trajectory(self, context: TrajectoryParseContext) -> AtifTrajectory:
+        return trajectory.parse_trajectory(context)

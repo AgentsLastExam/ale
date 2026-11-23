@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.sandbox import SandboxRequest
-from ale.run.providers.docker import DockerProvider
-from ale.run.task_images import prepare_task_image
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.sandbox import SandboxRequest
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.task_images import prepare_task_image
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import CONTAINER_BASE, write_task
 
 pytestmark = [pytest.mark.needs_docker]

@@ -17,22 +17,22 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-from ale.core.config import RunTimeouts, SandboxRetentionConfig
-from ale.core.errors import AgentError, AgentRefusalError, HarnessLimitError, PhaseTimeoutError
-from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.trace import read_jsonl
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.episode import run_episode, run_episode_with_retries
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import Limits
-from ale.run.harnesses.builtin import NopHarness, OracleHarness
-from ale.run.protocol import episode_protocol
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.task_images import prepare_task_image, prepare_verifier_image
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import RunTimeouts, SandboxRetentionConfig
+from orbit.core.errors import AgentError, AgentRefusalError, HarnessLimitError, PhaseTimeoutError
+from orbit.core.harness import AgentRun, AutonomousHarness, HarnessSession
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.trace import read_jsonl
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode, run_episode_with_retries
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import Limits
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness
+from orbit.run.protocol import episode_protocol
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.task_images import prepare_task_image, prepare_verifier_image
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import edit_task_config, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -110,7 +110,7 @@ async def test_a_hanging_agent_times_out_and_keeps_its_trace(
         (result.run_dir / "trajectory.json").read_text()
     )
     assert trajectory.steps[0].source == "user"
-    assert trajectory.extra["ale"]["incomplete"] is True
+    assert trajectory.extra["orbit"]["incomplete"] is True
     assert any(phase.phase == "agent" for phase in result.record.phases)
 
 
@@ -209,7 +209,7 @@ async def test_runtime_agent_timeout_destroys_descendants_and_does_not_retry(
         "docker",
         "ps",
         "--filter",
-        f"label=ale.episode={result.episode_id}",
+        f"label=orbit.episode={result.episode_id}",
         "--format",
         "{{.Names}}",
         stdout=asyncio.subprocess.PIPE,
@@ -253,7 +253,7 @@ async def test_a_timed_out_episode_leaves_no_container_behind(
         "docker",
         "ps",
         "--filter",
-        f"label=ale.episode={result.episode_id}",
+        f"label=orbit.episode={result.episode_id}",
         "--format",
         "{{.Names}}",
         stdout=asyncio.subprocess.PIPE,

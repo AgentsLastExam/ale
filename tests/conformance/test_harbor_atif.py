@@ -1,4 +1,4 @@
-"""The canonical ALE document is accepted directly by the adjacent Harbor checkout."""
+"""The canonical Orbit document is accepted directly by the adjacent Harbor checkout."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from tests.support import sibling_checkout
 
-from ale.core.trajectory import (
+from orbit.core.trajectory import (
     AtifAgent,
     AtifAudioSource,
     AtifContentPart,
@@ -73,7 +73,7 @@ def test_harbor_accepts_tools_images_audio_subagents_and_continuation(tmp_path: 
         trajectory_id="root",
         session_id="session",
         continued_trajectory_ref="segments/next.json",
-        agent=AtifAgent(name="ale", version="1", model_name="model"),
+        agent=AtifAgent(name="orbit", version="1", model_name="model"),
         steps=[
             AtifStep(
                 step_id=1,

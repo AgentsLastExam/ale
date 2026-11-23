@@ -20,24 +20,24 @@ from test_runtime_contracts import make_lock
 from tests.support import edit_task_config
 from typer.testing import CliRunner
 
-from ale.core.config import RunConfig
-from ale.core.errors import TaskDefinitionError
-from ale.core.harness import HarnessSession
-from ale.core.result import FailureInfo, ResultRecord
-from ale.core.sandbox import ExecResult, PreparedTaskImage
-from ale.core.taskspec import CalibrationCase, ImageKind, OperatingSystem, TaskConfig
-from ale.core.verdict import Status, Verdict
-from ale.run.assets import asset_roots
-from ale.run.cli.main import app
-from ale.run.episode import EpisodeResult
-from ale.run.gateway.session import GatewaySession
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.lint import lint_repository
-from ale.run.providers import ProviderRegistry
-from ale.run.recording import atomic_write_json
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
-from ale_verify import read_result
+from orbit.core.config import RunConfig
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.harness import HarnessSession
+from orbit.core.result import FailureInfo, ResultRecord
+from orbit.core.sandbox import ExecResult, PreparedTaskImage
+from orbit.core.taskspec import CalibrationCase, ImageKind, OperatingSystem, TaskConfig
+from orbit.core.verdict import Status, Verdict
+from orbit.run.assets import asset_roots
+from orbit.run.cli.main import app
+from orbit.run.episode import EpisodeResult
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.lint import lint_repository
+from orbit.run.providers import ProviderRegistry
+from orbit.run.recording import atomic_write_json
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
+from orbit_verify import read_result
 
 pytestmark = pytest.mark.unit
 
@@ -330,8 +330,13 @@ class _ExecSandbox:
 @pytest.mark.parametrize(
     ("operating_system", "home", "stage", "entry"),
     [
-        (OperatingSystem.LINUX, "/home/user", "/home/user/.ale-solution", "solve.sh"),
-        (OperatingSystem.WINDOWS, "C:\\Users\\user", "C:\\Users\\user\\.ale-solution", "solve.ps1"),
+        (OperatingSystem.LINUX, "/home/user", "/home/user/.orbit-solution", "solve.sh"),
+        (
+            OperatingSystem.WINDOWS,
+            "C:\\Users\\user",
+            "C:\\Users\\user\\.orbit-solution",
+            "solve.ps1",
+        ),
     ],
 )
 async def test_the_oracle_runs_its_solution_in_its_stage_directory(
@@ -345,7 +350,7 @@ async def test_the_oracle_runs_its_solution_in_its_stage_directory(
     ((argv, kwargs),) = sandbox.calls
     assert argv[-1].endswith(entry) and argv[-1].startswith(stage)
     assert kwargs["cwd"] == stage
-    assert kwargs["env"] == {"ALE_HOME": home, "ALE_STAGE_DIR": stage}
+    assert kwargs["env"] == {"ORBIT_HOME": home, "ORBIT_STAGE_DIR": stage}
 
 
 #: What a case's episode ends with: the result its verifier wrote, or how it failed.
@@ -367,7 +372,7 @@ async def _calibrate(
     result is stored rounded, as the engine stores it. Returns the exit code, the Task's
     calibration record, the console lines and the cases each episode ran, in order.
     """
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     task = scaffold_task(tmp_path / "demo")
     if entries:
         edit_task_config(task, {"calibration": entries})
@@ -384,7 +389,7 @@ async def _calibrate(
                 source="solver-local",
                 input_identity=DIGEST,
                 image_source_identity=DIGEST,
-                runtime_ref="ale-task:fixture",
+                runtime_ref="orbit-task:fixture",
                 prepared_identity=DIGEST,
             )
         return ()
@@ -554,7 +559,7 @@ async def test_a_case_meets_its_expectation_by_the_stored_reward_and_the_results
 def test_calibrate_accepts_run_level_judge_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    cli = import_module("ale.run.cli.main")
+    cli = import_module("orbit.run.cli.main")
     config = tmp_path / "verification.toml"
     config.write_text(
         "[verification.llm]\n"
@@ -600,7 +605,7 @@ async def test_calibration_passes_artifact_policy_to_episodes(
     expected: bool,
 ) -> None:
     repository = write_task_repo("calibration-artifacts")
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     digest = "sha256:" + "a" * 64
 
     async def fake_prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
@@ -610,7 +615,7 @@ async def test_calibration_passes_artifact_policy_to_episodes(
                 source="solver-local",
                 input_identity=digest,
                 image_source_identity=digest,
-                runtime_ref="ale-task:fixture",
+                runtime_ref="orbit-task:fixture",
                 prepared_identity=digest,
             )
         return ()
@@ -653,7 +658,7 @@ async def test_an_oracle_run_gives_a_listed_task_its_egress_proxy(
     verifier its own, a list included: the episode gets the proxy and a registry for its
     egress session whichever of them has the list."""
     repository = write_task_repo("oracle-list", config={table: network})
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     digest = "sha256:" + "a" * 64
 
     async def fake_prepare(tasks, _providers, _continued=None):  # type: ignore[no-untyped-def]
@@ -663,7 +668,7 @@ async def test_an_oracle_run_gives_a_listed_task_its_egress_proxy(
                 source="solver-local",
                 input_identity=digest,
                 image_source_identity=digest,
-                runtime_ref="ale-task:fixture",
+                runtime_ref="orbit-task:fixture",
                 prepared_identity=digest,
             )
         return ()

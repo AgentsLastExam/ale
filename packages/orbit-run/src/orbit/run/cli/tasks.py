@@ -1,0 +1,1690 @@
+"""Task-oriented CLI workflows shared by the Typer commands."""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import hashlib
+import json
+import os
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from functools import partial
+from pathlib import Path
+from typing import Literal
+
+import typer
+
+from orbit.core.calibration import (
+    CalibrationAttempt,
+    CalibrationCheck,
+    CalibrationEngine,
+    CalibrationNotice,
+    CalibrationObservation,
+    CaseCalibrationObservation,
+    TaskCalibrationObservation,
+)
+from orbit.core.capability import round_verifier_resources
+from orbit.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
+from orbit.core.errors import ConfigError, OrbitError, ProviderCapabilityError, TaskDefinitionError
+from orbit.core.fleet import RunPlan
+from orbit.core.harness import EffectiveAgentResources, Harness
+from orbit.core.ids import content_hash, task_component
+from orbit.core.lock import AssetProvenance, ResumedFrom, RunLock
+from orbit.core.result import ResultRecord, SandboxOutcome
+from orbit.core.sandbox import (
+    ImageKind,
+    PreparedTaskImage,
+    ResolvedImage,
+    Sandbox,
+    SandboxRequest,
+    SandboxRole,
+)
+from orbit.core.task import Stage, TaskAssetObservation
+from orbit.core.taskspec import CalibrationCase, Expectation, VerificationMode
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status, Verdict
+from orbit.run.agent_resources import resolve_agent_resources
+from orbit.run.assets import observe_task_assets
+from orbit.run.episode import (
+    EpisodeResult,
+    check_retention,
+    run_episode,
+    run_episode_with_retries,
+)
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import Limits, SessionRegistry
+from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.droid import DroidHarness
+from orbit.run.harnesses.forgecode import ForgecodeHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.hermes import HermesHarness
+from orbit.run.harnesses.kimi_code import KimiCodeHarness
+from orbit.run.harnesses.muse_code import MuseCodeHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
+from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.harnesses.qwen_code import QwenCodeHarness
+from orbit.run.harnesses.zcode import ZCodeHarness
+from orbit.run.ledger import Ledger, episode_identity
+from orbit.run.lint import lint_repository
+from orbit.run.protocol.episode_protocol import (
+    EpisodeProtocol,
+    KeptSolver,
+    Resume,
+    ReverificationProtocol,
+    SolverSnapshot,
+    validation_rounds,
+)
+from orbit.run.provenance import (
+    ProvenanceInputs,
+    agent_provenance,
+    framework_provenance,
+    gateway_provenance,
+)
+from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.fleet import FleetClient, FleetProvider
+from orbit.run.recording import atomic_write_json
+from orbit.run.secrets import host_credentials, provider_credentials, resolve_task_variables
+from orbit.run.sources import resolve
+from orbit.run.subscription import SubscriptionCredential, resolve_authentication
+from orbit.run.task_images import (
+    ImagePreparationResult,
+    ImagePreparationStep,
+    ImageRole,
+    prepare_task_image_result,
+    prepare_verifier_image_result,
+    resolve_image_kinds,
+    shares_verifier_image,
+    validates_separately,
+)
+from orbit.run.tasksets.manifest import ManifestTask, load_tasks
+from orbit.run.verification import preflight_judges
+
+EXIT_SOME_FAILED = 2
+EXIT_BAD_REFERENCE = 3
+PRESET_DIR = Path(__file__).resolve().parents[1] / "presets"
+
+# --- internals ---
+
+
+def _config(
+    config: Path | None,
+    overrides: list[str] | None,
+    *,
+    agent: str | None,
+    model: str | None,
+) -> RunConfig:
+    if config is None and (default_config := os.environ.get("ORBIT_RUN_CONFIG")):
+        config = Path(default_config).expanduser()
+    flags = [*(overrides or [])]
+    if agent is not None:
+        flags.append(f"agent.name={agent}")
+    if model:
+        flags.append(f"agent.model={model}")
+    try:
+        selected = select_agent_name(run_path=config, overrides=flags)
+        preset = PRESET_DIR / f"{selected}.toml"
+        if not preset.is_file():
+            preset = None
+        return load_run_config(preset_path=preset, run_path=config, overrides=flags)
+    except OrbitError as error:
+        typer.echo(f"configuration error: {error}", err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+
+
+def _harness(settings: RunConfig) -> Harness:
+    match settings.agent.name:
+        case "oracle":
+            return OracleHarness()
+        case "nop":
+            return NopHarness()
+        case "computer-use":
+            from orbit.run.harnesses.computer_use import ComputerUseHarness
+
+            return ComputerUseHarness(model=settings.agent.model, **settings.agent.settings)
+        case "claude-code":
+            _require_gateway_dialect(settings, "anthropic")
+            return ClaudeCodeHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
+        case "grok-build":
+            return GrokBuildHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "codex-cli":
+            _require_gateway_dialect(settings, "openai-responses")
+            return CodexCliHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
+        case "openclaw-cli":
+            _require_gateway_dialect(settings, "openai-responses")
+            return OpenClawCliHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
+        case "antigravity-cli":
+            _require_gateway_dialect(settings, "gemini")
+            return AntigravityCliHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
+        case "droid":
+            return DroidHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "forgecode":
+            return ForgecodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "hermes":
+            return HermesHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "kimi-code":
+            return KimiCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "muse-code":
+            # Muse speaks Meta's own Responses API, so the Gateway must use that dialect.
+            _require_gateway_dialect(settings, "openai-responses")
+            return MuseCodeHarness(
+                cli_version=settings.agent.version,
+                settings=settings.agent.settings,
+            )
+        case "opencode":
+            return OpenCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "openhands-cli":
+            return OpenHandsCliHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "pi-cli":
+            return PiCliHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "qwen-code":
+            return QwenCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case "zcode":
+            return ZCodeHarness(
+                cli_version=settings.agent.version,
+                gateway_dialect=settings.gateway.dialect,
+                settings=settings.agent.settings,
+            )
+        case unknown:
+            raise OrbitError(
+                f"unknown agent {unknown!r}; try antigravity-cli, claude-code, codex-cli, "
+                "computer-use, droid, forgecode, grok-build, hermes, kimi-code, muse-code, "
+                "openclaw-cli, opencode, openhands-cli, pi-cli, qwen-code, zcode, oracle or nop"
+            )
+
+
+def _require_gateway_dialect(settings: RunConfig, expected: str) -> None:
+    if settings.gateway.dialect != expected:
+        raise ConfigError(
+            f"{settings.agent.name} requires gateway.dialect={expected!r}, "
+            f"got {settings.gateway.dialect!r}"
+        )
+
+
+async def _run_one(
+    reference: str,
+    settings: RunConfig,
+    runs_dir: Path,
+    run_id: str | None = None,
+    require_reportable: bool = False,
+    continue_from: Path | None = None,
+) -> int:
+    try:
+        authentication = resolve_authentication(settings.agent)
+        harness = _harness(settings)
+        subscription = None
+        if authentication.mode == "subscription":
+            subscription = SubscriptionCredential(
+                authentication,
+                cli_version=harness.version(),
+                dialect=settings.gateway.dialect,
+            )
+            await subscription.preflight()
+    except OrbitError as error:
+        typer.echo(f"{error}", err=True)
+        return EXIT_BAD_REFERENCE
+    providers = ProviderRegistry(settings)
+    try:
+        resolved = resolve(reference)
+        tasks = _load(resolved.task_dir)
+        rounds: dict[str, int] = {}
+        for task in tasks:
+            harness.validate_os(task.spec.os)
+            rounds[str(task.spec.name)] = validation_rounds(
+                task, harness, settings.validation_rounds
+            )
+            task.validations = rounds[str(task.spec.name)]
+        _resolve_variables(tasks, settings, oracle=settings.agent.name == "oracle")
+        await preflight_judges(_verify_dirs(tasks), settings.verification)
+        continued = (
+            _continued(continue_from, tasks, settings) if continue_from is not None else None
+        )
+        await _prepare_images(tasks, providers, continued)
+        resume = (
+            _continuation(continued, tasks[0], settings, harness, providers)
+            if continued is not None
+            else None
+        )
+        await providers.preflight(tasks)
+    except OrbitError as error:
+        typer.echo(f"{error}", err=True)
+        await providers.close()
+        return EXIT_BAD_REFERENCE
+
+    run_id = run_id or uuid.uuid4().hex[:8]
+    run_dir = runs_dir / run_id
+    gateway = None
+    limits = None
+    gateway_url = ""
+    needs_model = settings.agent.name not in {"oracle", "nop"}
+
+    if needs_model:
+        if authentication.mode == "subscription":
+            assert subscription is not None
+            gateway = Gateway(subscription=subscription, host=_gateway_host())
+        else:
+            try:
+                api_key, upstream = provider_credentials(
+                    settings.gateway.provider,
+                    base_url=settings.gateway.base_url,
+                    key_var=settings.gateway.api_key_env,
+                )
+            except OrbitError as error:
+                typer.echo(f"{error}", err=True)
+                await providers.close()
+                return EXIT_BAD_REFERENCE
+            gateway = Gateway(
+                api_key=api_key,
+                upstream=upstream,
+                dialect=settings.gateway.dialect,
+                host=_gateway_host(),
+            )
+        gateway_url = await gateway.start()
+        limits = Limits(
+            **{
+                key: None if value == "unlimited" else value
+                for key, value in settings.gateway.limits.model_dump().items()
+            }
+        )
+    elif (gateway := await _judge_gateway(settings)) is not None:
+        gateway_url = gateway.base_url
+    proxy, sessions = await _egress_proxy(tasks, gateway)
+
+    profile = authentication.profile_slot_id or "none"
+    typer.echo(
+        f"auth  harness={settings.agent.name} provider={authentication.provider or 'none'} "
+        f"requested={authentication.requested} effective={authentication.mode} "
+        f"source={settings.authentication_source} model={settings.agent.model} profile={profile}"
+    )
+
+    ledger = Ledger(run_dir)
+    ledger.open_run(run_id, settings.config_hash)
+    failures = 0
+    total = len(tasks) * settings.episodes
+    fleet = await _plan_on_fleet(tasks, providers, settings, label=run_id)
+
+    # Episodes of one task are independent by construction — separate sandbox, separate
+    # gateway session, separate run directory — so the only thing bounding them is what
+    # the host can hold. One at a time is the default because a VM guest is measured in
+    # gigabytes, and four of those is a choice an operator should make deliberately.
+    gate = asyncio.Semaphore(settings.concurrency)
+
+    async def one(
+        task: ManifestTask,
+        episode_id: str,
+        inputs: ProvenanceInputs,
+        agent_resources: EffectiveAgentResources,
+    ) -> Status | None:
+        async def execute() -> EpisodeResult:
+            return await run_episode(
+                task,
+                EpisodeProtocol(
+                    harness,
+                    max_steps=settings.agent.max_steps,
+                    timeouts=settings.timeouts,
+                    resume=resume,
+                    validation_rounds=inputs.validation_rounds,
+                ),
+                providers,
+                run_dir=run_dir,
+                gateway_url=gateway_url,
+                model=settings.agent.model,
+                gateway=gateway,
+                session_registry=sessions,
+                limits=limits,
+                seed=settings.seed,
+                collect_artifacts=settings.artifacts.collect == "host",
+                provenance=inputs,
+                proxy_url=proxy.url if proxy is not None else "",
+                agent_resources=agent_resources,
+                episode_id=episode_id,
+                phase_callback=lambda phase: ledger.update_phase(episode_id, phase.value),
+                logging_policy=settings.logging,
+                verification_config=settings.verification,
+                sandbox_retention=settings.sandbox_retention,
+                desktop_resolution=settings.desktop_resolution,
+                destroy_failed_sandboxes=settings.episode_retries > 0,
+                authentication=authentication.mode,
+                profile_slot_id=authentication.profile_slot_id,
+            )
+
+        async with gate:
+            ledger.mark_running(episode_id)
+            if fleet is not None:
+                await fleet.report_episode(episode_id, task.spec.name, "running")
+            result = await run_episode_with_retries(
+                execute,
+                # A continuation changes the kept solver it adopts; another attempt would
+                # start from a different state. A snapshot stays as it was.
+                retries=(
+                    0
+                    if resume is not None and resume.attach is not None
+                    else settings.episode_retries
+                ),
+                on_retry=_report_retry,
+            )
+        ledger.finish_episode(result.episode_id, result.record)
+        if fleet is not None:
+            await fleet.report_episode(
+                episode_id, task.spec.name, _fleet_outcome(result.verdict.status)
+            )
+
+        _report(result)
+        reportable = _check_reportable(result)
+        unusable = require_reportable and not reportable
+        return (
+            None
+            if result.verdict.status is Status.COMPLETED and not unusable
+            else result.verdict.status
+        )
+
+    try:
+        pending = []
+        for task in tasks:
+            agent_resources = resolve_agent_resources(
+                task=task.spec.tools,
+                agent_skills=settings.agent.skills,
+                agent_mcp_servers=settings.agent.mcp_servers,
+                task_source=resolved.source,
+                network=task.spec.network,
+                operating_system=task.spec.os,
+                mcp_headers=task.variables.values.mcp_headers if task.variables else None,
+            )
+            harness.validate_resources(agent_resources)
+            inputs = ProvenanceInputs(
+                source=resolved.source,
+                agent=agent_provenance(
+                    harness,
+                    settings.agent.model,
+                    settings,
+                    agent_resources,
+                    authentication=authentication.provenance(
+                        source=settings.authentication_source,
+                        cli_version=harness.version(),
+                    ),
+                ),
+                gateway=gateway_provenance(settings),
+                config_hash=settings.config_hash,
+                timeouts=settings.timeouts,
+                validation_rounds=rounds[str(task.spec.name)],
+            )
+            if task.prepared_image is None:
+                raise TaskDefinitionError(f"solver image was not prepared for {task.spec.name}")
+            identity = episode_identity(
+                task.spec,
+                task_digest=task.task_digest,
+                image_digest=task.prepared_image.prepared_identity,
+                agent=f"{inputs.agent.harness}@{inputs.agent.version}",
+                seed=settings.seed,
+                reuse_hash=settings.reuse_hash,
+                resources_digest=agent_resources.digest,
+                assets=task.asset_observation,
+                resumed_from=resume.source.episode_id if resume is not None else None,
+            )
+            done = (
+                sum(
+                    1
+                    for row in ledger.episodes(run_id)
+                    if row.identity == identity and row.succeeded
+                )
+                if settings.resume
+                and (
+                    task.asset_observation is None
+                    or (
+                        not task.asset_observation.dirty
+                        and task.asset_observation.commit is not None
+                    )
+                )
+                else 0
+            )
+            for index in range(settings.episodes):
+                if index < done:
+                    typer.echo(f"skip  {task.spec.name}: episode {index + 1} already complete")
+                    continue
+                episode_id = f"{task_component(task.spec.name)}-{uuid.uuid4().hex[:8]}"
+                ledger.queue_episode(
+                    episode_id=episode_id,
+                    run_id=run_id,
+                    identity=identity,
+                    spec=task.spec,
+                    episode_path=episode_id,
+                )
+                pending.append(one(task, episode_id, inputs, agent_resources))
+
+        # One failing episode is a result, not an abort: the others are still work someone
+        # asked for, and a run that stops at the first failure reports a smaller sample
+        # than it took.
+        for outcome in await asyncio.gather(*pending, return_exceptions=True):
+            if isinstance(outcome, BaseException):
+                typer.echo(f"error: {outcome}")
+                failures += 1
+            elif outcome is not None:
+                failures += 1
+    finally:
+        ledger.close()
+        await providers.close()
+        if proxy is not None:
+            await proxy.stop()
+        if gateway is not None:
+            await gateway.stop()
+
+    typer.echo(f"run {run_id}: {total - failures}/{total} completed")
+    return 0 if failures == 0 else EXIT_SOME_FAILED
+
+
+async def _reverify(
+    reference: str,
+    source_run: Path,
+    settings: RunConfig,
+    runs_dir: Path,
+) -> int:
+    """Reverify retained solver episodes without launching their Harness again."""
+    try:
+        resolved = resolve(reference)
+        tasks = _load(resolved.task_dir)
+        providers = ProviderRegistry(settings)
+        by_name = {str(task.spec.name): task for task in tasks}
+        sources = _retained_source_episodes(source_run)
+        _resolve_variables(tasks, settings, oracle=False)
+        await preflight_judges(_verify_dirs(tasks), settings.verification)
+        matched = []
+        for *_, lock, _ in sources:
+            task = by_name.get(str(lock.task.name))
+            if task is None:
+                continue
+            matched.append(task)
+            declared, recorded = task.spec.image, lock.image.declaration
+            if declared.kind is None and declared.ref == recorded.ref:
+                # The solver is reused, not prepared: its image is of the kind its run read.
+                declared = declared.model_copy(update={"kind": recorded.kind})
+                task.spec = task.spec.model_copy(update={"image": declared})
+        # Task by Task: an image no registry answers for fails only the Task that names it.
+        unique = list(dict.fromkeys(matched))
+        outcomes = await asyncio.gather(
+            *(resolve_image_kinds([task]) for task in unique), return_exceptions=True
+        )
+        unclassified: dict[str, BaseException] = {}
+        for task, outcome in zip(unique, outcomes, strict=True):
+            if isinstance(outcome, (OrbitError, OSError, ValueError)):
+                unclassified[str(task.spec.name)] = outcome
+            elif isinstance(outcome, BaseException):
+                raise outcome
+        # Each solver is the one its source episode kept, on the Provider that kept it, and
+        # so is a snapshot verifier's, which is selected with its source below.
+        _note(
+            await providers.select(
+                [
+                    task
+                    for task in unique
+                    if str(task.spec.name) not in unclassified
+                    and task.spec.verify.environment_mode is not VerificationMode.SNAPSHOT
+                ],
+                solvers=False,
+            )
+        )
+    except (OrbitError, OSError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        return EXIT_BAD_REFERENCE
+
+    gateway = await _judge_gateway(settings)
+    gateway_url = gateway.base_url if gateway is not None else ""
+    proxy: EgressProxy | None = None
+    try:
+        proxy, sessions = await _egress_proxy(unique, gateway)
+        run_dir = runs_dir / f"reverify-{uuid.uuid4().hex[:8]}"
+        failures = 0
+        planned: list[tuple[ManifestTask, Callable[[], Awaitable[EpisodeResult]]]] = []
+        for source_dir, source_result, source_lock, retained in sources:
+            handle = retained.handle
+            assert handle is not None
+            task = by_name.get(str(source_lock.task.name))
+            if task is None:
+                typer.echo(
+                    f"source episode {source_result.episode_id} does not match the selected Task",
+                    err=True,
+                )
+                failures += 1
+                continue
+            if (unread := unclassified.get(str(task.spec.name))) is not None:
+                typer.echo(f"{task.spec.name}: {unread}", err=True)
+                failures += 1
+                continue
+            if (
+                source_lock.task.non_verifier_digest is None
+                or task.non_verifier_digest != source_lock.task.non_verifier_digest
+            ):
+                typer.echo(
+                    f"{task.spec.name}: content outside tests/ changed or source evidence is "
+                    "missing; run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
+            if (
+                source_lock.validation_rounds
+                and source_lock.validation_stage == "tests"
+                and task.task_digest != source_lock.task.content_digest
+            ):
+                # Its agent received tests/'s results, so tests/ is part of what it did.
+                typer.echo(
+                    f"{task.spec.name}: tests/ validated the source agent's rounds and the Task "
+                    "changed since; run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
+            if task.spec.image != source_lock.image.declaration:
+                typer.echo(
+                    f"{task.spec.name}: its image differs from the source run's; "
+                    "run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
+            try:
+                observed_assets = observe_task_assets(task)
+            except OrbitError as error:
+                typer.echo(f"{task.spec.name}: {error}", err=True)
+                failures += 1
+                continue
+            if not _same_assets(source_lock.asset, observed_assets):
+                typer.echo(
+                    f"{task.spec.name}: Task assets differ from the source run or are not "
+                    "committed; run the solver again",
+                    err=True,
+                )
+                failures += 1
+                continue
+            if source_lock.resources is None:
+                typer.echo(f"{task.spec.name}: source RunLock has no solver allocation", err=True)
+                failures += 1
+                continue
+            mode = task.spec.verify.environment_mode
+            snapshot = mode is VerificationMode.SNAPSHOT
+            # A separate verifier takes its solver running or as a snapshot.
+            if mode is not VerificationMode.SEPARATE and snapshot != (
+                retained.outcome == "snapshotted"
+            ):
+                typer.echo(
+                    f"{task.spec.name}: "
+                    + (
+                        "its verifier boots from a snapshot of the source episode's solver, and "
+                        f"episode {source_result.episode_id} kept its solver running instead; "
+                        "run the solver again with sandbox_retention.solver = 'snapshot'"
+                        if snapshot
+                        else f"episode {source_result.episode_id} kept only a snapshot of its "
+                        "solver, and its verification needs the solver running; run the solver "
+                        "again with sandbox_retention.solver = 'keep'"
+                    ),
+                    err=True,
+                )
+                failures += 1
+                continue
+            if "verifier" in retained.roles and (
+                task.spec.verify.environment_mode is not VerificationMode.SHARED
+            ):
+                typer.echo(
+                    f"{task.spec.name}: episode {source_result.episode_id} kept the Sandbox its "
+                    "shared verifier ran in, whose disk holds what that verifier changed, and "
+                    f"{task.spec.verify.environment_mode} verification needs the solver as its "
+                    "agent left it; run the solver again with this Task",
+                    err=True,
+                )
+                failures += 1
+                continue
+            task = copy.copy(task)
+            task.provider = source_lock.resources.effective.provider
+            try:
+                task.asset_observation = observed_assets
+                task.prepared_image = await _reused_solver_image(task, source_lock, providers)
+                if snapshot:
+                    # Booted from the snapshot, which only the Provider that saved it holds.
+                    _note(await providers.select([task], solvers=False))
+                prepared = await prepare_verifier_image_result(
+                    task, providers.get(task.verifier_provider or task.provider)
+                )
+                task.prepared_verifier_image = prepared.image if prepared is not None else None
+            except OrbitError as error:
+                typer.echo(str(error), err=True)
+                failures += 1
+                continue
+
+            request = SandboxRequest(
+                episode_id=source_result.episode_id,
+                os=task.spec.os,
+                role=(
+                    SandboxRole.SHARED
+                    if task.spec.verify.environment_mode is VerificationMode.SHARED
+                    else SandboxRole.SOLVER
+                ),
+                retention="keep",
+                prepared_image=task.prepared_image,
+                resources=task.spec.resources,
+                network=task.spec.solver_network,
+                gateway_url=gateway_url or None,
+                sudo=task.spec.resources.sudo,
+                user=task.spec.image.user,
+            )
+            provenance = ProvenanceInputs(
+                source=resolved.source,
+                agent=source_lock.agent,
+                gateway=source_lock.gateway,
+                config_hash=settings.config_hash,
+                timeouts=settings.timeouts,
+                # What the agent whose state it verifies received.
+                validation_rounds=source_lock.validation_rounds,
+            )
+            episode_id = f"{source_result.episode_id}-reverify-{uuid.uuid4().hex[:6]}"
+
+            async def execute(
+                task: ManifestTask = task,
+                handle: str = handle,
+                request: SandboxRequest = request,
+                source_lock: RunLock = source_lock,
+                source_dir: Path = source_dir,
+                provenance: ProvenanceInputs = provenance,
+                episode_id: str = episode_id,
+                snapshot: bool = snapshot,
+            ) -> EpisodeResult:
+                solver: KeptSolver | SolverSnapshot
+                if snapshot:
+                    assert source_lock.resources is not None
+                    solver = SolverSnapshot(
+                        handle=handle,
+                        episode_id=request.episode_id,
+                        resolved_image=_recorded_image(source_lock),
+                        allocation=source_lock.resources.effective,
+                    )
+                else:
+                    solver = KeptSolver(
+                        request,
+                        partial(_attach_retained, handle, lock=source_lock, providers=providers),
+                    )
+                return await run_episode(
+                    task,
+                    ReverificationProtocol(
+                        solver, source_dir, source_lock.sandbox, timeouts=settings.timeouts
+                    ),
+                    providers,
+                    run_dir=run_dir,
+                    model=source_lock.agent.model,
+                    seed=source_lock.seed,
+                    collect_artifacts=settings.artifacts.collect == "host",
+                    provenance=provenance,
+                    episode_id=episode_id,
+                    gateway=gateway,
+                    gateway_url=gateway_url,
+                    proxy_url=proxy.url if proxy is not None else "",
+                    session_registry=sessions,
+                    verification_config=settings.verification,
+                    sandbox_retention=SandboxRetentionConfig(solver="keep", verifier="destroy"),
+                    desktop_resolution=settings.desktop_resolution,
+                    destroy_failed_sandboxes=True,
+                    authentication=source_lock.agent.authentication.effective,
+                    profile_slot_id=source_lock.agent.authentication.profile_slot_id,
+                )
+
+            planned.append((task, execute))
+        try:
+            await providers.preflight([task for task, _ in planned], solvers=False)
+        except OrbitError as error:
+            typer.echo(str(error), err=True)
+            return EXIT_BAD_REFERENCE
+        for task, execute in planned:
+            # Shared verification mutates its source; a verifier of its own is a fresh
+            # Sandbox on every attempt.
+            retries = (
+                0
+                if task.spec.verify.environment_mode is VerificationMode.SHARED
+                else settings.episode_retries
+            )
+            try:
+                result = await run_episode_with_retries(
+                    execute, retries=retries, on_retry=_report_retry
+                )
+            except OrbitError as error:
+                typer.echo(f"{task.spec.name}: {error}", err=True)
+                failures += 1
+                continue
+            _report(result)
+            if result.verdict.status is not Status.COMPLETED:
+                failures += 1
+        typer.echo(f"reverification run: {run_dir}")
+        return 0 if failures == 0 else EXIT_SOME_FAILED
+    finally:
+        await providers.close()
+        if proxy is not None:
+            await proxy.stop()
+        if gateway is not None:
+            await gateway.stop()
+
+
+async def _reused_solver_image(
+    task: ManifestTask, lock: RunLock, providers: ProviderRegistry
+) -> PreparedTaskImage:
+    """The image of the solver ``lock`` recorded, which reverification reuses rather than
+    builds again: each source episode owns its exact prepared image and provenance.
+
+    The Fleet prepares images on its Nodes, which keep them under the key the Run gave
+    them, so a solver of the Fleet's is named by that key again: its Node still holds the
+    image, and the control plane checks the key as it hands the Sandbox over or boots its
+    snapshot.
+    """
+    if task.provider == FleetProvider.name:
+        return (await prepare_task_image_result(task, providers.get(task.provider))).image
+    image = lock.image
+    return PreparedTaskImage(
+        kind=image.declaration.kind,
+        source="solver-local" if image.source == "local" else "external-ref",
+        input_identity=image.input_identity,
+        image_source_identity=image.image_source_identity,
+        runtime_ref=(
+            image.prepared_identity
+            if image.declaration.kind is ImageKind.CONTAINER
+            else image.runtime_ref
+        ),
+        prepared_identity=image.prepared_identity,
+        base_materials=image.base_materials,
+        resolved_reference=image.resolved_reference,
+        builder_identity=image.builder_identity,
+    )
+
+
+def _retained_source_episodes(
+    source_run: Path,
+) -> tuple[tuple[Path, ResultRecord, RunLock, SandboxOutcome], ...]:
+    """The episodes under ``source_run`` that kept their solver, running or as a snapshot,
+    each with that outcome."""
+    source_run = source_run.expanduser().resolve()
+    result_paths = (
+        (source_run / "result.json",)
+        if (source_run / "result.json").is_file()
+        else (
+            tuple(sorted(source_run.glob("*/result.json")))
+            or tuple(sorted(source_run.glob("*/*/result.json")))
+        )
+    )
+    episodes = []
+    for result_path in result_paths:
+        lock_path = result_path.with_name("lock.json")
+        if not lock_path.is_file():
+            continue
+        result = ResultRecord.model_validate_json(result_path.read_text())
+        lock = RunLock.model_validate_json(lock_path.read_text())
+        retained = next(
+            (
+                sandbox
+                for sandbox in result.sandboxes
+                if "solver" in sandbox.roles
+                and sandbox.outcome in {"retained", "snapshotted"}
+                and sandbox.handle is not None
+            ),
+            None,
+        )
+        if retained is not None:
+            episodes.append((result_path.parent, result, lock, retained))
+    if not episodes:
+        raise ValueError(f"no episode under {source_run} kept its solver or a snapshot of it")
+    return tuple(episodes)
+
+
+@dataclass(frozen=True)
+class _Continued:
+    """The episode a Run continues, as its records hold it."""
+
+    result: ResultRecord
+    lock: RunLock
+    trajectory: AtifTrajectory | None
+    retained: SandboxOutcome
+    """The solver it kept, or the snapshot of it."""
+    handle: str
+
+    def require(self, name: str, recorded: object, current: object) -> None:
+        if recorded != current:
+            raise TaskDefinitionError(
+                f"episode {self.result.episode_id} cannot be continued here: its {name} differs"
+            )
+
+    def require_keeper(self, task: ManifestTask) -> None:
+        """Refuse a selection that gives the solver another Provider than the one that kept
+        it, which alone holds its Sandbox or snapshot."""
+        resources = self.lock.resources
+        kept = resources.effective.provider if resources else None
+        if kept != task.provider:
+            raise TaskDefinitionError(
+                f"episode {self.result.episode_id} cannot be continued here: "
+                f"{kept or 'no recorded Provider'} kept its solver, and sandbox.providers "
+                f"selects {task.provider} for it"
+            )
+
+
+def _continued(episode_dir: Path, tasks: list[ManifestTask], settings: RunConfig) -> _Continued:
+    """The retained solver and native session an earlier episode left, read before anything
+    is selected or prepared for the Run that continues it."""
+    if len(tasks) != 1 or settings.episodes != 1:
+        raise ConfigError("--continue-from continues one episode of one Task")
+    episode_dir = episode_dir.expanduser().resolve()
+    trajectory_path = episode_dir / "trajectory.json"
+    try:
+        result = ResultRecord.model_validate_json((episode_dir / "result.json").read_text())
+        lock = RunLock.model_validate_json((episode_dir / "lock.json").read_text())
+        trajectory = (
+            AtifTrajectory.model_validate_json(trajectory_path.read_text())
+            if trajectory_path.is_file()
+            else None
+        )
+    except (OSError, ValueError) as exc:
+        raise TaskDefinitionError(f"{episode_dir} holds no complete episode: {exc}") from exc
+    retained = next(
+        (
+            sandbox
+            for sandbox in result.sandboxes
+            if "solver" in sandbox.roles and sandbox.outcome in {"retained", "snapshotted"}
+        ),
+        None,
+    )
+    if result.continuation is None or retained is None or retained.handle is None:
+        raise TaskDefinitionError(
+            f"episode {result.episode_id} left no retained solver and native session"
+        )
+    snapshot = tasks[0].spec.verify.environment_mode is VerificationMode.SNAPSHOT
+    if retained.outcome == "retained" and (snapshot or tasks[0].validations):
+        # Its verifier, or its first validation round, would boot from a snapshot of it,
+        # whose save stops the kept solver.
+        saving = "snapshot verification" if snapshot else "a validation round"
+        raise TaskDefinitionError(
+            f"episode {result.episode_id} kept its solver running, which {saving} "
+            "would save and destroy; continue from a snapshot of it instead, kept with "
+            "sandbox_retention.solver = 'snapshot'"
+        )
+    return _Continued(result, lock, trajectory, retained, retained.handle)
+
+
+def _continuation(
+    continued: _Continued,
+    task: ManifestTask,
+    settings: RunConfig,
+    harness: Harness,
+    providers: ProviderRegistry,
+) -> Resume:
+    """How this Run continues ``continued``, once its Task's images are prepared."""
+    result, lock, retained, handle = (
+        continued.result,
+        continued.lock,
+        continued.retained,
+        continued.handle,
+    )
+    assert result.continuation is not None
+    kept = retained.outcome == "retained"
+    # The native session is read by the same program, and the Sandbox is the Task's image
+    # as the earlier agent left it. A running Sandbox also keeps its resources, its role
+    # and its desktop's resolution; one booted from a snapshot takes this Task's and Run's.
+    recorded_and_current: dict[str, tuple[object, object]] = {
+        "harness": (result.continuation.harness, harness.name),
+        "CLI version": (lock.agent.version, harness.version()),
+    }
+    if lock.resources is None or lock.resources.effective.provider != "fleet":
+        # On the Fleet, which prepares images on its Nodes, the control plane checks the
+        # image's key as it hands the Sandbox over or boots the snapshot.
+        recorded_and_current["prepared solver image"] = (
+            lock.image.prepared_identity,
+            task.prepared_image.prepared_identity if task.prepared_image is not None else None,
+        )
+    if kept:
+        recorded_and_current |= {
+            "resources": (
+                lock.resources.requested if lock.resources is not None else None,
+                task.spec.resources,
+            ),
+            "verification mode": (
+                "verifier" in retained.roles,
+                task.spec.verify.environment_mode is VerificationMode.SHARED,
+            ),
+        }
+        desktop = lock.resources.effective.desktop_resolution if lock.resources else None
+        if desktop is not None:
+            recorded_and_current["desktop resolution"] = (desktop, settings.desktop_resolution)
+    for name, (recorded, current) in recorded_and_current.items():
+        continued.require(name, recorded, current)
+    return Resume(
+        source=ResumedFrom(
+            episode_id=result.episode_id,
+            retention="keep" if kept else "snapshot",
+            handle=handle,
+            continuation=result.continuation,
+        ),
+        trajectory=continued.trajectory,
+        attach=(
+            partial(_attach_retained, handle, lock=lock, providers=providers) if kept else None
+        ),
+    )
+
+
+async def _attach_retained(
+    handle: str,
+    request: SandboxRequest,
+    *,
+    lock: RunLock,
+    providers: ProviderRegistry,
+) -> Sandbox:
+    assert lock.resources is not None
+    allocation = lock.resources.effective
+    try:
+        # The Provider that kept it, as this Run configures it: the Fleet hands the Sandbox
+        # over through the Run's own connection.
+        provider = providers.get(allocation.provider)
+    except ProviderCapabilityError as exc:
+        raise TaskDefinitionError(f"unsupported retained sandbox handle: {handle}") from exc
+    return await provider.attach_retained(handle, request, allocation, _recorded_image(lock))
+
+
+def _recorded_image(lock: RunLock) -> ResolvedImage:
+    return ResolvedImage(
+        kind=lock.image.declaration.kind,
+        prepared_identity=lock.image.prepared_identity,
+        observed_identity=lock.image.observed_identity,
+        observed_ref=lock.image.observed_ref,
+    )
+
+
+def _same_assets(recorded: AssetProvenance | None, current: TaskAssetObservation | None) -> bool:
+    """Whether a Task's assets are provably the committed version a source run used.
+
+    Asset bytes are identified by their commit rather than hashed, so any asset change,
+    even one only below tests/assets, needs a fresh solver run.
+    """
+    if recorded is None or current is None:
+        return recorded is None and current is None
+    return (
+        not recorded.dirty
+        and not current.dirty
+        and recorded.commit is not None
+        and (recorded.repository, recorded.task_path, recorded.commit)
+        == (current.repository, current.task_path, current.commit)
+    )
+
+
+def _check_reportable(result: EpisodeResult) -> bool:
+    """Say whether this result could back a published number (Constitution III).
+
+    Always said out loud, never silently enforced. Running a task from a local path is
+    how authoring works and must stay frictionless, but the run still states plainly
+    that the result is not publishable — the failure mode worth designing against is a
+    number that quietly loses its provenance, not an author who is told about it.
+    ``--require-reportable`` is what turns the statement into a gate.
+    """
+    if result.lock is None:
+        typer.echo("  not reportable: no provenance was recorded", err=True)
+        return False
+    problems = result.lock.missing_for_report()
+    for problem in problems:
+        typer.echo(f"  not reportable: {problem}", err=True)
+    return not problems
+
+
+async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int:
+    """Run every calibration case of every selected Task, and record what each scored."""
+    providers = ProviderRegistry(settings)
+    try:
+        resolved = resolve(reference)
+        tasks = _load(resolved.task_dir)
+        for task in tasks:
+            # Every case checks validation/ too, or tests/ where it validates the agent's
+            # rounds, on a snapshot of the same final state.
+            task.validations = int(
+                task.validation_stage is Stage.VALIDATION or task.spec.validation_rounds > 0
+            )
+        _resolve_variables(tasks, settings, oracle=True)
+        await preflight_judges(_verify_dirs(tasks), settings.verification)
+        await _prepare_images(tasks, providers)
+        await providers.preflight(tasks)
+    except OrbitError as error:
+        typer.echo(f"{error}", err=True)
+        return EXIT_BAD_REFERENCE
+
+    gateway = await _judge_gateway(settings)
+    gateway_url = gateway.base_url if gateway is not None else ""
+    proxy = None
+    try:
+        proxy, sessions = await _egress_proxy(tasks, gateway)
+        run_id = f"calibrate-{uuid.uuid4().hex[:8]}"
+        run_dir = runs_dir / run_id
+        ledger = Ledger(run_dir)
+        ledger.open_run(run_id, settings.config_hash)
+        resources = EffectiveAgentResources()
+        failures = 0
+        observations: list[TaskCalibrationObservation] = []
+        try:
+            for task in tasks:
+                spec = task.spec
+                cases: list[CaseCalibrationObservation] = []
+                for case in spec.calibration:
+                    # Every case is an oracle run of its directory: the same protocol, limits
+                    # and [solution].env as the Task's reference solution.
+                    harness = OracleHarness(case.name)
+                    episode_id = f"{task_component(spec.name)}-{case.name}-{uuid.uuid4().hex[:8]}"
+                    inputs = ProvenanceInputs(
+                        source=resolved.source,
+                        agent=agent_provenance(
+                            harness,
+                            "",
+                            settings,
+                            resources,
+                        ),
+                        gateway=gateway_provenance(settings),
+                        config_hash=settings.config_hash,
+                        timeouts=settings.timeouts,
+                    )
+                    identity = episode_identity(
+                        spec,
+                        task_digest=task.task_digest,
+                        image_digest=task.prepared_image.prepared_identity,
+                        agent=f"calibration-{case.name}@{harness.version()}",
+                        seed=settings.seed,
+                        reuse_hash=settings.reuse_hash,
+                        assets=task.asset_observation,
+                    )
+                    ledger.queue_episode(
+                        episode_id=episode_id,
+                        run_id=run_id,
+                        identity=identity,
+                        spec=spec,
+                    )
+                    ledger.mark_running(episode_id)
+
+                    async def execute(
+                        task: ManifestTask = task,
+                        harness: OracleHarness = harness,
+                        episode_id: str = episode_id,
+                        inputs: ProvenanceInputs = inputs,
+                    ) -> EpisodeResult:
+                        return await run_episode(
+                            task,
+                            EpisodeProtocol(
+                                harness,
+                                max_steps=settings.agent.max_steps,
+                                timeouts=settings.timeouts,
+                                check_validation=task.validates,
+                            ),
+                            providers,
+                            run_dir=run_dir,
+                            episode_id=episode_id,
+                            seed=settings.seed,
+                            collect_artifacts=settings.artifacts.collect == "host",
+                            proxy_url=proxy.url if proxy is not None else "",
+                            session_registry=sessions,
+                            provenance=inputs,
+                            phase_callback=lambda phase, current=episode_id: ledger.update_phase(
+                                current, phase.value
+                            ),
+                            logging_policy=settings.logging,
+                            gateway=gateway,
+                            gateway_url=gateway_url,
+                            verification_config=settings.verification,
+                            sandbox_retention=settings.sandbox_retention,
+                            desktop_resolution=settings.desktop_resolution,
+                            destroy_failed_sandboxes=settings.episode_retries > 0,
+                        )
+
+                    result = await run_episode_with_retries(
+                        execute, retries=settings.episode_retries, on_retry=_report_retry
+                    )
+                    ledger.finish_episode(episode_id, result.record)
+                    observed, case_failures = _calibration_check(
+                        case, result.verdict, result.run_dir
+                    )
+                    validation = (
+                        _validation_check(
+                            case, result.record, result.run_dir, task.validation_stage
+                        )
+                        if task.validates
+                        else None
+                    )
+                    cases.append(
+                        CaseCalibrationObservation(
+                            name=case.name,
+                            expect=case.expect,
+                            attempt=_calibration_attempt(result, run_dir),
+                            observed=observed,
+                            failures=case_failures,
+                            validation=validation,
+                            passed=not case_failures and (validation is None or validation.passed),
+                        )
+                    )
+                    typer.echo(_case_line(str(spec.name), cases[-1], task.validation_stage))
+
+                passed = all(case.passed for case in cases)
+                observations.append(
+                    TaskCalibrationObservation(
+                        name=str(spec.name),
+                        spec_hash=spec.spec_hash,
+                        cases=tuple(cases),
+                        passed=passed,
+                    )
+                )
+                failures += 0 if passed else 1
+                as_expected = sum(case.passed for case in cases)
+                typer.echo(
+                    f"{'ok  ' if passed else 'FAIL'}  {spec.name}: "
+                    f"{as_expected}/{len(cases)} cases as expected"
+                )
+        finally:
+            ledger.close()
+
+        framework = framework_provenance()
+        observation = CalibrationObservation(
+            run_id=run_id,
+            engine=CalibrationEngine(version=framework.version, commit=framework.commit),
+            tasks=tuple(observations),
+        )
+        atomic_write_json(run_dir / "calibration.json", observation.model_dump(mode="json"))
+        typer.echo(f"calibration run: {run_dir}")
+        return 0 if failures == 0 else EXIT_SOME_FAILED
+    finally:
+        await providers.close()
+        if proxy is not None:
+            await proxy.stop()
+        if gateway is not None:
+            await gateway.stop()
+
+
+async def _prepare_only(reference: str, settings: RunConfig) -> int:
+    try:
+        resolved = resolve(reference)
+        tasks = _load(resolved.task_dir)
+        for root in {task.folder.root for task in tasks}:
+            findings = lint_repository(root)
+            if problems := [item for item in findings if item.severity == "error"]:
+                raise TaskDefinitionError(
+                    "lint: " + "; ".join(str(item) for item in problems)[:2000]
+                )
+        for task in tasks:
+            # The images its own rounds need too, the validation verifier's among them.
+            task.validations = task.spec.validation_rounds
+        results = await _prepare_images(tasks, ProviderRegistry(settings))
+    except OrbitError as error:
+        typer.echo(str(error), err=True)
+        return EXIT_BAD_REFERENCE
+
+    selected = {
+        (str(task.spec.name), role): provider
+        for task in tasks
+        for role, provider in (
+            ("solver", task.provider),
+            ("verifier", task.verifier_provider or task.provider),
+        )
+    }
+    for result in results:
+        image = result.image
+        source = "ref" if image.source == "external-ref" else "local"
+        typer.echo(
+            f"{result.task} {result.role} provider={selected[result.task, result.role]} "
+            f"kind={image.kind} source={source} prepared={image.prepared_identity}"
+        )
+        for step in result.steps:
+            suffix = " ".join(value for value in (step.identity, step.detail) if value is not None)
+            typer.echo(f"  {step.name:<20} {step.outcome:<8} {suffix}".rstrip())
+    return 0
+
+
+async def _judge_gateway(settings: RunConfig) -> Gateway | None:
+    """A Gateway for Judge sessions when no agent needs one, as for oracle runs.
+
+    Judges always reach their endpoint through the Gateway, so their keys stay on the
+    Host; a Gateway without an agent upstream serves only their sessions.
+    """
+    if settings.verification.llm is None and settings.verification.agent is None:
+        return None
+    gateway = Gateway(host=_gateway_host())
+    await gateway.start()
+    return gateway
+
+
+async def _egress_proxy(
+    tasks: list[ManifestTask], gateway: Gateway | None
+) -> tuple[EgressProxy | None, SessionRegistry | None]:
+    """The egress proxy when a Task's agent or a verifier, of ``tests/`` or of its rounds, has
+    a proxied policy, an allowlist or a blocklist, and the sessions only it serves.
+
+    The oracle meets the agent's network, a proxied one included, and a verifier its own, so
+    the proxy starts whether or not anything calls a model. With a Gateway it shares the
+    Gateway's registry, where each episode opens its egress session; without one, the
+    episodes open theirs in a registry of the proxy's own.
+    """
+    if not any(
+        policy.proxied
+        for task in tasks
+        for policy in (
+            task.spec.network,
+            task.spec.verify.network,
+            task.spec.validation_spec.network,
+        )
+    ):
+        return None, None
+    registry = gateway.sessions if gateway is not None else SessionRegistry()
+    proxy = EgressProxy(registry, host=_gateway_host())
+    await proxy.start()
+    return proxy, None if gateway is not None else registry
+
+
+def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle: bool) -> None:
+    """Every Task's variables, before any image, Sandbox or model call; see ``secrets``."""
+    resolve_task_variables(
+        tasks,
+        oracle=oracle,
+        protected=host_credentials(
+            (settings.gateway.api_key_env, settings.sandbox.daytona.api_key_env)
+        ),
+    )
+
+
+def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
+    """The verifier stages the Run runs: ``tests/``, and ``validation/`` where it validates."""
+    return [
+        task.folder.root / stage
+        for task in tasks
+        for stage in dict.fromkeys(
+            (Stage.TESTS, task.validation_stage) if task.validates else (Stage.TESTS,)
+        )
+    ]
+
+
+def _load(path: Path) -> list[ManifestTask]:
+    """The Tasks at ``path``, saying once where each departs from Orbit's form."""
+    tasks = load_tasks(path)
+    for task in tasks:
+        for warning in task.warnings:
+            typer.echo(f"warning  {task.spec.name}: {warning}", err=True)
+    return tasks
+
+
+def _note(notices: tuple[str, ...]) -> None:
+    """Say what a selection notes once, at the start of the Run it serves."""
+    for notice in notices:
+        typer.echo(f"note  {notice}", err=True)
+
+
+async def _prepare_images(
+    tasks: list[ManifestTask], providers: ProviderRegistry, continued: _Continued | None = None
+) -> tuple[ImagePreparationResult, ...]:
+    """Select a Provider for every Sandbox, refusing the selection if any is unserved, then
+    prepare each image once for each Provider that runs it.
+
+    A ``continued`` solver that boots from a snapshot needs one, and must be selected to the
+    Provider that kept it, which alone holds its Sandbox or snapshot. A retention that cannot
+    hold for a Task is refused first.
+    """
+    for task in tasks:
+        check_retention(task.spec, providers.settings.sandbox_retention, validates=task.validates)
+    await resolve_image_kinds(tasks)
+    _note(
+        await providers.select(
+            tasks,
+            snapshots=providers.settings.sandbox_retention.solver == "snapshot"
+            or (continued is not None and continued.retained.outcome == "snapshotted"),
+        )
+    )
+    if continued is not None:
+        continued.require_keeper(tasks[0])
+    by_source: dict[str, PreparedTaskImage] = {}
+    by_identity: dict[tuple[str, ImageKind, str], PreparedTaskImage] = {}
+
+    async def prepared(
+        task: ManifestTask, role: ImageRole, provider: str
+    ) -> ImagePreparationResult:
+        spec = {
+            "solver": task.spec.image,
+            "verifier": task.spec.verify.image,
+            "validation": task.spec.validation_spec.image,
+        }[role]
+        assert spec is not None
+        key = content_hash(
+            {
+                "image": role,
+                "provider": provider,
+                "os": task.spec.os,
+                "kind": spec.kind,
+                "local": {
+                    "solver": task.image_source_digest,
+                    "verifier": task.verifier_image_source_digest,
+                    "validation": task.validation_image_source_digest,
+                }[role],
+                "ref": spec.ref,
+                "base_ref": spec.base_ref,
+                "user": spec.user,
+            }
+        )
+        image = None if spec.base_ref is not None else by_source.get(key)
+        if image is not None:
+            return _reused_result(task, role, image)
+        result = await (
+            prepare_task_image_result(task, providers.get(provider))
+            if role == "solver"
+            else prepare_verifier_image_result(task, providers.get(provider), role=role)
+        )
+        assert result is not None
+        image = by_identity.setdefault(
+            (provider, result.image.kind, result.image.prepared_identity), result.image
+        )
+        by_source[key] = image
+        return result if image is result.image else _reused_result(task, role, image)
+
+    async def verifier(
+        task: ManifestTask, role: Literal["verifier", "validation"]
+    ) -> PreparedTaskImage | None:
+        """The image of a verifier of its own: its own, or the very one its solver runs."""
+        placed = task.spec.validation_spec if role == "validation" else task.spec.verify
+        if placed.environment_mode is VerificationMode.SHARED:
+            return None
+        assert task.verifier_provider is not None
+        result = (
+            await prepare_verifier_image_result(
+                task, providers.get(task.verifier_provider), role=role
+            )
+            if placed.image is None
+            else await prepared(task, role, task.verifier_provider)
+        )
+        assert result is not None
+        results.append(result)
+        return result.image
+
+    results: list[ImagePreparationResult] = []
+    for task in tasks:
+        assert task.provider is not None
+        task.asset_observation = observe_task_assets(task)
+        solver = await prepared(task, "solver", task.provider)
+        results.append(solver)
+        task.prepared_image = solver.image
+        task.prepared_verifier_image = await verifier(task, "verifier")
+        task.prepared_validation_image = (
+            None
+            if not validates_separately(task)
+            else task.prepared_verifier_image
+            if shares_verifier_image(task)
+            else await verifier(task, "validation")
+        )
+    return tuple(results)
+
+
+def _reused_result(
+    task: ManifestTask, role: str, image: PreparedTaskImage
+) -> ImagePreparationResult:
+    return ImagePreparationResult(
+        task=str(task.spec.name),
+        role=role,
+        image=image,
+        steps=(
+            ImagePreparationStep("lint", "executed"),
+            ImagePreparationStep(
+                "artifact-check",
+                "reused",
+                image.prepared_identity,
+                image.runtime_ref,
+            ),
+        ),
+    )
+
+
+def _calibration_check(
+    case: CalibrationCase, verdict: Verdict, episode_dir: Path
+) -> tuple[dict[str, float | None], tuple[CalibrationNotice, ...]]:
+    """What a case's episode observed of each value the case expects, and how it differs.
+
+    ``reward`` is the episode's stored reward, already rounded to two decimals; any other key
+    names a top-level number of the Verification Result in ``episode_dir``, read only for
+    this comparison. An episode that did not complete fails its case, since a failure is not
+    a score.
+    """
+    if verdict.status is not Status.COMPLETED or verdict.rewards is None:
+        message = f"the episode ended with {_episode_outcome(verdict)}"
+        return {}, (CalibrationNotice(code="not_completed", message=message),)
+    return _expected_values(
+        case, verdict.rewards.get("reward"), episode_dir / "verification.json", validation=False
+    )
+
+
+def _validation_check(
+    case: CalibrationCase, record: ResultRecord, episode_dir: Path, stage: Stage
+) -> CalibrationCheck:
+    """What ``stage``, the one that validates, gave a case's final state, which its episode
+    ran once before ``tests/`` scored it, against ``expect_validation``, or ``expect``
+    without one."""
+    expect = case.validation_expect
+    scored = next(iter(record.validation_rounds), None)
+    observed: dict[str, float | None] = {}
+    if scored is None:
+        message = f"the episode ended with {record.status.value} before {stage}/ validated"
+        failures: tuple[CalibrationNotice, ...] = (
+            CalibrationNotice(code="not_completed", message=message),
+        )
+    elif scored.status is not Status.COMPLETED:
+        failure = scored.failure
+        detail = f" ({failure.error_type}: {failure.message})" if failure is not None else ""
+        message = f"{stage}/ ended with {scored.status.value}{detail}"
+        failures = (CalibrationNotice(code="not_completed", message=message),)
+    else:
+        path = episode_dir / "validation" / str(scored.index) / "verification.json"
+        observed, failures = _expected_values(case, scored.reward, path, validation=True)
+    return CalibrationCheck(
+        expect=expect, observed=observed, failures=failures, passed=not failures
+    )
+
+
+def _expected_values(
+    case: CalibrationCase, reward: float | None, result: Path, *, validation: bool
+) -> tuple[dict[str, float | None], tuple[CalibrationNotice, ...]]:
+    """Each value a case expects of one verifier's result, ``reward`` and the numbers the
+    Verification Result at ``result`` holds, and how they differ from it."""
+    expect = case.validation_expect if validation else case.expect
+    values: dict[str, object] = {}
+    if any(key != "reward" for key in expect):
+        values = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else {}
+    values["reward"] = reward
+    observed: dict[str, float | None] = {}
+    failures: list[CalibrationNotice] = []
+    for key, expected in expect.items():
+        value = values.get(key)
+        if key not in values:
+            observed[key] = None
+            message = f"{key} in the Verification Result is missing"
+            failures.append(CalibrationNotice(code="missing_value", message=message))
+            continue
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            observed[key] = None
+            message = f"{key} in the Verification Result is not a number: {value!r:.80}"
+            failures.append(CalibrationNotice(code="not_a_number", message=message))
+            continue
+        observed[key] = float(value)
+        if not case.admits(key, value, validation=validation):
+            message = f"{key} is {value}, expected {_expectation_text(expected)}"
+            failures.append(CalibrationNotice(code="unexpected_value", message=message))
+    return observed, tuple(failures)
+
+
+def _expectation_text(expected: Expectation) -> str:
+    return f"[{expected[0]}, {expected[1]}]" if isinstance(expected, tuple) else str(expected)
+
+
+def _calibration_attempt(result: EpisodeResult, run_dir: Path) -> CalibrationAttempt:
+    result_path = result.run_dir / "result.json"
+    lock_path = result.run_dir / "lock.json" if result.lock is not None else None
+    return CalibrationAttempt(
+        episode_id=result.episode_id,
+        status=result.verdict.status,
+        rewards=result.verdict.rewards if result.verdict.status is Status.COMPLETED else None,
+        lock_path=lock_path.relative_to(run_dir).as_posix() if lock_path else None,
+        lock_digest=(
+            f"sha256:{hashlib.sha256(lock_path.read_bytes()).hexdigest()}" if lock_path else None
+        ),
+        result_path=result_path.relative_to(run_dir).as_posix(),
+    )
+
+
+def _case_line(task: str, case: CaseCalibrationObservation, stage: Stage) -> str:
+    """One case: the values it observed when it passed, or each way it failed, and those of
+    its validation check by ``stage``."""
+
+    def outcome(observed: dict[str, float | None], failures: tuple[CalibrationNotice, ...]) -> str:
+        if failures:
+            return "; ".join(notice.message for notice in failures)
+        return ", ".join(f"{key}={value}" for key, value in observed.items())
+
+    line = outcome(case.observed, case.failures)
+    if case.validation is not None:
+        line += f"; {stage}/: " + outcome(case.validation.observed, case.validation.failures)
+    return f"{'ok  ' if case.passed else 'FAIL'}  {task} {case.name}: {line}"
+
+
+def _episode_outcome(verdict: Verdict) -> str:
+    if verdict.failure is not None:
+        return f"{verdict.status.value} ({verdict.failure.error_class}: {verdict.failure.message})"
+    return verdict.status.value
+
+
+async def _plan_on_fleet(
+    tasks: list[ManifestTask], providers: ProviderRegistry, settings: RunConfig, *, label: str
+) -> FleetClient | None:
+    """Tell the Fleet what this Run will ask for, when any of its Tasks runs there.
+
+    The plan only places images and shows progress, so a Fleet that cannot take it is
+    reported and the Run goes on.
+    """
+    items = []
+    for task in tasks:
+        if task.provider is None or task.prepared_image is None:
+            continue
+        provider = providers.get(task.provider)
+        if not isinstance(provider, FleetProvider):
+            continue
+        items.append(
+            provider.plan_item(
+                task.spec.name,
+                task.prepared_image,
+                task.spec.os,
+                task.spec.solver_network,
+                task.spec.resources,
+                settings.episodes,
+                verifier=(
+                    task.spec.verify.resources.as_resources()
+                    if task.spec.verify.environment_mode is VerificationMode.SNAPSHOT
+                    and task.spec.verify.resources is not None
+                    else None
+                ),
+                round_verifier=round_verifier_resources(task.spec, task.validations),
+                verifier_network=task.spec.verify.network,
+                round_verifier_network=task.spec.validation_spec.network,
+                planned_saves=task.validations,
+            )
+        )
+    fleet = providers.fleet
+    if fleet is not None and items:
+        plan = RunPlan(label=label, concurrency=settings.concurrency, items=tuple(items))
+        try:
+            reply = await fleet.plan(plan)
+        except OrbitError as error:
+            typer.echo(f"fleet: the plan was not accepted: {error}", err=True)
+        else:
+            for assignment in reply.assignments:
+                nodes = ", ".join(node.name for node in assignment.nodes)
+                typer.echo(f"fleet {assignment.image[:19]} -> {nodes}")
+    return fleet
+
+
+def _fleet_outcome(status: Status) -> str:
+    if status is Status.COMPLETED:
+        return "completed"
+    return "infrastructure" if status is Status.ENV_ERROR else "failed"
+
+
+def _gateway_host() -> str:
+    """Bind where a sandbox can reach us.
+
+    Every sandbox is in a different network namespace from this process, so loopback is
+    never an address one of them can dial: a container on an isolated bridge reaches the
+    host at its gateway address, a QEMU VM through the runner holding it, and a macOS VM
+    at the Mac's address on Tart's NAT network. Binding to all interfaces is what makes the
+    deny-all topology usable.
+
+    This used to bind loopback for anything that was not Docker, which was true when the
+    VM backend ran qemu on the host with slirp — the guest's own NAT delivered to the
+    host's loopback. It stopped being true when the VM moved inside a runner, and nothing
+    noticed, because every VM test until now used the oracle and never asked for a model.
+
+    What keeps this safe is not the bind address: a request without a live per-episode
+    bearer token is refused, and those tokens die with their episode.
+    """
+    return "0.0.0.0"
+
+
+def _report_retry(result: EpisodeResult, retry: int, retries: int) -> None:
+    failure = result.record.failure
+    reason = f"{failure.error_type}: {failure.message}" if failure is not None else ""
+    typer.echo(
+        f"retry {retry}/{retries}  {result.episode_id}  after {result.record.status.value}: "
+        + " ".join(reason.split())[:1000]
+    )
+
+
+def _report(result: EpisodeResult) -> None:
+    verdict = result.verdict
+    typer.echo(f"{verdict.status.value}  {result.episode_id}  ({result.duration_sec:.1f}s)")
+    if verdict.rewards:
+        typer.echo(f"  rewards: {verdict.rewards}")
+    if verdict.failure:
+        typer.echo(f"  {verdict.failure.error_class}: {verdict.failure.message}")
+    typer.echo(f"  run dir: {result.run_dir}")

@@ -1,0 +1,381 @@
+"""Agent harnesses.
+
+Two families, distinguished by who owns the interaction loop — not by where the agent
+process runs, which proved an unstable line, and so that no existing agent has its
+control flow inverted to fit:
+
+* :class:`AutonomousHarness` — the agent owns its loop. We hand over a prompt and take
+  the result; what happens in between is the agent's business. It may run inside the
+  sandbox or outside it against the sandbox's exposed interfaces.
+* :class:`PolicyHarness` — the agent steps through a :class:`~orbit.core.env.TaskEnv` we
+  hand it. It drives, but every observation and action passes through our environment,
+  so the trajectory is witnessed rather than reported.
+
+Both reach the sandbox through the contract and both send model traffic through the
+gateway, so both produce the same trace. That is what makes a CLI agent and a GUI agent
+comparable.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from orbit.core.blob import BlobSink
+from orbit.core.env import Observation, StepResult, TaskEnv
+from orbit.core.errors import AgentUnsupportedError
+from orbit.core.sandbox import Sandbox
+from orbit.core.taskspec import McpServer, OperatingSystem
+from orbit.core.trace import DesktopAction
+from orbit.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
+
+__all__ = [
+    "AgentRun",
+    "AutonomousHarness",
+    "EffectiveAgentResources",
+    "Harness",
+    "HarnessFamily",
+    "HarnessSession",
+    "NativeContinuation",
+    "Observation",
+    "PolicyHarness",
+    "ResolvedMcpServer",
+    "ResolvedSkill",
+    "ResumeSupport",
+    "StepwisePolicy",
+    "TrajectoryParseContext",
+]
+
+
+class HarnessFamily(StrEnum):
+    """Which side owns the interaction loop.
+
+    A property of the harness, not of the task: the same task can be attempted by an
+    agent that runs itself and by one the framework drives step by step.
+    """
+
+    AUTONOMOUS = "autonomous"
+    POLICY = "policy"
+
+
+class ResumeSupport(StrEnum):
+    """How, if at all, an agent can continue an interrupted exchange."""
+
+    NONE = "none"
+    REPLAY = "replay"
+    """Restart on the accumulated conversation — correct for stateless programs."""
+
+    NATIVE = "native"
+    """The agent reopens its own recorded session; nothing is replayed."""
+
+
+class HarnessSession(BaseModel):
+    """What a harness needs in order to talk to the model through the gateway."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    episode_id: str
+    gateway_url: str
+    token: str = Field(description="Per-episode bearer; never a provider credential")
+    model: str
+    os: OperatingSystem = OperatingSystem.LINUX
+    authentication: Literal["api-key", "subscription"] = "api-key"
+    profile_slot_id: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    sandbox_id: str = ""
+    provider_web_tools: bool = Field(
+        default=False,
+        description=(
+            "Whether the agent may use tools its model provider runs on its own side that "
+            "reach the network, such as hosted web search. They act outside the Sandbox's "
+            "network policy, so only a Task whose network is open allows them, and the "
+            "harness turns them off otherwise."
+        ),
+    )
+    resources_digest: str = (
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    )
+    home: str = Field(
+        default="/home/user",
+        description=(
+            "The agent's home directory, and so where a harness may write. Supplied "
+            "rather than chosen: the agent runs unprivileged, and a path it does not own "
+            "fails on the first write with an error about permissions that says nothing "
+            "about the agent or the task."
+        ),
+    )
+    workdir: str | None = Field(
+        default=None, description="Where the agent starts, when the Task names a directory."
+    )
+
+    @property
+    def start_dir(self) -> str:
+        return self.workdir or self.home
+
+
+class ResolvedSkill(BaseModel):
+    """One validated Skill ready to stage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    path: Path
+    source_layers: tuple[Literal["preset", "run", "cli"], ...]
+    declared_sources: tuple[str, ...]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_version: str | None = None
+    reportable: bool
+    reportability_reason: str | None = None
+    executable_files: tuple[str, ...] = Field(default=(), exclude=True)
+
+
+class ResolvedMcpServer(BaseModel):
+    """One validated canonical MCP server ready for adapter translation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    server: McpServer
+    source_layers: tuple[Literal["task", "preset", "run", "cli"], ...]
+    declared_sources: tuple[str, ...]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_version: str | None = None
+    reportable: bool
+    reportability_reason: str | None = None
+    staged_files: Path | None = None
+    headers: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
+    """Resolved HTTP headers for the Harness to write; their values are never recorded."""
+
+
+class EffectiveAgentResources(BaseModel):
+    """The deterministic union of every declared Skill and MCP server."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    skills_dir: str | None = None
+    """The Task's Skills, in its image; the Harness copies them before ``skills``."""
+    skills: tuple[ResolvedSkill, ...] = ()
+    """What an operator added, uploaded for the Episode."""
+    mcp_servers: tuple[ResolvedMcpServer, ...] = ()
+    digest: str = Field(
+        default="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+
+
+class NativeContinuation(BaseModel):
+    """One harness's exact native session, which continues wherever its files are."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    harness: str
+    native_session_id: str = Field(min_length=1)
+
+
+class AgentRun(BaseModel):
+    """The outcome of one autonomous agent run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    exit_code: int
+    final_message: str | None = None
+    continuation: NativeContinuation | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0
+
+
+@dataclass(frozen=True)
+class TrajectoryParseContext:
+    """Everything a native-log parser may use to produce canonical ATIF."""
+
+    episode_id: str
+    trajectory_id: str
+    instruction: str
+    logs_dir: Path
+    model: str
+    agent_version: str
+    blobs: BlobSink
+    session_id: str | None = None
+    final_message: str | None = None
+    incomplete: bool = False
+    incomplete_reason: str | None = None
+
+
+class Harness(ABC):
+    """Common surface of both families."""
+
+    name: str
+    family: HarnessFamily
+    supported_os: tuple[OperatingSystem, ...] = (OperatingSystem.LINUX,)
+
+    logs: tuple[str, ...] = ()
+    """Files or directories this harness writes about its own run, relative to the agent's home.
+
+    Orbit mirrors them into ``logs/<harness>/`` at the same relative paths while the agent
+    runs, and once more after it stops; the parser reads that mirror.
+
+    Not artifacts. An artifact is what the *agent produced* while doing the task, and the
+    task declares it because only the task knows what its own output is. These are what
+    the *harness* produced while running it — a transcript, a stream of tool calls, an
+    error log — and only the harness knows about them.
+
+    Keeping them apart matters because they answer different questions. Artifacts say what
+    the agent achieved, which is what the verifier scores. These say how it went about it,
+    which is the only evidence for why a score is what it is: a run that scored 1.0 by
+    reading a file and one that scored 1.0 by looking at the screen are indistinguishable
+    from the reward alone.
+    """
+
+    credentials: tuple[str, ...] = ()
+    """Files under the agent's home, relative to it, in which this harness leaves a
+    credential: the episode token, or a subscription's. Orbit removes them before the
+    agent's disk is saved or kept, between turns included, and the harness writes them again
+    before each turn."""
+
+    @abstractmethod
+    def version(self) -> str:
+        """The agent build actually used; recorded in provenance."""
+
+    def integrity(self) -> str:
+        """What pins that build: an image digest, package hash, or commit."""
+        return "unpinned"
+
+    def validate_resources(self, resources: EffectiveAgentResources) -> None:
+        """Reject optional resources unless a concrete harness implements them."""
+        if resources.skills_dir or resources.skills or resources.mcp_servers:
+            raise AgentUnsupportedError(f"{self.name} does not support agent resources")
+
+    def validate_os(self, operating_system: OperatingSystem) -> None:
+        """Reject unsupported guest systems before provisioning or installation."""
+        if operating_system not in self.supported_os:
+            raise AgentUnsupportedError(f"{self.name} does not support {operating_system.value}")
+
+    async def install(self, sandbox: Sandbox) -> str:
+        """Prepare the sandbox. Default: no installation required."""
+        return self.version()
+
+    async def install_resources(
+        self,
+        sandbox: Sandbox,
+        session: HarnessSession,
+        resources: EffectiveAgentResources,
+    ) -> None:
+        """Translate and stage already validated resources. Default: none supported."""
+        return None
+
+    def parse_trajectory(self, context: TrajectoryParseContext) -> AtifTrajectory:
+        """Build the minimal truthful trajectory when no richer native log exists."""
+        builder = TrajectoryBuilder(
+            trajectory_id=context.trajectory_id,
+            session_id=context.session_id,
+            agent=AtifAgent(
+                name=self.name,
+                version=context.agent_version,
+                model_name=context.model or None,
+            ),
+            extra=(
+                {
+                    "orbit": {
+                        "incomplete": True,
+                        "incomplete_reason": context.incomplete_reason or "interrupted",
+                    }
+                }
+                if context.incomplete
+                else None
+            ),
+        )
+        builder.add(source="user", message=context.instruction)
+        if context.final_message is not None:
+            builder.add(source="agent", message=context.final_message)
+        return builder.build()
+
+
+class AutonomousHarness(Harness):
+    """The agent owns its loop."""
+
+    family = HarnessFamily.AUTONOMOUS
+    resume_support: ResumeSupport = ResumeSupport.NONE
+
+    @abstractmethod
+    async def launch(
+        self,
+        instruction: str,
+        sandbox: Sandbox,
+        session: HarnessSession,
+        *,
+        timeout_sec: float,
+    ) -> AgentRun:
+        """Run the agent to completion."""
+
+    async def resume(
+        self,
+        instruction: str | None,
+        continuation: NativeContinuation,
+        sandbox: Sandbox,
+        session: HarnessSession,
+        *,
+        timeout_sec: float,
+    ) -> AgentRun:
+        """Continue an exact native session.
+
+        An instruction becomes the session's next user message. ``None`` asks the agent to
+        carry on from where it stopped, without new task input.
+        """
+        raise AgentUnsupportedError(f"{self.name} does not support native resume")
+
+
+class PolicyHarness(Harness):
+    """The agent steps through an environment we supply.
+
+    Driving is the agent's job because that is the shape most agents already have —
+    gymnasium, cua-lite and verifiers all hand an agent an environment and let it run.
+    Making the framework call ``decide(observation)`` instead would force every such
+    agent through a queue-based inversion, and would buy nothing: the recording and the
+    limits live in the environment either way.
+    """
+
+    family = HarnessFamily.POLICY
+
+    @abstractmethod
+    async def rollout(self, env: TaskEnv, session: HarnessSession) -> str | None:
+        """Drive ``env`` until it is done. May return a closing message.
+
+        Stop when a :class:`~orbit.core.env.StepResult` reports ``done``; the environment
+        enforces its own ceilings, so ignoring that is refused rather than obeyed.
+        """
+
+
+class StepwisePolicy(PolicyHarness):
+    """A :class:`PolicyHarness` for agents that would rather be asked than drive.
+
+    Both styles are legitimate, and neither should have to adapt to the other. This
+    supplies the loop so a subclass only has to answer one question at a time.
+    """
+
+    async def rollout(self, env: TaskEnv, session: HarnessSession) -> str | None:
+        await self.start(session)
+        observation = await env.reset()
+        while True:
+            actions = await self.decide(observation)
+            result = await env.step(actions)
+            if result.done:
+                return await self.finish(result)
+            observation = result.observation
+
+    async def start(self, session: HarnessSession) -> None:
+        """Prepare for an episode. Default: nothing."""
+        return None
+
+    @abstractmethod
+    async def decide(self, observation: Observation) -> list[DesktopAction]:
+        """Actions for this observation. An empty list means finished."""
+
+    async def finish(self, result: StepResult) -> str | None:
+        """Release per-episode state; may return a closing message."""
+        return None

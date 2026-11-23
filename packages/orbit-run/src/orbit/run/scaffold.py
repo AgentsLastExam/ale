@@ -1,0 +1,96 @@
+"""Create a minimal self-contained Task that lints and calibrates."""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.ids import in_orbit_form
+from orbit.core.taskspec import SCHEMA_VERSION
+from orbit.run import orbit_image
+
+__all__ = ["DEFAULT_ORGANIZATION", "scaffold_task"]
+
+#: The organization of a scaffolded Task's ``org/name``; edit ``[task].name`` for another.
+DEFAULT_ORGANIZATION = "agentslastexam"
+
+TASK_TOML = f"""\
+schema_version = "{SCHEMA_VERSION}"
+artifacts = ["/home/user/output"]
+
+[task]
+name = "{{name}}"
+
+[environment]
+cpus = 2
+memory_mb = 8192
+
+[agent]
+user = "user"
+timeout_sec = 300
+network_mode = "no-network"
+
+[verifier]
+timeout_sec = 120
+"""
+
+INSTRUCTION_MD = """\
+Write the word hello into /home/user/output/result.txt
+"""
+
+DOCKERFILE = f"""\
+FROM {orbit_image("container-ubuntu22-base")}
+
+RUN mkdir -p /home/user/output && chown -R user:user /home/user/output
+"""
+
+TEST_SH = """\
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$ORBIT_VERIFY_PYTHON" verify.py
+"""
+
+VERIFY_PY = """\
+from orbit_verify import checks, write
+
+check = checks.text_equals("/home/user/output/result.txt", "hello\\n")
+write({"reward": check["score"], "content": check})
+"""
+
+
+SOLVE_SH = """\
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'hello\\n' > /home/user/output/result.txt
+"""
+
+
+def scaffold_task(path: Path, *, force: bool = False) -> Path:
+    target = path.resolve()
+    name = f"{DEFAULT_ORGANIZATION}/{target.name}"
+    if not in_orbit_form(name):
+        raise TaskDefinitionError(
+            "Task folder name must be a lowercase slug of letters, digits, '-' and '_', or "
+            f"task.toml must be written by hand: {target.name!r}"
+        )
+    if target.exists():
+        if not force:
+            raise TaskDefinitionError(f"{target} already exists; pass --force to overwrite it")
+        shutil.rmtree(target)
+
+    files = {
+        "task.toml": TASK_TOML.format(name=name),
+        "instruction.md": INSTRUCTION_MD,
+        "environment/Dockerfile": DOCKERFILE,
+        "tests/test.sh": TEST_SH,
+        "tests/verify.py": VERIFY_PY,
+        "solution/solve.sh": SOLVE_SH,
+    }
+    for relative, content in files.items():
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+        if destination.suffix == ".sh":
+            destination.chmod(0o755)
+    return target

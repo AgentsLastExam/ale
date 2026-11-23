@@ -13,31 +13,31 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.harness import (
+from orbit.core.config import RunConfig
+from orbit.core.harness import (
     AgentRun,
     EffectiveAgentResources,
     HarnessSession,
     ResolvedSkill,
 )
-from ale.core.lock import TaskSource
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.ledger import Ledger, episode_identity
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import (
+from orbit.core.lock import TaskSource
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.ledger import Ledger, episode_identity
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import (
     ProvenanceInputs,
     agent_provenance,
     framework_provenance,
     gateway_provenance,
 )
-from ale.run.providers.docker import DockerProvider
-from ale.run.task_images import prepare_task_image
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.task_images import prepare_task_image
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -209,7 +209,7 @@ class EvidenceHarness(ClaudeCodeHarness):
             ]
         )
         await sandbox.write_file(
-            f"{session.home}/.ale-harness/stdout.log",
+            f"{session.home}/.orbit-harness/stdout.log",
             (transcript + "\n").encode(),
             identity=Identity.AGENT,
         )

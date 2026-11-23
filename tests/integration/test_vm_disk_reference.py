@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.taskspec import OperatingSystem
-from ale.core.verdict import Status
-from ale.run import HELPER_RUNTIME, task_images
-from ale.run.episode import run_episode
-from ale.run.framework import MATERIALIZER_IMAGE, framework_identity, framework_on_disk
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.images import pull_vm_image
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.qemu import QemuProvider
-from ale.run.task_images import prepare_task_image_result
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.verdict import Status
+from orbit.run import HELPER_RUNTIME, task_images
+from orbit.run.episode import run_episode
+from orbit.run.framework import MATERIALIZER_IMAGE, framework_identity, framework_on_disk
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.images import pull_vm_image
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.task_images import prepare_task_image_result
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import VM_BASE, VM_RESOURCES, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
@@ -31,11 +31,11 @@ def _steps(result: task_images.ImagePreparationResult) -> dict[str, str]:
 async def test_a_bare_linux_qcow2_ref_gets_the_framework_once_and_runs(
     tmp_path: Path,
     write_repo: Callable[..., Path],
-    isolated_ale_cache: Path,
+    isolated_orbit_cache: Path,
     docker_buildx: None,
     kvm_host: None,
 ) -> None:
-    # A disk ALE did not prepare: the VM base and the Task's files, without the framework.
+    # A disk Orbit did not prepare: the VM base and the Task's files, without the framework.
     bare = tmp_path / "bare.qcow2"
     await pull_vm_image(VM_BASE, bare)
     subprocess.run(

@@ -19,18 +19,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ale.core.errors import AgentError
-from ale.core.harness import HarnessSession
-from ale.core.sandbox import ExecResult, Sandbox, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.core.verdict import Status
-from ale.run.assets import _repository_lock
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.errors import AgentError
+from orbit.core.harness import HarnessSession
+from orbit.core.sandbox import ExecResult, Sandbox, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from orbit.core.verdict import Status
+from orbit.run.assets import _repository_lock
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import CONTAINER_BASE, prepare_reference, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]

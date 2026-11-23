@@ -9,22 +9,22 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.errors import TaskDefinitionError
-from ale.core.lock import TaskSource
-from ale.core.taskspec import ImageKind
-from ale.core.verdict import Status
-from ale.run import task_images
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers import ProviderRegistry
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.task_images import prepare_task_image, prepare_task_image_result
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import RunConfig
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.lock import TaskSource
+from orbit.core.taskspec import ImageKind
+from orbit.core.verdict import Status
+from orbit.run import task_images
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.task_images import prepare_task_image, prepare_task_image_result
+from orbit.run.tasksets.manifest import load_tasks
 from tests.integration.conftest import HELLO_BUILD
 from tests.support import VM_BASE, VM_RESOURCES, provider_registry
 
@@ -49,8 +49,8 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
         assert required in dockerfile
     # The engine adds guestd and Cua Driver to every prepared image; the base carries neither.
     for forbidden in (
-        "/opt/ale",
-        "ale-guestd.service",
+        "/opt/orbit",
+        "orbit-guestd.service",
         "cua-driver",
         "LABEL",
         "nftables",
@@ -66,7 +66,7 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
 
     materialize = (materializer / "materialize.sh").read_text()
     assert "truncate -s 40G" not in materialize
-    # Uncompressed: `ale vm-image push` refuses a disk with compressed clusters.
+    # Uncompressed: `orbit vm-image push` refuses a disk with compressed clusters.
     (convert,) = [line for line in materialize.splitlines() if line.startswith("qemu-img convert")]
     assert " -c " not in f"{convert} "
     assert "qemu-img check" in materialize
@@ -81,7 +81,7 @@ def test_vm_base_and_materializer_sources_define_the_offline_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_local_container_build_reuse_and_input_boundaries(
-    tmp_path: Path, isolated_ale_cache: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, isolated_orbit_cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task_path = scaffold_task(tmp_path / "task")
     provider = DockerProvider()
@@ -125,7 +125,7 @@ async def test_local_container_build_reuse_and_input_boundaries(
 @pytest.mark.needs_kvm
 @pytest.mark.asyncio
 async def test_setup_never_enters_the_container_build_context(
-    tmp_path: Path, isolated_ale_cache: Path, docker_buildx: None
+    tmp_path: Path, isolated_orbit_cache: Path, docker_buildx: None
 ) -> None:
     task_path = scaffold_task(tmp_path / "task")
     environment = task_path / "environment"
@@ -166,7 +166,7 @@ def _allocated(disk: Path) -> int:
 async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
     tmp_path: Path,
     write_repo: Callable[..., Path],
-    isolated_ale_cache: Path,
+    isolated_orbit_cache: Path,
     docker_buildx: None,
     kvm_host: None,
 ) -> None:
@@ -188,9 +188,9 @@ async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
     # The base is pulled once, kept by its manifest digest, and the build's layer, the
     # framework included, sits on it in place.
     layer = Path(first.runtime_ref)
-    (base,) = (isolated_ale_cache / "vm-images").glob("*/disk.qcow2")
+    (base,) = (isolated_orbit_cache / "vm-images").glob("*/disk.qcow2")
     assert first.base_materials == ("sha256:" + base.parent.name,)
-    assert layer.parent == isolated_ale_cache / "vm-builds"
+    assert layer.parent == isolated_orbit_cache / "vm-builds"
     assert _chain(layer) == [layer, base.resolve()]
 
     started = time.monotonic()
@@ -211,7 +211,7 @@ async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
         build_script=HELLO_BUILD + "printf other > /etc/other-task\n",
     )
     own = Path((await prepare_task_image(load_tasks(other)[0], provider)).runtime_ref)
-    assert list((isolated_ale_cache / "vm-images").glob("*/disk.qcow2")) == [base]
+    assert list((isolated_orbit_cache / "vm-images").glob("*/disk.qcow2")) == [base]
     assert own != layer and _chain(own) == [own, base.resolve()]
     for disk in (layer, own):
         assert _allocated(disk) < min(_allocated(base) // 10, 1 << 30)
@@ -250,7 +250,7 @@ async def test_a_linux_vm_build_is_one_layer_on_the_pulled_base(
 async def test_failed_linux_vm_build_leaves_no_partial_disk(
     tmp_path: Path,
     write_repo: Callable[..., Path],
-    isolated_ale_cache: Path,
+    isolated_orbit_cache: Path,
     docker_buildx: None,
     kvm_host: None,
 ) -> None:
@@ -262,7 +262,7 @@ async def test_failed_linux_vm_build_leaves_no_partial_disk(
     )
     with pytest.raises(TaskDefinitionError, match=r"build\.sh failed \(exit=3.*the build broke"):
         await prepare_task_image(load_tasks(task_path)[0], QemuProvider())
-    root = isolated_ale_cache / "vm-builds"
+    root = isolated_orbit_cache / "vm-builds"
     assert not list(root.glob("*.qcow2"))
     assert not list(root.glob(".*-*"))
 

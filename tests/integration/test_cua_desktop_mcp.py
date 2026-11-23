@@ -15,10 +15,10 @@ import re
 
 import pytest
 
-from ale.core.sandbox import Identity, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.run.providers.docker import DockerProvider
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.core.sandbox import Identity, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
@@ -73,7 +73,7 @@ async def speak(sandbox, server_path: str, requests: list[dict], env: str = "") 
 @pytest.mark.asyncio
 async def test_cua_desktop_is_absent_until_explicitly_staged(desktop) -> None:  # type: ignore[no-untyped-def]
     missing = await desktop.exec(
-        ["test", "!", "-e", f"{WORK_DIR}/.ale-cua-desktop/cua_desktop_mcp.py"],
+        ["test", "!", "-e", f"{WORK_DIR}/.orbit-cua-desktop/cua_desktop_mcp.py"],
         identity=Identity.AGENT,
     )
     assert missing.ok
@@ -162,7 +162,7 @@ async def test_a_capped_screenshot_is_smaller_and_leaves_input_on_the_screen(des
             call(4, "mouse_move", {"coordinate": [500, 500]}),
             call(5, "cursor_position", {}),
         ],
-        env="ALE_CUA_SCREENSHOT_MAX_DIMENSION=512",
+        env="ORBIT_CUA_SCREENSHOT_MAX_DIMENSION=512",
     )
 
     size = replies[1]["result"]["structuredContent"]

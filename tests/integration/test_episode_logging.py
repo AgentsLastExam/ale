@@ -10,16 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.capability import CapabilityProfile, SandboxNeeds
-from ale.core.episode import EpisodeContext
-from ale.core.lock import (
+from orbit.core.capability import CapabilityProfile, SandboxNeeds
+from orbit.core.episode import EpisodeContext
+from orbit.core.lock import (
     AgentProvenance,
     FrameworkProvenance,
     GatewayProvenance,
     TaskSource,
 )
-from ale.core.result import PhaseTiming, ResultRecord
-from ale.core.sandbox import (
+from orbit.core.result import PhaseTiming, ResultRecord
+from orbit.core.sandbox import (
     ExecResult,
     ImageKind,
     ImageRef,
@@ -29,16 +29,16 @@ from ale.core.sandbox import (
     ResourceAllocation,
     SandboxRequest,
 )
-from ale.core.task import Task
-from ale.core.taskspec import TaskSpec
-from ale.core.trace import (
+from orbit.core.task import Task
+from orbit.core.taskspec import TaskSpec
+from orbit.core.trace import (
     PhaseFinished,
     PhaseStarted,
     TrajectoryLink,
     TransportCall,
     read_jsonl,
 )
-from ale.core.trajectory import (
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
@@ -48,11 +48,11 @@ from ale.core.trajectory import (
     AtifToolCall,
     AtifTrajectory,
 )
-from ale.core.verdict import Verdict
-from ale.run.episode import run_episode
-from ale.run.ledger import Ledger, episode_identity
-from ale.run.provenance import ProvenanceInputs
-from ale.run.recording import CommandRecorder
+from orbit.core.verdict import Verdict
+from orbit.run.episode import run_episode
+from orbit.run.ledger import Ledger, episode_identity
+from orbit.run.provenance import ProvenanceInputs
+from orbit.run.recording import CommandRecorder
 from tests.support import provider_registry
 
 pytestmark = pytest.mark.integration
@@ -97,7 +97,7 @@ class LoggedProtocol:
             kind=ImageKind.CONTAINER,
             prepared_identity=DIGEST,
             observed_identity=DIGEST,
-            observed_ref="ale-task:fixture",
+            observed_ref="orbit-task:fixture",
         )
         ctx.resource_allocation = ResourceAllocation(
             cpus=task.spec.resources.cpus,
@@ -125,7 +125,7 @@ class LoggedProtocol:
             component="task-stage",
             execution_id="setup-1",
             actor="task",
-            argv=["bash", "/opt/ale/setup/run.sh"],
+            argv=["bash", "/opt/orbit/setup/run.sh"],
         )
         await recorder.write("stdout", b"prepared\n")
         recorder.finish(ExecResult(exit_code=0, duration_ms=3))
@@ -197,7 +197,7 @@ class LoggedProtocol:
                             )
                         ]
                     ),
-                    extra={"ale": {"transport_call_ids": [call_id]}},
+                    extra={"orbit": {"transport_call_ids": [call_id]}},
                 ),
             ],
         )
@@ -248,7 +248,7 @@ async def test_complete_episode_has_one_authoritative_home_per_fact(
         source="solver-local",
         input_identity=DIGEST,
         image_source_identity=DIGEST,
-        runtime_ref="ale-task:fixture",
+        runtime_ref="orbit-task:fixture",
         prepared_identity=DIGEST,
     )
     # As a Run that selected and checked its Providers hands the Task over.

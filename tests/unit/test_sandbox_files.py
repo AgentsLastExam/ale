@@ -14,11 +14,11 @@ from types import SimpleNamespace
 import pytest
 from tests.unit.test_guest_authentication import TOKEN, guest
 
-from ale.core.sandbox import SandboxFile
-from ale.run.guestd import main as guestd
-from ale.run.providers.docker import DockerSandbox
-from ale.run.providers.qemu import QemuSandbox
-from ale.run.transport import GuestClient, StdioTransport, TcpTransport
+from orbit.core.sandbox import SandboxFile
+from orbit.run.guestd import main as guestd
+from orbit.run.providers.docker import DockerSandbox
+from orbit.run.providers.qemu import QemuSandbox
+from orbit.run.transport import GuestClient, StdioTransport, TcpTransport
 
 pytestmark = pytest.mark.unit
 
@@ -198,8 +198,8 @@ async def test_provider_reads_use_a_separate_guest_connection(tmp_path: Path, ba
 async def test_log_mirror_follows_appends_and_rewrites_through_a_real_guest(
     tmp_path: Path,
 ) -> None:
-    from ale.core.taskspec import OperatingSystem
-    from ale.run.protocol.log_mirror import LogMirror
+    from orbit.core.taskspec import OperatingSystem
+    from orbit.run.protocol.log_mirror import LogMirror
 
     transport = StdioTransport([sys.executable, guestd.__file__, "--stdio"])
     await transport.start()
@@ -207,23 +207,23 @@ async def test_log_mirror_follows_appends_and_rewrites_through_a_real_guest(
     sandbox = DockerSandbox.__new__(DockerSandbox)
     sandbox._client = sandbox._file_client = client
     home, host = tmp_path / "home", tmp_path / "host"
-    log = home / ".ale-harness" / "stdout.log"
+    log = home / ".orbit-harness" / "stdout.log"
     log.parent.mkdir(parents=True)
-    (home / ".ale-harness" / "link").symlink_to(tmp_path)
+    (home / ".orbit-harness" / "link").symlink_to(tmp_path)
     log.write_bytes(b"first\n")
     mirror = LogMirror(
-        sandbox, home=str(home), os=OperatingSystem.LINUX, paths=(".ale-harness",), target=host
+        sandbox, home=str(home), os=OperatingSystem.LINUX, paths=(".orbit-harness",), target=host
     )
     try:
         await mirror.sync()
         with log.open("ab") as stream:
             stream.write(b"second\n")
         await mirror.sync()
-        assert (host / ".ale-harness/stdout.log").read_bytes() == b"first\nsecond\n"
+        assert (host / ".orbit-harness/stdout.log").read_bytes() == b"first\nsecond\n"
         log.write_bytes(b"FIRST\nsecond\n")  # Same size, rewritten in place.
         await mirror.sync(final=True)
-        assert (host / ".ale-harness/stdout.log").read_bytes() == b"FIRST\nsecond\n"
-        assert sorted(path.name for path in (host / ".ale-harness").iterdir()) == ["stdout.log"]
+        assert (host / ".orbit-harness/stdout.log").read_bytes() == b"FIRST\nsecond\n"
+        assert sorted(path.name for path in (host / ".orbit-harness").iterdir()) == ["stdout.log"]
         assert not mirror.incomplete
     finally:
         await client.close()

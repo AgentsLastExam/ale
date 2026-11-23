@@ -6,9 +6,9 @@ import asyncio
 
 import pytest
 
-from ale.core.sandbox import SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
-from ale.run.providers.docker import DockerProvider
+from orbit.core.sandbox import SandboxRequest
+from orbit.core.taskspec import NetworkPolicy, Resources
+from orbit.run.providers.docker import DockerProvider
 from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_gui]
@@ -17,7 +17,7 @@ GUI_IMAGE = CONTAINER_BASE
 
 PROBE = """
 import sys
-sys.path.insert(0, "/opt/ale/guestd")
+sys.path.insert(0, "/opt/orbit/guestd")
 import gui
 png = gui.capture_screen()
 print(gui._binary(), len(png), png.startswith(bytes([137, 80, 78, 71])))

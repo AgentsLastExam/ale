@@ -12,25 +12,25 @@ from typing import Any
 
 import pytest
 
-from ale.run.harnesses.base import STDOUT_PATH
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.secrets import provider_credentials
+from orbit.run.harnesses.base import STDOUT_PATH
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.secrets import provider_credentials
 from tests.support import sibling_checkout
 
 LIVE = pytest.mark.skipif(
-    os.environ.get("ALE_RUN_LIVE_ACCEPTANCE") != "1",
-    reason="set ALE_RUN_LIVE_ACCEPTANCE=1 to make real model calls",
+    os.environ.get("ORBIT_RUN_LIVE_ACCEPTANCE") != "1",
+    reason="set ORBIT_RUN_LIVE_ACCEPTANCE=1 to make real model calls",
 )
 #: The model live calls to each provider use. Keys and endpoints are not test knobs: every
-#: live call resolves them as ale does, from ALE_<PROVIDER>_API_KEY and
-#: ALE_<PROVIDER>_BASE_URL in the checkout's .env.
+#: live call resolves them as orbit does, from ORBIT_<PROVIDER>_API_KEY and
+#: ORBIT_<PROVIDER>_BASE_URL in the checkout's .env.
 MODELS = {
-    "anthropic": os.environ.get("ALE_LIVE_ANTHROPIC_MODEL", "claude-sonnet-5"),
-    "openai": os.environ.get("ALE_LIVE_OPENAI_MODEL", "gpt-5.6-luna"),
+    "anthropic": os.environ.get("ORBIT_LIVE_ANTHROPIC_MODEL", "claude-sonnet-5"),
+    "openai": os.environ.get("ORBIT_LIVE_OPENAI_MODEL", "gpt-5.6-luna"),
     "xai": "grok-4.5",
 }
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
@@ -59,8 +59,8 @@ def run_task(
     options: tuple[str, ...] = (),
     timeout: float = 900,
 ) -> Path:
-    """Run one episode through ``ale run``; ``model=None`` keeps the agent preset's."""
-    executable = Path(sys.executable).parent / "ale"
+    """Run one episode through ``orbit run``; ``model=None`` keeps the agent preset's."""
+    executable = Path(sys.executable).parent / "orbit"
     command = [
         str(executable),
         "run",
@@ -74,7 +74,7 @@ def run_task(
         "--run-id",
         run_id,
         "--no-resume",
-        # A subscription login in the checkout's .ale/auth would otherwise win; live runs
+        # A subscription login in the checkout's .orbit/auth would otherwise win; live runs
         # always test the API-key route the .env describes.
         "--auth",
         "api-key",
@@ -82,7 +82,7 @@ def run_task(
     for setting in settings:
         command.extend(("--set", setting))
     command.extend(("--set", 'logging.native_logs="debug"'))
-    # Live checks read what the agent wrote, and ale keeps no artifacts unless asked.
+    # Live checks read what the agent wrote, and Orbit keeps no artifacts unless asked.
     command.extend(("--set", 'artifacts.collect="host"'))
     result = subprocess.run(
         command,
@@ -180,7 +180,7 @@ def trajectory_mcp_calls(steps: list[dict[str, Any]]) -> dict[str, dict[str, Any
             for result in (step.get("observation") or {}).get("results", [])
         }
         for call in step.get("tool_calls") or []:
-            mcp = ((call.get("extra") or {}).get("ale") or {}).get("mcp")
+            mcp = ((call.get("extra") or {}).get("orbit") or {}).get("mcp")
             if mcp:
                 calls[call["tool_call_id"]] = {
                     "call": call,

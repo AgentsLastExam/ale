@@ -16,11 +16,11 @@ import subprocess
 
 import pytest
 
-from ale.core.errors import ProviderCapabilityError, TaskDefinitionError
-from ale.core.sandbox import ImageRef, PreparedTaskImage
-from ale.run.framework import with_framework
-from ale.run.images import resolve_container_reference
-from ale.run.providers.docker import DockerProvider
+from orbit.core.errors import ProviderCapabilityError, TaskDefinitionError
+from orbit.core.sandbox import ImageRef, PreparedTaskImage
+from orbit.run.framework import with_framework
+from orbit.run.images import resolve_container_reference
+from orbit.run.providers.docker import DockerProvider
 from tests.support import CONTAINER_BASE
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -32,7 +32,7 @@ CONFORMING = CONTAINER_BASE
 UPSTREAM = "docker.io/library/python:3.12-slim"
 #: An image whose Python is too old for verification; the framework brings its own.
 OLD_PYTHON = "docker.io/library/python:3.10-slim"
-NO_COMMAND = "ale-test-no-command:latest"
+NO_COMMAND = "orbit-test-no-command:latest"
 
 
 async def _pulled(reference: str) -> str:

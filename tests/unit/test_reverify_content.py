@@ -4,9 +4,9 @@ from pathlib import Path
 import pytest
 from tests.support import edit_task_config
 
-from ale.core.result import SandboxOutcome
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.result import SandboxOutcome
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 
@@ -113,8 +113,8 @@ async def test_reverify_refuses_changed_or_unrecorded_inputs_before_attaching(
 
     from tests.unit.test_runtime_contracts import make_lock
 
-    from ale.core.config import RunConfig
-    from ale.run.cli import tasks as task_cli
+    from orbit.core.config import RunConfig
+    from orbit.run.cli import tasks as task_cli
 
     root = scaffold_task(tmp_path / "task")
     task = load_tasks(root)[0]
@@ -200,10 +200,10 @@ async def test_reverify_takes_the_solver_kind_from_its_run_and_reads_only_the_ve
 
     from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
-    from ale.core.config import RunConfig
-    from ale.core.errors import ProviderStartError
-    from ale.core.taskspec import ImageKind
-    from ale.run.cli import tasks as task_cli
+    from orbit.core.config import RunConfig
+    from orbit.core.errors import ProviderStartError
+    from orbit.core.taskspec import ImageKind
+    from orbit.run.cli import tasks as task_cli
 
     root = scaffold_task(tmp_path / "task")
     (root / "environment/Dockerfile").unlink()
@@ -253,7 +253,7 @@ async def test_reverify_takes_the_solver_kind_from_its_run_and_reads_only_the_ve
         prepared.append((task.spec.image, task.spec.verify.image.kind, task.prepared_image.kind))
         raise ProviderStartError("stop before the verifier starts")
 
-    monkeypatch.setattr("ale.run.task_images.classify_image", classify)
+    monkeypatch.setattr("orbit.run.task_images.classify_image", classify)
     monkeypatch.setattr(task_cli, "prepare_verifier_image_result", prepare_verifier)
     code = await task_cli._reverify(str(root), tmp_path / "source", RunConfig(), tmp_path / "runs")
     assert code == 2
@@ -271,9 +271,9 @@ async def test_reverify_fails_only_the_task_whose_image_no_registry_answers_for(
 
     from tests.unit.test_runtime_contracts import make_lock
 
-    from ale.core.config import RunConfig
-    from ale.core.errors import ProviderStartError
-    from ale.run.cli import tasks as task_cli
+    from orbit.core.config import RunConfig
+    from orbit.core.errors import ProviderStartError
+    from orbit.run.cli import tasks as task_cli
 
     root = scaffold_task(tmp_path / "task")
     config = root / "task.toml"
@@ -302,7 +302,7 @@ async def test_reverify_fails_only_the_task_whose_image_no_registry_answers_for(
     async def unreachable(reference: str) -> object:
         raise ProviderStartError(f"cannot read the manifest of {reference}")
 
-    monkeypatch.setattr("ale.run.task_images.classify_image", unreachable)
+    monkeypatch.setattr("orbit.run.task_images.classify_image", unreachable)
     prepare = AsyncMock(side_effect=AssertionError("its verifier was prepared"))
     monkeypatch.setattr(task_cli, "prepare_verifier_image_result", prepare)
     code = await task_cli._reverify(str(root), tmp_path / "source", RunConfig(), tmp_path / "runs")
@@ -336,8 +336,8 @@ async def test_reverify_refuses_a_source_its_verification_cannot_use(
     from tests.support import edit_task_config
     from tests.unit.test_runtime_contracts import make_lock
 
-    from ale.core.config import RunConfig
-    from ale.run.cli import tasks as task_cli
+    from orbit.core.config import RunConfig
+    from orbit.run.cli import tasks as task_cli
 
     root = scaffold_task(tmp_path / "task")
     # docker:runc gives no perf, which this snapshot verifier asks for.
@@ -389,11 +389,11 @@ async def test_a_fleet_solver_is_reverified_with_the_image_its_nodes_keep(tmp_pa
     from tests.support import edit_task_config
     from tests.unit.test_runtime_contracts import make_lock
 
-    from ale.core.config import RunConfig
-    from ale.run.cli import tasks as task_cli
-    from ale.run.providers import ProviderRegistry
-    from ale.run.providers.fleet import FleetProvider
-    from ale.run.task_images import prepare_verifier_image_result
+    from orbit.core.config import RunConfig
+    from orbit.run.cli import tasks as task_cli
+    from orbit.run.providers import ProviderRegistry
+    from orbit.run.providers.fleet import FleetProvider
+    from orbit.run.task_images import prepare_verifier_image_result
 
     root = scaffold_task(tmp_path / "task")
     edit_task_config(root, {"verifier": {"environment_mode": mode, "environment": {"cpus": 1}}})

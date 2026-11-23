@@ -47,7 +47,7 @@ def test_rejects_foreign_directory(tmp_path):
 
 
 def test_the_provider_reads_the_state_setup_writes():
-    from ale.run.providers.orchard.client import STATE_DIR
+    from orbit.run.providers.orchard.client import STATE_DIR
 
     assert setup.STATE_DIR == STATE_DIR
 
@@ -89,9 +89,9 @@ def test_cleanup_preserves_local_vm_disks_even_without_controller(tmp_path, monk
     assert disk.read_bytes() == b"retained task data"
 
 
-def test_cleanup_removes_the_images_ale_cached(tmp_path, monkeypatch):
+def test_cleanup_removes_the_images_orbit_cached(tmp_path, monkeypatch):
     root = tmp_path / "state"
-    for name in ("ale-framed-0123", "ale-built-4567"):
+    for name in ("orbit-framed-0123", "orbit-built-4567"):
         (root / "tart-home/vms" / name).mkdir(parents=True)
     state = {"processes": {"controller": {"pid": 42}, "worker": {"pid": 43}}}
     monkeypatch.setattr(setup, "process_matches", lambda record: True)

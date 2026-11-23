@@ -15,23 +15,23 @@ from types import SimpleNamespace
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, ConfigError
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
-from ale.core.sandbox import ExecResult
-from ale.core.taskspec import OperatingSystem, StreamableHttpMcpServer
-from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.zcode import ZCodeHarness
-from ale.run.harnesses.zcode import adapter as zcode_adapter
-from ale.run.recording import BlobStore
-from ale.run.secrets import provider_credentials, provider_endpoint
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
+from orbit.core.sandbox import ExecResult
+from orbit.core.taskspec import OperatingSystem, StreamableHttpMcpServer
+from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.zcode import ZCodeHarness
+from orbit.run.harnesses.zcode import adapter as zcode_adapter
+from orbit.run.recording import BlobStore
+from orbit.run.secrets import provider_credentials, provider_endpoint
 
 pytestmark = pytest.mark.unit
 
 SESSION_ID = "session-1"
 CHILD_ID = "child-1"
-PROVIDER = "/home/agent/.zcode-ale/provider.json"
+PROVIDER = "/home/agent/.zcode-orbit/provider.json"
 CONFIG = "/home/agent/.zcode/cli/config.json"
 DB = ".zcode/cli/db/db.sqlite"
 PROMPTS = ("delegate", "second")
@@ -53,19 +53,19 @@ def test_preset_sends_the_zai_key_to_zai_never_the_anthropic_key(
 ) -> None:
     # ZCode speaks the Anthropic Messages API, but to z.ai: the dialect must not pick the key.
     gateway = load_run_config(preset_path=PRESET_DIR / "zcode.toml").gateway
-    monkeypatch.setenv("ALE_ANTHROPIC_API_KEY", "anthropic-key")
-    monkeypatch.delenv("ALE_ZAI_API_KEY", raising=False)
-    monkeypatch.delenv("ALE_ZAI_BASE_URL", raising=False)
+    monkeypatch.setenv("ORBIT_ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.delenv("ORBIT_ZAI_API_KEY", raising=False)
+    monkeypatch.delenv("ORBIT_ZAI_BASE_URL", raising=False)
 
     assert provider_endpoint(gateway.provider) == (
-        "ALE_ZAI_API_KEY",
+        "ORBIT_ZAI_API_KEY",
         "https://api.z.ai/api/anthropic",
     )
-    with pytest.raises(ConfigError, match="ALE_ZAI_API_KEY is not set"):
+    with pytest.raises(ConfigError, match="ORBIT_ZAI_API_KEY is not set"):
         provider_credentials(
             gateway.provider, base_url=gateway.base_url, key_var=gateway.api_key_env
         )
-    monkeypatch.setenv("ALE_ZAI_API_KEY", "zai-key")
+    monkeypatch.setenv("ORBIT_ZAI_API_KEY", "zai-key")
     assert provider_credentials(
         gateway.provider, base_url=gateway.base_url, key_var=gateway.api_key_env
     ) == ("zai-key", "https://api.z.ai/api/anthropic")
@@ -122,12 +122,12 @@ async def test_configuration_routes_the_model_through_the_gateway(
     assert rule["config"]["api"] == {"type": api, "baseUrl": base_url}
     assert rule["config"]["access"] == {"type": "api-key", "apiKey": "token"}
     assert rule["config"]["personalModelIds"] == ["test-model"]
-    assert provider["defaultModelSelection"] == {"providerId": "ale", "modelId": "test-model"}
+    assert provider["defaultModelSelection"] == {"providerId": "orbit", "modelId": "test-model"}
     # What the model takes is left to ZCode's catalog; only native web search is decided.
     assert provider["modelConfigRules"] == {
         "providerModelRules": [
             {
-                "providerId": "ale",
+                "providerId": "orbit",
                 "modelId": "test-model",
                 "config": {"properties": {"supportsNativeWebSearch": False}},
             }
@@ -164,7 +164,7 @@ async def test_input_format_is_laid_over_the_catalogs_for_the_model() -> None:
     assert rules == {
         "providerModelRules": [
             {
-                "providerId": "ale",
+                "providerId": "orbit",
                 "modelId": "test-model",
                 "config": {
                     "properties": {
@@ -199,7 +199,7 @@ async def test_native_web_search_follows_the_task_network(
     rules = json.loads(sandbox.files[PROVIDER])["config"]["modelConfigRules"]
     assert rules["providerModelRules"] == [
         {
-            "providerId": "ale",
+            "providerId": "orbit",
             "modelId": "test-model",
             "config": {"properties": {"supportsNativeWebSearch": native}},
         }
@@ -241,7 +241,7 @@ async def test_command_passes_the_prompt_file_as_its_argument() -> None:
         }
     )
     launch = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=None,
@@ -249,7 +249,7 @@ async def test_command_passes_the_prompt_file_as_its_argument() -> None:
     assert launch.session_id is None
     script = launch.script
     assert script.startswith("unset ZCODE_STORAGE_DIR ZCODE_SESSION_DB_PATH ")
-    assert "cat -- /home/agent/.ale-harness/prompt.md" in script
+    assert "cat -- /home/agent/.orbit-harness/prompt.md" in script
     assert script.endswith(' --prompt="$prompt"')
     assert "node /home/agent/.local/lib/zcode/zcode.cjs --mode yolo" in script
     assert "--output-format stream-json --cwd /home/agent" in script
@@ -265,7 +265,7 @@ async def test_command_passes_the_prompt_file_as_its_argument() -> None:
     assert "token" not in json.dumps(launch.env)
 
     resume = await ZCodeHarness().prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=SESSION_ID,
@@ -276,7 +276,7 @@ async def test_command_passes_the_prompt_file_as_its_argument() -> None:
 
 async def test_windows_command_keeps_git_bash_from_rewriting_the_prompt() -> None:
     command = await ZCodeHarness().prepare_command(
-        "C:/Users/Agent/.ale-harness/prompt.md",
+        "C:/Users/Agent/.orbit-harness/prompt.md",
         FakeSandbox(stdout=r"C:\Windows\System32"),  # type: ignore[arg-type]
         session(home=r"C:\Users\Agent"),
         native_session_id=None,
@@ -454,9 +454,9 @@ def write_run(logs: Path, *outputs: str) -> None:
     for prompt, output in zip(PROMPTS, outputs, strict=True):
         lines.append(json.dumps({"prompt": prompt, "stdout_offset": offset}) + "\n")
         offset += len(output.encode())
-    (logs / ".ale-harness").mkdir(parents=True, exist_ok=True)
-    (logs / ".ale-harness/invocations.jsonl").write_text("".join(lines))
-    (logs / ".ale-harness/stdout.log").write_text("".join(outputs))
+    (logs / ".orbit-harness").mkdir(parents=True, exist_ok=True)
+    (logs / ".orbit-harness/invocations.jsonl").write_text("".join(lines))
+    (logs / ".orbit-harness/stdout.log").write_text("".join(outputs))
 
 
 Message = tuple[dict[str, object], list[dict[str, object]]]
@@ -601,7 +601,7 @@ def test_unlinked_subagents_and_missing_attachments_are_reported(tmp_path: Path)
     trajectory = ZCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert trajectory.subagent_trajectories is None
-    issues = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
+    issues = trajectory.extra["orbit"]["parse_issues"]  # type: ignore[index]
     assert {"reason": "unlinked_subagent", "session_id": CHILD_ID} in issues
     assert any(issue["reason"] == "missing_attachment" for issue in issues)
     image_result = trajectory.steps[2].observation.results[0]  # type: ignore[union-attr]
@@ -635,7 +635,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
 
     trajectory = ZCodeHarness().parse_trajectory(context(logs, tmp_path, incomplete=True))
 
-    assert "parse_issues" not in trajectory.extra["ale"]  # type: ignore[index]
+    assert "parse_issues" not in trajectory.extra["orbit"]  # type: ignore[index]
     (helper,) = trajectory.subagent_trajectories or ()
     (nested,) = helper.subagent_trajectories or ()
     assert nested.trajectory_id == f"trajectory-subagent-{CHILD_ID}-subagent-{GRANDCHILD_ID}"
@@ -649,7 +649,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
     assert result.subagent_trajectory_ref[0].trajectory_id == nested.trajectory_id
     # An interrupted run leaves every session in it incomplete.
     for subagent in (helper, nested):
-        assert subagent.extra == {"ale": {"incomplete": True, "incomplete_reason": "interrupted"}}
+        assert subagent.extra == {"orbit": {"incomplete": True, "incomplete_reason": "interrupted"}}
 
 
 def test_an_unlinked_session_below_a_subagent_is_reported_on_the_root(tmp_path: Path) -> None:
@@ -660,7 +660,7 @@ def test_an_unlinked_session_below_a_subagent_is_reported_on_the_root(tmp_path: 
 
     (helper,) = trajectory.subagent_trajectories or ()
     assert helper.subagent_trajectories is None
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unlinked_subagent", "session_id": GRANDCHILD_ID}
     ]
 
@@ -694,5 +694,7 @@ def test_without_the_store_each_turn_comes_from_its_prompt_and_stdout(tmp_path: 
         ("user", "second"),
         ("agent", "SECOND-DONE"),
     ]
-    ale = trajectory.extra["ale"]  # type: ignore[index]
-    assert {"reason": "native_session_unavailable", "session_id": SESSION_ID} in ale["parse_issues"]
+    orbit = trajectory.extra["orbit"]  # type: ignore[index]
+    assert {"reason": "native_session_unavailable", "session_id": SESSION_ID} in orbit[
+        "parse_issues"
+    ]

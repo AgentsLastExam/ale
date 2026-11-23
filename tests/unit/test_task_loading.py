@@ -8,9 +8,9 @@ import pytest
 from tests.support import edit_task_config as edit
 from tests.support import write_task
 
-from ale.core.errors import TaskDefinitionError
-from ale.core.task import Stage
-from ale.core.taskspec import (
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.task import Stage
+from orbit.core.taskspec import (
     SCHEMA_VERSION,
     ContainerFeature,
     ImageKind,
@@ -18,10 +18,10 @@ from ale.core.taskspec import (
     OperatingSystem,
     VerificationMode,
 )
-from ale.run.assets import ASSET_ROOTS, asset_roots
-from ale.run.lint import lint_repository
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import discover_task_folders, load_tasks
+from orbit.run.assets import ASSET_ROOTS, asset_roots
+from orbit.run.lint import lint_repository
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import discover_task_folders, load_tasks
 
 pytestmark = pytest.mark.unit
 #: A Linux VM disk published to a registry, as a base or an image used directly.
@@ -666,10 +666,10 @@ def test_a_harbor_task_loads_as_it_is_with_harbor_s_account(tmp_path: Path) -> N
     assert str(loaded.spec.name) == "local/hello-world"
     assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("root", True)
     assert loaded.warnings == (
-        'task.toml: no schema_version, so it is read as a Harbor Task in ALE\'s format "0.2"; '
+        'task.toml: no schema_version, so it is read as a Harbor Task in Orbit\'s format "0.2"; '
         "as in Harbor, its agent runs as root",
         "task.toml: no [task].name, so this Task is local/hello-world, after where it lives",
-        "environment/Dockerfile: python can change under the Task; ALE uses the version it "
+        "environment/Dockerfile: python can change under the Task; Orbit uses the version it "
         "names when the image is prepared and records its digest; name an exact version",
     )
     # Every warning is one for lint, which still passes.
@@ -678,17 +678,17 @@ def test_a_harbor_task_loads_as_it_is_with_harbor_s_account(tmp_path: Path) -> N
     assert all(str(item).startswith(f"{task}: warning: ") for item in findings)
 
 
-def test_an_ale_task_loads_without_a_warning(tmp_path: Path) -> None:
+def test_an_orbit_task_loads_without_a_warning(tmp_path: Path) -> None:
     loaded = load_tasks(scaffold_task(tmp_path / "demo"))[0]
     assert (loaded.harbor, loaded.warnings) == (False, ())
     assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("user", False)
 
 
 def test_another_format_fails_to_load(tmp_path: Path) -> None:
-    task = write_task(tmp_path / "demo", config={"schema_version": "1.4+ale.1"})
+    task = write_task(tmp_path / "demo", config={"schema_version": "1.4+orbit.1"})
     with pytest.raises(TaskDefinitionError, match="schema_version") as raised:
         load_tasks(task)
-    assert "neither ALE's format \"0.2\" nor one of Harbor's" in str(raised.value)
+    assert "neither Orbit's format \"0.2\" nor one of Harbor's" in str(raised.value)
 
 
 def test_a_harbor_task_s_containers_are_kept_alive(tmp_path: Path) -> None:
@@ -699,10 +699,10 @@ def test_a_harbor_task_s_containers_are_kept_alive(tmp_path: Path) -> None:
         write_task(tmp_path / "harbor", config={**HARBOR_TASK, **verifier}, dockerfile="FROM x\n")
     )[0].spec
     assert harbor.image.keep_alive and harbor.verify.image.keep_alive
-    ale = load_tasks(write_task(tmp_path / "ale", config=verifier))[0].spec
-    assert not (ale.image.keep_alive or ale.verify.image.keep_alive)
-    # Written only when set, so an ALE Task's identity is the one it had.
-    assert "keep_alive" not in ale.image.model_dump()
+    orbit = load_tasks(write_task(tmp_path / "orbit", config=verifier))[0].spec
+    assert not (orbit.image.keep_alive or orbit.verify.image.keep_alive)
+    # Written only when set, so an Orbit Task's identity is the one it had.
+    assert "keep_alive" not in orbit.image.model_dump()
 
 
 def test_a_harbor_task_naming_its_account_keeps_it(tmp_path: Path) -> None:
@@ -711,7 +711,7 @@ def test_a_harbor_task_naming_its_account_keeps_it(tmp_path: Path) -> None:
     # It names its own account, so only the format is Harbor's.
     assert (loaded.spec.image.user, loaded.spec.resources.sudo) == ("user", False)
     assert loaded.warnings == (
-        "task.toml: Harbor's schema_version \"1.4\", so it is read as a Harbor Task in ALE's "
+        "task.toml: Harbor's schema_version \"1.4\", so it is read as a Harbor Task in Orbit's "
         'format "0.2"',
     )
 
@@ -721,7 +721,7 @@ def test_a_harbor_image_s_own_user_is_named_in_a_warning(tmp_path: Path) -> None
     task = write_task(tmp_path / "demo", config=HARBOR_TASK, dockerfile=dockerfile)
     assert (
         "environment/Dockerfile: its image runs as USER agent, which Harbor's agent runs as; "
-        "ALE's runs as root unless [agent].user names agent"
+        "Orbit's runs as root unless [agent].user names agent"
     ) in load_tasks(task)[0].warnings
     edit(task, {"agent": {"user": "agent"}})
     loaded = load_tasks(task)[0]
@@ -751,6 +751,6 @@ def test_a_name_in_harbor_s_characters_is_read_as_written(tmp_path: Path) -> Non
     loaded = load_tasks(task)[0]
     assert str(loaded.spec.name) == "SWE-smith/vuejs__core.d0b513eb"
     assert loaded.warnings == (
-        "task.toml: [task].name SWE-smith/vuejs__core.d0b513eb is Harbor's form; ALE's is a "
+        "task.toml: [task].name SWE-smith/vuejs__core.d0b513eb is Harbor's form; Orbit's is a "
         "lowercase org/name of letters, digits, '-' and '_'",
     )

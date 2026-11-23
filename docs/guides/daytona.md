@@ -4,25 +4,25 @@ The Daytona backend runs Linux container Tasks on [Daytona](https://www.daytona.
 instead of the local Docker daemon. Use it when the Host cannot run enough sandboxes at
 once. Docker stays on the Host: it builds and checks each Task image, and the Provider
 pushes the result to Daytona. Linux and Windows VMs stay with the QEMU backend, macOS VMs
-with the local Orchard. How the backend holds ALE's guarantees on Daytona is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#daytona).
+with the local Orchard. How the backend holds Orbit's guarantees on Daytona is in
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#daytona).
 
 ## Before the first run
 
-- **A Daytona organization on Tier 3 or Tier 4.** ALE switches a sandbox's network on and
+- **A Daytona organization on Tier 3 or Tier 4.** Orbit switches a sandbox's network on and
   off while it runs, which Daytona allows only at those tiers. On a lower tier the first
   `open_egress` fails with a message saying so.
 - **An API key** from the Daytona dashboard, in the checkout's `.env`:
 
   ```bash
-  ALE_DAYTONA_API_KEY=<your key>
+  ORBIT_DAYTONA_API_KEY=<your key>
   ```
 
   The key stays on the Host. To use another variable, set
   `sandbox.daytona.api_key_env` to its name.
 - **`docker` and `ssh` on the Host.** `ssh` is the OpenSSH client: guestd and the Gateway
   tunnel run over it. Daytona's gateway host key is recorded in
-  `~/.cache/ale/daytona/known_hosts` on first use; delete that file if Daytona rotates it.
+  `~/.cache/orbit/daytona/known_hosts` on first use; delete that file if Daytona rotates it.
 
 ## Select the backend
 
@@ -41,7 +41,7 @@ retained_lifetime_hours = 72 # the same, for sandboxes kept with sandbox_retenti
 ```
 
 ```bash
-uv run ale run TASK --agent claude-code \
+uv run orbit run TASK --agent claude-code \
   --set 'sandbox.providers=["daytona", "qemu", "orchard"]'
 ```
 
@@ -50,15 +50,15 @@ that needs the `perf` container feature, goes to the next Provider listed that s
 when none does, the Run is refused before anything starts, with each Provider's reason.
 Every Daytona sandbox has the same container features, whether its Task names them or not;
 which they are is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#container-features).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#container-features).
 
 ## GPU Tasks
 
 A Task that sets `[environment].gpus` gets that many GPUs in Daytona's GPU region, which
 Daytona chooses itself, of a model its `gpu_types` accepts; how those names become Daytona's
 GPU types is in the
-[Providers README](../../packages/ale-run/src/ale/run/providers/README.md#gpu-models). The
-organization needs GPU quota there; Daytona's usage report lists it per region, with the
+[Providers README](../../packages/orbit-run/src/orbit/run/providers/README.md#gpu-models).
+The organization needs GPU quota there; Daytona's usage report lists it per region, with the
 CPU, memory and disk each GPU may come with. A sandbox takes up to 8 GPUs.
 
 GPU sandboxes are billed per GPU while they exist, and a kept one runs until
@@ -74,24 +74,24 @@ does on Docker. Its downloads therefore pass through your machine's connection.
 ## Checking an organization
 
 To check that an organization gives every guarantee, run the Daytona suites with the API
-key in the environment. `ALE_TEST_DAYTONA_GPU=1` runs them on GPU sandboxes as well, which
+key in the environment. `ORBIT_TEST_DAYTONA_GPU=1` runs them on GPU sandboxes as well, which
 costs a few GPU-minutes:
 
 ```bash
-ALE_TEST_DAYTONA_GPU=1 uv run pytest -m needs_daytona tests/conformance/test_provider_daytona.py tests/integration/test_daytona_episode.py
+ORBIT_TEST_DAYTONA_GPU=1 uv run pytest -m needs_daytona tests/conformance/test_provider_daytona.py tests/integration/test_daytona_episode.py
 ```
 
 ## What it creates in your organization
 
-- **Sandboxes**, labeled `ale.run.managed=true` with the episode, role and retention. They are
+- **Sandboxes**, labeled `orbit.run.managed=true` with the episode, role and retention. They are
   deleted when the episode ends, and by Daytona after `lifetime_hours` if a run dies first.
-  A kept sandbox is listed by `ale sandbox list` and removed by `ale sandbox destroy
-  daytona:<id>`; both touch only sandboxes carrying the `ale.run.*` labels, so other tools
+  A kept sandbox is listed by `orbit sandbox list` and removed by `orbit sandbox destroy
+  daytona:<id>`; both touch only sandboxes carrying the `orbit.run.*` labels, so other tools
   in a shared organization, including ones that label their own sandboxes `ale.*`, are not
   affected.
-- **One registry entry**, `ale-transient`, which ALE keeps current so Daytona can build from
-  the images it pushes; leave it in place. Daytona removes pushed images on its own
-  schedule, and ALE pushes again when one is gone.
+- **One registry entry**, `orbit-transient`, which Orbit keeps current so Daytona can build
+  from the images it pushes; leave it in place. Daytona removes pushed images on its own
+  schedule, and Orbit pushes again when one is gone.
 
 Nothing else is created: no snapshots, so Daytona's snapshot quota is not used. Under
 `sandbox_retention.solver = "snapshot"` no solver goes to Daytona, nor a Task's solver or
@@ -116,8 +116,8 @@ is refused before a sandbox is made.
 
 | Message | Cause |
 |---|---|
-| `Daytona rejected the API key` | `ALE_DAYTONA_API_KEY` is wrong or for another organization |
+| `Daytona rejected the API key` | `ORBIT_DAYTONA_API_KEY` is wrong or for another organization |
 | `would not change the sandbox's network settings at runtime` | the organization is below Tier 3 |
 | `is not a whole number of GiB` | the Task's memory or storage is not a multiple of 1024 MB |
 | `can still reach Daytona's daemon` | the sandbox could not be sealed; it was destroyed. Report it with the image |
-| `REMOTE HOST IDENTIFICATION HAS CHANGED` | delete `~/.cache/ale/daytona/known_hosts` |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED` | delete `~/.cache/orbit/daytona/known_hosts` |

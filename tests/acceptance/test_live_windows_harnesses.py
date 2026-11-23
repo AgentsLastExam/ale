@@ -6,20 +6,20 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import LoggingPolicy, load_run_config
-from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession
-from ale.core.sandbox import Sandbox
-from ale.core.taskspec import OperatingSystem
-from ale.core.verdict import Status
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.episode import run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import Limits
-from ale.run.harnesses.base import STDOUT_PATH
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.qemu import QemuProvider
-from ale.run.secrets import provider_credentials
-from ale.run.tasksets.manifest import load_task_folder
+from orbit.core.config import LoggingPolicy, load_run_config
+from orbit.core.harness import AgentRun, AutonomousHarness, HarnessSession
+from orbit.core.sandbox import Sandbox
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.verdict import Status
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.episode import run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import Limits
+from orbit.run.harnesses.base import STDOUT_PATH
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.secrets import provider_credentials
+from orbit.run.tasksets.manifest import load_task_folder
 from tests.support import provider_registry
 
 from .test_cross_os_standard_task import _write_task
@@ -34,9 +34,9 @@ pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_kvm, pytest.mark.needs
 async def test_windows_native_harness_completes_a_file_task(
     tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to a prepared Windows base qcow2")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to a prepared Windows base qcow2")
     config = load_run_config(preset_path=PRESET_DIR / f"{name}.toml")
     harness = _harness(config)
     if name in {"claude-code", "opencode"}:

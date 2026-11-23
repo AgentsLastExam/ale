@@ -4,9 +4,9 @@ import base64
 
 import pytest
 
-from ale.core.taskspec import NetworkMode, NetworkPolicy
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.session import GatewaySession, SessionRegistry
+from orbit.core.taskspec import NetworkMode, NetworkPolicy
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.session import GatewaySession, SessionRegistry
 
 pytestmark = pytest.mark.unit
 

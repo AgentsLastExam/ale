@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.harness import AgentRun, HarnessSession, TrajectoryParseContext
-from ale.core.lock import TaskSource
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.trajectory import (
+from orbit.core.harness import AgentRun, HarnessSession, TrajectoryParseContext
+from orbit.core.lock import TaskSource
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.trajectory import (
     AtifAgent,
     AtifObservation,
     AtifObservationResult,
@@ -19,13 +19,13 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.core.verdict import Status
-from ale.run.agent_resources import resolve_agent_resources
-from ale.run.episode import run_episode
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.verdict import Status
+from orbit.run.agent_resources import resolve_agent_resources
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import (
     MINIMAL_TASK_CONFIG,
     edit_task_config,
@@ -63,7 +63,7 @@ import re
 import subprocess
 from pathlib import Path
 
-home = Path(os.environ["ALE_HOME"])
+home = Path(os.environ["ORBIT_HOME"])
 skill_path = home / ".claude-config/skills/resource-proof/SKILL.md"
 skill = skill_path.read_text(encoding="utf-8")
 template = re.search(r"Write exactly `([^`]+)`", skill).group(1)
@@ -120,7 +120,7 @@ answer = template.replace("<nonce>", nonce).replace("<fragment>", fragment)
 """
         result = await sandbox.exec(
             ["python3", "-c", script],
-            env={"ALE_HOME": session.home},
+            env={"ORBIT_HOME": session.home},
             identity=Identity.AGENT,
             timeout_sec=timeout_sec,
         )
@@ -149,7 +149,7 @@ answer = template.replace("<nonce>", nonce).replace("<fragment>", fragment)
                     function_name="mcp__task-proof__derive_fragment",
                     arguments={"nonce": "A1B2C3D4"},
                     extra={
-                        "ale": {
+                        "orbit": {
                             "mcp": {
                                 "server": payload["server"],
                                 "tool": payload["tool"],
@@ -275,7 +275,7 @@ def _write_task(root: Path) -> Path:
         import json
         from pathlib import Path
 
-        from ale_verify import write
+        from orbit_verify import write
 
         nonce = Path("/home/user/input/nonce.txt").read_text()
         answer = Path("/home/user/output/result.txt").read_text()
@@ -342,7 +342,7 @@ async def test_autonomous_agent_uses_task_skill_and_mcp_to_pass(
         (result.run_dir / "trajectory.json").read_text()
     )
     call = trajectory.steps[1].tool_calls[0]
-    assert call.extra["ale"]["mcp"] == {
+    assert call.extra["orbit"]["mcp"] == {
         "server": "task-proof",
         "tool": "derive_fragment",
     }

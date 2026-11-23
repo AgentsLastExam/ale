@@ -9,10 +9,10 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from ale.core.harness import HarnessSession
-from ale.core.sandbox import ExecResult, SandboxFile
-from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.core.harness import HarnessSession
+from orbit.core.sandbox import ExecResult, SandboxFile
+from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
 
 pytestmark = pytest.mark.integration
 
@@ -44,7 +44,7 @@ class FakeClaudeSandbox:
         home = kwargs["cwd"]
         self.files[f"{home}/.claude-config/projects/home/{native_id}.jsonl"] = b"{}\n"
         line = json.dumps({"type": "result", "session_id": native_id, "result": prompt})
-        self.files[f"{home}/.ale-harness/stdout.log"] += line.encode() + b"\n"
+        self.files[f"{home}/.orbit-harness/stdout.log"] += line.encode() + b"\n"
         return ExecResult(exit_code=0)
 
     async def write_file(self, path, data, **kwargs):  # type: ignore[no-untyped-def]

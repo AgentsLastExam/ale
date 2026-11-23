@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ale.run.tools import cua_desktop_mcp
+from orbit.run.tools import cua_desktop_mcp
 
 pytestmark = pytest.mark.unit
 

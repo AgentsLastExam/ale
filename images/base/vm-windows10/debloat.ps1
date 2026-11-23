@@ -4,7 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$log = "$env:ProgramData\ALE\debloat.log"
+$log = "$env:ProgramData\Orbit\debloat.log"
 Start-Transcript -Path $log -Append | Out-Null
 
 function Invoke-Uninstaller {
@@ -252,7 +252,7 @@ Dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase
 powercfg.exe /hibernate off
 Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue
 if ($RemoveInstallCache) {
-    Remove-Item "$env:ProgramData\ALE\install" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:ProgramData\Orbit\install" -Recurse -Force -ErrorAction SilentlyContinue
 }
 Set-ItemProperty `
     "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
@@ -268,5 +268,5 @@ $remainingProducts = foreach ($root in $uninstallRoots) {
 if ($remainingProducts) {
     throw "Removed products remain registered: $($remainingProducts.PSChildName -join ', ')"
 }
-New-Item "$env:ProgramData\ALE\debloat.done" -ItemType File -Force | Out-Null
+New-Item "$env:ProgramData\Orbit\debloat.done" -ItemType File -Force | Out-Null
 Stop-Transcript | Out-Null

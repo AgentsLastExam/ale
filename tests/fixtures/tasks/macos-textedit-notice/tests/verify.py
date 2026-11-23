@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from ale_verify import write
+from orbit_verify import write
 
 TITLE = "Community Design Meetup"
 BODY = [

@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.needs_docker]
@@ -27,7 +27,7 @@ async def test_relocated_task_local_verifier_does_not_enter_solver_image(
     (source / "tests" / "helper.py").write_text(f"EXPECTED = {secret!r}\n")
     (source / "tests" / "verify.py").write_text(
         "from pathlib import Path\n"
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         "from helper import EXPECTED\n"
         "v = {}\n"
         "v['withheld'] = float(EXPECTED == 'verify-only-marker')\n"
@@ -60,7 +60,7 @@ async def test_external_reference_is_published_only_for_live_verification(
     reference.parent.mkdir(parents=True)
     reference.write_text("expected")
     (task_path / "tests" / "verify.py").write_text(
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['reference'] = checks.text_equals('assets/expected.txt', 'expected')['score']\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"

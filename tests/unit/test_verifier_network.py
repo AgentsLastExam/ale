@@ -18,20 +18,20 @@ from tests.support import (
 from tests.unit.test_runtime_contracts import make_lock
 from tests.unit.test_validation_rounds import IMAGE
 
-from ale.core.config import SandboxRetentionConfig
-from ale.core.harness import AgentRun
-from ale.core.sandbox import ExecResult, SandboxRequest, SandboxRole
-from ale.core.taskspec import NetworkMode, NetworkPolicy, VerificationMode
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.session import SessionRegistry
-from ale.run.protocol.episode_protocol import (
+from orbit.core.config import SandboxRetentionConfig
+from orbit.core.harness import AgentRun
+from orbit.core.sandbox import ExecResult, SandboxRequest, SandboxRole
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, VerificationMode
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.session import SessionRegistry
+from orbit.run.protocol.episode_protocol import (
     EpisodeProtocol,
     KeptSolver,
     ReverificationProtocol,
 )
-from ale.run.provenance import ProvenanceInputs
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from orbit.run.provenance import ProvenanceInputs
+from orbit.run.tasksets.manifest import ManifestTask, load_tasks
 
 pytestmark = pytest.mark.unit
 
@@ -189,7 +189,7 @@ async def test_a_blocklist_and_an_allowlist_share_one_solver_and_one_egress_sess
 @pytest.mark.parametrize(
     ("agent", "verifier", "solver", "expected"),
     [
-        # ALE's defaults: the agent sealed, verification open.
+        # Orbit's defaults: the agent sealed, verification open.
         ({}, {}, NetworkMode.BLOCK, [True, False, True, False]),
         # A public agent and a sealed verifier: the shared solver is created sealable.
         (
@@ -290,7 +290,7 @@ async def test_reverification_reconnects_a_kept_solver_with_its_own_egress_sessi
     async def attach(request: SandboxRequest) -> MemorySandbox:
         attached.append(request)
         sandbox = MemorySandbox(provider, request)
-        sandbox.files["/opt/ale/agent-episode"] = b"source"
+        sandbox.files["/opt/orbit/agent-episode"] = b"source"
         return sandbox
 
     result = await run_episode(

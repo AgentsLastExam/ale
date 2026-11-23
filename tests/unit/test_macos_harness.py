@@ -9,22 +9,22 @@ from types import SimpleNamespace
 
 import pytest
 
-import ale.run.cli.tasks  # noqa: F401  (imports every shipped adapter)
-from ale.core.errors import AgentError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, ResolvedMcpServer
-from ale.core.sandbox import ExecResult, Identity, SandboxFile
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET
-from ale.run.harnesses._npm import agent_python, npm_env
-from ale.run.harnesses.base import CliHarness
-from ale.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.computer_use import ComputerUseHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.tools import resolved_cua_desktop
+import orbit.run.cli.tasks  # noqa: F401  (imports every shipped adapter)
+from orbit.core.errors import AgentError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, ResolvedMcpServer
+from orbit.core.sandbox import ExecResult, Identity, SandboxFile
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer
+from orbit.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET
+from orbit.run.harnesses._npm import agent_python, npm_env
+from orbit.run.harnesses.base import CliHarness
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.computer_use import ComputerUseHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.tools import resolved_cua_desktop
 
 pytestmark = pytest.mark.unit
 
@@ -32,7 +32,7 @@ pytestmark = pytest.mark.unit
 def _cli_adapters(base: type[CliHarness] = CliHarness) -> list[type[CliHarness]]:
     found = []
     for child in base.__subclasses__():
-        if child.__module__.startswith("ale.run.harnesses."):
+        if child.__module__.startswith("orbit.run.harnesses."):
             found.append(child)
         found.extend(_cli_adapters(child))
     return found
@@ -106,7 +106,7 @@ def test_macos_harnesses_accept_the_guest_system(harness) -> None:
     [
         (OperatingSystem.LINUX, "python3"),
         (OperatingSystem.WINDOWS, "python"),
-        (OperatingSystem.MACOS, "/opt/ale/python/bin/python3"),
+        (OperatingSystem.MACOS, "/opt/orbit/python/bin/python3"),
     ],
 )
 def test_helper_scripts_run_on_a_python_every_system_has(operating_system, python) -> None:
@@ -145,7 +145,7 @@ async def test_macos_oracle_uses_agent_account_and_posix_path() -> None:
         os=OperatingSystem.MACOS,
     )
     await OracleHarness().launch("work", SimpleNamespace(exec=execute), session, timeout_sec=10)
-    assert calls[0][0] == ["bash", "/Users/agent/.ale-solution/solve.sh"]
+    assert calls[0][0] == ["bash", "/Users/agent/.orbit-solution/solve.sh"]
     assert calls[0][1]["identity"] is Identity.AGENT
 
 
@@ -192,33 +192,33 @@ async def test_macos_native_launch_uses_episode_gateway_and_agent_identity(harne
         await harness.launch("work", sandbox, session, timeout_sec=10)
     argv, options = next((argv, opts) for argv, opts in calls if opts.get("timeout_sec") == 10)
     assert argv[:2] == ["sh", "-c"]
-    assert files["/Users/agent/.ale-harness/prompt.md"] == b"work"
-    assert "/Users/agent/.ale-harness/stdout.log" in argv[2]
+    assert files["/Users/agent/.orbit-harness/prompt.md"] == b"work"
+    assert "/Users/agent/.orbit-harness/stdout.log" in argv[2]
     assert options["identity"] is Identity.AGENT
     assert options["cwd"] == "/Users/agent"
     env = options["env"]
     assert "/opt/homebrew/bin" in env["PATH"].split(":")
     if isinstance(harness, CodexCliHarness):
-        assert env["CODEX_HOME"] == "/Users/agent/.codex-ale"
-        assert env["ALE_GATEWAY_TOKEN"] == session.token
-        assert session.gateway_url.encode() in files["/Users/agent/.codex-ale/config.toml"]
+        assert env["CODEX_HOME"] == "/Users/agent/.codex-orbit"
+        assert env["ORBIT_GATEWAY_TOKEN"] == session.token
+        assert session.gateway_url.encode() in files["/Users/agent/.codex-orbit/config.toml"]
     elif isinstance(harness, ClaudeCodeHarness):
         assert env["CLAUDE_CONFIG_DIR"] == "/Users/agent/.claude-config"
         assert env["ANTHROPIC_BASE_URL"] == session.gateway_url
         assert env["ANTHROPIC_AUTH_TOKEN"] == session.token
     elif isinstance(harness, GrokBuildHarness):
-        assert env["GROK_HOME"] == "/Users/agent/.grok-ale"
-        assert env["ALE_GATEWAY_TOKEN"] == session.token
-        config = tomllib.loads(files["/Users/agent/.grok-ale/config.toml"].decode())
+        assert env["GROK_HOME"] == "/Users/agent/.grok-orbit"
+        assert env["ORBIT_GATEWAY_TOKEN"] == session.token
+        config = tomllib.loads(files["/Users/agent/.grok-orbit/config.toml"].decode())
         assert config["model"]["test"]["base_url"] == session.gateway_url + "/v1"
         assert "/Users/agent/.grok-build-install/bin/grok" in argv[2]
     else:
-        assert env["OPENCLAW_HOME"] == "/Users/agent/.openclaw-ale"
-        assert env["ALE_GATEWAY_TOKEN"] == session.token
-        config = json.loads(files["/Users/agent/.openclaw-ale/openclaw.json"])
+        assert env["OPENCLAW_HOME"] == "/Users/agent/.openclaw-orbit"
+        assert env["ORBIT_GATEWAY_TOKEN"] == session.token
+        config = json.loads(files["/Users/agent/.openclaw-orbit/openclaw.json"])
         provider = config["models"]["providers"][harness.settings.provider]
         assert provider["baseUrl"] == session.gateway_url + "/v1"
-        assert provider["apiKey"] == "${ALE_GATEWAY_TOKEN}"
+        assert provider["apiKey"] == "${ORBIT_GATEWAY_TOKEN}"
 
 
 @pytest.mark.parametrize("operating_system", [OperatingSystem.MACOS, OperatingSystem.LINUX])
@@ -255,7 +255,7 @@ async def test_every_cli_tells_the_desktop_server_where_the_macos_driver_is(
     resources = EffectiveAgentResources(mcp_servers=(resolved_cua_desktop(operating_system),))
     await adapter().install_resources(sandbox, session, resources)
     # The staged server's own sources are not its configuration.
-    configs = [data for path, data in files.items() if "/.ale-cua-desktop/" not in path]
+    configs = [data for path, data in files.items() if "/.orbit-cua-desktop/" not in path]
     named = [
         data
         for data in configs
@@ -264,4 +264,4 @@ async def test_every_cli_tells_the_desktop_server_where_the_macos_driver_is(
     if operating_system is OperatingSystem.MACOS:
         assert named
     else:
-        assert not any(b"ALE_CUA_DRIVER" in data for data in configs)
+        assert not any(b"ORBIT_CUA_DRIVER" in data for data in configs)

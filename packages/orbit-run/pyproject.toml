@@ -1,0 +1,34 @@
+[project]
+name = "orbit-run"
+version = "0.2.0"
+description = "Orbit orchestrator: providers, gateway, guest service, harnesses, CLI"
+requires-python = ">=3.12"
+dependencies = [
+    "huggingface-hub>=0.27",
+    "orbit-core",
+    "orbit-verify",
+    "typer>=0.15",
+    "aiohttp>=3.11",
+    "pyyaml>=6.0",
+    "yarl>=1.17",
+    "zstandard>=0.25",
+]
+
+[project.scripts]
+orbit = "orbit.run.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+orbit-core = { workspace = true }
+orbit-verify = { workspace = true }
+
+# `orbit` is a PEP 420 namespace package shared with orbit-core and orbit-fleet: there is
+# deliberately no src/orbit/__init__.py in any of them.
+[tool.hatch.build.targets.wheel]
+packages = ["src/orbit"]
+
+[tool.hatch.build]
+artifacts = ["src/orbit/run/presets/*.toml"]

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.blob import BlobRef, InlineText
-from ale.run.recording import INLINE_TEXT_LIMIT, BlobStore, EpisodeRecording
+from orbit.core.blob import BlobRef, InlineText
+from orbit.run.recording import INLINE_TEXT_LIMIT, BlobStore, EpisodeRecording
 
 pytestmark = pytest.mark.integration
 

@@ -12,18 +12,18 @@ service and the network policy stay with the Providers that already enforce them
 Node, so the Fleet adds scheduling without a second implementation of any guarantee. It
 boots nothing before a request: an idle macOS VM would hold half of its Mac.
 
-One control plane serves the Fleet, with its ledger in one SQLite file (`ale-fleet serve`).
-Every peer authenticates with the one Fleet token, `ALE_FLEET_TOKEN`.
+One control plane serves the Fleet, with its ledger in one SQLite file (`orbit-fleet
+serve`). Every peer authenticates with the one Fleet token, `ORBIT_FLEET_TOKEN`.
 
-The control plane and the node agent are the `ale-fleet` package, which builds on the engine:
+The control plane and the node agent are the `orbit-fleet` package, which builds on the engine:
 a node agent lends the engine's leaves and prepares images with the engine's own code. The
 engine never imports it. A Run reaches the Fleet through the FleetProvider, one of its
 Providers, so the Fleet can grow without the engine knowing more than one Provider; all three
-speak the protocol in `ale.core.fleet`.
+speak the protocol in `orbit.core.fleet`.
 
 ## Network
 
-ALE builds no network of its own: how the machines are connected is the operator's choice,
+Orbit builds no network of its own: how the machines are connected is the operator's choice,
 such as one LAN or Tailscale. The Fleet needs only that
 
 - every Node and every Run's machine reaches the control plane;
@@ -189,7 +189,7 @@ macOS VM that is shutting down still counts against its Mac.
 
 ## Node agent
 
-`ale-fleet node` lends a machine's leaves to the Fleet. It drives the very Provider and
+`orbit-fleet node` lends a machine's leaves to the Fleet. It drives the very Provider and
 Sandbox objects a local Run would, so every guarantee of the
 [Provider contract](sandbox-image.md#provider-contract) holds on a Node as it does on the
 Run's own machine; the agent only carries the calls.
@@ -278,9 +278,9 @@ machines, so neither the Harness nor the episode protocol knows it is there.
   - `--continue-from` continues in a kept Sandbox through the Run's own Fleet connection, so
     the Run must select the Fleet for that Task. The Run knows the image only by its key
     until a Node prepares it, so the control plane checks that the key is the same one.
-  - `ale sandbox list` and `ale sandbox destroy` reach the Fleet whose control plane
-    `$ALE_FLEET_URL` names. A destroy waits until the Node confirms the Sandbox or snapshot
-    gone.
+  - `orbit sandbox list` and `orbit sandbox destroy` reach the Fleet whose control plane
+    `$ORBIT_FLEET_URL` names. A destroy waits until the Node confirms the Sandbox or
+    snapshot gone.
 - **Each Sandbox** is acquired under a fresh name, created on its Node with the grant, and
   driven through the node agent; its lease is renewed while the Run holds it, and destroying
   it releases it in the ledger and on the Node. A call whose connection the Node refused, as
@@ -318,7 +318,7 @@ in the Run's own output.
 ## Operating
 
 The control plane serves one status document, `GET /v1/status`, and a page drawn from it
-at `/`; `ale-fleet status` prints the same document. Both show Nodes (state, profiles,
+at `/`; `orbit-fleet status` prints the same document. Both show Nodes (state, profiles,
 resources used of total including macOS slots, images, free disk, agent version), the queue
 with why each Sandbox waits, each Run's progress and mean start segments, the Sandboxes of
 the last hour with the Task and image each serves, which Nodes prepared each image, for
@@ -326,6 +326,6 @@ which Tasks and how long it took them, and the latest events. A Sandbox's Task i
 its Run reported for its episode, or else the one its Run's plan names for its image. The
 page reads the document again every few seconds and changes only what changed, so it never
 reloads. An operator can drain a Node and resume it, destroy a Sandbox, and cancel a Run's
-queued Sandboxes, from the page or with `ale-fleet drain`, `resume`, `destroy` and
+queued Sandboxes, from the page or with `orbit-fleet drain`, `resume`, `destroy` and
 `cancel`; each action is an event in the ledger. The page needs the Fleet token once,
 through `/?token=`, which it keeps in a cookie that also authorizes its actions.

@@ -7,32 +7,32 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.config import LoggingPolicy, RunConfig, SandboxRetentionConfig
-from ale.core.harness import AgentRun
-from ale.core.lock import TaskSource
-from ale.core.sandbox import (
+from orbit.core.config import LoggingPolicy, RunConfig, SandboxRetentionConfig
+from orbit.core.harness import AgentRun
+from orbit.core.lock import TaskSource
+from orbit.core.sandbox import (
     ExecResult,
     ImageKind,
     PreparedTaskImage,
     RetainedSandbox,
     SandboxRequest,
 )
-from ale.core.taskspec import NetworkPolicy, Resources
-from ale.core.trajectory import AtifContentPart, AtifImageSource, AtifStep, AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.cli.tasks import _reverify
-from ale.run.episode import _Lease, run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import (
+from orbit.core.taskspec import NetworkPolicy, Resources
+from orbit.core.trajectory import AtifContentPart, AtifImageSource, AtifStep, AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.cli.tasks import _reverify
+from orbit.run.episode import _Lease, run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers.docker import (
     DockerProvider,
     DockerSandbox,
 )
-from ale.run.recording import BlobStore, EpisodeRecording, atomic_write_json
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.recording import BlobStore, EpisodeRecording, atomic_write_json
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import edit_task_config, provider_registry
 
 pytestmark = pytest.mark.integration
@@ -112,11 +112,11 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
     recording = EpisodeRecording(root)
     logs = root / "logs/claude-code"
     logs.mkdir(parents=True)
-    (logs / ".ale-harness").mkdir()
-    (logs / ".ale-harness/stdout.log").write_text(
+    (logs / ".orbit-harness").mkdir()
+    (logs / ".orbit-harness/stdout.log").write_text(
         json.dumps({"type": "result", "session_id": "session", "result": "done"}) + "\n"
     )
-    (logs / ".ale-harness/invocations.jsonl").write_text(
+    (logs / ".orbit-harness/invocations.jsonl").write_text(
         json.dumps({"prompt": "instruction", "session_id": "session", "stdout_offset": 0}) + "\n"
     )
     native = logs / ".claude-config/projects/home/session.jsonl"
@@ -164,16 +164,16 @@ def test_debug_and_interruption_keep_native_logs(tmp_path: Path) -> None:
         AgentRun(exit_code=0, final_message="done"),
     )
     EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(debug_ctx)  # type: ignore[arg-type]
-    assert (debug / "logs/claude-code/.ale-harness/stdout.log").is_file()
+    assert (debug / "logs/claude-code/.orbit-harness/stdout.log").is_file()
 
     interrupted = tmp_path / "interrupted"
     interrupted_ctx = context(interrupted, LoggingPolicy(), None)
     EpisodeProtocol(ClaudeCodeHarness())._parse_harness_trajectory(  # type: ignore[arg-type]
         interrupted_ctx
     )
-    assert (interrupted / "logs/claude-code/.ale-harness/stdout.log").is_file()
+    assert (interrupted / "logs/claude-code/.orbit-harness/stdout.log").is_file()
     trajectory = json.loads((interrupted / "trajectory.json").read_text())
-    assert trajectory["extra"]["ale"]["incomplete"] is True
+    assert trajectory["extra"]["orbit"]["incomplete"] is True
 
 
 @pytest.mark.needs_docker
@@ -228,15 +228,15 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
 
     stale.unlink()
     (task_path / "tests/verify.py").write_text(
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['reverified'] = checks.text_equals('/home/user/output/result.tx"
         "t', 'hello\\n')['score']\n"
-        "v['stale_removed'] = checks.file_missing('/opt/ale/tests/stale.txt')['score']\n"
+        "v['stale_removed'] = checks.file_missing('/opt/orbit/tests/stale.txt')['score']\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"
         "write(v)\n"
     )
-    from ale.run.cli import tasks as task_cli
+    from orbit.run.cli import tasks as task_cli
 
     async def no_solver_build(*args, **kwargs):
         raise AssertionError("reverification must not rebuild solver images")
@@ -260,7 +260,7 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
 def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
     root = tmp_path / "failed"
     ctx = context(root, LoggingPolicy(), AgentRun(exit_code=0, final_message="done"))
-    transcript = root / "logs/claude-code/.ale-harness/stdout.log"
+    transcript = root / "logs/claude-code/.orbit-harness/stdout.log"
     transcript.write_text(
         json.dumps(
             {
@@ -283,8 +283,8 @@ def test_conversion_failure_keeps_native_logs(tmp_path: Path) -> None:
 
     assert transcript.is_file()
     trajectory = json.loads((root / "trajectory.json").read_text())
-    assert trajectory["extra"]["ale"]["incomplete_reason"] == "conversion_failed"
-    (issue,) = trajectory["extra"]["ale"]["parse_issues"]
+    assert trajectory["extra"]["orbit"]["incomplete_reason"] == "conversion_failed"
+    (issue,) = trajectory["extra"]["orbit"]["parse_issues"]
     assert issue["detail"].startswith("TrajectoryReferenceError:")
 
 
@@ -315,8 +315,8 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
     oracle.write_text(
         oracle.read_text()
         # Another Harness's credentials, which sanitation removes whichever Harness ran.
-        + "mkdir -p /home/user/.codex-ale /home/user/.claude-config\n"
-        + "printf secret > /home/user/.codex-ale/auth.json\n"
+        + "mkdir -p /home/user/.codex-orbit /home/user/.claude-config\n"
+        + "printf secret > /home/user/.codex-orbit/auth.json\n"
         + "printf secret > /home/user/.claude-config/.credentials.json\n"
     )
     result = await run_episode(
@@ -342,7 +342,7 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
             "test",
             "!",
             "-e",
-            "/opt/ale/tests/config.json",
+            "/opt/orbit/tests/config.json",
         )
         assert await probe.wait() == 0
         credentials = await asyncio.create_subprocess_exec(
@@ -351,7 +351,7 @@ async def test_shared_keep_returns_one_sanitized_actionable_handle(tmp_path: Pat
             container,
             "sh",
             "-c",
-            "test ! -e /home/user/.codex-ale/auth.json && "
+            "test ! -e /home/user/.codex-orbit/auth.json && "
             "test ! -e /home/user/.claude-config/.credentials.json && "
             "test ! -e /logs/verifier",
         )
@@ -462,7 +462,7 @@ async def test_sanitation_failure_destroys_sandbox_without_changing_reward(
     original_exec = DockerSandbox.exec
 
     async def fail_sanitation(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-        if list(argv[:3]) == ["rm", "-rf", "--"] and "/opt/ale/setup" in argv:
+        if list(argv[:3]) == ["rm", "-rf", "--"] and "/opt/orbit/setup" in argv:
             return ExecResult(exit_code=1, stderr="simulated sanitation failure")
         return await original_exec(self, argv, **kwargs)
 

@@ -16,10 +16,10 @@ from aiohttp import ClientSession, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer, unused_port
 from tests.support import MemoryProvider, MemorySandbox
 
-from ale.core.capability import Arch, GpuHold, GpuModel, SandboxNeeds
-from ale.core.config import DockerProviderConfig
-from ale.core.errors import ProviderCapabilityError, ProviderCapacityError, ProviderStartError
-from ale.core.fleet import (
+from orbit.core.capability import Arch, GpuHold, GpuModel, SandboxNeeds
+from orbit.core.config import DockerProviderConfig
+from orbit.core.errors import ProviderCapabilityError, ProviderCapacityError, ProviderStartError
+from orbit.core.fleet import (
     AcquireRequest,
     CreateSandbox,
     ExecCall,
@@ -34,7 +34,7 @@ from ale.core.fleet import (
     sign_grant,
     verify_grant,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     GpuDevice,
     ImageRef,
     PreparedTaskImage,
@@ -42,7 +42,7 @@ from ale.core.sandbox import (
     SandboxCheck,
     SandboxRequest,
 )
-from ale.core.taskspec import (
+from orbit.core.taskspec import (
     ContainerFeature,
     ImageKind,
     NetworkMode,
@@ -50,22 +50,22 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
-from ale.fleet import images as images_module
-from ale.fleet import node as node_module
-from ale.fleet.control import ControlPlane, Timing
-from ale.fleet.images import NodeImages
-from ale.fleet.node import NodeAgent, NodeSettings, probe
-from ale.fleet.server import control_app
-from ale.fleet.store import Store
-from ale.run.framework import fleet_framework_identity
-from ale.run.guestd.tunnel import Mux
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.fleet.tunnel import NodeListeners, RunTunnel
-from ale.run.providers.orchard import OrchardProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.task_images import ImagePreparationResult
-from ale.run.tasksets.manifest import load_task_folder
+from orbit.fleet import images as images_module
+from orbit.fleet import node as node_module
+from orbit.fleet.control import ControlPlane, Timing
+from orbit.fleet.images import NodeImages
+from orbit.fleet.node import NodeAgent, NodeSettings, probe
+from orbit.fleet.server import control_app
+from orbit.fleet.store import Store
+from orbit.run.framework import fleet_framework_identity
+from orbit.run.guestd.tunnel import Mux
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.fleet.tunnel import NodeListeners, RunTunnel
+from orbit.run.providers.orchard import OrchardProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.task_images import ImagePreparationResult
+from orbit.run.tasksets.manifest import load_task_folder
 
 pytestmark = pytest.mark.unit
 
@@ -1039,7 +1039,7 @@ class TestRecovery:
             if len(started) == 4:
                 everyone.set()
             if handle == "memory:episode-3":
-                raise RuntimeError("not an AleError")
+                raise RuntimeError("not an OrbitError")
             if handle == "memory:episode-4":
                 await asyncio.Event().wait()  # never answers
             await everyone.wait()  # only if all four are under way at once
@@ -1060,7 +1060,7 @@ class TestRecovery:
 def test_a_request_that_saves_otherwise_than_its_grant_is_refused() -> None:
     """A grant is placed for the saves a solver plans and the verifier a validation round
     boots beside it; a request that differs in either is not the one granted."""
-    from ale.fleet.node import _mismatch
+    from orbit.fleet.node import _mismatch
 
     wanted = request(planned_saves=2, round_verifier=Resources(cpus=1, memory_mb=512))
     demand = SandboxDemand(

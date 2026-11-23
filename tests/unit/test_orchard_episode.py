@@ -19,27 +19,27 @@ import pytest
 from test_runtime_contracts import make_lock
 from tests.support import edit_task_config, write_task
 
-from ale.core.config import RunConfig, RunTimeouts
-from ale.core.errors import (
+from orbit.core.config import RunConfig, RunTimeouts
+from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ResourceExhaustedError,
     StorageExhaustedError,
 )
-from ale.core.lock import LimitTermination
-from ale.core.verdict import Status
-from ale.run import guestd
-from ale.run.episode import run_episode
-from ale.run.framework import MACOS_PYTHON
-from ale.run.harnesses.builtin import NopHarness, OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs
-from ale.run.providers import ProviderRegistry, privileges
-from ale.run.providers.orchard import OrchardProvider
-from ale.run.providers.orchard import provider as orchard
-from ale.run.providers.orchard.framing import FramedImage
-from ale.run.tasksets.manifest import load_tasks
-from ale.run.transport import GuestClient, StdioTransport
+from orbit.core.lock import LimitTermination
+from orbit.core.verdict import Status
+from orbit.run import guestd
+from orbit.run.episode import run_episode
+from orbit.run.framework import MACOS_PYTHON
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs
+from orbit.run.providers import ProviderRegistry, privileges
+from orbit.run.providers.orchard import OrchardProvider
+from orbit.run.providers.orchard import provider as orchard
+from orbit.run.providers.orchard.framing import FramedImage
+from orbit.run.tasksets.manifest import load_tasks
+from orbit.run.transport import GuestClient, StdioTransport
 
 pytestmark = pytest.mark.unit
 
@@ -145,9 +145,9 @@ class MemoryGuest:
             self._chunk(req_id, "chunk", content)
         elif op == "put_tree":
             self._upload = req_id, params["path"]
-            if params["path"] == "/Users/user/.ale-solution":
+            if params["path"] == "/Users/user/.orbit-solution":
                 assert params["run_as"] == "user"
-            elif params["path"].startswith("/opt/ale/"):
+            elif params["path"].startswith("/opt/orbit/"):
                 assert "run_as" not in params
             return
         elif op == "remove":
@@ -157,7 +157,7 @@ class MemoryGuest:
             if result is None:
                 if not self.timeout_oracle:
                     return  # Simulate a still-running guest command until cancellation.
-                # The guest deadline fires before ALE's host-side stop grace.
+                # The guest deadline fires before Orbit's host-side stop grace.
                 await asyncio.sleep(params["timeout_sec"])
                 data = {"exit_code": None, "timed_out": True}
             else:
@@ -221,16 +221,16 @@ class MemoryGuest:
             return 0, b""
         if argv[:2] == ["sh", "-c"] and "$(id -u)" in argv[2]:
             return 0, b"501 no" if params.get("run_as") == self.user else b"0 yes"
-        if argv == ["bash", "setup.sh"] and cwd == "/opt/ale/setup":
-            assert not any(path.startswith("/opt/ale/tests/") for path in self.files)
-            assert not any(".ale-solution" in path for path in self.files)
-            assert env["ALE_HOME"] == "/Users/user"
+        if argv == ["bash", "setup.sh"] and cwd == "/opt/orbit/setup":
+            assert not any(path.startswith("/opt/orbit/tests/") for path in self.files)
+            assert not any(".orbit-solution" in path for path in self.files)
+            assert env["ORBIT_HOME"] == "/Users/user"
             self._stage("setup")
             return (17 if self.fail_setup else 0), b""
-        if argv == ["bash", "/Users/user/.ale-solution/solve.sh"]:
+        if argv == ["bash", "/Users/user/.orbit-solution/solve.sh"]:
             assert params["run_as"] == "user"
             assert argv[1] in self.files
-            assert not any(path.startswith("/opt/ale/tests/") for path in self.files)
+            assert not any(path.startswith("/opt/orbit/tests/") for path in self.files)
             self._stage("oracle")
             self.oracle_started.set()
             self.files[OUTPUT] = b"hello macOS"
@@ -238,15 +238,15 @@ class MemoryGuest:
             if self.wait_oracle:
                 return None
             return 0, b"oracle finished\n"
-        if argv == ["bash", "test.sh"] and cwd == "/opt/ale/tests":
+        if argv == ["bash", "test.sh"] and cwd == "/opt/orbit/tests":
             assert "run_as" not in params
             self._stage("verify")
-            assert not any(path.startswith("/opt/ale/logs/verifier/") for path in self.files)
+            assert not any(path.startswith("/opt/orbit/logs/verifier/") for path in self.files)
             score = float(self.files.get(OUTPUT) == b"hello macOS")
-            self.files["/opt/ale/logs/verifier/verification.json"] = json.dumps(
+            self.files["/opt/orbit/logs/verifier/verification.json"] = json.dumps(
                 {"reward": score, "result": score}
             ).encode()
-            self.files["/opt/ale/logs/verifier/reward.json"] = json.dumps(
+            self.files["/opt/orbit/logs/verifier/reward.json"] = json.dumps(
                 {"reward": score}
             ).encode()
             # The immutable host snapshot must remain the solver's original output.
@@ -256,9 +256,9 @@ class MemoryGuest:
             return (17 if self.verify_failure == "exit" else 0), b""
         if argv[:2] == ["sh", "-c"] and argv[-1] == "/logs/verifier":
             return 1, b"mkdir: /logs: Read-only file system"
-        if argv[:2] == ["sh", "-c"] and argv[-1] == "/opt/ale/logs/verifier":
+        if argv[:2] == ["sh", "-c"] and argv[-1] == "/opt/orbit/logs/verifier":
             for path in tuple(self.files):
-                if path.startswith("/opt/ale/logs/verifier/"):
+                if path.startswith("/opt/orbit/logs/verifier/"):
                     del self.files[path]
             return 0, b""
         if argv[:3] == ["rm", "-rf", "--"]:
@@ -288,11 +288,11 @@ class MemoryGuest:
             self.modes[argv[3]] = int(argv[2], 8)
             return 0, b""
         if argv[:2] == ["sh", "-c"] and "verifier" in argv[2]:
-            assert argv[-2:] == ["/opt/ale/logs", "/opt/ale/logs/verifier"]
+            assert argv[-2:] == ["/opt/orbit/logs", "/opt/orbit/logs/verifier"]
             return 0, b""
         if argv[:2] == ["sh", "-c"] and "sysconfig.get_paths()" in argv[-1]:
             return 0, b"/opt/homebrew/lib/python3.12/site-packages\n"
-        if argv == ["python3", "-c", "import ale_verify"]:
+        if argv == ["python3", "-c", "import orbit_verify"]:
             return 0, b""
         raise AssertionError(f"Unexpected guest command: {argv[0:2]}, cwd={cwd}")
 
@@ -427,7 +427,7 @@ def episode_fixture(
 
 async def _framed(local, image, *, user) -> FramedImage:
     return FramedImage(
-        name="ale-framed-fixture",
+        name="orbit-framed-fixture",
         identity="sha256:" + "e" * 64,
         agent_home=f"/Users/{user}",
         agent_uid=501,
@@ -454,8 +454,8 @@ async def test_orchard_episode_scores_and_captures_before_verify(
     oracle: bool,
 ) -> None:
     guest = MemoryGuest()
-    guest.files["/opt/ale/logs/verifier/reward.json"] = b'{"reward": 1}'
-    guest.files["/opt/ale/logs/verifier/verification.json"] = b'{"reward": 1}'
+    guest.files["/opt/orbit/logs/verifier/reward.json"] = b'{"reward": 1}'
+    guest.files["/opt/orbit/logs/verifier/verification.json"] = b'{"reward": 1}'
     task, providers, controller = episode_fixture(tmp_path, monkeypatch, guest)
     result = await run_episode(
         load_tasks(task)[0],
@@ -470,10 +470,10 @@ async def test_orchard_episode_scores_and_captures_before_verify(
     resets = [
         params["argv"]
         for op, params in guest.operations
-        if op == "exec" and params["argv"][-1] == "/opt/ale/logs/verifier"
+        if op == "exec" and params["argv"][-1] == "/opt/orbit/logs/verifier"
     ]
     assert resets, "verification must prepare its macOS result directory"
-    assert all(argv[-2] == "/opt/ale/logs" for argv in resets)
+    assert all(argv[-2] == "/opt/orbit/logs" for argv in resets)
     assert guest.stages == (
         ["setup", "oracle", "capture", "verify"] if oracle else ["setup", "capture", "verify"]
     )
@@ -541,8 +541,8 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
     assert solver.files[OUTPUT] == b"hello macOS"
     assert verifier.files[OUTPUT] == b"modified by verifier"
     assert (result.run_dir / "artifacts/0000/result.txt").read_bytes() == b"hello macOS"
-    assert not any(".ale-solution" in path for path in verifier.files)
-    assert not any(path.startswith("/opt/ale/setup/") for path in verifier.files)
+    assert not any(".orbit-solution" in path for path in verifier.files)
+    assert not any(path.startswith("/opt/orbit/setup/") for path in verifier.files)
     restored = [
         args for op, args in verifier.operations if op == "write_file" and args["path"] == OUTPUT
     ]
@@ -550,7 +550,7 @@ async def test_orchard_separate_verifier_restores_solver_artifacts_and_modes(
     verification = [
         args
         for op, args in verifier.operations
-        if op == "exec" and args.get("cwd") == "/opt/ale/tests"
+        if op == "exec" and args.get("cwd") == "/opt/orbit/tests"
     ]
     assert len(verification) == 1 and "run_as" not in verification[0]
     for controller in (solver_controller, verifier_controller):
@@ -680,7 +680,7 @@ async def test_macos_verifier_failure_does_not_accept_a_written_reward(
         providers,
         run_dir=tmp_path / "runs",
     )
-    assert "/opt/ale/logs/verifier/reward.json" in guest.files
+    assert "/opt/orbit/logs/verifier/reward.json" in guest.files
     expected = Status.TASK_ERROR if failure == "exit" else Status.TIMEOUT
     assert result.verdict.status is expected
     assert result.verdict.rewards is None
@@ -697,7 +697,7 @@ EXHAUSTED: dict[str, tuple[type[ResourceExhaustedError], str, Status]] = {
     ),
     "storage_mb": (
         StorageExhaustedError,
-        "ALE stopped the sandbox: it wrote 8193 MiB over its image, past the 8192 MiB its Task "
+        "Orbit stopped the sandbox: it wrote 8193 MiB over its image, past the 8192 MiB its Task "
         "declares",
         Status.STORAGE_EXHAUSTED,
     ),

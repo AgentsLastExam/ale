@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build ALE's gVisor runtime image: runsc, its containerd shim and its gvisor-bin/
-# sidecars from an official gVisor release tag with ALE's patches applied in order,
+# Build Orbit's gVisor runtime image: runsc, its containerd shim and its gvisor-bin/
+# sidecars from an official gVisor release tag with Orbit's patches applied in order,
 # built by gVisor's own Bazel build the way gVisor builds its release tarball.
 #
 #   images/runtimes/gvisor/build.sh WORKDIR
@@ -8,7 +8,7 @@
 # WORKDIR holds the gVisor checkout, the Bazel cache (about 10 GB) and the built tarball;
 # put it on a fast local disk. The build runs Bazel in a privileged container on the local
 # Docker daemon, which must be rootful. The result is tagged
-# ghcr.io/agentslastexam/ale-gvisor:$VERSION; .github/workflows/images.yml publishes it.
+# ghcr.io/agentslastexam/orbit-gvisor:$VERSION; .github/workflows/images.yml publishes it.
 set -euo pipefail
 
 # This image's own version: raise it to publish a changed build. A published version is
@@ -23,9 +23,9 @@ mkdir -p "$1"
 work=$(cd "$1" && pwd)
 src=$work/gvisor
 out=$work/out
-image=ghcr.io/agentslastexam/ale-gvisor:$VERSION
-# runsc reports this as its version: the upstream release, then ALE's build of it.
-stamp=$GVISOR_TAG+ale.$VERSION
+image=ghcr.io/agentslastexam/orbit-gvisor:$VERSION
+# runsc reports this as its version: the upstream release, then Orbit's build of it.
+stamp=$GVISOR_TAG+orbit.$VERSION
 
 if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
     echo "WARNING: $image is already published; this build replaces it in the local" >&2
@@ -48,14 +48,14 @@ done
 
 # gVisor stamps the output of tools/workspace_status.sh into every binary; a patched tree
 # would read as "$GVISOR_TAG-dirty".
-printf '#!/bin/sh\necho STABLE_VERSION %s\n' "$stamp" >"$src/tools/ale_workspace_status.sh"
-chmod +x "$src/tools/ale_workspace_status.sh"
+printf '#!/bin/sh\necho STABLE_VERSION %s\n' "$stamp" >"$src/tools/orbit_workspace_status.sh"
+chmod +x "$src/tools/orbit_workspace_status.sh"
 
 # gVisor's release pipeline builds //debian:gvisor-release-tar-* with these options; its
 # Makefile runs Bazel in its builder container.
 echo ">> building $stamp"
 options="--config=x86_64 --compilation_mode=opt"
-options+=" --workspace_status_command=tools/ale_workspace_status.sh"
+options+=" --workspace_status_command=tools/orbit_workspace_status.sh"
 mkdir -p "$out"
 status=0
 make -C "$src" BAZEL_CACHE="$work/bazel-cache" BAZEL_OPTIONS="$options" \

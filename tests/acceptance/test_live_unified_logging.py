@@ -17,7 +17,7 @@ pytestmark = [pytest.mark.needs_docker, pytest.mark.needs_llm, LIVE]
 
 def test_real_claude_unified_logging_and_llm_trajectory_audit(tmp_path) -> None:
     task = task_path(
-        "ALE_LIVE_RESOURCE_TASK",
+        "ORBIT_LIVE_RESOURCE_TASK",
         WORKSPACE_ROOT / "ale-tasks-base/tasks/demo/resource_injection",
     )
     assert task.is_dir()

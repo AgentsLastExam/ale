@@ -17,22 +17,22 @@ from typing import Any
 import pytest
 from aiohttp import web
 
-from ale.core.harness import (
+from orbit.core.harness import (
     EffectiveAgentResources,
     HarnessSession,
     ResolvedMcpServer,
     ResolvedSkill,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import Identity
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.core.trace import read_jsonl
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession
-from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
-from ale.run.harnesses.base import CONTINUE_PROMPT
-from ale.run.protocol.log_mirror import LogMirror
-from ale.run.recording import EpisodeRecording
+from orbit.core.sandbox import Identity
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
+from orbit.run.harnesses.base import CONTINUE_PROMPT
+from orbit.run.protocol.log_mirror import LogMirror
+from orbit.run.recording import EpisodeRecording
 from tests.support import cli_os, cli_sandbox
 
 pytestmark = [
@@ -293,7 +293,7 @@ async def test_agy_runs_through_the_gateway_with_resources_and_resumes(tmp_path:
     trajectory = harness.parse_trajectory(context)
     assert harness.parse_trajectory(context) == trajectory
     # Every native file is converted or a copy of what the converted records hold.
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
     assert [step.message for step in trajectory.steps if step.source == "user"] == [
         first_prompt,
         "second",
@@ -308,7 +308,7 @@ async def test_agy_runs_through_the_gateway_with_resources_and_resumes(tmp_path:
     }
     assert "shell-proof" in json.dumps(results["run_command"][1].content)
     mcp_call, mcp_result = results["mcp__proof__echo"]
-    assert (mcp_call.extra or {})["ale"]["mcp"] == {"server": "proof", "tool": "echo"}
+    assert (mcp_call.extra or {})["orbit"]["mcp"] == {"server": "proof", "tool": "echo"}
     assert "echo:mcp-proof" in json.dumps(mcp_result.content)
     assert "denied by pre-tool hook" in json.dumps(results["search_web"][1].content)
     assert [step.message for step in trajectory.steps if step.source == "agent"][-3:] == [

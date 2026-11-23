@@ -11,12 +11,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.errors import TaskError
-from ale.core.sandbox import ExecResult
-from ale.core.taskspec import OperatingSystem
-from ale.run import guestd
-from ale.run.harnesses.builtin import NopHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.core.errors import TaskError
+from orbit.core.sandbox import ExecResult
+from orbit.core.taskspec import OperatingSystem
+from orbit.run import guestd
+from orbit.run.harnesses.builtin import NopHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
 
 pytestmark = pytest.mark.unit
 
@@ -54,7 +54,7 @@ async def test_linux_selects_newer_python_without_replacing_default(
     python, site = await protocol._site_packages(ctx, sandbox)  # type: ignore[arg-type]
     assert python == ("python3" if default_is_modern else "python3.12")
     assert site
-    await protocol._probe_package(sandbox, python, "ale-verify", "import ale_verify")  # type: ignore[arg-type]
+    await protocol._probe_package(sandbox, python, "orbit-verify", "import orbit_verify")  # type: ignore[arg-type]
     if not default_is_modern:
         result = await sandbox.exec(["python3", "-c", "pass"])
         assert result.exit_code != 0 and "3.10" in result.stderr
@@ -68,7 +68,7 @@ async def test_an_image_without_a_compatible_python_verifies_on_the_frameworks(
     bin_dir.mkdir()
     (bin_dir / "sh").symlink_to("/bin/sh")
     executable(bin_dir / "python3", "echo 'Python 3.10 is too old' >&2; exit 1")
-    framework_python = tmp_path / "opt-ale-python" / "python3"
+    framework_python = tmp_path / "opt-orbit-python" / "python3"
     framework_python.parent.mkdir()
     executable(framework_python, f'exec {shlex.quote(sys.executable)} "$@"')
     monkeypatch.setitem(guestd.PYTHON, "linux", str(framework_python))

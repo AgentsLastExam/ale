@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 from tests.support import sibling_checkout
 
-from ale.core import lock
-from ale.core.ids import in_ale_form
-from ale.core.taskspec import SCHEMA_VERSION, TaskConfig
+from orbit.core import lock
+from orbit.core.ids import in_orbit_form
+from orbit.core.taskspec import SCHEMA_VERSION, TaskConfig
 
 pytestmark = pytest.mark.unit
 
@@ -47,8 +47,8 @@ def test_living_task_docs_do_not_recommend_removed_contracts(path: Path) -> None
         "oracle/assets",
         "resources.sudo",
         "network.mode",
-        "COPY --from=ale_assets",
-        "$ALE_REPO_PATH/.cache/assets/",
+        "COPY --from=orbit_assets",
+        "$ORBIT_REPO_PATH/.cache/assets/",
         "setup:\n  assets:",
         "verify:\n  kits:",
         "image:\n  assets:",
@@ -61,7 +61,7 @@ def test_living_task_docs_do_not_recommend_removed_contracts(path: Path) -> None
         "image: {build: verify/image}",
         "image: {build: verify}",
         "image: {ref:",
-        "1.4+ale.1",
+        "1.4+orbit.1",
         "vm_image",
         "vm_base",
         "vm = true",
@@ -118,7 +118,7 @@ def test_authoring_contract_names_the_current_task_shape() -> None:
     for irrelevant in (
         "assets",
         "sandbox-base-",
-        "ALE_ASSETS_COLLECTION",
+        "ORBIT_ASSETS_COLLECTION",
         "There is no Image Tree",
         "Submission checklist",
     ):
@@ -146,13 +146,13 @@ def test_task_quality_standard_owns_only_semantic_quality() -> None:
         "task.toml",
         "assets/",
         "requirement matrix",
-        "ale calibrate",
+        "orbit calibrate",
         "Required final response",
     ):
         assert implementation_detail not in text
     verification = (ROOT / "docs/specs/verification.md").read_text(encoding="utf-8")
     assert "finite number from 0 through 1" in verification
-    assert "ALE scores only `reward`" in verification
+    assert "Orbit scores only `reward`" in verification
 
 
 @pytest.mark.parametrize(
@@ -165,15 +165,15 @@ def test_maintained_tasks_use_the_current_configuration(repository: Path) -> Non
         pytest.skip(f"optional Task checkout not present: {repository.name}")
     for path in repository.glob("tasks/**/task.toml"):
         config = TaskConfig.model_validate(tomllib.loads(path.read_text(encoding="utf-8")))
-        # Loading accepts more; a maintained Task is in ALE's form.
+        # Loading accepts more; a maintained Task is in Orbit's form.
         assert config.schema_version == SCHEMA_VERSION, path
-        assert config.task.name is not None and in_ale_form(config.task.name), path
+        assert config.task.name is not None and in_orbit_form(config.task.name), path
 
 
 def test_current_docs_name_prepare_and_current_schema() -> None:
     text = "\n".join(path.read_text(encoding="utf-8") for path in NORMATIVE)
     for required in (
-        "ale prepare",
+        "orbit prepare",
         f"RunLock schema {lock.SCHEMA_VERSION}",
         f'schema_version = "{SCHEMA_VERSION}"',
     ):

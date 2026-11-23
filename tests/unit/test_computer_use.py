@@ -14,11 +14,11 @@ from typing import Any
 import pytest
 from aiohttp import web
 
-from ale.core.env import Observation, StepResult, TaskEnv
-from ale.core.errors import AgentError
-from ale.core.harness import HarnessSession
-from ale.core.trace import DesktopAction
-from ale.run.harnesses.computer_use import (
+from orbit.core.env import Observation, StepResult, TaskEnv
+from orbit.core.errors import AgentError
+from orbit.core.harness import HarnessSession
+from orbit.core.trace import DesktopAction
+from orbit.run.harnesses.computer_use import (
     GRID,
     ComputerUseHarness,
     _computer_tool,
@@ -114,15 +114,15 @@ def test_a_click_keeps_its_coordinate() -> None:
 
 
 def test_coordinates_need_no_rescaling() -> None:
-    """Generic computer tools continue to use ALE's normalized coordinate space."""
+    """Generic computer tools continue to use Orbit's normalized coordinate space."""
     assert GRID == 1000
     action = translate_action({"action": "mouse_move", "coordinate": [GRID, 0]})
     assert action is not None and action.coordinate == (GRID, 0)
 
 
 def test_typing_carries_its_text() -> None:
-    action = translate_action({"action": "type", "text": "ALE-38D85F"})
-    assert action is not None and action.text == "ALE-38D85F"
+    action = translate_action({"action": "type", "text": "ORBIT-38D85F"})
+    assert action is not None and action.text == "ORBIT-38D85F"
 
 
 def test_a_chord_becomes_a_key_sequence() -> None:

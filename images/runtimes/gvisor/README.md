@@ -1,8 +1,8 @@
 # gVisor runtime
 
-This directory builds ALE's gVisor runtime: `runsc` from an official gVisor release with the
-patches in [`patches/`](patches/) applied in order. The patches are ALE's own and are not
-sent upstream; a stock `runsc` lacks them.
+This directory builds Orbit's gVisor runtime: `runsc` from an official gVisor release with
+the patches in [`patches/`](patches/) applied in order. The patches are Orbit's own and are
+not sent upstream; a stock `runsc` lacks them.
 
 | Patch | Effect |
 |---|---|
@@ -20,7 +20,7 @@ Each patch's header says what it changes, why, and how it was verified.
 
 ## The image
 
-`ghcr.io/agentslastexam/ale-gvisor:<version>` holds, under `/gvisor`, the layout of
+`ghcr.io/agentslastexam/orbit-gvisor:<version>` holds, under `/gvisor`, the layout of
 gVisor's release tarball:
 
 ```text
@@ -34,7 +34,7 @@ gVisor's release tarball:
 
 `runsc` and its sidecars come from one build and are installed together. The image's
 version is `VERSION` in [`build.sh`](build.sh), and `runsc --version` reports the release
-and that version, such as `release-20261109.0+ale.0.1.4`. Nothing in it depends on the
+and that version, such as `release-20261109.0+orbit.0.1.4`. Nothing in it depends on the
 engine, so it has its own version, raised when the build changes.
 
 ## Install on a Host
@@ -44,8 +44,8 @@ binaries of a sandbox that is running:
 
 ```bash
 version=0.1.4
-dir=/usr/local/lib/ale-gvisor/$version
-id=$(docker create ghcr.io/agentslastexam/ale-gvisor:$version)
+dir=/usr/local/lib/orbit-gvisor/$version
+id=$(docker create ghcr.io/agentslastexam/orbit-gvisor:$version)
 sudo mkdir -p "$dir"
 docker cp "$id":/gvisor/. - | sudo tar -x -C "$dir"
 docker rm "$id"
@@ -60,7 +60,7 @@ alone:
 {
   "runtimes": {
     "runsc": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.4/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.4/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -68,7 +68,7 @@ alone:
       ]
     },
     "runsc-net-raw": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.4/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.4/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -77,7 +77,7 @@ alone:
       ]
     },
     "runsc-nested": {
-      "path": "/usr/local/lib/ale-gvisor/0.1.4/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.4/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -89,11 +89,11 @@ alone:
 }
 ```
 
-ALE's `docker:gvisor` leaf starts a sandbox under `runsc`, under `runsc-net-raw` when its
+Orbit's `docker:gvisor` leaf starts a sandbox under `runsc`, under `runsc-net-raw` when its
 Task needs raw sockets, or under `runsc-nested` when it runs a container engine, and its
 preflight refuses a Host where a runtime it needs is missing, is registered with other
 arguments than these, or is not this build
-([Providers](../../../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
+([Providers](../../../packages/orbit-run/src/orbit/run/providers/README.md#docker-on-gvisor)).
 
 - Registered by `path`, `runsc` runs under containerd's runc shim, which passes it
   `runtimeArgs`. gVisor's own shim, `io.containerd.runsc.v1`, would read `runsc`'s flags
@@ -114,7 +114,7 @@ arguments than these, or is not this build
   changes nothing.
 - `--net-raw` gives a container the raw and packet sockets Docker's default capabilities
   hold, which `runsc` otherwise removes: ping works and a packet socket captures, while a
-  packet socket's write fails (`ENOTSUP`) without `--allow-packet-socket-write`, which ALE
+  packet socket's write fails (`ENOTSUP`) without `--allow-packet-socket-write`, which Orbit
   does not pass.
 - `--TESTONLY-nftables` gives the Sentry's network stack nf_tables, which the `iptables` of
   Debian, Ubuntu and Alpine (its `nf_tables` variant), Docker and Podman set their rules
@@ -132,7 +132,7 @@ arguments than these, or is not this build
   NVIDIA Container Toolkit mounts into them.
 
 Under rootless Docker, copy `/gvisor` without `sudo` into a directory of the user's, such as
-`~/.local/lib/ale-gvisor/$version`, register it in `~/.config/docker/daemon.json`, and run
+`~/.local/lib/orbit-gvisor/$version`, register it in `~/.config/docker/daemon.json`, and run
 `systemctl --user reload docker`. Limits need the systemd cgroup driver and a user manager
 that delegates the `memory`, `cpu` and `pids` controllers; `runsc` reaches the manager over
 the session bus at `$DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`, else
@@ -167,9 +167,9 @@ Measured in `python:3.12-slim` with `--memory 572m`, `--memory-swap` equal to it
 `--oom-score-adj 500`, against runc with `--memory 512m` and no swap, 20 runs with the patch
 and 10 to 30 without; "lost" means the container stopped, "held" is what the process held,
 in 8 MiB steps, when it was killed, and a second, small process ran beside the 300 processes
-and the writer. Rootful is Docker 29.1.3 on Linux 7.0, without patch 0009 ALE's 0.1.0, whose
-out-of-memory code 0.1.1 shares; rootless is Docker 29.9.3 on Linux 6.12 with no swap on the
-Host, without patch 0009 ALE's 0.1.1:
+and the writer. Rootful is Docker 29.1.3 on Linux 7.0, without patch 0009 Orbit's 0.1.0,
+whose out-of-memory code 0.1.1 shares; rootless is Docker 29.9.3 on Linux 6.12 with no swap
+on the Host, without patch 0009 Orbit's 0.1.1:
 
 | Workload | Docker | Without patch 0009 | With patch 0009 | runc |
 |---|---|---|---|---|
@@ -203,10 +203,10 @@ Docker's default swap allowance, before patch 0009:
 
 Rootless Docker's default ties the stubs with the Sentry, and when the OOM killer takes the
 Sentry the sandbox ends, so a gVisor container needs `--oom-score-adj` above the inherited
-value; ALE passes 500. `runsc` cannot hold the Sentry lower instead: an unprivileged process
-cannot go below its `oom_score_adj_min`, the value its user's systemd manager was started
-with (`OOMScoreAdjust` of `user@.service`: 100 in systemd 259, unset and so 0 in systemd
-249).
+value; Orbit passes 500. `runsc` cannot hold the Sentry lower instead: an unprivileged
+process cannot go below its `oom_score_adj_min`, the value its user's systemd manager was
+started with (`OOMScoreAdjust` of `user@.service`: 100 in systemd 259, unset and so 0 in
+systemd 249).
 
 ## GPU memory limit
 
@@ -276,7 +276,7 @@ The script checks out `GVISOR_TAG`, fails unless it still names `GVISOR_COMMIT`,
 every patch in `patches/` in name order, and builds `//debian:gvisor-release-tar-bz2` with
 gVisor's Makefile, which runs Bazel in gVisor's builder container with the options of
 gVisor's own release pipeline. It then checks the tarball's layout and the version `runsc`
-reports, and builds `ghcr.io/agentslastexam/ale-gvisor:$VERSION` from this directory's
+reports, and builds `ghcr.io/agentslastexam/orbit-gvisor:$VERSION` from this directory's
 `Dockerfile`. When that version is already published, it warns that the local image only
 shadows the published one. It needs a rootful Docker daemon and about 15 GB in `WORKDIR`
 and Docker's storage together. On a 112-core Host it takes 5.5 minutes with an empty

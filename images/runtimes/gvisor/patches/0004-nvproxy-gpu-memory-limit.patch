@@ -94,7 +94,7 @@ a NUMA node (Grace Hopper), PMA takes contiguous allocations from the kernel
 in power-of-two blocks (_vidmemPmaAllocate()), which can exceed the rounded
 size. Driver sources cited are open-gpu-kernel-modules 570.195.03.
 
-Why: ALE admits a sandbox to a GPU that other jobs share when the GPU has the
+Why: Orbit admits a sandbox to a GPU that other jobs share when the GPU has the
 memory its Task declares free. Without a limit the sandbox can take the
 others' memory and make their allocations fail; with it, the sandbox's own
 allocation fails instead, as an ordinary out-of-memory error, and the sandbox

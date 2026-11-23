@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from ale.core.taskspec import OperatingSystem
+from orbit.core.taskspec import OperatingSystem
 from tests.integration.cli_web_tools import (
     CASES,
     DIRECT,

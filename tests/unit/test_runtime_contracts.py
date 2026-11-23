@@ -10,19 +10,19 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from ale.core.config import (
+from orbit.core.config import (
     AssetCollectionConfig,
     GatewayLimits,
     LoggingPolicy,
     RunConfig,
-    ale_repo_path,
     load_run_config,
     merge_layers,
+    orbit_repo_path,
     parse_override,
     resolve_asset_collection,
 )
-from ale.core.errors import ConfigError, ProvenanceIncompleteError
-from ale.core.lock import (
+from orbit.core.errors import ConfigError, ProvenanceIncompleteError
+from orbit.core.lock import (
     AgentProvenance,
     FrameworkProvenance,
     GatewayProvenance,
@@ -32,29 +32,29 @@ from ale.core.lock import (
     TaskProvenance,
     TaskSource,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     DesktopResolution,
     ImageRef,
     PreparedTaskImage,
     ResolvedImage,
     ResourceAllocation,
 )
-from ale.core.taskspec import (
+from orbit.core.taskspec import (
     SCHEMA_VERSION,
     ImageKind,
     ImageSpec,
     Resources,
     TaskSpec,
 )
-from ale.core.trace import TransportCall
-from ale.run.guestd.protocol import PROTOCOL_VERSION
-from ale.run.provenance import ProvenanceInputs, build_lock
+from orbit.core.trace import TransportCall
+from orbit.run.guestd.protocol import PROTOCOL_VERSION
+from orbit.run.provenance import ProvenanceInputs, build_lock
 
 pytestmark = pytest.mark.unit
 
 DIGEST = "sha256:" + "0" * 64
 
-GUESTD = Path(__file__).resolve().parents[2] / "packages/ale-run/src/ale/run/guestd/main.py"
+GUESTD = Path(__file__).resolve().parents[2] / "packages/orbit-run/src/orbit/run/guestd/main.py"
 
 
 def make_lock(**overrides: object) -> RunLock:
@@ -76,10 +76,10 @@ def make_lock(**overrides: object) -> RunLock:
             input_identity=DIGEST,
             image_source_identity=DIGEST,
             prepared_identity=DIGEST,
-            runtime_ref="ale-task:fixture",
+            runtime_ref="orbit-task:fixture",
             provider="docker:runc",
             observed_identity=DIGEST,
-            observed_ref="ale-task:fixture",
+            observed_ref="orbit-task:fixture",
         ),
         "resources": ResourceProvenance(
             requested=Resources(),
@@ -150,7 +150,7 @@ class TestRunLock:
         assert make_lock().framework.schema_version == 3
 
     def test_a_harbor_task_and_its_warnings_are_recorded_only_when_there(self) -> None:
-        """An ALE Task's record keeps its shape; a Harbor Task's says it was one, and why."""
+        """An Orbit Task's record keeps its shape; a Harbor Task's says it was one, and why."""
         assert {"harbor", "warnings"}.isdisjoint(make_lock().model_dump(mode="json")["task"])
         task = make_lock().task.model_copy(
             update={"harbor": True, "warnings": ("task.toml: no schema_version, so ...",)}
@@ -227,14 +227,14 @@ class TestRunLock:
             kind="container",
             prepared_identity=DIGEST,
             observed_identity=DIGEST,
-            observed_ref="ale-task:fixture",
+            observed_ref="orbit-task:fixture",
         )
         prepared = PreparedTaskImage(
             kind="container",
             source="solver-local",
             input_identity=DIGEST,
             image_source_identity=DIGEST,
-            runtime_ref="ale-task:fixture",
+            runtime_ref="orbit-task:fixture",
             prepared_identity=DIGEST,
         )
         lock = build_lock(
@@ -278,22 +278,22 @@ class TestRunLock:
 
 
 class TestConfigLayering:
-    def test_ale_repo_path_is_absolute(
+    def test_orbit_repo_path_is_absolute(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        checkout = tmp_path / "ale"
-        (checkout / "packages" / "ale-run").mkdir(parents=True)
-        (checkout / "pyproject.toml").write_text("[project]\nname='ale'\n")
-        monkeypatch.setenv("ALE_REPO_PATH", str(checkout))
-        assert ale_repo_path() == checkout
-        monkeypatch.setenv("ALE_REPO_PATH", "relative")
+        checkout = tmp_path / "orbit"
+        (checkout / "packages" / "orbit-run").mkdir(parents=True)
+        (checkout / "pyproject.toml").write_text("[project]\nname='orbit'\n")
+        monkeypatch.setenv("ORBIT_REPO_PATH", str(checkout))
+        assert orbit_repo_path() == checkout
+        monkeypatch.setenv("ORBIT_REPO_PATH", "relative")
         with pytest.raises(ConfigError, match="absolute"):
-            ale_repo_path()
+            orbit_repo_path()
 
     def test_asset_collection_cli_overrides_environment(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("ALE_ASSETS_COLLECTION", "user/assets-env")
+        monkeypatch.setenv("ORBIT_ASSETS_COLLECTION", "user/assets-env")
         assert resolve_asset_collection().collection_slug == "user/assets-env"
         resolved = resolve_asset_collection("user/assets-cli")
         assert resolved == AssetCollectionConfig(
@@ -435,7 +435,7 @@ class TestGuestProtocol:
 
     @pytest.mark.asyncio
     async def test_a_file_larger_than_one_message_is_written_whole(self, tmp_path: Path) -> None:
-        from ale.run.transport import GuestClient, StdioTransport
+        from orbit.run.transport import GuestClient, StdioTransport
 
         transport = StdioTransport([sys.executable, str(GUESTD), "--stdio"])
         await transport.start()
@@ -504,7 +504,7 @@ class TestFailedModelCalls:
 def test_a_task_source_is_read_from_its_git_checkout(tmp_path: Path) -> None:
     import subprocess
 
-    from ale.run.sources import resolve
+    from orbit.run.sources import resolve
 
     def git(*argv: str) -> None:
         subprocess.run(["git", "-C", str(tmp_path), *argv], check=True, capture_output=True)
@@ -537,8 +537,8 @@ def test_a_task_source_records_no_credentials_and_needs_no_git(
 ) -> None:
     import subprocess
 
-    from ale.run import sources
-    from ale.run.sources import resolve
+    from orbit.run import sources
+    from orbit.run.sources import resolve
 
     def git(*argv: str) -> None:
         subprocess.run(["git", "-C", str(tmp_path), *argv], check=True, capture_output=True)

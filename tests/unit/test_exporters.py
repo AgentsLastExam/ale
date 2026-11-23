@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ale.core.result import FailureInfo, ResultRecord
-from ale.core.trajectory import (
+from orbit.core.result import FailureInfo, ResultRecord
+from orbit.core.trajectory import (
     AtifAgent,
     AtifAudioSource,
     AtifContentPart,
@@ -17,8 +17,8 @@ from ale.core.trajectory import (
     AtifToolCall,
     AtifTrajectory,
 )
-from ale.core.verdict import Status
-from ale.run.exporters import (
+from orbit.core.verdict import Status
+from orbit.run.exporters import (
     harbor_result,
     harbor_trajectory,
     prime_verifiers_record,

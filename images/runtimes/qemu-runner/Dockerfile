@@ -1,6 +1,6 @@
 # The container that hosts a virtual machine.
 #
-# ALE does not run `qemu-system-x86_64` on the host. This image does, and it is inherited
+# Orbit does not run `qemu-system-x86_64` on the host. This image does, and it is inherited
 # rather than written: the parts that are tedious and easy to get subtly wrong — device
 # permissions, the guest's bridge and its DHCP, port forwarding to the guest, signal
 # handling — were already solved here, and re-solving them would buy nothing.
@@ -11,18 +11,18 @@
 # the other half — a run should not depend on an image someone else can move or delete.
 #
 # Published under each engine version by .github/workflows/images.yml; `images/build.sh
-# ale-qemu-runner` builds a version not yet published.
+# orbit-qemu-runner` builds a version not yet published.
 FROM agentslastexam/ale-qemu:0.2.0
 
-COPY entrypoint.sh /usr/local/bin/ale-qemu-entrypoint
-RUN chmod 0755 /usr/local/bin/ale-qemu-entrypoint
+COPY entrypoint.sh /usr/local/bin/orbit-qemu-entrypoint
+RUN chmod 0755 /usr/local/bin/orbit-qemu-entrypoint
 
 # What the guest service listens on, so the entrypoint can say so rather than a reader
 # having to know. The provider publishes this port; nothing here binds it.
-ENV ALE_GUEST_PORT=7411
+ENV ORBIT_GUEST_PORT=7411
 
-LABEL org.opencontainers.image.source="https://github.com/AgentsLastExam/ale" \
-      org.opencontainers.image.description="Hosts an ALE guest VM under qemu/KVM" \
-      ale.role="qemu-runner"
+LABEL org.opencontainers.image.source="https://github.com/AgentsLastExam/orbit" \
+      org.opencontainers.image.description="Hosts an Orbit guest VM under qemu/KVM" \
+      orbit.role="qemu-runner"
 
-ENTRYPOINT ["/usr/local/bin/ale-qemu-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/orbit-qemu-entrypoint"]

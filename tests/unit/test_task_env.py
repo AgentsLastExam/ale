@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.env import Observation, StepResult
-from ale.core.harness import HarnessSession, StepwisePolicy
-from ale.core.trace import DesktopAction
-from ale.core.trajectory import AtifAgent, TrajectoryBuilder
-from ale.run.envs import SandboxEnv
-from ale.run.recording import BlobStore
+from orbit.core.env import Observation, StepResult
+from orbit.core.harness import HarnessSession, StepwisePolicy
+from orbit.core.trace import DesktopAction
+from orbit.core.trajectory import AtifAgent, TrajectoryBuilder
+from orbit.run.envs import SandboxEnv
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
@@ -271,8 +271,8 @@ class TestWitnessing:
 
         calls = env.trajectory_steps[0].tool_calls
         assert calls is not None
-        assert [call.extra["ale"]["accepted"] for call in calls] == [True, False]
-        assert calls[1].extra["ale"]["rejection"]
+        assert [call.extra["orbit"]["accepted"] for call in calls] == [True, False]
+        assert calls[1].extra["orbit"]["rejection"]
 
 
 class TestStepwisePolicy:

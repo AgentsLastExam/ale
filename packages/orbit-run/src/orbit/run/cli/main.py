@@ -1,0 +1,476 @@
+"""The ``orbit`` command line.
+
+Kept thin on purpose: it resolves a reference, assembles the pieces, and prints what
+came back. Every decision that matters — how a task loads, how an episode runs, what a
+verdict means — lives in the library, so the same behaviour is available to anything
+that imports it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import signal
+from collections.abc import Coroutine, Sequence
+from pathlib import Path
+from typing import Annotated, Any
+
+import typer
+
+from orbit.core.errors import OrbitError, ProviderCapabilityError
+from orbit.core.sandbox import Provider
+from orbit.run import __version__
+from orbit.run.assets import (
+    AssetSyncResult,
+    asset_status,
+    pull_assets,
+    push_assets,
+)
+from orbit.run.cli.assets import assets_app
+from orbit.run.cli.tasks import (
+    EXIT_BAD_REFERENCE,
+    _calibrate,
+    _config,
+    _prepare_only,
+    _reverify,
+    _run_one,
+)
+from orbit.run.lint import lint_repository
+from orbit.run.providers import RETAINING_PROVIDERS, provider_named
+from orbit.run.scaffold import scaffold_task
+from orbit.run.secrets import load_env
+
+app = typer.Typer(
+    name="orbit",
+    help="Agents' Last Exam evaluation orchestrator.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(assets_app, name="assets")
+vm_image_app = typer.Typer(help="Publish and acquire prebuilt VM disks.", no_args_is_help=True)
+app.add_typer(vm_image_app, name="vm-image")
+sandbox_app = typer.Typer(
+    help="Inspect and remove retained sandboxes and snapshots.", no_args_is_help=True
+)
+app.add_typer(sandbox_app, name="sandbox")
+
+EXIT_PROVIDER = 4
+
+
+def _print_version(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def root(
+    _version: Annotated[
+        bool,
+        typer.Option(
+            "--version", callback=_print_version, is_eager=True, help="Print the version."
+        ),
+    ] = False,
+) -> None:
+    """Run, calibrate and author Orbit evaluation tasks."""
+    # Credentials come from the checkout's .env, read once here for every command. A
+    # variable already set in the environment, such as `KEY=... orbit run` or a CI secret,
+    # takes precedence.
+    load_env()
+
+
+@app.command()
+def run(
+    reference: Annotated[str, typer.Argument(help="Task or collection filesystem path")],
+    agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help=(
+                "antigravity-cli, claude-code, codex-cli, droid, forgecode, grok-build, "
+                "hermes, kimi-code, muse-code, openclaw-cli, opencode, openhands-cli, "
+                "pi-cli, qwen-code, zcode, computer-use, oracle or nop"
+            ),
+        ),
+    ] = None,
+    model: Annotated[str | None, typer.Option("--model")] = None,
+    auth: Annotated[
+        str | None,
+        typer.Option("--auth", help="auto, api-key or subscription"),
+    ] = None,
+    base_url: Annotated[
+        str,
+        typer.Option(
+            "--base-url",
+            help="One-off model endpoint; defaults to the preset provider's endpoint",
+        ),
+    ] = "",
+    api_key_env: Annotated[
+        str,
+        typer.Option(
+            "--api-key-env",
+            help="Which .env variable holds the key for --base-url",
+        ),
+    ] = "",
+    config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
+    overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
+    runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+    episodes: Annotated[int, typer.Option("-n", "--episodes", min=1)] = 1,
+    episode_retries: Annotated[
+        int | None,
+        typer.Option("--episode-retries", min=0, help="Extra attempts for incomplete episodes"),
+    ] = None,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            min=1,
+            help="How many episodes to run at once; bounded by what the host can hold",
+        ),
+    ] = 1,
+    run_id: Annotated[
+        str | None, typer.Option("--run-id", help="Resume this run instead of starting one")
+    ] = None,
+    no_resume: Annotated[
+        bool, typer.Option("--no-resume", help="Re-run episodes already recorded complete")
+    ] = False,
+    require_reportable: Annotated[
+        bool,
+        typer.Option(
+            "--require-reportable",
+            help="Fail unless every episode's provenance could back a published result",
+        ),
+    ] = False,
+    continue_from: Annotated[
+        Path | None,
+        typer.Option(
+            "--continue-from",
+            help="Episode directory whose retained solver and agent session this run continues",
+        ),
+    ] = None,
+) -> None:
+    """Run a task and report its verdict.
+
+    Re-invoking with the same ``--run-id`` continues where an interrupted run stopped:
+    episodes are matched by what they are, not by when they ran. ``--continue-from``
+    instead gives the Task's instruction to the agent of an earlier episode whose solver
+    was kept, in that Sandbox and native session.
+    """
+    flags = [*(overrides or []), f"episodes={episodes}", f"concurrency={concurrency}"]
+    if episode_retries is not None:
+        flags.append(f"episode_retries={episode_retries}")
+    if no_resume:
+        flags.append("resume=false")
+    if auth:
+        flags.append(f"agent.authentication={auth}")
+    if base_url:
+        flags.append(f"gateway.base_url={base_url}")
+    if api_key_env:
+        flags.append(f"gateway.api_key_env={api_key_env}")
+    settings = _config(config, flags, agent=agent, model=model)
+    exit_code = run_async(
+        _run_one(reference, settings, runs_dir, run_id, require_reportable, continue_from)
+    )
+    raise typer.Exit(exit_code)
+
+
+@app.command()
+def calibrate(
+    reference: Annotated[str, typer.Argument(help="Task or Task collection path")],
+    config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
+    overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
+    runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+) -> None:
+    """Score every calibration case of every task and check it against its expectation.
+
+    The reference solution, solution/, and each further case under calibration/ run as
+    fresh episodes. Verification uses the same run-level judge configuration as
+    an ordinary episode.
+    """
+    settings = _config(config, overrides, agent="oracle", model="")
+    exit_code = run_async(_calibrate(reference, settings, runs_dir))
+    raise typer.Exit(exit_code)
+
+
+@app.command()
+def prepare(
+    reference: Annotated[str, typer.Argument(help="Task or Task collection path")],
+    config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
+    overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
+) -> None:
+    """Build or acquire Task images without starting an episode."""
+    settings = _config(config, overrides, agent="oracle", model="")
+    raise typer.Exit(run_async(_prepare_only(reference, settings)))
+
+
+@app.command(hidden=True)
+def reverify(
+    reference: Annotated[str, typer.Argument(help="Task or collection filesystem path")],
+    source_run: Annotated[
+        Path,
+        typer.Argument(help="Prior run or episode directory with a kept or snapshotted solver"),
+    ],
+    config: Annotated[Path | None, typer.Option("--config", help="Run configuration TOML")] = None,
+    overrides: Annotated[list[str] | None, typer.Option("--set", help="key.path=value")] = None,
+    runs_dir: Annotated[Path, typer.Option("--runs-dir")] = Path("runs"),
+    episode_retries: Annotated[
+        int | None,
+        typer.Option("--episode-retries", min=0, help="Extra attempts for incomplete episodes"),
+    ] = None,
+) -> None:
+    """Re-run current verification against retained solvers without their agent."""
+    flags = [*(overrides or [])]
+    if episode_retries is not None:
+        flags.append(f"episode_retries={episode_retries}")
+    settings = _config(config, flags, agent="nop", model="")
+    raise typer.Exit(run_async(_reverify(reference, source_run, settings, runs_dir)))
+
+
+@app.command()
+def lint(
+    reference: Annotated[Path, typer.Argument(help="Task or repository path")] = Path(),
+) -> None:
+    """Check tasks without starting a container.
+
+    The cheap half of admission: everything answerable from the files alone. Run it on
+    every save; run `orbit calibrate` when you want a task actually solved. Only problems
+    fail it; warnings say where a task departs from Orbit's form.
+    """
+    findings = lint_repository(reference)
+    for finding in findings:
+        typer.echo(str(finding), err=True)
+    problems = sum(finding.severity == "error" for finding in findings)
+    warnings = f", {len(findings) - problems} warning(s)" if len(findings) > problems else ""
+    if problems:
+        typer.echo(f"{problems} problem(s){warnings}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"ok{warnings}")
+
+
+@vm_image_app.command("push")
+def vm_image_push(
+    source: Annotated[Path, typer.Argument(help="Local qcow2 disk")],
+    reference: Annotated[str, typer.Argument(help="Destination OCI reference with a new tag")],
+) -> None:
+    """Publish a local qcow2 to an OCI registry as chunk layers, under a new tag."""
+    from orbit.run.images import publish_vm_image
+
+    typer.echo(f"pushing {source} to {reference}")
+    try:
+        resolved = run_async(publish_vm_image(source, reference))
+    except OrbitError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    typer.echo(f"ok    {resolved}")
+
+
+@vm_image_app.command("pull")
+def vm_image_pull(
+    reference: Annotated[str, typer.Argument(help="Published OCI reference, by tag or digest")],
+    destination: Annotated[Path, typer.Argument(help="Local qcow2 destination")],
+) -> None:
+    """Download a published qcow2 from an OCI registry straight to its destination.
+
+    Chunks are fetched in parallel and checked as they are written; running the same pull
+    again after an interruption keeps the chunks already in place.
+    """
+    from orbit.run.images import pull_vm_image
+
+    typer.echo(f"pulling {reference}")
+    try:
+        resolved = run_async(pull_vm_image(reference, destination))
+    except OrbitError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    typer.echo(f"ok    {resolved} -> {destination}")
+
+
+@app.command("new-task")
+def new_task(
+    path: Annotated[Path, typer.Argument(help="Where to create the task folder")],
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing folder")] = False,
+) -> None:
+    """Scaffold a task that passes `orbit lint` immediately.
+
+    The folder name is the Task's name, in the `agentslastexam` organization. The scaffold
+    solves itself: its solution writes what its tests expect, so a new task starts from a
+    green `orbit calibrate` and the author changes one thing at a time from a known-good state.
+    """
+    try:
+        created = scaffold_task(path, force=force)
+    except OrbitError as error:
+        typer.echo(f"{error}", err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    typer.echo(f"created {created}")
+    typer.echo(f"next: orbit lint {created}  &&  orbit calibrate {created}")
+
+
+@assets_app.command("status")
+def assets_status(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="One or more Task or Task collection paths"),
+    ],
+) -> None:
+    """Inspect Task-local assets without reading their file contents."""
+    try:
+        statuses = asset_status(paths)
+    except OrbitError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    for item in statuses:
+        typer.echo(
+            f"{'dirty' if item.dirty else 'clean':6} "
+            f"{item.repository}/{item.task_path} commit={item.commit or 'none'}"
+        )
+
+
+@assets_app.command("pull")
+def assets_pull(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="One or more Task or Task collection paths"),
+    ],
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Replace existing selected asset roots"),
+    ] = False,
+    revision: Annotated[
+        str | None,
+        typer.Option("--revision", help="HF revision; pass a fixed commit SHA for reproducibility"),
+    ] = None,
+) -> None:
+    """Pull selected asset roots directly into their Task folders."""
+    try:
+        results = pull_assets(paths, force=force, revision=revision)
+    except OrbitError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    _print_asset_sync(results)
+
+
+@assets_app.command("push")
+def assets_push(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="One or more Task or Task collection paths"),
+    ],
+    collection: Annotated[
+        str | None,
+        typer.Option("--collection", help="Hugging Face collection slug"),
+    ] = None,
+) -> None:
+    """Push selected Task-local stage asset roots exactly."""
+    try:
+        results = push_assets(paths, collection=collection)
+    except OrbitError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_BAD_REFERENCE) from error
+    _print_asset_sync(results)
+
+
+def _print_asset_sync(results: Sequence[AssetSyncResult]) -> None:
+    for result in results:
+        typer.echo(f"ok {result.repository} dataset={result.remote_repo_id} commit={result.commit}")
+        for task in result.tasks:
+            typer.echo(f"  {task.task_path} {'dirty' if task.dirty else 'clean'}")
+
+
+@sandbox_app.command("list")
+def sandbox_list() -> None:
+    """List Orbit-managed sandboxes and snapshots requested for retention."""
+    try:
+        records = run_async(_list_retained_sandboxes())
+    except OrbitError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_PROVIDER) from error
+    for record in records:
+        typer.echo(
+            f"{record['handle']} episode={record['episode']} role={record['role']} "
+            f"gpus={','.join(record['gpus']) or '-'} cleanup={record['cleanup_command']}"
+        )
+
+
+@sandbox_app.command("destroy")
+def sandbox_destroy(
+    handle: Annotated[str, typer.Argument(help="Retained sandbox or snapshot handle")],
+) -> None:
+    """Destroy one Orbit-retained sandbox or snapshot and its owned resources."""
+    try:
+        run_async(_destroy_retained_sandbox(handle))
+    except OrbitError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(EXIT_PROVIDER) from error
+    typer.echo(f"destroyed {handle}")
+
+
+async def _list_retained_sandboxes() -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for name in RETAINING_PROVIDERS:
+        if name == "fleet" and not os.environ.get("ORBIT_FLEET_URL"):
+            continue  # no Fleet named here
+        provider = provider_named(name)
+        try:
+            records.extend(await provider.list_retained())
+        finally:
+            await _close(provider)
+    return sorted(records, key=lambda item: str(item["handle"]))
+
+
+async def _destroy_retained_sandbox(handle: str) -> None:
+    name, separator, _ = handle.partition(":")
+    if not separator or name not in RETAINING_PROVIDERS:
+        offered = ", ".join(f"'{provider}:'" for provider in RETAINING_PROVIDERS)
+        raise ProviderCapabilityError(f"retained sandbox handle must start with {offered}")
+    provider = provider_named(name)
+    try:
+        await provider.destroy_retained(handle)
+    finally:
+        await _close(provider)
+
+
+async def _close(provider: Provider) -> None:
+    """Close the Fleet's connections; other Providers hold none between calls."""
+    from orbit.run.providers.fleet import FleetProvider
+
+    if isinstance(provider, FleetProvider):
+        await provider.client.close()
+
+
+def run_async[T](main: Coroutine[Any, Any, T]) -> T:
+    """Run a command's coroutine, cancelling it on SIGTERM as asyncio does on Ctrl-C.
+
+    asyncio turns only SIGINT into cancellation. Without this, the SIGTERM of `kill`,
+    `timeout` or a supervisor ends the process before the cancellation-shielded teardown
+    destroys the Sandboxes the command created. A second SIGTERM kills at once.
+    """
+
+    async def cancelled_by_sigterm() -> T:
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        assert task is not None
+        terminated = False
+
+        def terminate() -> None:
+            nonlocal terminated
+            terminated = True
+            loop.remove_signal_handler(signal.SIGTERM)
+            task.cancel()
+
+        loop.add_signal_handler(signal.SIGTERM, terminate)
+        try:
+            return await main
+        except asyncio.CancelledError:
+            if terminated:
+                # 143, as Ctrl-C ends with 130: the shell's status for death by the signal.
+                raise typer.Exit(128 + signal.SIGTERM) from None
+            raise
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+    return asyncio.run(cancelled_by_sigterm())
+
+
+def main() -> None:
+    """Console script entry point."""
+    app()

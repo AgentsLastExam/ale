@@ -1,7 +1,7 @@
 # Autonomous Harness Integration
 
 This is the implementation contract for adding an agent program that owns its own
-interaction loop. ALE supplies one instruction, a live Sandbox, a resolved authentication
+interaction loop. Orbit supplies one instruction, a live Sandbox, a resolved authentication
 mode, checked settings, and resolved resources. The Harness launches the program in
 that Sandbox and returns a typed result.
 
@@ -9,9 +9,9 @@ that Sandbox and returns a typed result.
 
 Every shipped autonomous harness must include:
 
-1. an adapter under `ale.run.harnesses`;
+1. an adapter under `orbit.run.harnesses`;
 2. a frozen Pydantic settings model with `extra="forbid"`;
-3. a complete packaged preset at `ale/run/presets/<harness>.toml`;
+3. a complete packaged preset at `orbit/run/presets/<harness>.toml`;
 4. adapter-specific and common conformance tests;
 5. version and integrity reporting;
 6. explicit Skill, MCP, and resume checks;
@@ -35,7 +35,7 @@ resource.
 
 ## Shipped Integrations
 
-ALE integrates these official upstream agent programs:
+Orbit integrates these official upstream agent programs:
 
 | Harness | Pinned package | Gateway dialect | Public settings |
 |---------|----------------|-----------------|-----------------|
@@ -44,7 +44,7 @@ ALE integrates these official upstream agent programs:
 | `codex-cli` | `@openai/codex@0.146.0` | OpenAI Responses | `reasoning_effort`, `web_search` |
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params`, `input` |
 
-Each integration installs its program's official distribution; ALE does not install a fork
+Each integration installs its program's official distribution; Orbit does not install a fork
 or carry agent-program patches. That is the npm package when upstream publishes one.
 Otherwise it is the official release executable, pinned per OS and architecture by URL and
 SHA-256 in the adapter's `release_assets`; when upstream ships it inside a tar or zip
@@ -55,11 +55,11 @@ whole table. A program upstream distributes only through its own installer is in
 its adapter from one pinned artifact: a source installer at one commit, reported as
 `git:<repository>@<commit>`, or an installer package it verifies and unpacks, reported as
 the `sha256:` of the files it runs. Bases provide runtimes, not agent CLI packages; they pin
-Node.js 24.15.0, which a macOS image, having no ALE base, provides itself. Each run installs
-and configures the selected CLI before applying the Task network policy.
+Node.js 24.15.0, which a macOS image, having no Orbit base, provides itself. Each run
+installs and configures the selected CLI before applying the Task network policy.
 
 Every other adapter gives its pin, Gateway dialects and public settings in its own README,
-listed in the [Harness index](../../packages/ale-run/src/ale/run/harnesses/README.md).
+listed in the [Harness index](../../packages/orbit-run/src/orbit/run/harnesses/README.md).
 
 `agent.version` selects an exact version, and omitting it uses the adapter's pinned
 default. A release-binary adapter accepts only its pinned version, because only that
@@ -90,8 +90,8 @@ together.
 
 Claude Code, Codex CLI, and Grok Build support `agent.authentication = "auto" |
 "api-key" | "subscription"`. Subscription state is isolated from ordinary Host agent
-homes: Claude reads `ALE_CLAUDE_CODE_OAUTH_TOKEN` from the ALE checkout's `.env`; Codex
-and Grok use `<checkout>/.ale/auth/<harness>/auth.json`. Credentials remain on the Host;
+homes: Claude reads `ORBIT_CLAUDE_CODE_OAUTH_TOKEN` from the Orbit checkout's `.env`; Codex
+and Grok use `<checkout>/.orbit/auth/<harness>/auth.json`. Credentials remain on the Host;
 every Sandbox receives only its episode Gateway token. Other Harnesses reject explicit
 subscription authentication.
 
@@ -100,7 +100,7 @@ subscription authentication.
 The preset lists every public setting, even when its value is a sentinel.
 
 - `default` means omit the native option and use the pinned CLI's own default behavior.
-  It never means that ALE substitutes a number.
+  It never means that Orbit substitutes a number.
 - `unlimited` means no ceiling. The adapter must map it to a documented native no-limit
   representation or reject it.
 - Positive numeric limits are concrete native limits.
@@ -145,7 +145,7 @@ Preparation runs after task setup and before agent egress is sealed:
 1. `install()` verifies or installs the pinned program and returns the observed version.
 2. `install_resources()` stages only `EffectiveAgentResources`: `install_skills` copies the
    Task's `skills_dir` into the native skills directory, then uploads the operator's Skills.
-3. ALE checks stdio MCP commands and working directories inside the sandbox.
+3. Orbit checks stdio MCP commands and working directories inside the sandbox.
 
 Use only the provider-independent `Sandbox` API. Run measured and staged agent-owned
 content as `Identity.AGENT`. Native config, Skills, MCP files, and temporary state must
@@ -168,7 +168,7 @@ the agent deadline. It must:
 - return `AgentRun`;
 - classify known refusals and native limits with typed errors.
 
-`CliHarness` writes each prompt as UTF-8 to `.ale-harness/prompt.md` and the CLI reads
+`CliHarness` writes each prompt as UTF-8 to `.orbit-harness/prompt.md` and the CLI reads
 that file through stdin or its native prompt-file option, so the prompt never passes
 through argv, an environment variable, or shell quoting and reaches the model exactly as
 sent. A CLI that takes a prompt only as an argument is the exception: it receives the
@@ -177,9 +177,9 @@ OS's argument limits bound the prompt and a longer one fails at launch instead o
 truncated. A CLI that reads a headless prompt from stdin only inside a structured message
 gets the file's exact text wrapped into that message by the Sandbox's Python (on macOS
 the framework's) first. Every
-invocation, launch or resume, appends to `.ale-harness/stdout.log` and
-`.ale-harness/stderr.log` and records its prompt, requested session ID, and stream offsets
-in `.ale-harness/invocations.jsonl`. Result interpretation sees only the current
+invocation, launch or resume, appends to `.orbit-harness/stdout.log` and
+`.orbit-harness/stderr.log` and records its prompt, requested session ID, and stream offsets
+in `.orbit-harness/invocations.jsonl`. Result interpretation sees only the current
 invocation's output, so it cannot reuse the success or session ID of an earlier turn.
 
 The CLI starts from a non-login shell, POSIX `sh` on Linux and macOS and Git Bash on
@@ -217,7 +217,7 @@ provisioning. The framework's preamble below the instruction and each round's pr
 the program as any prompt does and are recorded with it, and every turn's invocation
 appends to the same evidence logs, so the trajectory is the one native session across all
 turns. Each Harness declares the files in which its program keeps credentials
-(`Harness.credentials`), which ALE removes, every Harness's, before a solver is saved or
+(`Harness.credentials`), which Orbit removes, every Harness's, before a solver is saved or
 kept ([Security](security.md#5-answers-are-absent-not-hidden)).
 
 A [move](episode-protocol.md#moves) resumes the session a run cut by its limit left, in the
@@ -235,15 +235,15 @@ lookup is invalid.
 ### Collect and Parse
 
 `Harness.logs` declares, relative to the agent home, the files and directories that
-hold a Harness's own record of a run. A CLI declares `.ale-harness` and its native
+hold a Harness's own record of a run. A CLI declares `.orbit-harness` and its native
 session directories, including child-session locations. The
 [episode protocol](episode-protocol.md#evidence-capture) mirrors them and the parser
 reads the mirror at the same relative paths; it never sees the Sandbox.
 
 `parse_trajectory()` is pure host-side code. For identical collected bytes it returns an
 identical schema-valid ATIF v1.8 trajectory. It preserves valid events before malformed
-or truncated input, returns bounded parse issues under `extra.ale`, and never writes
-Gateway transport records. A parser that raises does not decide the episode: ALE records
+or truncated input, returns bounded parse issues under `extra.orbit`, and never writes
+Gateway transport records. A parser that raises does not decide the episode: Orbit records
 a minimal truthful trajectory, the instruction and final message, with
 `incomplete_reason: conversion_failed` and a `parse_issues` entry, keeps the native logs
 regardless of retention policy, and continues to artifact capture and verification.
@@ -254,7 +254,7 @@ When the session is unavailable, each turn is rebuilt from its recorded prompt a
 own stdout, and a `parse_issues` entry says so; nothing is invented. A mirrored native
 session the parser found but did not convert is named in `parse_issues`, since the
 trajectory lacks that conversation; the program's other files are not named. Parse issues
-do not decide retention (see [Trace](trace.md)). ALE converts once, after the final log
+do not decide retention (see [Trace](trace.md)). Orbit converts once, after the final log
 copy, and then adds transport links, exact token enrichment, and retention.
 
 A spawned child session becomes a subagent trajectory (see [Trace](trace.md)) only when
@@ -284,7 +284,7 @@ deduplicated resources, not host search paths.
 - A harness with no MCP implementation rejects any MCP declaration.
 - Remote MCP authentication is not copied from the host.
 
-ALE's `cua-desktop` adapter pins its MCP-visible server metadata, ordered tool schemas,
+Orbit's `cua-desktop` adapter pins its MCP-visible server metadata, ordered tool schemas,
 and successful result semantics to AgentsLastExam commit
 `783b93ab969e0298014e4996c86d025302ee21ba`. Its sandbox-local GUI backend may differ;
 the MCP client contract may not.
@@ -314,15 +314,15 @@ native limits.
 
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and
 Gemini `generateContent` for API-key mode; each dialect's routes and request handling
-are in the [Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md). The
+are in the [Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md). The
 preset names the default dialect and its model provider (`gateway.provider`), whose
-`ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL` select the key and upstream (see
+`ORBIT_<PROVIDER>_API_KEY` and `ORBIT_<PROVIDER>_BASE_URL` select the key and upstream (see
 [Security](security.md#3-provider-credentials-stay-on-the-host)); a Harness may accept a
 documented compatible dialect override. Subscription mode uses the
 same Sandbox-side Gateway configuration; only the Host Gateway's upstream authentication
 changes, so model authority, limits,
 accounting, retry coalescing, and Transport Trace are common to both modes. The ChatGPT
-Codex backend rejects `max_output_tokens`, so ALE accounts the completed response and
+Codex backend rejects `max_output_tokens`, so Orbit accounts the completed response and
 refuses the next call once an output ceiling is reached.
 
 The Gateway does not pre-count input tokens or reserve worst-case token budgets.

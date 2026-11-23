@@ -11,7 +11,7 @@ they shared the packet's conntrack tuple and its NAT-done flags. Once a table
 of iptables was set, iptables gave each new connection a NAT, a no-op one when
 no rule matched, and nftables' NAT of the same packet then panicked the Sentry
 ("packet already had NAT: DNAT performed"); at postrouting iptables finalized
-nftables' connection, so nftables found none. ALE sets iptables chains in a
+nftables' connection, so nftables found none. Orbit sets iptables chains in a
 sandbox whose network is sealed or that has a Gateway, and a container engine
 in it sets its rules in nf_tables, so the engine's first connection ended the
 sandbox.
@@ -25,7 +25,7 @@ Verified:
   local server: without this patch the sandbox died at the first connection
   (exit status 2, the panic above); with it a connection to each rule's
   address reached the server its rule names.
-- ALE's conformance and integration suites: a sealed sandbox with ALE's chains
+- Orbit's conformance and integration suites: a sealed sandbox with Orbit's chains
   in iptables ran Docker 29.1.3, whose rules are in nf_tables; its containers
   reached the Internet while it was open, and the sandbox reached its Gateway.
 

@@ -11,24 +11,24 @@ from types import SimpleNamespace
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, AgentUnsupportedError, ConfigError
-from ale.core.harness import (
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, AgentUnsupportedError, ConfigError
+from orbit.core.harness import (
     EffectiveAgentResources,
     NativeContinuation,
     ResolvedMcpServer,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import ExecResult
-from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.base import INVOCATIONS_PATH, STDERR_PATH, STDOUT_PATH
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.recording import BlobStore
+from orbit.core.sandbox import ExecResult
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.base import INVOCATIONS_PATH, STDERR_PATH, STDOUT_PATH
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-STATE = "/home/agent/.opencode-ale"
+STATE = "/home/agent/.opencode-orbit"
 SESSION_ID = "ses_0b7c5f1e6f394f0a9d476a0f0c8f3a11"
 CHILD_ID = "ses_child"
 
@@ -100,17 +100,17 @@ async def test_the_gateway_is_the_only_usable_provider(
     )
     await harness.install_resources(sandbox, session(), EffectiveAgentResources())  # type: ignore[arg-type]
 
-    config = json.loads(sandbox.files[f"{STATE}/ale.json"])
+    config = json.loads(sandbox.files[f"{STATE}/orbit.json"])
     assert config == {
         "$schema": "https://opencode.ai/config.json",
-        "model": "ale/test-model",
+        "model": "orbit/test-model",
         "update": "disable",
         "share": "disabled",
         "providers": {
-            "ale": {
-                "name": "ALE Gateway",
+            "orbit": {
+                "name": "Orbit Gateway",
                 "package": package,
-                "env": ["ALE_GATEWAY_TOKEN"],
+                "env": ["ORBIT_GATEWAY_TOKEN"],
                 "settings": {"baseURL": "http://gateway" + base_url},
                 "models": {
                     "test-model": {
@@ -125,7 +125,7 @@ async def test_the_gateway_is_the_only_usable_provider(
         },
         "policies": [
             {"action": "provider.use", "resource": "*", "effect": "deny"},
-            {"action": "provider.use", "resource": "ale", "effect": "allow"},
+            {"action": "provider.use", "resource": "orbit", "effect": "allow"},
         ],
         "plugins": [
             "-opencode.provider.ollama",
@@ -142,8 +142,8 @@ async def test_the_gateway_is_the_only_usable_provider(
 async def test_defaults_leave_the_model_to_opencode_and_remove_websearch() -> None:
     sandbox = FakeSandbox()
     await OpenCodeHarness().install_resources(sandbox, session(), EffectiveAgentResources())  # type: ignore[arg-type]
-    config = json.loads(sandbox.files[f"{STATE}/ale.json"])
-    assert config["providers"]["ale"]["models"] == {"test-model": {}}
+    config = json.loads(sandbox.files[f"{STATE}/orbit.json"])
+    assert config["providers"]["orbit"]["models"] == {"test-model": {}}
     assert config["websearch"] is False
     assert "agents" not in config
 
@@ -175,7 +175,7 @@ async def test_skills_and_mcp_servers_are_direct_native_tools(tmp_path: Path) ->
     await OpenCodeHarness().install_resources(sandbox, session(), effective)  # type: ignore[arg-type]
 
     assert sandbox.uploads == [(str(tmp_path / "resource-proof"), f"{STATE}/skills/resource-proof")]
-    assert json.loads(sandbox.files[f"{STATE}/ale.json"])["mcp"] == {
+    assert json.loads(sandbox.files[f"{STATE}/orbit.json"])["mcp"] == {
         "servers": {
             "task-proof": {
                 "type": "local",
@@ -198,21 +198,21 @@ async def test_skills_and_mcp_servers_are_direct_native_tools(tmp_path: Path) ->
 async def test_command_reads_stdin_into_one_exact_session(native_session_id: str | None) -> None:
     harness = OpenCodeHarness(settings={"reasoning_effort": "low"})
     command = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=native_session_id,
     )
     sh, invoke, python, prompt, requested, *argv = shlex.split(command.script)
     assert (sh, invoke, python) == ("sh", f"{STATE}/invoke.sh", "python3")
-    assert prompt == "/home/agent/.ale-harness/prompt.md"
+    assert prompt == "/home/agent/.orbit-harness/prompt.md"
     assert requested == command.session_id
     assert argv[:2] == ["opencode", "run"]
     assert {"--standalone", "--auto"} <= set(argv)
     options = {flag: argv[argv.index(flag) + 1] for flag in ("--format", "--model", "--session")}
     assert options == {
         "--format": "json",
-        "--model": "ale/test-model#low",
+        "--model": "orbit/test-model#low",
         "--session": command.session_id,
     }
     if native_session_id is None:
@@ -223,7 +223,7 @@ async def test_command_reads_stdin_into_one_exact_session(native_session_id: str
     assert command.env["OPENCODE_CONFIG_DIR"] == STATE
     assert command.env["OPENCODE_DISABLE_MODELS_FETCH"] == "1"
     assert command.env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
-    assert command.env["ALE_GATEWAY_TOKEN"] == "token"
+    assert command.env["ORBIT_GATEWAY_TOKEN"] == "token"
     assert "OPENCODE_CONFIG_CONTENT" not in command.env
 
 
@@ -231,7 +231,7 @@ async def test_a_windows_invocation_fits_a_desktop_agent_s_command_line() -> Non
     sandbox = FakeSandbox(stdout=r"C:\\Windows\\System32")
     sandbox.native_stdout = (json.dumps(text("m", "p", "done")) + "\n").encode()
     home = "C:/Users/Agent User With A Long Name"
-    sandbox.files[f"{home}/.opencode-ale/exports/{SESSION_ID}/t/{SESSION_ID}.json"] = b"{}"
+    sandbox.files[f"{home}/.opencode-orbit/exports/{SESSION_ID}/t/{SESSION_ID}.json"] = b"{}"
     for log in (STDOUT_PATH, STDERR_PATH, INVOCATIONS_PATH):
         sandbox.files[f"{home}/{log}"] = b""
     await OpenCodeHarness(settings={"reasoning_effort": "high"}).resume(
@@ -246,7 +246,7 @@ async def test_a_windows_invocation_fits_a_desktop_agent_s_command_line() -> Non
         for argv in reversed(sandbox.commands)
         if argv[0] == "C:/Program Files/Git/bin/bash.exe"
     )
-    assert "/.opencode-ale/invoke.sh' python " in shell[2]
+    assert "/.opencode-orbit/invoke.sh' python " in shell[2]
     assert len(subprocess.list2cmdline(shell)) < 1024
 
 
@@ -295,8 +295,8 @@ async def test_every_invocation_exports_its_session_and_each_one_it_spawned(
     (fake / "ses_root.json").write_text(_export("ses_root", spawns=("ses_a", "ses_b")))
     (fake / "ses_a.json").write_text(_export("ses_a", parent="ses_root", spawns=("ses_c",)))
     (fake / "ses_c.json").write_text(_export("ses_c", parent="ses_a", spawns=("ses_a",)))
-    (home / ".opencode-ale").mkdir(parents=True)
-    (home / ".opencode-ale/ale.json").write_text('{"model": "ale/m"}')
+    (home / ".opencode-orbit").mkdir(parents=True)
+    (home / ".opencode-orbit/orbit.json").write_text('{"model": "orbit/m"}')
     (home / "prompt.md").write_text("go")
     sandbox = FakeSandbox()
     command = await OpenCodeHarness().prepare_command(
@@ -313,7 +313,7 @@ async def test_every_invocation_exports_its_session_and_each_one_it_spawned(
 
     assert result.returncode == status, result.stderr
     assert '"text":"done"' in result.stdout
-    (export,) = (home / ".opencode-ale/exports/ses_root").iterdir()
+    (export,) = (home / ".opencode-orbit/exports/ses_root").iterdir()
     assert not export.name.startswith(".")
     # ses_b has no export, so it is left out; ses_c's call naming ses_a again is not followed.
     assert sorted(path.name for path in export.iterdir()) == [
@@ -329,8 +329,8 @@ async def test_no_export_is_kept_without_the_session_itself(tmp_path: Path) -> N
     fake.mkdir()
     (fake / "opencode").write_text(FAKE_OPENCODE)
     (fake / "opencode").chmod(0o755)
-    (home / ".opencode-ale").mkdir(parents=True)
-    (home / ".opencode-ale/ale.json").write_text("{}")
+    (home / ".opencode-orbit").mkdir(parents=True)
+    (home / ".opencode-orbit/orbit.json").write_text("{}")
     sandbox = FakeSandbox()
     command = await OpenCodeHarness().prepare_command(
         str(home / "prompt.md"),
@@ -342,7 +342,7 @@ async def test_no_export_is_kept_without_the_session_itself(tmp_path: Path) -> N
     _stage(sandbox)
     env = {**command.env, "PATH": f"{fake}:{os.environ['PATH']}"}
     subprocess.run(["sh", "-c", command.script], env=env, check=True, capture_output=True)
-    assert list((home / ".opencode-ale/exports" / str(command.session_id)).iterdir()) == []
+    assert list((home / ".opencode-orbit/exports" / str(command.session_id)).iterdir()) == []
 
 
 def events(*items: dict[str, object]) -> str:
@@ -406,7 +406,7 @@ def test_a_retried_model_call_does_not_fail_the_invocation() -> None:
     assert (retried.final_message, retried.error) == ("Recovered.", None)
 
 
-INSTALLER = "/home/user/.local/share/ale/install-release.py"
+INSTALLER = "/home/user/.local/share/orbit/install-release.py"
 
 
 class InstallSandbox(FakeSandbox):
@@ -458,7 +458,7 @@ async def test_ripgrep_goes_where_opencode_looks_before_downloading_it() -> None
 
 def test_session_files_are_the_exports_of_exactly_that_session() -> None:
     harness = OpenCodeHarness()
-    exports = PurePosixPath(".opencode-ale/exports")
+    exports = PurePosixPath(".opencode-orbit/exports")
     name = f"{SESSION_ID}.json"
     assert harness.is_session_file(
         exports / SESSION_ID / "20261121T000000000000Z" / name, SESSION_ID
@@ -503,7 +503,7 @@ def record(root: Path, *prompts: str, stdout: list[str] | None = None) -> None:
 
 
 def export(root: Path, stamp: str, *sessions: dict[str, object], raw: str | None = None) -> None:
-    directory = root / ".opencode-ale/exports" / SESSION_ID / stamp
+    directory = root / ".opencode-orbit/exports" / SESSION_ID / stamp
     directory.mkdir(parents=True, exist_ok=True)
     for data in sessions:
         (directory / f"{data['info']['id']}.json").write_text(json.dumps(data))  # type: ignore[index]
@@ -512,8 +512,8 @@ def export(root: Path, stamp: str, *sessions: dict[str, object], raw: str | None
 
 
 def configure(root: Path, *servers: str) -> None:
-    (root / ".opencode-ale").mkdir(parents=True, exist_ok=True)
-    (root / ".opencode-ale/ale.json").write_text(
+    (root / ".opencode-orbit").mkdir(parents=True, exist_ok=True)
+    (root / ".opencode-orbit/orbit.json").write_text(
         json.dumps({"mcp": {"servers": {name: {"type": "local"} for name in servers}}})
     )
 
@@ -526,7 +526,7 @@ def assistant(*content: dict[str, object], **fields: object) -> dict[str, object
     return {
         "type": "assistant",
         "id": "msg_a",
-        "model": {"id": "scripted-model", "providerID": "ale"},
+        "model": {"id": "scripted-model", "providerID": "orbit"},
         "content": list(content),
         "time": {"created": 1795241923550},
         **fields,
@@ -614,7 +614,7 @@ def test_an_export_converts_in_native_order(tmp_path: Path) -> None:
     assert step.metrics.cached_tokens == 3
     calls = {call.tool_call_id: call for call in step.tool_calls or ()}
     assert list(calls) == ["call_shell", "call_mcp", "call_bad", "call_open"]
-    assert calls["call_mcp"].extra == {"ale": {"mcp": {"server": "task.proof", "tool": "shot"}}}
+    assert calls["call_mcp"].extra == {"orbit": {"mcp": {"server": "task.proof", "tool": "shot"}}}
     assert calls["call_shell"].extra is None
     results = {result.source_call_id: result for result in step.observation.results}  # type: ignore[union-attr]
     # A call that never settled has no result.
@@ -623,7 +623,7 @@ def test_an_export_converts_in_native_order(tmp_path: Path) -> None:
     (picture,) = results["call_mcp"].content  # type: ignore[misc]
     assert picture.type == "image" and picture.source.media_type == "image/png"  # type: ignore[union-attr]
     assert results["call_bad"].content == "no file; unknown"
-    assert results["call_bad"].extra == {"ale": {"is_error": True}}
+    assert results["call_bad"].extra == {"orbit": {"is_error": True}}
 
 
 def test_a_launch_and_its_resume_convert_with_their_failures(tmp_path: Path) -> None:
@@ -714,7 +714,7 @@ def test_subagents_embed_in_their_spawners_and_strays_are_named(tmp_path: Path) 
         },
         {"info": {"id": "ses_stray", "parentID": "ses_elsewhere"}, "messages": []},
     )
-    other = tmp_path / ".opencode-ale/exports/ses_other/20261121T000000000000Z"
+    other = tmp_path / ".opencode-orbit/exports/ses_other/20261121T000000000000Z"
     other.mkdir(parents=True)
     (other / "ses_other.json").write_text('{"info": {}, "messages": []}')
     trajectory = OpenCodeHarness().parse_trajectory(context(tmp_path))
@@ -736,14 +736,14 @@ def test_subagents_embed_in_their_spawners_and_strays_are_named(tmp_path: Path) 
     ]
     assert stray.subagent_trajectory_ref is None
     assert trajectory.extra == {
-        "ale": {
+        "orbit": {
             "parse_issues": [
                 {"reason": "unlinked_subagent", "session_id": "ses_stray"},
                 {
                     "reason": "unconverted_native_sessions",
                     "count": 1,
                     "sources": [
-                        ".opencode-ale/exports/ses_other/20261121T000000000000Z/ses_other.json"
+                        ".opencode-orbit/exports/ses_other/20261121T000000000000Z/ses_other.json"
                     ],
                 },
             ]
@@ -794,7 +794,7 @@ def test_every_kind_of_native_message_has_its_step(tmp_path: Path) -> None:
         ("system", "turn interrupted"),
     ]
     assert trajectory.extra == {
-        "ale": {
+        "orbit": {
             "parse_issues": [{"reason": "unknown_message_type", "type": "hologram", "count": 1}]
         }
     }
@@ -811,7 +811,7 @@ def test_a_malformed_export_falls_back_to_the_previous_one(tmp_path: Path) -> No
     trajectory = OpenCodeHarness().parse_trajectory(context(tmp_path))
 
     assert [step.message for step in trajectory.steps] == ["First."]
-    (issue,) = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
+    (issue,) = trajectory.extra["orbit"]["parse_issues"]  # type: ignore[index]
     assert issue["reason"] == "malformed_json"
     assert issue["source"].endswith(f"20261121T000100000000Z/{SESSION_ID}.json")
 
@@ -866,9 +866,9 @@ def test_a_turn_the_export_lacks_comes_from_its_json_events(tmp_path: Path) -> N
     ran, refused = trajectory.steps[2].observation.results  # type: ignore[union-attr]
     assert ran.content == "a.txt"
     assert (refused.source_call_id, refused.content) == (failed.tool_call_id, "no file")
-    assert refused.extra == {"ale": {"is_error": True}}
+    assert refused.extra == {"orbit": {"is_error": True}}
     assert trajectory.steps[2].metrics.prompt_tokens == 4  # type: ignore[union-attr]
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "prompt_not_in_native_session", "invocation": 2},
         {
             "invocation": 2,
@@ -887,10 +887,10 @@ def test_without_an_export_each_turn_is_its_prompt_and_events(tmp_path: Path) ->
         ("user", "First."),
         ("agent", "Answer."),
     ]
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "native_session_unavailable", "session_id": SESSION_ID}
     ]
-    assert trajectory.extra["ale"]["limitations"]  # type: ignore[index]
+    assert trajectory.extra["orbit"]["limitations"]  # type: ignore[index]
 
 
 def test_a_prompt_that_never_reached_the_session_keeps_its_place(tmp_path: Path) -> None:
@@ -925,14 +925,14 @@ def test_a_prompt_that_never_reached_the_session_keeps_its_place(tmp_path: Path)
         ("user", "Third."),
         ("agent", "Three."),
     ]
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "prompt_not_in_native_session", "invocation": 2}
     ]
 
 
 def test_malformed_native_records_become_issues_not_failures(tmp_path: Path) -> None:
     configure(tmp_path)
-    (tmp_path / ".opencode-ale/ale.json").write_text('{"mcp": {"servers": 5}}')
+    (tmp_path / ".opencode-orbit/orbit.json").write_text('{"mcp": {"servers": 5}}')
     record(tmp_path, "Go.")
     svg = base64.b64encode(b"<svg/>").decode()
     export(
@@ -972,7 +972,7 @@ def test_malformed_native_records_become_issues_not_failures(tmp_path: Path) -> 
     ]
     results = {result.source_call_id: result for result in step.observation.results}  # type: ignore[union-attr]
     assert results["call_b"].content == "[file data:image/svg+xml]"
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "duplicate_tool_call", "session_id": SESSION_ID, "id": "call_a"},
         {"reason": "subagent_session_unavailable", "session_id": "ses_gone"},
         {"reason": "unknown_message_type", "type": "", "count": 1},

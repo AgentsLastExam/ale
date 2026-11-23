@@ -14,17 +14,17 @@ import pytest
 from aiohttp import ClientSession, web
 from pydantic import ValidationError
 
-from ale.core.trace import TransportCall, read_jsonl
-from ale.run.gateway import anthropic, server
-from ale.run.gateway.anthropic import (
+from orbit.core.trace import TransportCall, read_jsonl
+from orbit.run.gateway import anthropic, server
+from orbit.run.gateway.anthropic import (
     extract_usage,
     refusal_body,
     stream_completed,
     usage_from_stream,
 )
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import CallUsage, GatewaySession, Limits, Usage
-from ale.run.recording import EpisodeRecording
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import CallUsage, GatewaySession, Limits, Usage
+from orbit.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
 
@@ -106,7 +106,7 @@ class Upstream:
             },
         }
         if self.token_data is not None:
-            body["ale_token_data"] = self.token_data
+            body["orbit_token_data"] = self.token_data
         return web.json_response(body)
 
     async def _stream(self, request: web.Request, payload: dict) -> web.StreamResponse:
@@ -400,7 +400,7 @@ class TestLimits:
 
         assert first == 200
         assert second == 429
-        assert body["error"]["ale"]["limit"] == "max_model_calls"
+        assert body["error"]["orbit"]["limit"] == "max_model_calls"
         assert upstream.calls == 1, "the refused call must not reach the provider"
         assert session.refusal is not None and session.refusal.limit == "max_model_calls"
 
@@ -432,7 +432,7 @@ class TestLimits:
 
         assert first == 200
         assert second == 429
-        assert body["error"]["ale"]["limit"] == "max_input_tokens"
+        assert body["error"]["orbit"]["limit"] == "max_input_tokens"
         assert upstream.count_calls == 0
         assert upstream.calls == 1
 
@@ -449,7 +449,7 @@ class TestLimits:
 
         assert first == 200
         assert second == 429
-        assert body["error"]["ale"]["limit"] == "max_output_tokens"
+        assert body["error"]["orbit"]["limit"] == "max_output_tokens"
         assert upstream.seen_max_tokens == [100]
 
     async def test_total_limit_does_not_preempt_the_current_call(self, stack) -> None:
@@ -484,7 +484,7 @@ class TestLimits:
         )
 
         assert (first, second, third) == (529, 200, 429)
-        assert body["error"]["ale"]["limit"] == "max_model_calls"
+        assert body["error"]["orbit"]["limit"] == "max_model_calls"
         assert session.usage.model_calls == 1
         assert upstream.calls == 2
 
@@ -585,7 +585,7 @@ class TestRecording:
         assert record["episode_id"] == "ep-1"
         assert record["input_tokens"] == 2
         assert record["output_tokens"] == 20
-        assert not any("cost" in key for key in record), "ALE reports tokens, not price"
+        assert not any("cost" in key for key in record), "Orbit reports tokens, not price"
         assert record["disposition"] == "forwarded"
 
     async def test_session_usage_keeps_cache_reads_and_writes(self, stack) -> None:
@@ -739,10 +739,10 @@ class TestDialect:
         )
 
     def test_refusal_looks_like_a_provider_error(self) -> None:
-        """Harnesses stop on provider errors already; none should need to know about ALE."""
+        """Harnesses stop on provider errors already; none should need to know about Orbit."""
         body = refusal_body("max_total_tokens", 5_000)
         assert body["type"] == "error"
-        assert body["error"]["type"] == "ale_limit_reached"
+        assert body["error"]["type"] == "orbit_limit_reached"
 
 
 @pytest.mark.parametrize("path", ["/models", "/v1/models", "/muse-code/models"])

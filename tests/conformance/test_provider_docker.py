@@ -12,15 +12,15 @@ from typing import Literal
 import pytest
 from tests.support import CONTAINER_BASE, skip_without_gvisor, skip_without_kata
 
-from ale.core.errors import GuestUnreachableError, MemoryExhaustedError
-from ale.core.sandbox import SANDBOX_GATEWAY_PORT, Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
-from ale.core.testkit import NESTED_CHECKS, ProviderConformance
-from ale.run import guestd
-from ale.run.framework import framework_identity
-from ale.run.providers import missing_features
-from ale.run.providers.docker import gvisor, kata, storage
-from ale.run.providers.docker.provider import (
+from orbit.core.errors import GuestUnreachableError, MemoryExhaustedError
+from orbit.core.sandbox import SANDBOX_GATEWAY_PORT, Identity, ImageRef, SandboxRequest
+from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
+from orbit.core.testkit import NESTED_CHECKS, ProviderConformance
+from orbit.run import guestd
+from orbit.run.framework import framework_identity
+from orbit.run.providers import missing_features
+from orbit.run.providers.docker import gvisor, kata, storage
+from orbit.run.providers.docker.provider import (
     DockerProvider,
     DockerSandbox,
     _bridge_host_ip,
@@ -28,9 +28,9 @@ from ale.run.providers.docker.provider import (
     _docker,
     _in_namespace,
 )
-from ale.run.scaffold import scaffold_task
-from ale.run.task_images import prepare_task_image
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.scaffold import scaffold_task
+from orbit.run.task_images import prepare_task_image
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_docker]
 
@@ -72,9 +72,9 @@ class TestDockerKataProvider(TestDockerProvider):
 
 class TestDockerGvisorProvider(TestDockerProvider):
     """The same suite with every sandbox on gVisor, whose network the Provider confines with
-    tc filters on the veth's egress and ALE's chains in netstack; the container feature test
-    runs one sandbox under the runtime registered for raw and packet sockets and one under
-    the runtime registered for container engines."""
+    tc filters on the veth's egress and Orbit's chains in netstack; the container feature
+    test runs one sandbox under the runtime registered for raw and packet sockets and one
+    under the runtime registered for container engines."""
 
     provider = DockerProvider(runtime="gvisor")
 
@@ -93,7 +93,7 @@ while True:
 """
 
 
-#: Ends every process of a sandbox of the container base but ALE's own, which run on the
+#: Ends every process of a sandbox of the container base but Orbit's own, which run on the
 #: framework's Python (guestd and, under gVisor, its memory watcher), its command's and
 #: supervisord, which reloads with no programs: the desktop's memory, which varies by about
 #: 50 MiB from run to run on a loaded Host, then leaves what one process holds alone.
@@ -112,7 +112,7 @@ for _ in range(10):
                 state = open(f"/proc/{name}/stat").read().rsplit(")", 1)[1].split()[0]
                 command = open(f"/proc/{name}/cmdline", "rb").read()
                 # A zombie, such as a child guestd has yet to reap, holds no memory.
-                if state != "Z" and not command.startswith(b"/opt/ale/python/"):
+                if state != "Z" and not command.startswith(b"/opt/orbit/python/"):
                     left.append(name)
                     os.kill(int(name), signal.SIGKILL)
             except OSError:
@@ -320,7 +320,7 @@ print("sent")
 _DIAL = (
     "import socket\n"
     "try:\n"
-    f"    socket.create_connection(('ale-gateway.internal', {SANDBOX_GATEWAY_PORT}), 5).close()\n"
+    f"    socket.create_connection(('orbit-gateway.internal', {SANDBOX_GATEWAY_PORT}), 5).close()\n"
     "except OSError:\n"
     "    pass\n"
 )
@@ -446,7 +446,7 @@ async def test_a_sealed_sandbox_gets_nothing_a_neighbour_forges_as_the_host(
     request = (await _plain_request(provider, f"{runtime}-from-host")).model_copy(
         update={"gateway_url": f"http://127.0.0.1:{port}"}
     )
-    forger = f"ale-{runtime}-host-forger"
+    forger = f"orbit-{runtime}-host-forger"
     await _docker("rm", "-f", forger)
     code, _, stderr = await _docker(
         "run", "-d", "--name", forger, "--runtime", "runc", "--cap-add", "NET_RAW",
@@ -484,7 +484,7 @@ async def test_a_sealed_sandbox_gets_nothing_a_neighbour_forges_as_the_host(
             assert (arrived.get(1, 0), arrived.get(2, 0)) == (0, 0), arrived
             dial = (
                 "import socket\n"
-                f"socket.create_connection(('ale-gateway.internal', {SANDBOX_GATEWAY_PORT}), 10)"
+                f"socket.create_connection(('orbit-gateway.internal', {SANDBOX_GATEWAY_PORT}), 10)"
                 ".close()\n"
                 "print('connected')\n"
             )
@@ -509,7 +509,7 @@ async def test_a_sealed_gvisor_sandbox_with_its_chains_flushed_still_reaches_not
         "    print('tcp closed')\n"
         "with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as icmp:\n"
         "    icmp.settimeout(5)\n"
-        "    body = struct.pack('!BBHHH', 8, 0, 0, 7, 1) + b'ale'\n"
+        "    body = struct.pack('!BBHHH', 8, 0, 0, 7, 1) + b'orbit'\n"
         "    words = sum(struct.unpack('!5H', body[:10])) + (body[10] << 8)\n"
         "    total = (words & 0xFFFF) + (words >> 16)\n"
         "    body = body[:2] + struct.pack('!H', ~total & 0xFFFF) + body[4:]\n"
@@ -654,7 +654,7 @@ async def test_a_gvisor_sandbox_runs_the_docker_its_image_has(tmp_path, start: s
 async def test_a_sealed_gvisor_sandbox_running_containers_reaches_nothing_past_its_seal() -> None:
     """The engine's bridges, rules and NAT are inside netstack, and the filters outside still
     bind what its containers send: open, a container reaches the Internet; sealed, it does
-    not, nor once root, who holds ``CAP_NET_ADMIN`` here, has flushed ALE's chains."""
+    not, nor once root, who holds ``CAP_NET_ADMIN`` here, has flushed Orbit's chains."""
     skip_without_gvisor()
     provider = DockerProvider(runtime="gvisor")
     request = await _plain_request(
@@ -808,8 +808,8 @@ async def test_a_docker_sandbox_killed_from_outside_says_so(runtime: str) -> Non
 @pytest.mark.asyncio
 async def test_blocked_network_has_no_route_off_the_host() -> None:
     """Deny-all is topological: an internal bridge simply has nowhere to go."""
-    from ale.core.sandbox import SandboxRequest
-    from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
+    from orbit.core.sandbox import SandboxRequest
+    from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
 
     provider = DockerProvider()
     prepared = await provider.prepare_image(
@@ -855,7 +855,11 @@ async def test_proxy_only_sandbox_can_resolve_the_host_proxy() -> None:
     )
     async with await provider.create(request) as sandbox:
         result = await sandbox.exec(
-            ["python3", "-c", "import socket; print(socket.gethostbyname('ale-gateway.internal'))"],
+            [
+                "python3",
+                "-c",
+                "import socket; print(socket.gethostbyname('orbit-gateway.internal'))",
+            ],
             timeout_sec=30,
         )
     assert result.ok, result.stderr
@@ -872,7 +876,7 @@ async def test_prepared_task_image_starts_without_remote_resolution(
         raise AssertionError("prepared Task images must not use remote resolution")
 
     monkeypatch.setattr(
-        "ale.run.providers.docker.provider.resolve_container_image",
+        "orbit.run.providers.docker.provider.resolve_container_image",
         remote_resolution_is_forbidden,
     )
     provider = DockerProvider()

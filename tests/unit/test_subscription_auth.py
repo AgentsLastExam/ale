@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from ale.core.config import AgentConfig, load_run_config
-from ale.core.errors import (
+from orbit.core.config import AgentConfig, load_run_config
+from orbit.core.errors import (
     AgentError,
     SubscriptionAuthenticationError,
     SubscriptionCompatibilityError,
@@ -18,9 +18,9 @@ from ale.core.errors import (
     SubscriptionProfileError,
     SubscriptionUnavailableError,
 )
-from ale.core.lock import AuthenticationProvenance
-from ale.run.cli.main import app
-from ale.run.subscription import (
+from orbit.core.lock import AuthenticationProvenance
+from orbit.run.cli.main import app
+from orbit.run.subscription import (
     SubscriptionCredential,
     classify_subscription_error,
     resolve_authentication,
@@ -32,8 +32,8 @@ pytestmark = pytest.mark.unit
 def isolated_auth_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     environment = tmp_path / ".env"
     environment.write_text("")
-    monkeypatch.setenv("ALE_ENV_FILE", str(environment))
-    return tmp_path / ".ale" / "auth"
+    monkeypatch.setenv("ORBIT_ENV_FILE", str(environment))
+    return tmp_path / ".orbit" / "auth"
 
 
 def jwt(expires_in: int = 3600) -> str:
@@ -132,7 +132,7 @@ def test_all_subscription_harnesses_use_the_gateway(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     isolated_auth_root(tmp_path, monkeypatch)
-    monkeypatch.setenv("ALE_CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
+    monkeypatch.setenv("ORBIT_CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
 
     auth = resolve_authentication(AgentConfig(name="claude-code", authentication="subscription"))
     provenance = auth.provenance(source="cli", cli_version="2.1.227")

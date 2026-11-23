@@ -7,16 +7,16 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-from ale.core.config import LLMJudgeConfig, VerificationConfig
-from ale.core.trace import read_jsonl
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
-from ale_verify import _llm
+from orbit.core.config import LLMJudgeConfig, VerificationConfig
+from orbit.core.trace import read_jsonl
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tasksets.manifest import load_tasks
+from orbit_verify import _llm
 from tests.support import CONTAINER_BASE, provider_registry, write_task
 
 pytestmark = pytest.mark.integration
@@ -86,7 +86,7 @@ def judged_task(root: Path) -> Path:
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p /home/user/output\n"
-        'test -z "${ALE_OPENAI_API_KEY-}${ALE_ANTHROPIC_API_KEY-}"\n'
+        'test -z "${ORBIT_OPENAI_API_KEY-}${ORBIT_ANTHROPIC_API_KEY-}"\n'
         "printf absent > /home/user/output/setup-key\n"
     )
     (task / "solution" / "solve.sh").write_text(
@@ -97,11 +97,11 @@ def judged_task(root: Path) -> Path:
     )
     (task / "tests" / "verify.py").write_text(
         "import os\n"
-        "from ale_verify import checks, judge, write\n"
+        "from orbit_verify import checks, judge, write\n"
         "v = {}\n"
         "v['credential_scope'] = checks.text_equals('/home/user/outpu"
         "t/setup-key', 'absent')['score']\n"
-        "v['key_withheld'] = 0.0 if {'ALE_OPENAI_API_KEY', 'ALE_ANTHROPIC_A"
+        "v['key_withheld'] = 0.0 if {'ORBIT_OPENAI_API_KEY', 'ORBIT_ANTHROPIC_A"
         "PI_KEY'} & set(os.environ) else 1.0\n"
         "v['correctness'] = {'no': 0.0, 'yes': 1.0}[judge('llm', 'cor"
         "rectness', prompt='Judge the answer.', files=['/home/user/ou"
@@ -161,8 +161,8 @@ async def run_judged_task(  # type: ignore[no-untyped-def]
     await site.start()
     upstream = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"  # type: ignore[union-attr]
     model_provider, dialect = _ROUTES[path]
-    monkeypatch.setenv(f"ALE_{model_provider.upper()}_API_KEY", secret)
-    monkeypatch.setenv(f"ALE_{model_provider.upper()}_BASE_URL", upstream)
+    monkeypatch.setenv(f"ORBIT_{model_provider.upper()}_API_KEY", secret)
+    monkeypatch.setenv(f"ORBIT_{model_provider.upper()}_BASE_URL", upstream)
     gateway = Gateway()
     gateway_url = await gateway.start()
     task_root = judged_task(tmp_path / "repo")

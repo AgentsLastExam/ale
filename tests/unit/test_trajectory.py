@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ale.core.trajectory import (
+from orbit.core.trajectory import (
     AtifAgent,
     AtifAudioSource,
     AtifContentPart,
@@ -34,7 +34,7 @@ def test_exact_v18_root_and_step_fields_reject_unknowns() -> None:
     )
     assert trajectory.schema_version == "ATIF-v1.8"
     with pytest.raises(ValidationError):
-        AtifTrajectory.model_validate(trajectory.model_dump() | {"ale_private": True})
+        AtifTrajectory.model_validate(trajectory.model_dump() | {"orbit_private": True})
     with pytest.raises(ValidationError):
         AtifStep.model_validate(
             {"step_id": 1, "source": "user", "message": "hello", "unknown": True}

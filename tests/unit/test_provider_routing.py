@@ -16,10 +16,10 @@ from pydantic import ValidationError
 from tests.support import MemoryProvider, edit_task_config, write_task
 from typer.testing import CliRunner
 
-from ale.core.capability import CapabilityProfile, SandboxNeeds
-from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import (
+from orbit.core.capability import CapabilityProfile, SandboxNeeds
+from orbit.core.config import RunConfig, SandboxRetentionConfig, load_run_config
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError
+from orbit.core.sandbox import (
     DesktopResolution,
     ExecResult,
     GpuDevice,
@@ -30,17 +30,17 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
-from ale.run import capprobe
-from ale.run.cli.main import _destroy_retained_sandbox, _list_retained_sandboxes, app
-from ale.run.episode import _Lease
-from ale.run.providers import ProviderRegistry, missing_features
-from ale.run.providers.desktop import require_resolution
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.task_images import ImagePreparationResult, ImagePreparationStep
-from ale.run.tasksets.manifest import ManifestTask, load_task_folder
+from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
+from orbit.run import capprobe
+from orbit.run.cli.main import _destroy_retained_sandbox, _list_retained_sandboxes, app
+from orbit.run.episode import _Lease
+from orbit.run.providers import ProviderRegistry, missing_features
+from orbit.run.providers.desktop import require_resolution
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.task_images import ImagePreparationResult, ImagePreparationStep
+from orbit.run.tasksets.manifest import ManifestTask, load_task_folder
 
 pytestmark = pytest.mark.unit
 MACOS_IMAGE = "ghcr.io/example/macos@sha256:" + "a" * 64
@@ -96,7 +96,7 @@ def test_the_registry_builds_each_provider_by_its_id_when_first_asked() -> None:
         registry.get("docker:runsc")
 
 
-def test_ale_run_has_no_provider_flag() -> None:
+def test_orbit_run_has_no_provider_flag() -> None:
     result = CliRunner().invoke(app, ["run", "--help"])
     assert result.exit_code == 0
     assert "--provider" not in result.output
@@ -289,7 +289,7 @@ async def test_a_refusal_names_only_what_each_provider_lacks_for_that_sandbox(
     def missing() -> None:
         raise ProviderCapabilityError("restricted macOS networking needs Softnet")
 
-    monkeypatch.setattr("ale.run.providers.orchard.provider.check_softnet", missing)
+    monkeypatch.setattr("orbit.run.providers.orchard.provider.check_softnet", missing)
     task = _task(tmp_path / "perf", {"environment": {"container_features": ["perf"]}})
     with pytest.raises(ProviderCapabilityError) as refused:
         await ProviderRegistry(RunConfig()).select([task])
@@ -335,7 +335,7 @@ def test_a_refused_selection_stops_the_command_before_anything_is_prepared(
     async def never(*_args: object) -> None:
         raise AssertionError("an image was prepared")
 
-    monkeypatch.setattr("ale.run.cli.tasks.prepare_task_image_result", never)
+    monkeypatch.setattr("orbit.run.cli.tasks.prepare_task_image_result", never)
     result = CliRunner().invoke(
         app, ["prepare", str(folder), "--set", 'sandbox.providers=["docker:runc"]']
     )
@@ -412,7 +412,7 @@ async def test_each_selected_leaf_is_checked_once_for_each_set_of_features_asked
         probed.append((sandbox.request, set(features)))
         return {}
 
-    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    monkeypatch.setattr("orbit.run.providers.missing_features", probe)
     await registry.preflight(tasks)
     await registry.preflight(tasks)
 
@@ -459,7 +459,7 @@ async def test_feature_probe_keeps_gpus_when_the_leaf_requires_them(
         assert sandbox.request.resources.gpus == 2
         return {}
 
-    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    monkeypatch.setattr("orbit.run.providers.missing_features", probe)
     await registry.preflight([task])
     assert len(leaf.requests) == 1
 
@@ -491,7 +491,7 @@ async def test_a_check_the_preflight_of_a_leaf_returns_runs_once_in_a_sandbox_of
     async def probe(_sandbox: Sandbox, _features: object) -> dict[ContainerFeature, str]:
         return {}
 
-    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    monkeypatch.setattr("orbit.run.providers.missing_features", probe)
     await registry.preflight(tasks)
     await registry.preflight(tasks)
 
@@ -529,7 +529,7 @@ async def test_the_preflight_of_a_leaf_runs_again_only_for_needs_it_has_not_pass
     async def probe(_sandbox: Sandbox, _features: object) -> dict[ContainerFeature, str]:
         return {}
 
-    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    monkeypatch.setattr("orbit.run.providers.missing_features", probe)
     for tasks in ([plain], [plain], [plain, raw], [raw, gpu]):
         await registry.preflight(tasks)
     asked = [
@@ -570,7 +570,7 @@ async def test_needs_whose_check_or_probe_failed_are_preflighted_again(
             return {ContainerFeature.MOUNT: "mount EPERM"}
         return {}
 
-    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    monkeypatch.setattr("orbit.run.providers.missing_features", probe)
     with pytest.raises((ProviderStartError, ProviderCapabilityError)):
         await registry.preflight([task])
     await registry.preflight([task])
@@ -592,7 +592,7 @@ async def test_a_feature_a_leaf_lacks_on_this_host_refuses_the_run(
     async def probe(_sandbox: Sandbox, _features: object) -> dict[ContainerFeature, str]:
         return {ContainerFeature.PERF: "perf_event_open EACCES"}
 
-    monkeypatch.setattr("ale.run.providers.missing_features", probe)
+    monkeypatch.setattr("orbit.run.providers.missing_features", probe)
     with pytest.raises(ProviderCapabilityError) as refused:
         await registry.preflight([_selected(task, "docker:kata")])
     assert str(refused.value) == (
@@ -602,7 +602,7 @@ async def test_a_feature_a_leaf_lacks_on_this_host_refuses_the_run(
     assert kata.destroyed == [kata.sandboxes[0].sandbox_id]
 
 
-def test_ale_run_refuses_to_start_when_a_leaf_lacks_a_feature_here(
+def test_orbit_run_refuses_to_start_when_a_leaf_lacks_a_feature_here(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = scaffold_task(tmp_path / "perf")
@@ -621,10 +621,10 @@ def test_ale_run_refuses_to_start_when_a_leaf_lacks_a_feature_here(
     async def episode(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("an episode started")
 
-    monkeypatch.setattr("ale.run.providers.leaf", lambda _id, **settings: kata)
-    monkeypatch.setattr("ale.run.cli.tasks.prepare_task_image_result", prepare)
-    monkeypatch.setattr("ale.run.providers.missing_features", lacking)
-    monkeypatch.setattr("ale.run.cli.tasks.run_episode", episode)
+    monkeypatch.setattr("orbit.run.providers.leaf", lambda _id, **settings: kata)
+    monkeypatch.setattr("orbit.run.cli.tasks.prepare_task_image_result", prepare)
+    monkeypatch.setattr("orbit.run.providers.missing_features", lacking)
+    monkeypatch.setattr("orbit.run.cli.tasks.run_episode", episode)
     result = CliRunner().invoke(
         app,
         ["run", str(folder), "--agent", "oracle", "--set", 'sandbox.providers=["docker:kata"]'],
@@ -652,7 +652,7 @@ async def test_the_probe_runs_as_root_on_the_frameworks_python_for_each_feature(
     wanted = {ContainerFeature.PERF, ContainerFeature.MOUNT, ContainerFeature.NESTED_CONTAINERS}
     missing = await missing_features(sandbox, wanted)  # type: ignore[arg-type]
     assert missing == {ContainerFeature.MOUNT: "mount_namespace EPERM"}
-    assert sandbox.argv[:3] == ("/opt/ale/python/bin/python3", "-I", "-c")
+    assert sandbox.argv[:3] == ("/opt/orbit/python/bin/python3", "-I", "-c")
     # Starting a container is no syscall: conformance checks nested containers.
     assert sandbox.argv[4:] == ("mount", "perf")
     assert await missing_features(sandbox, [ContainerFeature.NESTED_CONTAINERS]) == {}  # type: ignore[arg-type]
@@ -808,7 +808,7 @@ async def test_a_sandbox_without_a_selected_provider_is_refused_at_admission() -
 async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cli = importlib.import_module("ale.run.cli.main")
+    cli = importlib.import_module("orbit.run.cli.main")
     destroyed: list[tuple[str, str]] = []
 
     class Retaining:
@@ -837,24 +837,24 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
         "slurm:a",
         "slurm:z",
     ]
-    await _destroy_retained_sandbox("docker:ale-docker")
-    await _destroy_retained_sandbox("firecracker:ale-fc")
-    await _destroy_retained_sandbox("qemu:ale-qemu")
+    await _destroy_retained_sandbox("docker:orbit-docker")
+    await _destroy_retained_sandbox("firecracker:orbit-fc")
+    await _destroy_retained_sandbox("qemu:orbit-qemu")
     await _destroy_retained_sandbox("daytona:abc")
-    await _destroy_retained_sandbox("orchard:ale-vm:uid")
+    await _destroy_retained_sandbox("orchard:orbit-vm:uid")
     await _destroy_retained_sandbox("orchard:snapshot:abc")
-    await _destroy_retained_sandbox("slurm:login/ale-0/1")
+    await _destroy_retained_sandbox("slurm:login/orbit-0/1")
     assert destroyed == [
-        ("docker", "docker:ale-docker"),
-        ("firecracker", "firecracker:ale-fc"),
-        ("qemu", "qemu:ale-qemu"),
+        ("docker", "docker:orbit-docker"),
+        ("firecracker", "firecracker:orbit-fc"),
+        ("qemu", "qemu:orbit-qemu"),
         ("daytona", "daytona:abc"),
-        ("orchard", "orchard:ale-vm:uid"),
+        ("orchard", "orchard:orbit-vm:uid"),
         ("orchard", "orchard:snapshot:abc"),
-        ("slurm", "slurm:login/ale-0/1"),
+        ("slurm", "slurm:login/orbit-0/1"),
     ]
     with pytest.raises(ProviderCapabilityError, match="must start"):
-        await _destroy_retained_sandbox("ale-ambiguous")
+        await _destroy_retained_sandbox("orbit-ambiguous")
 
 
 @pytest.mark.asyncio
@@ -865,7 +865,7 @@ async def test_a_machine_without_docker_lists_none_of_its_sandboxes(
     import asyncio
     import shutil
 
-    from ale.run.providers import provider_named
+    from orbit.run.providers import provider_named
 
     async def no_process(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("a machine without Docker ran a process for its listing")
@@ -881,7 +881,7 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
     write_task_repo,  # type: ignore[no-untyped-def]
 ) -> None:
     repository = write_task_repo("ale-tasks-prepare", tasks=("b", "a"))
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     observed: list[str] = []
     digest = "sha256:" + "a" * 64
 
@@ -894,7 +894,7 @@ def test_prepare_uses_selection_and_starts_no_runtime_services(
             source="solver-local",
             input_identity=digest,
             image_source_identity=digest,
-            runtime_ref="ale-task:fixture",
+            runtime_ref="orbit-task:fixture",
             prepared_identity=digest,
         )
         return tuple(

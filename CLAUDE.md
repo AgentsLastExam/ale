@@ -10,7 +10,7 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
   `pip install`, never create an environment by hand.
 - **Never** share a `.venv` between worktrees or symlink one into place. Each tree owns
   its own; it is created by `just bootstrap` in seconds from the shared uv cache.
-- Worktrees belong in `../ale-worktrees/<name>` and are created with `just wt <name>`.
+- Worktrees belong in `../orbit-worktrees/<name>` and are created with `just wt <name>`.
 - If anything about the environment looks wrong, run `just doctor` before investigating.
 - Keep `uv.lock` committed and in sync (`uv lock --check`).
 
@@ -21,15 +21,15 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - Use the names in `docs/specs/lexicon.md`. A Sandbox is never an Environment.
 - Lay a model class out as fields, properties/methods, then validators under a
   `# --- validation ---` marker.
-- Respect `.importlinter`: `ale.core` and `ale_verify` are independent; the Gateway never
-  imports a Provider; `guestd` is standard-library only; Harnesses use the Sandbox
-  contract instead of concrete Providers; `ale.run` never imports `ale.fleet`, whose
+- Respect `.importlinter`: `orbit.core` and `orbit_verify` are independent; the Gateway
+  never imports a Provider; `guestd` is standard-library only; Harnesses use the Sandbox
+  contract instead of concrete Providers; `orbit.run` never imports `orbit.fleet`, whose
   control plane never imports a Provider.
 - Put a responsibility in the narrowest existing owner. Do not add a package, registry,
   interface, flag or compatibility layer until more than one concrete use needs it.
 - This project is in active development. Do not preserve backward compatibility: change
   interfaces directly and update every caller, test and document in the same change.
-- Keep CLI modules as composition, `ale.core` as contracts, and Provider/Harness code as
+- Keep CLI modules as composition, `orbit.core` as contracts, and Provider/Harness code as
   edge adapters. Cross boundaries through public types, not `Any`, ambient state or
   private imports.
 - Start at `docs/README.md` and read the owning living specification before changing a
@@ -55,14 +55,14 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 
 ## Local guides
 
-- `packages/ale-core/AGENTS.md` — public contracts and persisted schemas
-- `packages/ale-fleet/AGENTS.md` — the Fleet's control plane and node agent
-- `packages/ale-run/AGENTS.md` — runtime ownership and the episode path
-- `packages/ale-run/src/ale/run/harnesses/AGENTS.md` — native agent adapters
-- `packages/ale-run/src/ale/run/gateway/AGENTS.md` — model transport and credentials
-- `packages/ale-run/src/ale/run/providers/AGENTS.md` — Docker, QEMU, Daytona and Orchard
+- `packages/orbit-core/AGENTS.md` — public contracts and persisted schemas
+- `packages/orbit-fleet/AGENTS.md` — the Fleet's control plane and node agent
+- `packages/orbit-run/AGENTS.md` — runtime ownership and the episode path
+- `packages/orbit-run/src/orbit/run/harnesses/AGENTS.md` — native agent adapters
+- `packages/orbit-run/src/orbit/run/gateway/AGENTS.md` — model transport and credentials
+- `packages/orbit-run/src/orbit/run/providers/AGENTS.md` — Docker, QEMU, Daytona and Orchard
   backends
-- `packages/ale-verify/AGENTS.md` — sandbox-local public verification API
+- `packages/orbit-verify/AGENTS.md` — sandbox-local public verification API
 - `tests/AGENTS.md` — test taxonomy and infrastructure markers
 - `docs/AGENTS.md` — specifications and guides
 - `images/AGENTS.md` — Sandbox bases, image builders and Provider runtimes
@@ -71,7 +71,7 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 
 ```bash
 just test
-uv run pytest packages/ale-verify/tests
+uv run pytest packages/orbit-verify/tests
 just test-int
 just lint
 ```
