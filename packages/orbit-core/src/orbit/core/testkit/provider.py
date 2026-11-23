@@ -132,6 +132,9 @@ for target in sys.argv[1:]:
 """
 
 
+#: A directory of every image of the system that the framework may write, as a volume
+#: candidate: macOS's own volume is read-only, and it has no ``/srv``.
+_VOLUME = {OperatingSystem.LINUX: "/srv", OperatingSystem.MACOS: "/Users/Shared"}
 #: A container image to run inside a Sandbox, pinned so the check stays the same.
 _BUSYBOX = "busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 #: What Tasks do with a container engine, once it runs: a container deletes a file of its
@@ -791,7 +794,7 @@ class ProviderConformance:
         image: its snapshot keeps it, and a Sandbox booted from the snapshot, or one of its
         own image that mounts the snapshot's volumes, sees it through a view of its own,
         whose writes reach no other Sandbox. One that mounts none leaves them on the disk."""
-        path, absent = "/srv", "/orbit-conformance-absent"
+        path, absent = _VOLUME[(await self.request()).os], "/orbit-conformance-absent"
         kept = f"{path}/kept.txt"
         mounts = any(profile.volumes for profile in await self.provider.profiles())
         saves = any(profile.snapshot for profile in await self.provider.profiles())
