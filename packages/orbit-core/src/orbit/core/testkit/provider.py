@@ -760,29 +760,35 @@ class ProviderConformance:
                     desktop_resolution=DesktopResolution(width=1366, height=768),
                 ),
             ]
-            booted = await asyncio.gather(
-                *(self.provider.create(item) for item in requests), return_exceptions=True
-            )
-            forks = [fork for fork in booted if isinstance(fork, Sandbox)]
-            try:
-                for fork, request in zip(booted, requests, strict=True):
-                    if isinstance(fork, BaseException):
-                        raise fork
-                    assert await fork.read_file(kept) == b"kept"
-                    if request.role is not SandboxRole.VERIFIER:
-                        # Verification runs as root; nothing is promised of a verifier's
-                        # agent account.
-                        assert await _elevates(fork) is request.sudo
-                    assert fork.allocation.desktop_resolution in (None, request.desktop_resolution)
-                    assert fork.request.role is request.role
-                    assert (fork.allocation.cpus, fork.allocation.memory_mb) == (
-                        request.resources.cpus,
-                        request.resources.memory_mb,
-                    )
-                    assert fork.allocation.network_mode is request.network.mode
-            finally:
-                for fork in forks:
-                    await fork.destroy()
+            # The agents' two at once, then the verifier's: a Mac runs no more than two macOS
+            # VMs, and a third would wait for room the first two hold.
+            for group in (requests[:2], requests[2:]):
+                booted = await asyncio.gather(
+                    *(self.provider.create(item) for item in group), return_exceptions=True
+                )
+                forks = [fork for fork in booted if isinstance(fork, Sandbox)]
+                try:
+                    for fork, request in zip(booted, group, strict=True):
+                        if isinstance(fork, BaseException):
+                            raise fork
+                        assert await fork.read_file(kept) == b"kept"
+                        if request.role is not SandboxRole.VERIFIER:
+                            # Verification runs as root; nothing is promised of a verifier's
+                            # agent account.
+                            assert await _elevates(fork) is request.sudo
+                        assert fork.allocation.desktop_resolution in (
+                            None,
+                            request.desktop_resolution,
+                        )
+                        assert fork.request.role is request.role
+                        assert (fork.allocation.cpus, fork.allocation.memory_mb) == (
+                            request.resources.cpus,
+                            request.resources.memory_mb,
+                        )
+                        assert fork.allocation.network_mode is request.network.mode
+                finally:
+                    for fork in forks:
+                        await fork.destroy()
         finally:
             await self.provider.destroy_retained(retained.handle)
         listed = {record["handle"] for record in await self.provider.list_retained()}
