@@ -74,8 +74,8 @@ even before `uv sync`.
 An x86-64 machine without KVM still runs every Linux container Task that `docker:runc` or
 `docker:gvisor` serves, but not one that needs `perf`, `bpf` or `io_uring`, which only Kata
 and Firecracker give here; one without a container runtime cannot run the default path.
-Orbit's Linux Tasks are x86-64, so Docker on an arm64 machine, such as an Apple silicon Mac,
-runs none of them.
+The Linux Tasks of Agents' Last Exam are x86-64, so Docker on an arm64 machine, such as an
+Apple silicon Mac, runs none of them.
 
 ## Choose Providers
 

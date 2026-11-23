@@ -82,7 +82,7 @@ def run_task(
     for setting in settings:
         command.extend(("--set", setting))
     command.extend(("--set", 'logging.native_logs="debug"'))
-    # Live checks read what the agent wrote, and orbit keeps no artifacts unless asked.
+    # Live checks read what the agent wrote, and Orbit keeps no artifacts unless asked.
     command.extend(("--set", 'artifacts.collect="host"'))
     result = subprocess.run(
         command,

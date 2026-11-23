@@ -87,7 +87,7 @@ ORBIT_TEST_DAYTONA_GPU=1 uv run pytest -m needs_daytona tests/conformance/test_p
   deleted when the episode ends, and by Daytona after `lifetime_hours` if a run dies first.
   A kept sandbox is listed by `orbit sandbox list` and removed by `orbit sandbox destroy
   daytona:<id>`; both touch only sandboxes carrying the `orbit.run.*` labels, so other tools
-  in a shared organization, including ones that label their own sandboxes `orbit.*`, are not
+  in a shared organization, including ones that label their own sandboxes `ale.*`, are not
   affected.
 - **One registry entry**, `orbit-transient`, which Orbit keeps current so Daytona can build
   from the images it pushes; leave it in place. Daytona removes pushed images on its own

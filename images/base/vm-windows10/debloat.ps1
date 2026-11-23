@@ -160,7 +160,7 @@ $removeTrees = @(
     "$env:SystemDrive\Users\$AgentUser\.conda",
     "$env:SystemDrive\Users\$AgentUser\.ssh",
     "$env:SystemDrive\Users\$AgentUser\.vscode",
-    "$env:SystemDrive\Users\$AgentUser\orbit-smoke-dir",
+    "$env:SystemDrive\Users\$AgentUser\ale-smoke-dir",
     "$env:SystemDrive\Users\$AgentUser\scripts",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\GIMP",
     "$env:SystemDrive\Users\$AgentUser\AppData\Local\Google",
@@ -201,7 +201,7 @@ Get-ChildItem "$env:ProgramData\Mozilla-*" -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 $userHome = "$env:SystemDrive\Users\$AgentUser"
 foreach ($name in @(
-    ".bash_history", ".tmp.7z", ".viminfo", "orbit-smoke.txt", "thunderbird-profile.7z"
+    ".bash_history", ".tmp.7z", ".viminfo", "ale-smoke.txt", "thunderbird-profile.7z"
 )) {
     Remove-Item -LiteralPath (Join-Path $userHome $name) -Force -ErrorAction SilentlyContinue
 }

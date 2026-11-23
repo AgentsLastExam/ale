@@ -68,16 +68,14 @@ foreach ($stage in $setup, $tests) {
     icacls $stage /inheritance:r /grant:r `
         "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" "${AgentUser}:(OI)(CI)(M)" | Out-Null
 }
-# A seed an earlier recipe prepared also carries a guestd of its own, the logon tasks that
-# started it and its firewall rule.
-foreach ($task in "Orbit Guestd Session", "Orbit Guestd") {
+# A seed an earlier recipe prepared also carries that recipe's framework root, the logon
+# tasks that started its guestd and its firewall rule, all under the framework's former name.
+foreach ($task in "ALE Guestd Session", "ALE Guestd") {
     Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
 }
-Get-NetFirewallRule -DisplayName "Orbit guestd" -ErrorAction SilentlyContinue |
+Get-NetFirewallRule -DisplayName "ALE guestd" -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule
-foreach ($leftover in "guestd", "start-guestd.ps1", "start-session.ps1", "debloat.ps1") {
-    Remove-Item "$env:ProgramData\Orbit\$leftover" -Recurse -Force -ErrorAction SilentlyContinue
-}
+Remove-Item "$env:ProgramData\ALE" -Recurse -Force -ErrorAction SilentlyContinue
 
 # The seed came from GCP, but the prepared disk runs behind Orbit's QEMU runner.  Leaving
 # cloud agents enabled adds minute-long metadata timeouts to every cold boot.

@@ -91,8 +91,8 @@ from orbit.run.transport import GuestClient, StdioTransport
 __all__ = ["HANDLE_PREFIX", "DaytonaProvider", "DaytonaSandbox"]
 
 HANDLE_PREFIX = "daytona:"
-#: Daytona organizations are shared, and other tools there use bare ``orbit.*`` labels, so
-#: Orbit's own live under ``orbit.run.``. Listing and destroying act only on these.
+#: Daytona organizations are shared with other tools, which label their sandboxes ``ale.*``,
+#: so Orbit's own labels live under ``orbit.run.``. Listing and destroying act only on these.
 MANAGED_LABEL = "orbit.run.managed"
 EPISODE_LABEL = "orbit.run.episode"
 ROLE_LABEL = "orbit.run.role"

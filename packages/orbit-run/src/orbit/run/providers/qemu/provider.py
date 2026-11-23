@@ -147,7 +147,7 @@ VOLUMES_CONFIG = "volumes.json"
 #: The serial by which a guest finds the disk of the snapshot it views, and the SCSI
 #: controller, of its own, it is attached to.
 VIEW_SERIAL = "orbit-view"
-VIEW_BUS = "aleviews"
+VIEW_BUS = "orbitviews"
 #: The runner's QEMU monitor, inside its container.
 MONITOR_PORT = 7100
 #: Which of the paths it is given are directories in a Windows guest, with no reparse point
@@ -1121,9 +1121,9 @@ class QemuProvider(Provider):
             else "file=/storage/view.qcow2"
         )
         commands = (
-            f"drive_add 0 {drive},if=none,id=aleview,format=qcow2\n"
-            f"device_add scsi-hd,bus={VIEW_BUS}.0,drive=aleview,serial={VIEW_SERIAL}\n"
-            "info block aleview\n"
+            f"drive_add 0 {drive},if=none,id=orbitview,format=qcow2\n"
+            f"device_add scsi-hd,bus={VIEW_BUS}.0,drive=orbitview,serial={VIEW_SERIAL}\n"
+            "info block orbitview\n"
         )
         code, out, err = await _run(
             "docker", "exec", container, "sh", "-c",
