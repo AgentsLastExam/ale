@@ -1,7 +1,7 @@
 # Slurm provider
 
-Decided: Orbit runs on a login node of the cluster, never on a machine that reaches one, and a
-Run drives that one cluster; joining clusters or other machines is not this Provider's.
+Decided: Orbit runs on a login node of the cluster, never on a machine that reaches one, and
+a Run drives that one cluster; joining clusters or other machines is not this Provider's.
 OpenRSI's login nodes have no Docker, no Podman and no subordinate ID range for the account,
 so no container runs there, and images are prepared on the cluster. Measured on OpenRSI's
 compute nodes (Podman 4.9.3, Buildah 1.33.7): `COPY --chmod` and
@@ -74,13 +74,13 @@ A boot that does not fit beside what runs gets an allocation of its own, loading
 snapshot from a `podman save` archive on the shared home, as does a snapshot the Run keeps,
 whose allocation ends with the episode.
 
-The batch step, not Orbit, starts each Sandbox's step (`srun --exact`), so Orbit's own process
-ending never ends it; Orbit only writes the request and reads the step's files on the shared
-home. With `--ignore-cgroups` alone, one allocating process could take down the entire
-Sentry, so the runtime reads the nearest cgroup above the step that has a `memory.max`,
-without joining or modifying it. The batch step holds Podman's pause namespace through
-cleanup. Each job needs private XDG, graph, run and temporary directories so concurrent jobs
-of one UID can end independently.
+The batch step, not Orbit, starts each Sandbox's step (`srun --exact`), so Orbit's own
+process ending never ends it; Orbit only writes the request and reads the step's files on
+the shared home. With `--ignore-cgroups` alone, one allocating process could take down the
+entire Sentry, so the runtime reads the nearest cgroup above the step that has a
+`memory.max`, without joining or modifying it. The batch step holds Podman's pause namespace
+through cleanup. Each job needs private XDG, graph, run and temporary directories so
+concurrent jobs of one UID can end independently.
 
 A job's store on the node's `/tmp` outlived it in three ways, 88 of them on two nodes: Podman
 sets an empty store up again at its path as `podman unshare` exits, Python ends at once on

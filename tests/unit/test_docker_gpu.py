@@ -765,9 +765,9 @@ def _request(resources: Resources, episode: str = "e1") -> SandboxRequest:
 
 class Daemon:
     """A Docker daemon on a Host with ``HOST``'s GPUs, as ``create`` sees it: it lists the
-    Orbit containers running, ``holders`` and those it started, by their labels, and starts a
-    Sandbox after ``starting`` returns, or, unless ``starts``, refuses it once the flags were
-    read."""
+    Orbit containers running, ``holders`` and those it started, by their labels, and starts
+    a Sandbox after ``starting`` returns, or, unless ``starts``, refuses it once the flags
+    were read."""
 
     def __init__(
         self,

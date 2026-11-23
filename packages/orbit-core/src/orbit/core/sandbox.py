@@ -240,8 +240,8 @@ class SandboxRequest(BaseModel):
     solver is saved as a snapshot whatever its retention, on a leaf that serves both."""
     round_verifier: Resources | None = None
     """Under shared verification, the resources of the verifier each validation round boots
-    from this solver's snapshot (:func:`~orbit.core.capability.round_verifier_resources`), on
-    the leaf that saved it, which serves both."""
+    from this solver's snapshot (:func:`~orbit.core.capability.round_verifier_resources`),
+    on the leaf that saved it, which serves both."""
     verifier_network_mode: NetworkMode = NetworkMode.OPEN
     """The network mode of ``snapshot_verifier``, the Task's verifier network's
     (:attr:`~orbit.core.taskspec.VerifySpec.network`)."""

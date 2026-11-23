@@ -39,10 +39,11 @@ its command does not depend on the shell agy uses. agy's other web tools, such a
 
 agy reads a headless prompt from stdin only as a stream-json message, so the command first
 has the Sandbox's Python (on macOS the framework's) wrap `prompt.md` into
-`.orbit-harness/request.jsonl`, one `{"event": "user", "message": {"content": ...}}` line, and
-feeds that to agy. agy chooses the conversation ID and reports it in its `init` and `result`
-events; a resume passes it to `--conversation`. A failed turn ends with a `result` whose
-`status` is not `SUCCESS`, exits non-zero, and writes an `AGY_ERROR:` JSON line to stderr.
+`.orbit-harness/request.jsonl`, one `{"event": "user", "message": {"content": ...}}` line,
+and feeds that to agy. agy chooses the conversation ID and reports it in its `init` and
+`result` events; a resume passes it to `--conversation`. A failed turn ends with a `result`
+whose `status` is not `SUCCESS`, exits non-zero, and writes an `AGY_ERROR:` JSON line to
+stderr.
 
 Skills go to `~/.gemini/antigravity-cli/skills/<name>/` and MCP servers to
 `~/.gemini/config/mcp_config.json` (`command`/`args`/`env`/`cwd`, or `serverUrl`). agy

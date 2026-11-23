@@ -72,9 +72,9 @@ class TestDockerKataProvider(TestDockerProvider):
 
 class TestDockerGvisorProvider(TestDockerProvider):
     """The same suite with every sandbox on gVisor, whose network the Provider confines with
-    tc filters on the veth's egress and Orbit's chains in netstack; the container feature test
-    runs one sandbox under the runtime registered for raw and packet sockets and one under
-    the runtime registered for container engines."""
+    tc filters on the veth's egress and Orbit's chains in netstack; the container feature
+    test runs one sandbox under the runtime registered for raw and packet sockets and one
+    under the runtime registered for container engines."""
 
     provider = DockerProvider(runtime="gvisor")
 

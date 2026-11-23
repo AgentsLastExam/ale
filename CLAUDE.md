@@ -21,8 +21,8 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - Use the names in `docs/specs/lexicon.md`. A Sandbox is never an Environment.
 - Lay a model class out as fields, properties/methods, then validators under a
   `# --- validation ---` marker.
-- Respect `.importlinter`: `orbit.core` and `orbit_verify` are independent; the Gateway never
-  imports a Provider; `guestd` is standard-library only; Harnesses use the Sandbox
+- Respect `.importlinter`: `orbit.core` and `orbit_verify` are independent; the Gateway
+  never imports a Provider; `guestd` is standard-library only; Harnesses use the Sandbox
   contract instead of concrete Providers; `orbit.run` never imports `orbit.fleet`, whose
   control plane never imports a Provider.
 - Put a responsibility in the narrowest existing owner. Do not add a package, registry,

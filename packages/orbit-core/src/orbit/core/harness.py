@@ -234,9 +234,9 @@ class Harness(ABC):
 
     credentials: tuple[str, ...] = ()
     """Files under the agent's home, relative to it, in which this harness leaves a
-    credential: the episode token, or a subscription's. Orbit removes them before the agent's
-    disk is saved or kept, between turns included, and the harness writes them again before
-    each turn."""
+    credential: the episode token, or a subscription's. Orbit removes them before the
+    agent's disk is saved or kept, between turns included, and the harness writes them again
+    before each turn."""
 
     @abstractmethod
     def version(self) -> str:

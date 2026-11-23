@@ -5,10 +5,10 @@ way every reference implementation does it. Two worktrees can then point at diff
 providers without fighting over a shared file, and "what credentials did this run use?"
 is answered by looking at the tree the run came from.
 
-Every name Orbit reads carries an ``ORBIT_`` prefix, so a checkout's credentials never collide
-with the variables the operator's own tools read. API keys loaded here remain Host-side
-behind the Gateway. Checkout-local subscription credentials are resolved separately and
-also remain Host-side.
+Every name Orbit reads carries an ``ORBIT_`` prefix, so a checkout's credentials never
+collide with the variables the operator's own tools read. API keys loaded here remain
+Host-side behind the Gateway. Checkout-local subscription credentials are resolved
+separately and also remain Host-side.
 
 The same file supplies the variables Tasks declare (``[environment].env`` and the other
 Harbor ``env`` tables), and only the file does: a variable merely exported in the

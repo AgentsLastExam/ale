@@ -121,17 +121,16 @@ Retries are never counted twice. Only a successful provider response (2xx) or a 
 refusal is replayed to a retry of the same request; after a provider error the retry is
 forwarded and recorded as a new `call`. A streamed 2xx response is successful only when it
 reached its dialect's terminal event, listed in the
-[Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md), without an in-band
-error; an interrupted or failed stream is recorded `failed` and forwarded again on retry.
-The Gateway itself sends an agent's call the provider failed again, for at most a minute
-of the provider's failure and before anything reached the client, and records each try as
-a failed `call`
-([Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md#provider-failures)).
-A call the provider failed does not count toward `max_model_calls`, as it gave the agent
-nothing; one it answered does, a refusal of the request included, and every call's tokens
-count. Failed and refused calls remain visible. Default records contain digests and
-accounting metadata, not provider request/response bodies or a second copy of the
-conversation.
+[Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md), without an
+in-band error; an interrupted or failed stream is recorded `failed` and forwarded again on
+retry. The Gateway itself sends an agent's call the provider failed again, for at most a
+minute of the provider's failure and before anything reached the client, and records each
+try as a failed `call`
+([Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md#provider-failures)). A call
+the provider failed does not count toward `max_model_calls`, as it gave the agent nothing;
+one it answered does, a refusal of the request included, and every call's tokens count.
+Failed and refused calls remain visible. Default records contain digests and accounting
+metadata, not provider request/response bodies or a second copy of the conversation.
 
 Subscription traffic takes the same path:
 Claude Code, Codex CLI, and Grok Build send every model call to the Gateway, which only

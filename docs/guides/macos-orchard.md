@@ -94,8 +94,8 @@ The image needs:
   ([Task authoring](../specs/task-authoring.md#environment)).
 
 `[agent].sudo` is applied at every boot, as on Linux: a last sudoers rule gives the account
-passwordless sudo, or with `false` denies it every command, and Orbit also takes it out of the
-`admin` group. `admin` keeps passwordless sudo for Orbit itself, so a Task that runs as
+passwordless sudo, or with `false` denies it every command, and Orbit also takes it out of
+the `admin` group. `admin` keeps passwordless sudo for Orbit itself, so a Task that runs as
 `admin` must declare `sudo = true`; for a Task without it, create and sign in another
 account in `build.sh`: add it with `sysadminctl` and its home at `$ORBIT_HOME`, set
 `autoLoginUser` in `/Library/Preferences/com.apple.loginwindow` and its password in

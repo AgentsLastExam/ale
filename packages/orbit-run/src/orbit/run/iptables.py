@@ -2,16 +2,17 @@
 
 The engine runs this source as root with CAP_NET_ADMIN on the framework's Python
 (``python3 -I -c``) with one JSON argument, such as ``{"tables": {"nat": {"chains":
-{"ORBIT_GATEWAY": [rule, ...]}, "jumps": {"OUTPUT": ["ORBIT_GATEWAY"]}}, "filter": {...}}}``.
-In each table named, each ORBIT_ chain listed gets exactly its rules, other ORBIT_ chains and
-jumps into them go, and each built-in chain under "jumps" starts with jumps to the chains
-listed. A table is read with IPT_SO_GET_INFO and IPT_SO_GET_ENTRIES and replaced with one
-IPT_SO_SET_REPLACE on a UDP socket: gVisor's netstack checks only CAP_NET_ADMIN, and runsc
-gives an exec the CAP_NET_RAW a raw socket needs only under --net-raw. Entries Orbit does not
-own are copied as opaque bytes, since netstack reads some back unlike they were set and a
-kernel table can hold extensions unknown here; only offsets into the table move. Rules are
-built as iptables 1.8 builds them. It uses only the standard library and imports no engine
-code, so it runs in any Sandbox the framework is in, which ships no iptables.
+{"ORBIT_GATEWAY": [rule, ...]}, "jumps": {"OUTPUT": ["ORBIT_GATEWAY"]}}, "filter":
+{...}}}``. In each table named, each ORBIT_ chain listed gets exactly its rules, other
+ORBIT_ chains and jumps into them go, and each built-in chain under "jumps" starts with
+jumps to the chains listed. A table is read with IPT_SO_GET_INFO and IPT_SO_GET_ENTRIES and
+replaced with one IPT_SO_SET_REPLACE on a UDP socket: gVisor's netstack checks only
+CAP_NET_ADMIN, and runsc gives an exec the CAP_NET_RAW a raw socket needs only under
+--net-raw. Entries Orbit does not own are copied as opaque bytes, since netstack reads some
+back unlike they were set and a kernel table can hold extensions unknown here; only offsets
+into the table move. Rules are built as iptables 1.8 builds them. It uses only the standard
+library and imports no engine code, so it runs in any Sandbox the framework is in, which
+ships no iptables.
 """
 
 import ctypes
@@ -174,7 +175,8 @@ def rewrite(
     jumps: Jumps,
 ) -> tuple[list[int], list[int], bytes, int]:
     """The hook entries, underflows, entries and entry count of ``table``, as
-    IPT_SO_GET_ENTRIES returned it, with Orbit's ``chains`` (name: entries) and ``jumps``."""
+    IPT_SO_GET_ENTRIES returned it, with Orbit's ``chains`` (name: entries) and
+    ``jumps``."""
     old: list[tuple[int, bytes]] = []
     offset = 0
     while offset < len(table):

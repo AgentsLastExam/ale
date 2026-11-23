@@ -24,10 +24,9 @@ leaves behind nor assumes it is the only run on the host. Every Kata and gVisor 
 `open` one's included, and every runc one whose network is not `open` gets a network of its
 own, on a subnet of Orbit's own, so suites run at once on one host never exhaust Docker's
 address pools
-([Docker runtimes](../packages/orbit-run/src/orbit/run/providers/README.md#docker-runtimes)).
-The Kata tests run only where Kata is installed
-([Providers](../packages/orbit-run/src/orbit/run/providers/README.md#docker-on-kata-containers)),
-and the gVisor tests only where Docker registers Orbit's build of `runsc` under every name its
+([Docker runtimes](../packages/orbit-run/src/orbit/run/providers/README.md#docker-runtimes)). The
+Kata tests run only where Kata is installed
+([Providers](../packages/orbit-run/src/orbit/run/providers/README.md#docker-on-kata-containers)), and the gVisor tests only where Docker registers Orbit's build of `runsc` under every name its
 README shows
 ([gVisor](../packages/orbit-run/src/orbit/run/providers/README.md#docker-on-gvisor)).
 
@@ -35,9 +34,9 @@ Run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI p
 `just test-vm` after changing VM or Windows behavior. CI's backend jobs run all three. After
 changing macOS behavior, run the Orchard suites on a Mac
 ([macOS guide](../docs/guides/macos-orchard.md)). On a Mac whose local Orchard
-`scripts/setup_macos.py` keeps running, `ORBIT_TEST_CLI_OS=macos just test-harnesses` installs
-and runs every CLI in a macOS VM instead of a container: one of an image of the pinned Tahoe
-base with Node.js, built once.
+`scripts/setup_macos.py` keeps running, `ORBIT_TEST_CLI_OS=macos just test-harnesses`
+installs and runs every CLI in a macOS VM instead of a container: one of an image of the
+pinned Tahoe base with Node.js, built once.
 
 Tests that require infrastructure must carry the matching marker (`needs_docker`,
 `needs_kvm`, `needs_orchard`, `needs_gui`, `needs_llm`, `needs_cli_install`, or a Hugging
@@ -49,7 +48,7 @@ one covers runs it locally before merging. Most run only with
 `ORBIT_RUN_LIVE_ACCEPTANCE=1`; the Judge tests instead skip without their provider's key.
 They load the checkout's `.env` before any test module is imported, and `ORBIT_ENV_FILE`
 points every worktree at one file. Every agent and Judge call resolves its key and endpoint
-exactly as `orbit` does, from `ORBIT_<PROVIDER>_API_KEY` and `ORBIT_<PROVIDER>_BASE_URL`, so a
-shared gateway is configured once in `.env` rather than per test. Only the models are test
-knobs: `ORBIT_LIVE_ANTHROPIC_MODEL` (default `claude-sonnet-5`) and `ORBIT_LIVE_OPENAI_MODEL`
-(default `gpt-5.6-luna`); xAI calls use `grok-4.5`.
+exactly as `orbit` does, from `ORBIT_<PROVIDER>_API_KEY` and `ORBIT_<PROVIDER>_BASE_URL`, so
+a shared gateway is configured once in `.env` rather than per test. Only the models are test
+knobs: `ORBIT_LIVE_ANTHROPIC_MODEL` (default `claude-sonnet-5`) and
+`ORBIT_LIVE_OPENAI_MODEL` (default `gpt-5.6-luna`); xAI calls use `grok-4.5`.

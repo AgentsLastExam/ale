@@ -12,8 +12,8 @@ service and the network policy stay with the Providers that already enforce them
 Node, so the Fleet adds scheduling without a second implementation of any guarantee. It
 boots nothing before a request: an idle macOS VM would hold half of its Mac.
 
-One control plane serves the Fleet, with its ledger in one SQLite file (`orbit-fleet serve`).
-Every peer authenticates with the one Fleet token, `ORBIT_FLEET_TOKEN`.
+One control plane serves the Fleet, with its ledger in one SQLite file (`orbit-fleet
+serve`). Every peer authenticates with the one Fleet token, `ORBIT_FLEET_TOKEN`.
 
 The control plane and the node agent are the `orbit-fleet` package, which builds on the engine:
 a node agent lends the engine's leaves and prepares images with the engine's own code. The
@@ -279,8 +279,8 @@ machines, so neither the Harness nor the episode protocol knows it is there.
     the Run must select the Fleet for that Task. The Run knows the image only by its key
     until a Node prepares it, so the control plane checks that the key is the same one.
   - `orbit sandbox list` and `orbit sandbox destroy` reach the Fleet whose control plane
-    `$ORBIT_FLEET_URL` names. A destroy waits until the Node confirms the Sandbox or snapshot
-    gone.
+    `$ORBIT_FLEET_URL` names. A destroy waits until the Node confirms the Sandbox or
+    snapshot gone.
 - **Each Sandbox** is acquired under a fresh name, created on its Node with the grant, and
   driven through the node agent; its lease is renewed while the Run holds it, and destroying
   it releases it in the ledger and on the Node. A call whose connection the Node refused, as

@@ -38,7 +38,7 @@ A base carries no part of the framework and has its own version: the Linux bases
 Raise a base's version to publish it changed.
 
 ```bash
-just images                                  # pull published images, build unpublished ones
+just images                                    # pull published images, build unpublished ones
 images/build.sh orbit-qemu-runner              # one image
 ```
 

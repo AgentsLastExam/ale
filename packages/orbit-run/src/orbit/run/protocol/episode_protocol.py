@@ -749,8 +749,8 @@ class EpisodeProtocol:
     ) -> SandboxRequest:
         """The solver's request; one that ``validations`` still to come save asks for a leaf
         that saves that many snapshots in a row, and more
-        (:func:`~orbit.core.capability.solver_saves`), and that serves the verifier that boots
-        from its snapshot too."""
+        (:func:`~orbit.core.capability.solver_saves`), and that serves the verifier that
+        boots from its snapshot too."""
         spec = ctx.spec
         mode = spec.verify.environment_mode
         return SandboxRequest(
@@ -3385,8 +3385,8 @@ def _attributed(ctx: EpisodeContext) -> Iterator[None]:
 def _program_failed(error: Exception) -> bool:
     """Whether a Harness reported its program's own failure, in the program's words, behind
     which a model provider failing its calls may be: an AgentError of no narrower kind, or a
-    subscription's login or entitlement as the CLI put it; not what Orbit found wrong itself,
-    such as a missing native session or a trajectory it could not convert."""
+    subscription's login or entitlement as the CLI put it; not what Orbit found wrong
+    itself, such as a missing native session or a trajectory it could not convert."""
     return type(error) is AgentError or isinstance(
         error, (SubscriptionAuthenticationError, SubscriptionEntitlementError)
     )

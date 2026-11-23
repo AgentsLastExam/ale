@@ -8,8 +8,8 @@ prefer MSIX; an existing suitable unattended offline installer can be reused dir
 
 ## Define and build the image
 
-Declare the published Orbit Windows base in `task.toml`; an absolute path to a local copy of a
-base works too:
+Declare the published Orbit Windows base in `task.toml`; an absolute path to a local copy of
+a base works too:
 
 ```toml
 [environment]

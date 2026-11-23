@@ -15,12 +15,12 @@ interrupted, and for a request for input it cancelled, even when the session rec
 turn as succeeded. A retried model call is a `retry` event and fails nothing.
 
 `OPENCODE_CONFIG_DIR` is `.opencode-orbit`, holding the declared Skills, in place of
-`~/.config/opencode`. Orbit's configuration, `.opencode-orbit/orbit.json`, reaches OpenCode as
-`OPENCODE_CONFIG_CONTENT`, which outranks a workspace's own `opencode.json` and
-`.opencode`. It defines one custom provider, `orbit`, the episode Gateway, whose key OpenCode
-reads from `ORBIT_GATEWAY_TOKEN` and stores nowhere, and a policy that makes every other
-provider unusable, OpenCode's keyless hosted models included. Sessions, logs and snapshots
-stay where OpenCode keeps them, under `~/.local/share/opencode`.
+`~/.config/opencode`. Orbit's configuration, `.opencode-orbit/orbit.json`, reaches OpenCode
+as `OPENCODE_CONFIG_CONTENT`, which outranks a workspace's own `opencode.json` and
+`.opencode`. It defines one custom provider, `orbit`, the episode Gateway, whose key
+OpenCode reads from `ORBIT_GATEWAY_TOKEN` and stores nowhere, and a policy that makes every
+other provider unusable, OpenCode's keyless hosted models included. Sessions, logs and
+snapshots stay where OpenCode keeps them, under `~/.local/share/opencode`.
 
 The Gateway dialect selects OpenCode's package for a compatible endpoint: Chat Completions
 (`openai-compatible`, the default), Responses (`openai-compatible/responses`), Anthropic
@@ -38,10 +38,10 @@ network is sealed, accepting only the archive digests OpenCode itself pins and e
 
 `--session` continues the session with that ID or creates it, so Orbit chooses a new
 session's ID, `ses_` and a UUID, as OpenCode requires the `ses` prefix. Each invocation
-runs through `.opencode-orbit/invoke.sh`, which Orbit writes, since a Windows desktop agent's
-command line may not exceed 1,024 characters. OpenCode keeps sessions in SQLite only, so
-after every invocation the script has `opencode session export` write the session, and
-every session it spawned at any depth, to
+runs through `.opencode-orbit/invoke.sh`, which Orbit writes, since a Windows desktop
+agent's command line may not exceed 1,024 characters. OpenCode keeps sessions in SQLite
+only, so after every invocation the script has `opencode session export` write the session,
+and every session it spawned at any depth, to
 `.opencode-orbit/exports/<root session id>/<time>/<session id>.json`. The parser reads the
 newest export, uses an invocation's JSON events only for a turn the export lacks, and adds
 an invocation's error to a turn whose session records no failure. A `subagent` call's

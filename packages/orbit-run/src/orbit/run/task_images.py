@@ -543,8 +543,9 @@ async def _on_cluster(
     task: Task, role: ImageRole, provider: SlurmProvider
 ) -> ImagePreparationResult:
     """One of a Task's images as the Slurm Provider prepares it, on the cluster, from what
-    the Task declares, as no container runtime runs where Orbit does: a named image pinned by
-    the digest its registry gives it now, or the Task's own build, with the framework layer.
+    the Task declares, as no container runtime runs where Orbit does: a named image pinned
+    by the digest its registry gives it now, or the Task's own build, with the framework
+    layer.
 
     Its key covers what goes into it: the pinned name, or the build context as
     ``_context_identity`` observes it, and the framework for its account and command.

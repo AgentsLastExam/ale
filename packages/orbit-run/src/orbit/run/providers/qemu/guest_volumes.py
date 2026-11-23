@@ -3,11 +3,12 @@
 The framework installs this file as ``/opt/orbit/volumes.py`` on the framework's Python, so
 like guestd it is standard-library only.
 
-* As the guest boots, ``orbit-volumes.service`` runs it with the Sandbox's volumes, which the
-  Provider hands it in QEMU's firmware configuration: each path that is a directory on the
-  disk, with no link on its way, becomes an overlay of that directory under a layer of its
-  own on the disk, ``/opt/orbit/volumes/<name>``, which a snapshot of the disk keeps and a VM
-  booted from it mounts again. What it mounted it writes to ``/run/orbit/volumes.json``.
+* As the guest boots, ``orbit-volumes.service`` runs it with the Sandbox's volumes, which
+  the Provider hands it in QEMU's firmware configuration: each path that is a directory on
+  the disk, with no link on its way, becomes an overlay of that directory under a layer of
+  its own on the disk, ``/opt/orbit/volumes/<name>``, which a snapshot of the disk keeps and
+  a VM booted from it mounts again. What it mounted it writes to
+  ``/run/orbit/volumes.json``.
 * Once the guest is up, guestd runs it with ``views``, the paths of another Sandbox's
   snapshot to view and the serial of that snapshot's disk, which the Provider has just
   attached read-only: each becomes an overlay of what that disk holds there, its directory

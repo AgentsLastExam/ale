@@ -3,9 +3,9 @@
 
 Run with uv; this script uses only Python's standard library. It never changes
 Homebrew, launchd, system trust, desktop permissions, or the shared Tart home. With sudo,
-which asks for this account's password, it installs Orbit's macOS framer: a root-owned copy of
-``framework_macos.sh`` and a sudoers rule that lets this account run that program alone as
-root, which framing an image offline needs. On macOS 26 or later it also installs Softnet
+which asks for this account's password, it installs Orbit's macOS framer: a root-owned copy
+of ``framework_macos.sh`` and a sudoers rule that lets this account run that program alone
+as root, which framing an image offline needs. On macOS 26 or later it also installs Softnet
 root-owned and set-user-ID as the worker's ``softnet``, which a VM whose network Orbit
 restricts runs on.
 

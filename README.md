@@ -55,9 +55,9 @@ uv run orbit run /path/to/task --agent nop
 packages/orbit-core/    public contracts and interfaces
 packages/orbit-run/     orchestration, providers, harnesses, Gateway and CLI
 packages/orbit-verify/  sandbox-local verification library
-images/               Sandbox bases, image builders and Provider runtimes
-docs/                 maintained specifications, decisions and guides
-tests/                engine unit, conformance, integration and live acceptance tests
+images/                 Sandbox bases, image builders and Provider runtimes
+docs/                   maintained specifications, decisions and guides
+tests/                  engine unit, conformance, integration and live acceptance tests
 ```
 
 Task content lives in independent Task repositories. The engine repository contains

@@ -105,8 +105,8 @@ def has_desktop() -> bool:
     Xvfb for a headless browser, does not. Windows always draws one, and it is Orbit's to
     drive once the framework has installed Cua Driver, as in every Task image; the bare
     base, booted only to build a Task image, has none to wait for. On macOS the Provider
-    declares one by naming the Driver's socket (``ORBIT_CUA_DRIVER_SOCKET``) in every sandbox
-    the agent works in; a verifier or ``build.sh`` VM has none.
+    declares one by naming the Driver's socket (``ORBIT_CUA_DRIVER_SOCKET``) in every
+    sandbox the agent works in; a verifier or ``build.sh`` VM has none.
     """
     if os.name == "nt":
         return os.path.isfile(_WINDOWS_DRIVER)

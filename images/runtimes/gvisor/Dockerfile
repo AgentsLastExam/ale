@@ -1,5 +1,6 @@
-# Orbit's gVisor runtime, as gVisor's release tarball lays it out: runsc, the containerd shim
-# and the sidecars runsc runs from gvisor-bin/ next to itself, all from one patched build.
+# Orbit's gVisor runtime, as gVisor's release tarball lays it out: runsc, the containerd
+# shim and the sidecars runsc runs from gvisor-bin/ next to itself, all from one patched
+# build.
 #
 # Nothing runs this image as a sandbox: an operator copies /gvisor onto the Host and
 # registers its runsc with Docker (README.md). The entrypoint lets `docker create` take it

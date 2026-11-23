@@ -99,8 +99,8 @@ such a loss stays an environment error, which is retried.
 - 400 processes of 16 MiB lived on in swap. 400 of 48 MiB, past memory and free disk, froze
   the guest at about 12 GiB: guestd, a new SSH session and Tart's guest agent stopped
   answering, the VM's two vCPUs ran flat out, Orchard reported it running, and the Host
-  itself reached memory pressure after five minutes. Orbit's command ended after its timeout,
-  or with `GuestUnreachableError` once Orchard dropped guestd's channel.
+  itself reached memory pressure after five minutes. Orbit's command ended after its
+  timeout, or with `GuestUnreachableError` once Orchard dropped guestd's channel.
 - A RAM disk needs no privilege (`hdiutil attach -nomount ram://...`) and fills to its size
   or until macOS drops it (at 12 GiB of 20), swapped like any memory; the VM lived.
 - Nothing outside the guest records why: Orchard's VM log and the worker's log are empty,

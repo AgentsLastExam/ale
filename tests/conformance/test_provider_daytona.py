@@ -1,7 +1,7 @@
 """The Daytona backend against the shared Provider contract.
 
-Creates real, billable sandboxes on Daytona, so it runs only when ``ORBIT_DAYTONA_API_KEY`` is
-set and is selected with ``-m needs_daytona``. Daytona allocates whole GiB; the request
+Creates real, billable sandboxes on Daytona, so it runs only when ``ORBIT_DAYTONA_API_KEY``
+is set and is selected with ``-m needs_daytona``. Daytona allocates whole GiB; the request
 hook rounds the suite's small default resources up to that, which the Provider itself
 refuses to do. ``ORBIT_TEST_DAYTONA_GPU=1`` also runs the suite on GPU sandboxes.
 """
@@ -294,8 +294,8 @@ print(count.value)
 """
 
 #: Loads the library the NVIDIA Vulkan ICD names and initializes EGL on every device through
-#: GLVND, as an offscreen renderer does, so it needs nothing beyond the Orbit base. Prints the
-#: vendors of the devices that initialized.
+#: GLVND, as an offscreen renderer does, so it needs nothing beyond the Orbit base. Prints
+#: the vendors of the devices that initialized.
 RENDERING = r"""
 import ctypes, json
 ctypes.CDLL("libGLX_nvidia.so.0")

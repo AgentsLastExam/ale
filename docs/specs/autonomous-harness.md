@@ -55,8 +55,8 @@ whole table. A program upstream distributes only through its own installer is in
 its adapter from one pinned artifact: a source installer at one commit, reported as
 `git:<repository>@<commit>`, or an installer package it verifies and unpacks, reported as
 the `sha256:` of the files it runs. Bases provide runtimes, not agent CLI packages; they pin
-Node.js 24.15.0, which a macOS image, having no Orbit base, provides itself. Each run installs
-and configures the selected CLI before applying the Task network policy.
+Node.js 24.15.0, which a macOS image, having no Orbit base, provides itself. Each run
+installs and configures the selected CLI before applying the Task network policy.
 
 Every other adapter gives its pin, Gateway dialects and public settings in its own README,
 listed in the [Harness index](../../packages/orbit-run/src/orbit/run/harnesses/README.md).

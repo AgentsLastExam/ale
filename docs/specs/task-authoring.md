@@ -7,14 +7,14 @@ the [Task quality standard](task-quality-standard.md); scoring and Judge APIs be
 [Verification](verification.md).
 
 The format is based on Harbor's task format (`task.toml`, `environment/`, `tests/`,
-`solution/`). A field Orbit implements as Harbor does keeps Harbor's name, table and meaning.
-A field Orbit adds sits in the Harbor table of what it configures, under a name Harbor gives
-no other meaning: a separate namespace would not stop one name meaning two things, and would
-have to mirror every table it extends. The exception is `[[calibration]]`, which no Harbor
-table configures; `validation/` and `calibration/` are Orbit's directories. `schema_version`
-is the Orbit version, major and minor, in which the format last changed, and Orbit accepts
-exactly that value, so a file written for another format fails as it loads instead of being
-read with a different meaning.
+`solution/`). A field Orbit implements as Harbor does keeps Harbor's name, table and
+meaning. A field Orbit adds sits in the Harbor table of what it configures, under a name
+Harbor gives no other meaning: a separate namespace would not stop one name meaning two
+things, and would have to mirror every table it extends. The exception is `[[calibration]]`,
+which no Harbor table configures; `validation/` and `calibration/` are Orbit's directories.
+`schema_version` is the Orbit version, major and minor, in which the format last changed,
+and Orbit accepts exactly that value, so a file written for another format fails as it loads
+instead of being read with a different meaning.
 
 ## Task folder
 
@@ -56,8 +56,8 @@ macOS, `test.ps1` and `solve.ps1` on Windows; every further
 - `image` alone is used directly.
 
 Windows and macOS Tasks run only in VMs, so a Dockerfile fails there. A Linux image used
-directly is a VM when `image` is an absolute path to a qcow2 or names an Orbit VM disk, and a
-container when it names a container image
+directly is a VM when `image` is an absolute path to a qcow2 or names an Orbit VM disk, and
+a container when it names a container image
 ([Sandbox image](sandbox-image.md#source-selection-and-identity)). Every image build has
 `environment/` as its context, `setup/` excluded.
 
@@ -65,9 +65,9 @@ container when it names a container image
 
 `task.toml` is strict, and small. Only `schema_version` and `[task].name` are required; every
 other key has a default, so a Task states what makes it different. An unknown key fails, and a
-Harbor key Orbit does not implement fails with a message saying so. The annotated shape below
-describes every key of Orbit's format, with `Orbit` marking the ones Harbor does not have; the
-Harbor keys Orbit also reads, so that a Harbor Task loads with few edits, are in
+Harbor key Orbit does not implement fails with a message saying so. The annotated shape
+below describes every key of Orbit's format, with `Orbit` marking the ones Harbor does not
+have; the Harbor keys Orbit also reads, so that a Harbor Task loads with few edits, are in
 [Harbor compatibility](#harbor-compatibility). A Task Orbit can read but that departs from this
 form loads with a warning, which every command that loads it prints and the RunLock records
 in `task.warnings`; only an error fails `orbit lint`.
@@ -186,14 +186,14 @@ one, each declaration gets a numbered directory there; those names and the inven
 `snapshot.json`, are Orbit's, and destinations may not overlap. A verifier still receives every
 copy at its source path.
 
-Orbit copies each match according to its actual type and skips links, missing paths, and copy
-failures. No link is followed anywhere on an artifact's path, a directory above it included:
-one the agent made could point at a file only the framework may read. These are fixed
-defaults; the verifier decides how to score the resulting output. A copy stops at 100,000
-entries or 64 directories deep. An artifact cut off there fails a separate verifier's Episode
-as a Task error, because scoring part of an output gives a wrong score rather than a low one.
-Copying uses the framework's privileged identity on every supported OS; see
-[Permissions](sandbox-image.md#permissions).
+Orbit copies each match according to its actual type and skips links, missing paths, and
+copy failures. No link is followed anywhere on an artifact's path, a directory above it
+included: one the agent made could point at a file only the framework may read. These are
+fixed defaults; the verifier decides how to score the resulting output. A copy stops at
+100,000 entries or 64 directories deep. An artifact cut off there fails a separate
+verifier's Episode as a Task error, because scoring part of an output gives a wrong score
+rather than a low one. Copying uses the framework's privileged identity on every supported
+OS; see [Permissions](sandbox-image.md#permissions).
 
 Separate verification transfers the declared artifacts to its verifier through the Host, as
 in Harbor, but for those it [mounts views of](#volumes); a snapshot verifier needs none, as
@@ -435,10 +435,10 @@ required by the Task. The Linux bases are:
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04), a VM disk for
   `[environment].image`.
 
-Name an exact version, such as `:0.1.1`, never `latest`; `orbit new-task` writes the container
-base's current version, and `orbit lint` warns about a registry `FROM` or `image` with no tag or
-`latest`. A Task keeps building from the version it names until its author moves it
-([Sandbox image](sandbox-image.md#versions)).
+Name an exact version, such as `:0.1.1`, never `latest`; `orbit new-task` writes the
+container base's current version, and `orbit lint` warns about a registry `FROM` or `image`
+with no tag or `latest`. A Task keeps building from the version it names until its author
+moves it ([Sandbox image](sandbox-image.md#versions)).
 
 The submitted initial environment must be reproducible from `environment/`; an exploratory
 sandbox snapshot is not Task source. Build-local scripts may implement non-trivial
@@ -488,27 +488,27 @@ if ($LASTEXITCODE -ne 0) { throw "7zip installation failed: $LASTEXITCODE" }
 Copy-Item .\input.txt "$env:ORBIT_HOME\input.txt"
 ```
 
-`orbit prepare TASK` boots a temporary VM of the base that already runs Orbit's current guestd
-and Cua Driver, copies `environment/`, less `setup/`, into it and runs the script under the
-framework's identity (root, Administrator on Windows) with that directory as cwd,
-`ORBIT_HOME` set to the agent home and the network open. The copy's files are not executable,
-whatever their mode in the folder, as every upload's are not
+`orbit prepare TASK` boots a temporary VM of the base that already runs Orbit's current
+guestd and Cua Driver, copies `environment/`, less `setup/`, into it and runs the script
+under the framework's identity (root, Administrator on Windows) with that directory as cwd,
+`ORBIT_HOME` set to the agent home and the network open. The copy's files are not
+executable, whatever their mode in the folder, as every upload's are not
 ([Permissions](sandbox-image.md#permissions)), so the script runs a helper through its
 interpreter, `bash install.sh` rather than `./install.sh`. It then removes the directory and
 keeps the VM's disk as the Task's layer on the base. A Linux or Windows base must already
-have the `[agent].user` account, because Orbit installs the framework for it before the script
-runs. Scripts may use the system's package managers or local unattended installers; pin
-package versions where supported and check native command exit codes. Scripts must finish
-within `build_timeout_sec`; nonzero exits fail the build. Suppress installer reboots; builds
-requiring a mid-script restart are unsupported. Orbit owns shutdown. Copy required files out
-of the build directory to their final locations, and set the owner of what the script
-writes for the agent. Only that context is staged, and the whole build is cached by base,
-builder, and every file in it.
+have the `[agent].user` account, because Orbit installs the framework for it before the
+script runs. Scripts may use the system's package managers or local unattended installers;
+pin package versions where supported and check native command exit codes. Scripts must
+finish within `build_timeout_sec`; nonzero exits fail the build. Suppress installer reboots;
+builds requiring a mid-script restart are unsupported. Orbit owns shutdown. Copy required
+files out of the build directory to their final locations, and set the owner of what the
+script writes for the agent. Only that context is staged, and the whole build is cached by
+base, builder, and every file in it.
 
 A macOS Task (`os = "macos"`) builds the same way on a Tart image named by `image`, with
-`environment/build.sh`. `orbit prepare TASK` boots the base with Orbit's framework installed for
-`admin`, the account Orbit controls the VM through, which the base must therefore sign in,
-runs `bash build.sh` there as for Linux, and keeps the VM's disk as a local image on the
+`environment/build.sh`. `orbit prepare TASK` boots the base with Orbit's framework installed
+for `admin`, the account Orbit controls the VM through, which the base must therefore sign
+in, runs `bash build.sh` there as for Linux, and keeps the VM's disk as a local image on the
 Mac. Orbit frames the result for `[agent].user` when a sandbox first uses it, so `build.sh`
 may create that account; `ORBIT_HOME` is then `/Users/<user>`, the home the build must give
 it, and the build fails if the account is missing or lives elsewhere. Such an account must
@@ -571,13 +571,13 @@ that run; the RunLock records what the run used. See
 `tests/test.sh` (or Windows `tests/test.ps1`) evaluates the final outcome and writes its
 `reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`; macOS,
 whose root volume is read-only, `/opt/orbit/logs/verifier/reward.json`). Verifier
-implementation conventionally lives in `tests/verify.py`. Orbit uploads the whole directory to
-its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
+implementation conventionally lives in `tests/verify.py`. Orbit uploads the whole directory
+to its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
-absolute paths. Before each tests entrypoint starts, Orbit selects a Python 3.12+: the image's
-own when it has one, since that is where the Task installs what `verify.py` imports, and
-otherwise the framework's own. It stages `orbit_verify` and its JSON Schema library into that
-interpreter's site-packages, checks the import, then sets `ORBIT_VERIFY_PYTHON` in the
+absolute paths. Before each tests entrypoint starts, Orbit selects a Python 3.12+: the
+image's own when it has one, since that is where the Task installs what `verify.py` imports,
+and otherwise the framework's own. It stages `orbit_verify` and its JSON Schema library into
+that interpreter's site-packages, checks the import, then sets `ORBIT_VERIFY_PYTHON` in the
 entrypoint's process environment.
 It is available to the tests and their child processes, including during `calibrate` and
 `reverify`; it is not initialized by the image build, setup stage, or SDK import.
@@ -614,11 +614,11 @@ set's cannot overfit to the test set except through what the validation set shar
 
 `validation/` has the contract of [`tests/`](#tests): the entry `test.sh` (`test.ps1` on
 Windows), conventionally `verify.py`, writes `reward.json` and optionally
-`verification.json` and [`feedback.md`](verification.md#feedback), and may use `orbit_verify`
-and Judges. It is staged only when it runs, in its own root-only stage directory,
-`/opt/orbit/validation` (`C:\ProgramData\Orbit\validation` on Windows), where its entry runs
-with `ORBIT_STAGE_DIR` set, as `tests/`'s does. It is absent during every turn of the agent,
-as `tests/` is.
+`verification.json` and [`feedback.md`](verification.md#feedback), and may use
+`orbit_verify` and Judges. It is staged only when it runs, in its own root-only stage
+directory, `/opt/orbit/validation` (`C:\ProgramData\Orbit\validation` on Windows), where its
+entry runs with `ORBIT_STAGE_DIR` set, as `tests/`'s does. It is absent during every turn of
+the agent, as `tests/` is.
 
 Rounds run in `[verifier]`'s verifier unless Orbit's `[verifier.validation]` says otherwise,
 since a round often needs less, or other things, than the final score: a shorter limit, a
@@ -809,9 +809,9 @@ describe.
   ([Harnesses](../../packages/orbit-run/src/orbit/run/harnesses/README.md#mcp-transports)).
 
 Nothing in Orbit replaces Harbor's multi-step Tasks (`steps`, `multi_step_reward_strategy`),
-compose sidecars (`docker-compose.yaml`, which `orbit lint` refuses, an artifact's `service`,
-`[[verifier.collect]]`) or TPU selection (`tpu`), and a Task that sets one fails to load. An
-origin belongs in `[metadata]`, so there is no root-level `source`.
+compose sidecars (`docker-compose.yaml`, which `orbit lint` refuses, an artifact's
+`service`, `[[verifier.collect]]`) or TPU selection (`tpu`), and a Task that sets one fails
+to load. An origin belongs in `[metadata]`, so there is no root-level `source`.
 
 These values differ from Harbor's:
 
@@ -823,8 +823,8 @@ These values differ from Harbor's:
   backend and sets no time limit; `[agent].user` is `user`, not the image's `USER`;
   `[agent].network_mode` is `no-network`, not `public`; `build_timeout_sec` is 3600, not 600.
   The agent runs in its Sandbox, so the default size leaves it a CPU beside the Task's work.
-- `os = "windows"` is a VM with `.ps1` stage entries, because Orbit runs Windows in VMs, where
-  PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
+- `os = "windows"` is a VM with `.ps1` stage entries, because Orbit runs Windows in VMs,
+  where PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
 - `os = "macos"` is Orbit's: a macOS VM with `.sh` stage entries, which Harbor does not run.
 - `artifacts` may be globs, and nothing is collected undeclared, where Harbor always collects
   `/logs/artifacts`.
@@ -832,8 +832,8 @@ These values differ from Harbor's:
   and an empty value counts as unset; see [Variables](#variables).
 - A `skills_dir` that does not exist fails the Episode.
 - `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
-- `environment_mode` also takes `snapshot`, Orbit's: a verifier booted from a snapshot of the
-  solver; see [Verification topology](#verification-topology).
+- `environment_mode` also takes `snapshot`, Orbit's: a verifier booted from a snapshot of
+  the solver; see [Verification topology](#verification-topology).
 - The reference solution, `solution/` as in Harbor, is also the [calibration case](#calibration)
   `solution`; further cases live in `calibration/<name>/`, and a `calibration/solution/`
   fails as the Task loads.

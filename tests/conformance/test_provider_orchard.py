@@ -1,9 +1,9 @@
 """Opt-in Orchard qualification against the shared Sandbox contract.
 
 Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running, with
-ORBIT_TEST_ORCHARD=1. The suite builds its image on that Mac once, as ``orbit prepare`` would,
-from ``tests/fixtures/tasks/macos-unprivileged``: it signs in ``tester``, an account other
-than ``admin``, so the sudo=false cases apply. Every macOS sandbox has that account's
+ORBIT_TEST_ORCHARD=1. The suite builds its image on that Mac once, as ``orbit prepare``
+would, from ``tests/fixtures/tasks/macos-unprivileged``: it signs in ``tester``, an account
+other than ``admin``, so the sudo=false cases apply. Every macOS sandbox has that account's
 desktop, so the desktop capture and input checks always run. Each test destroys the VMs and
 snapshots it creates; none adopts a VM it did not create.
 """

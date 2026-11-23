@@ -402,7 +402,8 @@ async def resolve_vm_image(
                     if not await valid_qcow2(disk):
                         await remove_disk(disk)
                         await _download(registry, manifest, disk)
-                    # Orbit keeps the pulled disk, so the layers built on it use it in place.
+                    # Orbit keeps the pulled disk, so the layers built on it use it in
+                    # place.
                     _write_record(disk, {"parent": None, "identity": manifest.digest})
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
@@ -613,8 +614,8 @@ async def base_layer(image: PreparedTaskImage) -> Path:
     """The disk of ``image`` as the base of a chain, recorded under the image's identity.
 
     A disk Orbit keeps and recorded as a base, such as one it pulled from a registry, is the
-    base as it is. Any other disk may be compressed or not Orbit's to keep, so the base is an
-    uncompressed copy of it, made once per Host in ``vm-builds`` beside the layers on it.
+    base as it is. Any other disk may be compressed or not Orbit's to keep, so the base is
+    an uncompressed copy of it, made once per Host in ``vm-builds`` beside the layers on it.
     """
     source = Path(image.runtime_ref)
     if await finished_layer(source) == image.prepared_identity:

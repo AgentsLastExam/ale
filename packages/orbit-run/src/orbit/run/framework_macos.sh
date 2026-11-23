@@ -3,10 +3,10 @@
 #
 # usage: framework-macos DISK USER CONTROL IDENTITY < payload.tar
 #
-# DISK is the disk.img of an orbit-frame-* Tart VM owned by the calling user, USER the account
-# the VM signs in to its desktop (the Task's, or CONTROL's for a build.sh VM), CONTROL the
-# account the Provider logs in as, and IDENTITY the framework identity recorded in
-# /opt/orbit/framework. The payload holds the framework's python/ tree,
+# DISK is the disk.img of an orbit-frame-* Tart VM owned by the calling user, USER the
+# account the VM signs in to its desktop (the Task's, or CONTROL's for a build.sh VM),
+# CONTROL the account the Provider logs in as, and IDENTITY the framework identity recorded
+# in /opt/orbit/framework. The payload holds the framework's python/ tree,
 # driver.tar.gz and guestd/*.py. On success it prints the account's home and uid as JSON.
 #
 # The disk is the image's own, so nothing on it is trusted: no path is followed through a

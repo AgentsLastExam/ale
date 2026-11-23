@@ -122,8 +122,8 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/org.agentslastexam.orbit.
 ```
 
 After an engine update that changes the framer, stop the Orchard daemon
-(`sudo launchctl bootout system/org.agentslastexam.orbit.orchard`) and run setup from a login
-once more, since only then can sudo ask for the password.
+(`sudo launchctl bootout system/org.agentslastexam.orbit.orchard`) and run setup from a
+login once more, since only then can sudo ask for the password.
 
 ## Run on the Fleet
 
@@ -184,7 +184,7 @@ refreshes itself. From a shell:
 uv run orbit-fleet status --control-plane http://CONTROL:7470
 ```
 
-`--json` prints the document the page is drawn from, and `ORBIT_FLEET_URL` saves repeating the
-address. `orbit-fleet drain NODE` stops new placements on a Node before maintenance, and
-`orbit-fleet resume NODE` ends that; `orbit-fleet destroy SANDBOX` and `orbit-fleet cancel RUN`
-clean up after a Run that cannot.
+`--json` prints the document the page is drawn from, and `ORBIT_FLEET_URL` saves repeating
+the address. `orbit-fleet drain NODE` stops new placements on a Node before maintenance, and
+`orbit-fleet resume NODE` ends that; `orbit-fleet destroy SANDBOX` and `orbit-fleet cancel
+RUN` clean up after a Run that cannot.

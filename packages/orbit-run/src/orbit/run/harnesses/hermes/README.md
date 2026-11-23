@@ -18,8 +18,8 @@ the Gateway dialect, and turns off update checks, the model catalog, shared tele
 logins adopted from other agents and installs during the run. The provider's `key_cmd`
 prints the episode token from `.hermes-orbit/gateway-token`, the Harness's credential file.
 Hermes would pass a key variable in its environment on to its terminal tool, whose login
-environment it saves to a snapshot under `.hermes-orbit/cache/scratch`. The `supports_vision`
-setting is `model.supports_vision`.
+environment it saves to a snapshot under `.hermes-orbit/cache/scratch`. The
+`supports_vision` setting is `model.supports_vision`.
 Unset, Hermes looks the model up on models.dev, which it does for a custom provider only
 through a catalog provider Orbit does not name, so it takes the model to be text-only: a
 tool's image, such as an MCP screenshot, then reaches the model only as a `MEDIA:` file

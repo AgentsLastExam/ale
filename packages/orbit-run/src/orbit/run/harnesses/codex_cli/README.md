@@ -1,7 +1,8 @@
 # Codex CLI
 
 Runs `codex exec --json`, or `codex exec resume <thread id>`, with `-` reading the prompt
-from stdin. The rollout lives in `.codex-orbit/sessions/**/rollout-<time>-<thread id>.jsonl`.
+from stdin. The rollout lives in `.codex-orbit/sessions/**/rollout-<time>-<thread
+id>.jsonl`.
 
 Codex looks the model up by name in its bundled catalog and takes a model it does not list
 to accept text and images. Only `model_catalog_json`, a whole catalog that replaces the

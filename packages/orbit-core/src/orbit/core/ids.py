@@ -67,9 +67,9 @@ def task_component(task_id: TaskId) -> str:
     """The Task id as the start of one file name, container name or image tag component:
     ``org.name``, in lowercase.
 
-    Every name Orbit derives from a Task id goes through here. Ids differing only in case, or
-    in where a ``.`` stands for the ``/``, share one, so each name adds a unique part of its
-    own.
+    Every name Orbit derives from a Task id goes through here. Ids differing only in case,
+    or in where a ``.`` stands for the ``/``, share one, so each name adds a unique part of
+    its own.
     """
     return task_id.replace("/", ".").lower()
 

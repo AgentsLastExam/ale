@@ -1,8 +1,8 @@
 """The Fleet against the shared Provider contract: a control plane and a Docker Node.
 
-Both run as their own processes on this machine, as `orbit-fleet serve` and `orbit-fleet node`
-would, so every Sandbox the suite creates goes through placement, a grant, the node agent's
-API and the Gateway tunnel before it reaches the Node's Docker Provider.
+Both run as their own processes on this machine, as `orbit-fleet serve` and `orbit-fleet
+node` would, so every Sandbox the suite creates goes through placement, a grant, the node
+agent's API and the Gateway tunnel before it reaches the Node's Docker Provider.
 """
 
 from __future__ import annotations

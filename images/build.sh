@@ -3,17 +3,17 @@
 #
 # Every Orbit image is published once per version and never overwritten. The builder and
 # runner share the engine's version (packages/orbit-run/pyproject.toml); a base has its own
-# (BASES in packages/orbit-run/src/orbit/run/__init__.py). A version the registry already has is
-# pulled; one not published yet is built here, for testing before CI publishes it. The
-# gVisor runtime is installed on a Host rather than used from here; its own build.sh builds
-# it.
+# (BASES in packages/orbit-run/src/orbit/run/__init__.py). A version the registry already
+# has is pulled; one not published yet is built here, for testing before CI publishes it.
+# The gVisor runtime is installed on a Host rather than used from here; its own build.sh
+# builds it.
 #
 # The Linux VM base is a VM disk, not a Docker image. Orbit downloads a published one when a
 # Task first names it, so nothing is pulled ahead; an unpublished one is built into Orbit's
 # cache, and a Task names it there by path to test it.
 #
 #   images/build.sh                      every image
-#   images/build.sh orbit-qemu-runner      selected images, by repository name
+#   images/build.sh orbit-qemu-runner    selected images, by repository name
 set -euo pipefail
 
 cd "$(dirname "$0")/.."   # repository root
@@ -30,11 +30,11 @@ images=("$@")
 
 for repository in "${images[@]}"; do
     case "$repository" in
-        container-ubuntu22-base) dockerfile=images/base/container-ubuntu22/Dockerfile context=images/base/container-ubuntu22 ;;
-        vm-ubuntu24-base)        dockerfile="" context="" ;;
-        orbit-vm-materializer)     dockerfile=images/builders/vm-materializer/Dockerfile context=images/builders/vm-materializer ;;
-        orbit-qemu-runner)         dockerfile=images/runtimes/qemu-runner/Dockerfile context=images/runtimes/qemu-runner ;;
-        orbit-firecracker-runner)  dockerfile=images/runtimes/firecracker-runner/Dockerfile context=images/runtimes/firecracker-runner ;;
+        container-ubuntu22-base)  dockerfile=images/base/container-ubuntu22/Dockerfile context=images/base/container-ubuntu22 ;;
+        vm-ubuntu24-base)         dockerfile="" context="" ;;
+        orbit-vm-materializer)    dockerfile=images/builders/vm-materializer/Dockerfile context=images/builders/vm-materializer ;;
+        orbit-qemu-runner)        dockerfile=images/runtimes/qemu-runner/Dockerfile context=images/runtimes/qemu-runner ;;
+        orbit-firecracker-runner) dockerfile=images/runtimes/firecracker-runner/Dockerfile context=images/runtimes/firecracker-runner ;;
         *) echo "ERROR: unknown image: $repository" >&2; exit 1 ;;
     esac
     case "$repository" in

@@ -72,8 +72,8 @@ tmpfs, ended with nothing to say why, an environment error that is retried.
 **Context.** Measured with the VM base at 4096 MiB and Firecracker's microVM at 1024 MiB
 (November 2026):
 - The guest kernel's OOM killer ended only the allocator
-  (`task_memcg=/system.slice/orbit-guestd.service`), but the commands guestd starts are in its
-  unit, and systemd's default `OOMPolicy=stop` then stopped the unit
+  (`task_memcg=/system.slice/orbit-guestd.service`), but the commands guestd starts are in
+  its unit, and systemd's default `OOMPolicy=stop` then stopped the unit
   (`Failed with result 'oom-kill'`) and restarted guestd a second later, its connections
   gone.
 - The VM's whole memory is the Task's, so every OOM kill in it is the Sandbox's own. The

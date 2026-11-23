@@ -924,9 +924,9 @@ class TaskSpec(BaseModel):
         return self
 
 
-#: The ``task.toml`` format Orbit reads, named by the major and minor Orbit version that last
-#: changed it, as Harbor names its own. A Harbor Task, naming one of Harbor's formats or
-#: none, is read as this one, with a warning; a Task naming any other format fails.
+#: The ``task.toml`` format Orbit reads, named by the major and minor Orbit version that
+#: last changed it, as Harbor names its own. A Harbor Task, naming one of Harbor's formats
+#: or none, is read as this one, with a warning; a Task naming any other format fails.
 SCHEMA_VERSION = "0.2"
 #: Harbor's format versions, ``1.0`` through its current ``1.4``. A Task naming one, or none,
 #: which Harbor reads as its own current version, is Harbor's (``TaskConfig.harbor``).
@@ -1428,11 +1428,11 @@ class SolutionTable(BaseModel):
 class TaskConfig(BaseModel):
     """The strict authored shape of ``task.toml``.
 
-    A Harbor field keeps Harbor's meaning. A field Orbit adds sits in the Harbor table of what
-    it configures, under a name Harbor gives no other meaning, except ``[[calibration]]``,
-    which no Harbor table configures. Every key has a default: a Task that leaves out
-    ``schema_version`` or ``[task].name``, which Orbit's form writes, still loads, and the
-    loader says so.
+    A Harbor field keeps Harbor's meaning. A field Orbit adds sits in the Harbor table of
+    what it configures, under a name Harbor gives no other meaning, except
+    ``[[calibration]]``, which no Harbor table configures. Every key has a default: a Task
+    that leaves out ``schema_version`` or ``[task].name``, which Orbit's form writes, still
+    loads, and the loader says so.
     """
 
     model_config = _FROZEN

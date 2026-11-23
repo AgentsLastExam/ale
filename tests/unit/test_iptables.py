@@ -7,11 +7,11 @@ release-20261109.0 (runsc, the same iptables built to open a UDP socket):
 - ``<kernel|gvisor>-foreign``: rules a Task might add, a user chain jumped to from INPUT and
   OUTPUT with multiport, conntrack, comment and owner matches, FORWARD's policy DROP, a DNAT
   chain and a MASQUERADE;
-- ``<kernel|gvisor>-reference``: the same with Orbit's chains of :data:`STATES` ``reference``
-  built by iptables;
+- ``<kernel|gvisor>-reference``: the same with Orbit's chains of :data:`STATES`
+  ``reference`` built by iptables;
 - ``gvisor-dockerd``: what the dockerd of ``docker:dind``, on iptables-legacy, created in a
-  gVisor sandbox run with ``--net-raw`` and ``CAP_NET_ADMIN``, with Orbit's sealed chains set
-  by the writer.
+  gVisor sandbox run with ``--net-raw`` and ``CAP_NET_ADMIN``, with Orbit's sealed chains
+  set by the writer.
 """
 
 from __future__ import annotations

@@ -6,9 +6,9 @@ every frame through a packet socket on the container's veth: the namespace's net
 sees them, and netstack never sees a network attached later. So a gVisor sandbox boots on a
 bridge network of its own, which is not internal: tc filters on its veth's egress, in its
 network namespace outside the sandbox, seal it, and opening egress removes them. Orbit's own
-chains in netstack, set by :mod:`orbit.run.iptables`, route its Gateway and make what the seal
-drops fail at once. This module builds both, the sandbox's size, and what a sandbox that
-runs a container engine is given; the Provider applies them.
+chains in netstack, set by :mod:`orbit.run.iptables`, route its Gateway and make what the
+seal drops fail at once. This module builds both, the sandbox's size, and what a sandbox
+that runs a container engine is given; the Provider applies them.
 """
 
 from __future__ import annotations
@@ -177,10 +177,10 @@ def netstack(
 
     ``ORBIT_GATEWAY`` sends the fixed Gateway port to ``gateway_port``, when there is one.
     An isolated sandbox's ``ORBIT_HOST`` refuses every port of the Host's address but the
-    episode's ``ports``, always; while it is sealed, ``ORBIT_SEAL`` refuses everything else it
-    sends and ``ORBIT_INPUT`` drops what it did not ask for. Refused, a connection fails at
-    once rather than waiting out the drop outside. ``FORWARD`` jumps too, for what a sandbox
-    forwards between network namespaces of its own.
+    episode's ``ports``, always; while it is sealed, ``ORBIT_SEAL`` refuses everything else
+    it sends and ``ORBIT_INPUT`` drops what it did not ask for. Refused, a connection fails
+    at once rather than waiting out the drop outside. ``FORWARD`` jumps too, for what a
+    sandbox forwards between network namespaces of its own.
     """
     nat: dict[str, object] = {}
     if gateway_port:

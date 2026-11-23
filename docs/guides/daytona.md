@@ -57,8 +57,8 @@ which they are is in
 A Task that sets `[environment].gpus` gets that many GPUs in Daytona's GPU region, which
 Daytona chooses itself, of a model its `gpu_types` accepts; how those names become Daytona's
 GPU types is in the
-[Providers README](../../packages/orbit-run/src/orbit/run/providers/README.md#gpu-models). The
-organization needs GPU quota there; Daytona's usage report lists it per region, with the
+[Providers README](../../packages/orbit-run/src/orbit/run/providers/README.md#gpu-models).
+The organization needs GPU quota there; Daytona's usage report lists it per region, with the
 CPU, memory and disk each GPU may come with. A sandbox takes up to 8 GPUs.
 
 GPU sandboxes are billed per GPU while they exist, and a kept one runs until
@@ -89,8 +89,8 @@ ORBIT_TEST_DAYTONA_GPU=1 uv run pytest -m needs_daytona tests/conformance/test_p
   daytona:<id>`; both touch only sandboxes carrying the `orbit.run.*` labels, so other tools
   in a shared organization, including ones that label their own sandboxes `orbit.*`, are not
   affected.
-- **One registry entry**, `orbit-transient`, which Orbit keeps current so Daytona can build from
-  the images it pushes; leave it in place. Daytona removes pushed images on its own
+- **One registry entry**, `orbit-transient`, which Orbit keeps current so Daytona can build
+  from the images it pushes; leave it in place. Daytona removes pushed images on its own
   schedule, and Orbit pushes again when one is gone.
 
 Nothing else is created: no snapshots, so Daytona's snapshot quota is not used. Under

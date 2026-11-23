@@ -122,9 +122,9 @@ def resolved_judges(config: VerificationConfig) -> dict[str, dict[str, str]]:
     """Each configured Judge as ``orbit_verify`` reads it: its provider's endpoint and key name.
 
     A Judge names only its provider, so its key and URL resolve exactly as the Gateway's do,
-    from ``ORBIT_<PROVIDER>_API_KEY`` and ``ORBIT_<PROVIDER>_BASE_URL``. An LLM Judge's endpoint
-    carries its dialect's path, which is how ``orbit_verify`` learns the protocol; an Agent
-    Judge's protocol follows from its CLI.
+    from ``ORBIT_<PROVIDER>_API_KEY`` and ``ORBIT_<PROVIDER>_BASE_URL``. An LLM Judge's
+    endpoint carries its dialect's path, which is how ``orbit_verify`` learns the protocol;
+    an Agent Judge's protocol follows from its CLI.
     """
     resolved: dict[str, dict[str, str]] = {}
     for kind in _JUDGE_KINDS:

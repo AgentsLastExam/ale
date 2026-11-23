@@ -85,8 +85,8 @@ configured limits, usage accounting and Transport Trace stay common.
 
 - Provider subscription quota, billing and account concurrency remain provider-owned.
 - Orbit refreshes a rejected subscription token once. A usage limit is not tried again
-  ([Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md#provider-failures))
-  and an agent whose CLI stops on one ends `env_error`, unscored.
+  ([Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md#provider-failures)) and
+  an agent whose CLI stops on one ends `env_error`, unscored.
 - Codex's subscription endpoint rejects `max_output_tokens`. Orbit records completed usage
   and refuses later calls after a ceiling, but cannot hard-cap that current response with
   the public Responses field.

@@ -1,7 +1,7 @@
 """macOS sandboxes on the local Orchard controller and Tart worker.
 
-``scripts/setup_macos.py`` runs both on this Mac. Every VM Orbit creates is a clone of a local
-image that carries the framework (``framing``). Orbit owns only the VMs it creates,
+``scripts/setup_macos.py`` runs both on this Mac. Every VM Orbit creates is a clone of a
+local image that carries the framework (``framing``). Orbit owns only the VMs it creates,
 which last one episode unless kept; it never adopts a VM it did not create, nor changes the
 images it is given. Each sandbox the agent works in shows the desktop its image signs the
 Task's account in to.

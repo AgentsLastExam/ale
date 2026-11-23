@@ -23,8 +23,8 @@ app = typer.Typer(
 @app.callback()
 def root() -> None:
     """Pool Sandbox capacity across machines."""
-    # As for `orbit`: credentials come from the checkout's .env, which a Node needs to prepare
-    # images as a local Run would. A variable already set in the environment wins.
+    # As for `orbit`: credentials come from the checkout's .env, which a Node needs to
+    # prepare images as a local Run would. A variable already set in the environment wins.
     load_env()
 
 

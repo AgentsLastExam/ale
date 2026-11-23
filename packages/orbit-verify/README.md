@@ -19,8 +19,9 @@ agent.
 Task code may write `reward.json` directly without this package. The program must exit
 successfully for Orbit to accept it. Judge logs are independent.
 
-The package imports neither `orbit.core` nor `orbit.run`. Orbit stages its pinned pure-Python
-JSON Schema library alongside it. See [Verification](../../docs/specs/verification.md).
+The package imports neither `orbit.core` nor `orbit.run`. Orbit stages its pinned
+pure-Python JSON Schema library alongside it. See
+[Verification](../../docs/specs/verification.md).
 
 ```bash
 uv run pytest packages/orbit-verify/tests

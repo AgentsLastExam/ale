@@ -22,13 +22,13 @@ of the Task's own build or the image it names (the framework layer):
 - guestd, the guest service every sandbox operation goes through, under root-only
   `/opt/orbit`, so it always speaks the protocol of the engine driving it;
 - the framework's own Python at a pinned version, which guestd runs on whatever Python the
-  image has (or lacks): `/opt/orbit/python` on Linux and macOS, `C:\ProgramData\Orbit\python` on
-  Windows. guestd runs it isolated (`-I`), in a directory only the framework writes, and so
-  does every root process guestd starts on it, so neither the image's `PYTHON*` variables,
-  which a container's exec inherits, nor the agent's files change their modules or the
-  buffering of guestd's replies. Only the framework's identity can run it, except on macOS,
-  where the agent's desktop tool and Harness helpers run it too; the agent's PATH never
-  includes it;
+  image has (or lacks): `/opt/orbit/python` on Linux and macOS,
+  `C:\ProgramData\Orbit\python` on Windows. guestd runs it isolated (`-I`), in a directory
+  only the framework writes, and so does every root process guestd starts on it, so neither
+  the image's `PYTHON*` variables, which a container's exec inherits, nor the agent's files
+  change their modules or the buffering of guestd's replies. Only the framework's identity
+  can run it, except on macOS, where the agent's desktop tool and Harness helpers run it
+  too; the agent's PATH never includes it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation, which
   every account may run, because the agent's `cua-desktop` MCP server runs it too;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
@@ -66,10 +66,10 @@ once its window manager or shell runs.
 
 A Windows Task builds `environment/build.ps1` on an Orbit Windows base. The base signs its agent
 account in to a desktop automatically, with UAC on, and carries none of the framework; the
-Python it installs for all users is for Tasks and agents. Orbit installs the framework offline
-into the build VM's disk, a layer on the base, before it boots, so the build talks to the
-same guestd as every later sandbox, and the Task's script cannot replace the framework's
-pieces:
+Python it installs for all users is for Tasks and agents. Orbit installs the framework
+offline into the build VM's disk, a layer on the base, before it boots, so the build talks
+to the same guestd as every later sandbox, and the Task's script cannot replace the
+framework's pieces:
 
 - the current guestd under `C:\ProgramData\Orbit\guestd`, Cua Driver at the pinned version
   under `C:\ProgramData\Orbit\cua-driver`, and the framework's own Python;
@@ -212,8 +212,8 @@ both recorded immutably.
 On Linux and Windows, `[environment].image` may also be an absolute host path to a
 standalone qcow2; a macOS image is always a Tart OCI reference. Local disks are structurally
 checked and their actual file bytes are SHA-256 hashed at preparation, without contacting a
-registry. Disks with backing or external data files are rejected: Orbit knows a layer's parent
-only for the layers it makes, so a disk it is handed must hold its whole content. The
+registry. Disks with backing or external data files are rejected: Orbit knows a layer's
+parent only for the layers it makes, so a disk it is handed must hold its whole content. The
 operator must keep prepared local disks unchanged while they are in use.
 
 Any other Linux or Windows VM image names a VM disk published to an OCI registry with
@@ -230,8 +230,9 @@ builds on it, read without decompressing. Its format is in the
 A Provider may keep a prepared VM disk as a chain of layers, each holding only what changed
 on the one below, rather than flattening it, so a Host stores a base once under all the
 Tasks built on it; the QEMU Provider keeps a Linux or Windows Task image and a snapshot
-that way ([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#disk-layers)).
-A layer's identity is the hash of its parent's identity and the SHA-256 of its own bytes, as
+that way
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#disk-layers)). A
+layer's identity is the hash of its parent's identity and the SHA-256 of its own bytes, as
 an OCI ChainID is; the bottom disk's is the identity it was resolved under, whatever form a
 Host stores it in. Each layer is hashed once, when it is made, and a chain in which a layer
 sits on another parent than the one it recorded is refused, so the top layer's identity
@@ -292,8 +293,8 @@ assembles boot or a disk itself. Reuse covers the whole build and is keyed by ba
 framework, builder, and every file staged; there is no per-command cache or new recipe
 language. Authoring details belong to [Task authoring](task-authoring.md#environment).
 
-Windows 10 has no public ISO build path in Orbit. The current Windows base starts from the GCP
-image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
+Windows 10 has no public ISO build path in Orbit. The current Windows base starts from the
+GCP image `agenthle-win10-base-0210`; the maintained `images/base/vm-windows10/prepare.ps1`
 recipe installs and pins Orbit's cross-platform components, and `compact.sh` checks the
 resulting qcow2 and rewrites it uncompressed. Episodes always cold-boot a fresh overlay,
 over a retention snapshot when they continue one. Orbit creates no ready snapshot or warm
@@ -344,8 +345,8 @@ reset/seeding, generated values, writable copies, dynamic service start/reset, a
 checks. Setup is not a second image builder.
 
 Small static data may be committed anywhere in the build context. Large data is a
-[Task asset](task-assets.md) restored by `orbit assets pull`, then the same image build path.
-Runtime never downloads it.
+[Task asset](task-assets.md) restored by `orbit assets pull`, then the same image build
+path. Runtime never downloads it.
 
 ## Verifier images
 
@@ -483,8 +484,8 @@ whole GPUs gives it only such a model. A leaf that shares a GPU:
   past a share is memory another Sandbox was admitted with, and going past it is the
   Sandbox's own doing, so the episode goes on with what the agent makes of it rather than
   ending in an environment error that would rerun or unscore it. Where a limit's
-  accounting fails, which is Orbit's failure, it stops the Sandbox and the episode ends in an
-  environment error that says what used how much. Every selection says which leaves only
+  accounting fails, which is Orbit's failure, it stops the Sandbox and the episode ends in
+  an environment error that says what used how much. Every selection says which leaves only
   watch, and for how many Sandboxes;
 - records in the RunLock what it reserved on each GPU, how the Sandbox is held to it, and
   each GPU's total and free memory when it admitted the Sandbox.

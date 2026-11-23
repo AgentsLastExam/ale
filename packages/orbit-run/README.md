@@ -34,10 +34,10 @@ uv run orbit sandbox list
 ```
 
 Configuration is layered as CLI overrides, run TOML, Harness preset and model defaults.
-For `run`, `calibrate`, `prepare`, and `reverify`, `ORBIT_RUN_CONFIG` selects the default run
-TOML when `--config` is absent. An explicit `--config` replaces that default file; `--set`
-overrides values from the selected file. Use `--set section.key=value` for any setting
-without a dedicated flag. `sandbox.providers` lists the Providers that start a Run's
+For `run`, `calibrate`, `prepare`, and `reverify`, `ORBIT_RUN_CONFIG` selects the default
+run TOML when `--config` is absent. An explicit `--config` replaces that default file;
+`--set` overrides values from the selected file. Use `--set section.key=value` for any
+setting without a dedicated flag. `sandbox.providers` lists the Providers that start a Run's
 Sandboxes ([Choose Providers](../../docs/guides/development.md#choose-providers)). Model
 provider API keys belong in the checkout's gitignored `.env` under the `ORBIT_` names in
 [`../../.env.example`](../../.env.example); subscription setup is documented in

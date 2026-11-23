@@ -229,8 +229,8 @@ The Sandbox receives a URL and a bearer token that is worthless anywhere else an
 revoked when the episode ends — verified by `test_a_revoked_session_loses_its_egress`.
 
 Subscription access and refresh credentials remain in checkout-local Host state:
-`ORBIT_CLAUDE_CODE_OAUTH_TOKEN` in `.env`, and `.orbit/auth/<harness>/auth.json` for Codex and
-Grok. They go only to the provider's own subscription endpoint, never to
+`ORBIT_CLAUDE_CODE_OAUTH_TOKEN` in `.env`, and `.orbit/auth/<harness>/auth.json` for Codex
+and Grok. They go only to the provider's own subscription endpoint, never to
 `ORBIT_<PROVIDER>_BASE_URL`. The Gateway replaces the episode token with current provider
 authorization only after authenticating the session. Framework-authored result, trace,
 and RunLock fields contain neither raw credential nor profile path.
@@ -252,8 +252,8 @@ The one credential a Sandbox can receive beyond episode tokens is one its Task d
 `env` table, such as a token for a service the Task itself uses
 ([Task authoring](task-authoring.md#variables)). It comes from the checkout's `.env` only,
 reaches only the commands its table names, is redacted from every record, and can neither
-refer to an `ORBIT_` variable nor equal a Host credential, so no model or Judge key leaves the
-Gateway this way. `[environment].env` reaches the agent, and the agent can read it.
+refer to an `ORBIT_` variable nor equal a Host credential, so no model or Judge key leaves
+the Gateway this way. `[environment].env` reaches the agent, and the agent can read it.
 
 ## 4. The agent cannot change what it is measured under
 
@@ -488,8 +488,8 @@ security claims rot.
 **A malicious task author.** A Task folder's setup and verification entries run as trusted
 framework-controlled code, and a Task may declare `[agent].sudo` for its agent. Tasks
 are reviewed content, not untrusted input; the identity model protects a result from its
-*agent*, not a host from its Task. The gates that exist (`orbit lint`, `orbit calibrate`, CI,
-PR review) are aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host
+*agent*, not a host from its Task. The gates that exist (`orbit lint`, `orbit calibrate`,
+CI, PR review) are aimed at *broken* Tasks, not hostile ones. Judge keys stay on the Host
 Gateway; a malicious verifier can only spend its episode's Judge session while that episode
 runs.
 
@@ -550,10 +550,10 @@ reaches `tests/` in any mode.
 
 **Programs on the agent's disk.** A shared or snapshot verifier runs as root on the disk the
 agent left. With `[agent].sudo` the agent could change any program there, the image's
-Python that `ORBIT_VERIFY_PYTHON` selects included, and so what the verifier computes; without
-it, only what its account can write. A Task whose verifier must not run agent-changed code
-withholds sudo or uses separate verification, on its own image or the solver's, which
-restores only the declared artifacts into a fresh Sandbox.
+Python that `ORBIT_VERIFY_PYTHON` selects included, and so what the verifier computes;
+without it, only what its account can write. A Task whose verifier must not run
+agent-changed code withholds sudo or uses separate verification, on its own image or the
+solver's, which restores only the declared artifacts into a fresh Sandbox.
 
 **Unscored rather than low.** With `[agent].sudo` the agent can also make what runs on its
 disk after it fail under snapshot verification: the sanitation before the solver's save, the

@@ -69,14 +69,15 @@ administrator approves can download a file, so contributors request access on th
 page rather than joining the namespace, which would open its other private datasets to them.
 It is gated before it becomes public, so tests, solutions and licensed software are never
 downloadable by anyone not approved. The collection starts private. The checkpoint does not
-upload Task files. An existing dataset keeps the settings its owner chose, and Orbit treats a
-public, gated or private one alike. Commands pass `ORBIT_HF_TOKEN` from the checkout's `.env` explicitly to every Hugging Face
-call and Git request; without it they are anonymous, which is enough to pull a public dataset.
-The operator's own `HF_TOKEN` or cached Hugging Face login is never used, so the checkout alone
-decides which account Orbit acts as. Credentials never enter a remote Git URL or the Task
-definition. Git and Git LFS must be installed for local checkpoints and uploads. Pull does not
-read the collection. `ORBIT_ASSETS_COLLECTION` or `--collection`, when supplied for manual push,
-must identify the namespace's collection titled `assets`; otherwise it is discovered.
+upload Task files. An existing dataset keeps the settings its owner chose, and Orbit treats
+a public, gated or private one alike. Commands pass `ORBIT_HF_TOKEN` from the checkout's
+`.env` explicitly to every Hugging Face call and Git request; without it they are anonymous,
+which is enough to pull a public dataset. The operator's own `HF_TOKEN` or cached Hugging
+Face login is never used, so the checkout alone decides which account Orbit acts as.
+Credentials never enter a remote Git URL or the Task definition. Git and Git LFS must be
+installed for local checkpoints and uploads. Pull does not read the collection.
+`ORBIT_ASSETS_COLLECTION` or `--collection`, when supplied for manual push, must identify
+the namespace's collection titled `assets`; otherwise it is discovered.
 
 ## Local versions
 

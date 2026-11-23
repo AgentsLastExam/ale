@@ -29,9 +29,9 @@ not enough, so the Gateway URL is set there. Before each run Muse fetches
 Muse's `web_search` runs on Meta's side. In its default client mode the CLI sends each
 query to `/muse-code/search` at the model endpoint's origin, which the Gateway does not
 serve; in hosted mode each model request carries a hosted search tool instead. When
-`web_tools` is on and the Task's network is `open`, Orbit sets `MUSE_WEB_SEARCH_MODE=hosted`.
-Otherwise it passes `--disable-web-tools`, which removes Muse's `web_fetch` as well,
-though it fetches locally; no switch keeps it alone.
+`web_tools` is on and the Task's network is `open`, Orbit sets
+`MUSE_WEB_SEARCH_MODE=hosted`. Otherwise it passes `--disable-web-tools`, which removes
+Muse's `web_fetch` as well, though it fetches locally; no switch keeps it alone.
 
 A launch passes a new UUID to `--session-id`, and a resume passes the same ID again. The
 session is `.local/share/muse/sessions/<year>/<month>/<day>/<session id>/session.jsonl`.

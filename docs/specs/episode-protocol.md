@@ -43,8 +43,8 @@ deadline starts at Harness launch (or policy rollout), after installation, resou
 and network policy. Evidence capture, verification, and cleanup do not consume it. An Agent
 timeout terminates execution, is not retried, and destroys its Sandbox even if retention was
 requested, after verification. Teardown is cancellation-shielded on every exit path, and
-SIGTERM cancels a command as Ctrl-C does, so a supervisor or timeout that stops `orbit` still
-lets it destroy every Sandbox it created.
+SIGTERM cancels a command as Ctrl-C does, so a supervisor or timeout that stops `orbit`
+still lets it destroy every Sandbox it created.
 
 ### Provision
 
@@ -170,14 +170,14 @@ Shared verification uploads `tests/` into the completed solver sandbox. Separate
 verification first releases or retains the solver according to run policy, provisions a
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
 and uploads the same `tests/`. It never reruns setup or copies the solver filesystem. Before
-it captures them, Orbit asks the solver's leaf whether it serves a verifier that mounts views
-of the solver's volumes and saves the solver once more, which a solver kept running is
-not: if so, the verifier mounts a view of each volume from the solver's snapshot, which Orbit
-rids of what copying would have skipped, links, special files and `exclude` matches, and
-those are not copied. Where the leaf then refuses that verifier after all, as a Fleet Node
-too small for it does, Orbit copies the volumes from a Sandbox booted from the snapshot with
-the solver's resources, which fit there, and starts a verifier that mounts none, wherever
-one can start: views spare a copy, and their absence never fails the episode.
+it captures them, Orbit asks the solver's leaf whether it serves a verifier that mounts
+views of the solver's volumes and saves the solver once more, which a solver kept running is
+not: if so, the verifier mounts a view of each volume from the solver's snapshot, which
+Orbit rids of what copying would have skipped, links, special files and `exclude` matches,
+and those are not copied. Where the leaf then refuses that verifier after all, as a Fleet
+Node too small for it does, Orbit copies the volumes from a Sandbox booted from the snapshot
+with the solver's resources, which fit there, and starts a verifier that mounts none,
+wherever one can start: views spare a copy, and their absence never fails the episode.
 
 Snapshot verification boots a fresh verifier Sandbox from the solver's snapshot, on the leaf
 that saved it, with the verifier's resources and the solver's account, and uploads the same
@@ -196,10 +196,10 @@ agent's, which is why a solver that serves a shared verifier is created able to 
 drop privileges when executing a submitted program. Orbit stages `orbit_verify`, the
 instruction, optional solver trajectory, and run-level Judge configuration, then executes
 the OS entry from the verification staging directory. Linux and macOS use
-`/opt/orbit/tests/test.sh`; Windows uses `C:\ProgramData\Orbit\tests\test.ps1`. Orbit selects
-Python 3.12+ (`python3`, then `python3.12` on Linux and macOS; `python.exe` on Windows; then
-the framework's own) and provides its command as `ORBIT_VERIFY_PYTHON`. Every placement
-leaves the same [result](verification.md#result) in `/logs/verifier`
+`/opt/orbit/tests/test.sh`; Windows uses `C:\ProgramData\Orbit\tests\test.ps1`. Orbit
+selects Python 3.12+ (`python3`, then `python3.12` on Linux and macOS; `python.exe` on
+Windows; then the framework's own) and provides its command as `ORBIT_VERIFY_PYTHON`. Every
+placement leaves the same [result](verification.md#result) in `/logs/verifier`
 (`C:\logs\verifier`, macOS `/opt/orbit/logs/verifier`), which Orbit empties and gives to the
 framework alone before every attempt. The solver interpreter is unchanged.
 
@@ -312,11 +312,11 @@ prepared; either can set `validation_rounds = 0`.
 A Provider that holds a Sandbox only until a set time, as a scheduler holds an allocation
 for its wall time, gives the Sandbox a deadline: the latest time to begin saving it, which
 leaves what the save and writing it where another Sandbox can boot from it take
-([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#slurm)), and declares
-how long it holds one at most. A run of the agent is bounded, as it launches, by that
-deadline less 120 s for stopping the agent, copying its logs and sanitizing the solver, as
-by the agent's time. Where the deadline ends a run first, the turn is not over: the solver
-moves, so that an episode can be longer than any one Sandbox lasts.
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#slurm)), and
+declares how long it holds one at most. A run of the agent is bounded, as it launches, by
+that deadline less 120 s for stopping the agent, copying its logs and sanitizing the solver,
+as by the agent's time. Where the deadline ends a run first, the turn is not over: the
+solver moves, so that an episode can be longer than any one Sandbox lasts.
 
 1. The agent's logs are copied as a turn's end copies them, and the solver is sanitized as
    for retention and saved as a snapshot, which stops it and every process in it.
@@ -366,16 +366,16 @@ another kind is refused, and so is a kept shared Sandbox for separate or snapsho
 verification, since its disk holds what its shared verifier changed. An episode with
 validation rounds keeps no solver running, so it can be reverified only from a snapshot.
 
-For shared verification, Orbit reconnects to the retained shared Sandbox and runs the current
-`tests/` there. For separate verification, Orbit captures the declared artifacts from the
-retained solver, detaches without destroying it, provisions a fresh verifier Sandbox,
-restores the artifacts, and runs the current `tests/` there; from a snapshot, it boots a
-Sandbox from the snapshot to capture them instead, but for the volumes the verifier mounts
-views of, as a separate verifier does in an episode. For snapshot verification, Orbit boots a
-fresh verifier Sandbox from the source's snapshot, on the Provider that keeps it, captures
-the declared artifacts there when run policy collects them, and runs the current `tests/`,
-leaving the snapshot as it was. Before any path uploads `tests/`, Orbit removes the previously
-staged verifier files so deleted files cannot survive a revision.
+For shared verification, Orbit reconnects to the retained shared Sandbox and runs the
+current `tests/` there. For separate verification, Orbit captures the declared artifacts
+from the retained solver, detaches without destroying it, provisions a fresh verifier
+Sandbox, restores the artifacts, and runs the current `tests/` there; from a snapshot, it
+boots a Sandbox from the snapshot to capture them instead, but for the volumes the verifier
+mounts views of, as a separate verifier does in an episode. For snapshot verification, Orbit
+boots a fresh verifier Sandbox from the source's snapshot, on the Provider that keeps it,
+captures the declared artifacts there when run policy collects them, and runs the current
+`tests/`, leaving the snapshot as it was. Before any path uploads `tests/`, Orbit removes
+the previously staged verifier files so deleted files cannot survive a revision.
 
 The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory,
 with the blobs it references, for verifier and review use and records its own verification, result,

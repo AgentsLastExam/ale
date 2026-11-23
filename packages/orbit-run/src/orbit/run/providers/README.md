@@ -283,24 +283,24 @@ and the default margin), so that a Sandbox that needs more on every model it acc
 the next listed Provider rather than to a leaf that could never admit it.
 
 **Admission.** A Docker leaf admits a Sandbox to the Host's GPUs under one lock for its
-Docker daemon, `/tmp/orbit-gpu-<daemon ID>.lock` (`docker info --format {{.ID}}`), which every
-Orbit process of every user that admits through that daemon takes, whatever its cache, from
-reading the GPUs until `docker run` returns. It is opened read-only, which `flock` needs no
-more than: `fs.protected_regular` refuses `O_CREAT` on another user's file in the sticky
-`/tmp`, so the first process creates it with `O_EXCL`, readable by all whatever its umask,
-and the others open it as it is. The running containers' labels are the record of what Orbit
-holds: every Sandbox carries `orbit.gpus`, the GPUs it holds, and `orbit.gpu_memory_mb`, what it
-reserved on each when it shares them, both empty when unused, so an image's labels never
-stand in for them. The record is per daemon: Runs on one Host through different daemons,
-such as each user's rootless one, see what each other's Sandboxes use, through nvidia-smi,
-but not what they reserved and do not use yet. Under the lock it reads `nvidia-smi
---query-gpu=...,memory.total,memory.reserved,memory.free`, the labels of the running Orbit
-containers (`docker ps`), and, when one shares a GPU, what each process uses (`nvidia-smi
---query-compute-apps=pid,used_memory,gpu_uuid`), which it assigns to a container by the
-process's cgroup (`docker-<id>.scope` with the systemd driver, rootful or rootless;
-`/docker/<id>` with cgroupfs). nvidia-smi lists every user's processes, by their PIDs in the
-Host's namespace: under runc one row for each CUDA process, under gVisor one for the whole
-Sandbox, its Sentry, whose memory is nvproxy's count (measured).
+Docker daemon, `/tmp/orbit-gpu-<daemon ID>.lock` (`docker info --format {{.ID}}`), which
+every Orbit process of every user that admits through that daemon takes, whatever its cache,
+from reading the GPUs until `docker run` returns. It is opened read-only, which `flock`
+needs no more than: `fs.protected_regular` refuses `O_CREAT` on another user's file in the
+sticky `/tmp`, so the first process creates it with `O_EXCL`, readable by all whatever its
+umask, and the others open it as it is. The running containers' labels are the record of
+what Orbit holds: every Sandbox carries `orbit.gpus`, the GPUs it holds, and
+`orbit.gpu_memory_mb`, what it reserved on each when it shares them, both empty when unused,
+so an image's labels never stand in for them. The record is per daemon: Runs on one Host
+through different daemons, such as each user's rootless one, see what each other's Sandboxes
+use, through nvidia-smi, but not what they reserved and do not use yet. Under the lock it
+reads `nvidia-smi --query-gpu=...,memory.total,memory.reserved,memory.free`, the labels of
+the running Orbit containers (`docker ps`), and, when one shares a GPU, what each process
+uses (`nvidia-smi --query-compute-apps=pid,used_memory,gpu_uuid`), which it assigns to a
+container by the process's cgroup (`docker-<id>.scope` with the systemd driver, rootful or
+rootless; `/docker/<id>` with cgroupfs). nvidia-smi lists every user's processes, by their
+PIDs in the Host's namespace: under runc one row for each CUDA process, under gVisor one for
+the whole Sandbox, its Sentry, whose memory is nvproxy's count (measured).
 
 | Sandbox | May take a GPU | Of those, takes |
 |---|---|---|
@@ -325,8 +325,8 @@ fails as CUDA out of memory (`cudaErrorMemoryAllocation`, `torch.OutOfMemoryErro
 context that does not fit fails to be created, and the Sandbox goes on
 ([runtime](../../../../../../images/runtimes/gvisor/README.md#gpu-memory-limit)). Its
 preflight, whenever a Sandbox may share GPUs, checks that `runsc flags` lists
-`-nvproxy-gpu-memory-limit`, which only Orbit's build has. Under `docker:runc` nothing holds a
-process to a device memory limit, so every selection (`orbit run`, `orbit calibrate`, a
+`-nvproxy-gpu-memory-limit`, which only Orbit's build has. Under `docker:runc` nothing holds
+a process to a device memory limit, so every selection (`orbit run`, `orbit calibrate`, a
 reverification) says once, for the leaf and how many Sandboxes it serves so: `note
 docker:runc watches the gpu_memory_mb of N Sandboxes rather than enforcing it: a process
 past its share is killed`.
@@ -570,8 +570,8 @@ Docker leaf keeps the Provider name `docker` in its handles.
 
 Its preflight, given what the Run's Sandboxes of it need (everything its profiles declare,
 for a Node), finds each name they run under among those `docker info` lists, registered
-with exactly the arguments the runtime takes when Orbit builds it, or, for a containerd shim's
-name such as
+with exactly the arguments the runtime takes when Orbit builds it, or, for a containerd
+shim's name such as
 `io.containerd.kata.v2`, the shim `containerd-shim-kata-v2` on the PATH Docker runs it
 from, and checks its devices. It starts every Sandbox with `--runtime` naming the runtime
 its features need, `runc` included, and refuses one for which `docker inspect` reports
@@ -589,11 +589,11 @@ gone, was lost to memory ([Memory](#memory)). Otherwise a stopped container is r
 the sandbox itself dying: it was killed from outside on exit code 137, and otherwise its
 main process exited with its code; one still running lost only the session, which is
 reported as a lost guest session, with guestd's stderr. A session that never answered failed
-to start, and its stderr is reported at once. Orbit ends a session itself before it destroys,
-keeps or snapshots the Sandbox, and that end asks nothing of Docker. Nor does the end of a
-Sandbox that Orbit stopped, by the GPU watchdog ([GPU memory](#gpu-memory)) or the storage
-watch ([Docker writable storage](#docker-writable-storage)): it is reported as what Orbit
-stopped it for, whatever `OOMKilled` or a watcher says.
+to start, and its stderr is reported at once. Orbit ends a session itself before it
+destroys, keeps or snapshots the Sandbox, and that end asks nothing of Docker. Nor does the
+end of a Sandbox that Orbit stopped, by the GPU watchdog ([GPU memory](#gpu-memory)) or the
+storage watch ([Docker writable storage](#docker-writable-storage)): it is reported as what
+Orbit stopped it for, whatever `OOMKilled` or a watcher says.
 
 On every Docker leaf a sandbox runs its image's command before the Provider confines it,
 until the network helper's first run returns: 0.35 to 0.45 s after `docker run` did, most of
@@ -609,9 +609,9 @@ A rootless daemon's bridges are in a network namespace of rootlesskit's, which i
 for them (`--detach-netns`, `dockerd-rootless.sh`'s default) or which is the daemon's own,
 and which reaches no port on the Host's loopback (`--disable-host-loopback`): nothing the
 Host serves answers at a bridge's address. When `docker info` reports the daemon rootless
-and its bridges are in another network namespace than Orbit's, the Provider listens there, on
-every address, at each port of the Gateway and egress proxy its Sandboxes reach, and relays
-each connection to that port on the Host's loopback; a connection the port refuses is
+and its bridges are in another network namespace than Orbit's, the Provider listens there,
+on every address, at each port of the Gateway and egress proxy its Sandboxes reach, and
+relays each connection to that port on the Host's loopback; a connection the port refuses is
 reset. The seal is unchanged: it still admits only those ports of the Host's address. The
 Provider finds the namespace as `dockerd-rootless.sh` does: the daemon is the process on
 the socket the CLI uses (`SO_PEERCRED`), and the namespace is
@@ -759,15 +759,15 @@ pay for it most.
 
 ## Docker on gVisor
 
-The `docker:gvisor` leaf starts each of its sandboxes under Orbit's build of gVisor's `runsc`
-([gVisor runtime](../../../../../../images/runtimes/gvisor/README.md)): the container's
-system calls go to the Sentry, a kernel in user space, so an exploit in the sandbox must
-escape the Sentry and then its seccomp filter to reach the Host's kernel. The image, guestd
-over `docker exec`, files, uploads, the desktop, GPUs and snapshots work as on runc, and the
-allocation records the runtime Docker reports. Each row below was measured with Orbit's build
-of runsc release-20261109.0, with patches 0001 to 0005 and, for the rows on container
-engines, 0006 to 0008, which change only nf_tables and its connection tracking, under
-Docker 29.1.3 (containerd snapshotter) on Linux 7.0.
+The `docker:gvisor` leaf starts each of its sandboxes under Orbit's build of gVisor's
+`runsc` ([gVisor runtime](../../../../../../images/runtimes/gvisor/README.md)): the
+container's system calls go to the Sentry, a kernel in user space, so an exploit in the
+sandbox must escape the Sentry and then its seccomp filter to reach the Host's kernel. The
+image, guestd over `docker exec`, files, uploads, the desktop, GPUs and snapshots work as on
+runc, and the allocation records the runtime Docker reports. Each row below was measured
+with Orbit's build of runsc release-20261109.0, with patches 0001 to 0005 and, for the rows
+on container engines, 0006 to 0008, which change only nf_tables and its connection tracking,
+under Docker 29.1.3 (containerd snapshotter) on Linux 7.0.
 
 Every Host registers Orbit's `runsc` in Docker three times, the same on every Host, GPUs or
 not: as `runsc`, as `runsc-net-raw`, which adds `--net-raw`, and as `runsc-nested`, which
@@ -820,8 +820,8 @@ not supported`) and netavark 1.4 makes a netlink request that fails with `EINVAL
 
 The filters and chains confine IPv4. The Provider creates a sandbox's network without IPv6;
 on a daemon that enables IPv6 on every new network, the Host's IPv6 address is outside the
-Host's drop and `ORBIT_HOST` while egress is open, though the seal drops IPv6 like everything
-else.
+Host's drop and `ORBIT_HOST` while egress is open, though the seal drops IPv6 like
+everything else.
 
 What it costs, on a 112-core Host under a load of about 40: starting a bare container until
 `docker exec` works took a median 0.28 s against runc's 0.33 s, and an idle sandbox's
@@ -926,11 +926,11 @@ snapshot that does not fit beside what runs in its allocation, or that it would 
 gets an allocation of its own, which loads the snapshot written out with `podman save`; a
 snapshot the Run keeps (`sandbox_retention.solver = "snapshot"`) is written out as it is
 saved, as its allocation ends with the episode, and costs that copy.
-`orbit sandbox destroy slurm:<job name>/<index>` removes one; `orbit sandbox list` lists those
-written out below the cache. A chain of 200 commits, each booted from the one before, over a
-one-layer image was measured, so each profile saves 200 in a row; a container engine's
-storage is volumes, which a snapshot keeps as layers beside its commit. Slurm keeps no
-running Sandbox and limits no writable storage.
+`orbit sandbox destroy slurm:<job name>/<index>` removes one; `orbit sandbox list` lists
+those written out below the cache. A chain of 200 commits, each booted from the one before,
+over a one-layer image was measured, so each profile saves 200 in a row; a container
+engine's storage is volumes, which a snapshot keeps as layers beside its commit. Slurm keeps
+no running Sandbox and limits no writable storage.
 
 `srun --overlap --unbuffered` from the login node opens guestd's command and file sessions,
 a watcher of the Sentry's OOM kills and a tunnel, which carries the Run's Gateway, on the
@@ -992,9 +992,9 @@ function Task preparation uses for a qcow2 `ref`, so both share one cache in `vm
 Measured on a KVM host:
 
 - A disk that already carries this framework, such as one Orbit prepared, boots as it is.
-  Reading its marker (`/opt/orbit/framework`, or `C:\ProgramData\Orbit\framework` on Windows)
-  with the VM builder's `virt-cat` takes about 3 s, and the answer is recorded next to the
-  cache, so each disk pays it once per Host.
+  Reading its marker (`/opt/orbit/framework`, or `C:\ProgramData\Orbit\framework` on
+  Windows) with the VM builder's `virt-cat` takes about 3 s, and the answer is recorded next
+  to the cache, so each disk pays it once per Host.
 - Any other disk is framed offline into a [layer](#disk-layers) on its base
   (`images.base_layer`), once per disk, framework identity and builder image. A disk
   pulled from a registry is that base as it is ([registry disks](#registry-disks)). A local
@@ -1006,11 +1006,11 @@ Measured on a KVM host:
   boots, which the RunLock records.
 
 A VM boots from a qcow2 overlay on that disk, in `qemu/<sandbox id>/`; the disks, overlays
-and snapshots all live in the Orbit cache (`ORBIT_CACHE_DIR`, `~/.cache/orbit` by default). The
-runner opens them with `cache=none,aio=native`, which bypasses the page cache, and ZFS then
-bypasses its own cache as well, so the Orbit cache belongs on local SSD. From a ZFS pool of
-5400 rpm disks a Linux guest took 115–133 s to come up with its desktop rather than 20 s,
-and a Windows guest 250–310 s rather than 52 s.
+and snapshots all live in the Orbit cache (`ORBIT_CACHE_DIR`, `~/.cache/orbit` by default).
+The runner opens them with `cache=none,aio=native`, which bypasses the page cache, and ZFS
+then bypasses its own cache as well, so the Orbit cache belongs on local SSD. From a ZFS
+pool of 5400 rpm disks a Linux guest took 115–133 s to come up with its desktop rather than
+20 s, and a Windows guest 250–310 s rather than 52 s.
 
 ### Disk layers
 
@@ -1203,12 +1203,13 @@ A Tart disk is APFS, which only macOS reads, so `orchard/framing.py` frames an i
 the Mac, once per image, framework and account, the way the QEMU Provider frames a qcow2:
 it clones the image with Tart and has `framework_macos.sh` change the clone's disk offline.
 `scripts/setup_macos.py` installs that script root-owned as
-`/usr/local/libexec/orbit/framework-macos` with a sudoers rule for it alone, and the Provider
-refuses to frame when the installed copy differs from its own. The framer attaches the disk
-without mounting it, mounts only its Data volume, hidden from the Finder and without device
-files or set-uid programs, follows no link on it and runs none of its programs. It checks
-that the account it frames for, the Task's or `admin` for a `build.sh` VM, exists with a
-home and is signed in automatically (`autoLoginUser` and `/etc/kcpassword`), then installs:
+`/usr/local/libexec/orbit/framework-macos` with a sudoers rule for it alone, and the
+Provider refuses to frame when the installed copy differs from its own. The framer attaches
+the disk without mounting it, mounts only its Data volume, hidden from the Finder and
+without device files or set-uid programs, follows no link on it and runs none of its
+programs. It checks that the account it frames for, the Task's or `admin` for a `build.sh`
+VM, exists with a home and is signed in automatically (`autoLoginUser` and
+`/etc/kcpassword`), then installs:
 
 - guestd and a standalone Python under `/opt/orbit` (the Python readable by every account,
   for the agent's desktop tool and the Harnesses' helper scripts);
@@ -1230,8 +1231,8 @@ identity, whatever size Tart gives it, so every Sandbox would keep the first log
 [resolution](#desktop-resolution). The guest then shuts itself down, as a `build.sh` VM's
 does before its disk is kept: Orchard stops a VM with `tart stop --timeout 5`, which powers
 macOS off when its signed-in desktop does not shut down at once and loses what is still in
-memory. The stopped VM becomes the local Tart image `orbit-framed-<key>`; every Sandbox boots
-a clone of it, which on APFS copies no data.
+memory. The stopped VM becomes the local Tart image `orbit-framed-<key>`; every Sandbox
+boots a clone of it, which on APFS copies no data.
 
 In each Sandbox the agent works in, the Provider starts the Driver in the account's login
 session (`launchctl asuser`, then `open` so LaunchServices runs it under the identity the
@@ -1286,9 +1287,9 @@ An `open` Task's VM has Tart's own NAT network throughout. A `block`, `allowlist
 the Mac's network, outside the guest, where the agent cannot lift it even as root. It needs:
 
 - Softnet 0.25.0 or later, for its protocol and port rules. `scripts/setup_macos.py`
-  installs it on macOS 26 or later, which it requires, as `/usr/local/libexec/orbit/softnet`,
-  root-owned and set-user-ID because it sets the VM's network up as root, and links it
-  into the worker's PATH;
+  installs it on macOS 26 or later, which it requires, as
+  `/usr/local/libexec/orbit/softnet`, root-owned and set-user-ID because it sets the VM's
+  network up as root, and links it into the worker's PATH;
 - Orchard 0.57.0 or later, whose worker changes a running VM's Softnet rules in place, and
   Tart 2.34.0 or later, which it does that through. Setup pins Orchard 0.58.0 and Tart
   2.41.1, and restarts services an earlier pin started, once both are in place, unless

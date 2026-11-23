@@ -196,7 +196,8 @@ async def test_nothing_is_relayed_where_the_bridges_are_in_this_namespace(
     assert len(looked) == 1  # this process stays where it is
 
 
-#: A sandbox's addresses on its own network, ``orbit-net-e1``, whose bridge holds the Host at
+#: A sandbox's addresses on its own network, ``orbit-net-e1``, whose bridge holds the Host
+#: at
 #: 172.18.0.1, as a scripted docker CLI reports them.
 SANDBOX_IP, SANDBOX_MAC, BRIDGE_MAC = "172.18.0.5", "02:42:ac:12:00:05", "02:42:aa:bb:cc:01"
 PEERS = tc.Peers(host_ip="172.18.0.1", host_mac=BRIDGE_MAC, ip=SANDBOX_IP, mac=SANDBOX_MAC)

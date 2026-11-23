@@ -740,9 +740,9 @@ class _GvisorConfinement(_OnOwnBridge):
     """A sandbox under gVisor, sealed by tc filters on its veth's egress while it is
     isolated.
 
-    Orbit's chains in its netstack route the Gateway and refuse what the filters drop, so that
-    fails at once. The sandbox's own processes lack ``CAP_NET_ADMIN`` there unless it runs a
-    container engine; the filters outside are what binds it.
+    Orbit's chains in its netstack route the Gateway and refuse what the filters drop, so
+    that fails at once. The sandbox's own processes lack ``CAP_NET_ADMIN`` there unless it
+    runs a container engine; the filters outside are what binds it.
     """
 
     def __init__(self, networks: _Networks, network: str, host_ip: str, host_mac: str) -> None:
@@ -1043,7 +1043,8 @@ class _Session(StdioTransport):
         self._closing = False
         #: What the end of its stream was found to mean, which a later call then raises too.
         self._explained: GuestUnreachableError | None = None
-        #: What Orbit itself stopped the Sandbox for, which the end of the stream then raises.
+        #: What Orbit itself stopped the Sandbox for, which the end of the stream then
+        #: raises.
         self.stopped: GuestUnreachableError | None = None
 
     async def send(self, data: bytes) -> None:
@@ -1058,8 +1059,8 @@ class _Session(StdioTransport):
         return line
 
     async def close(self) -> None:
-        # Orbit ends the session before it destroys, keeps or snapshots the Sandbox, so an end
-        # it causes is never taken for a death.
+        # Orbit ends the session before it destroys, keeps or snapshots the Sandbox, so an
+        # end it causes is never taken for a death.
         self._closing = True
         await super().close()
 
@@ -1197,7 +1198,8 @@ class DockerSandbox(Sandbox):
         self.confinement = confinement
         self._client = session.client
         self._file_client = file_session.client
-        #: The guestd sessions of both clients, whose end says why Orbit stopped the Sandbox.
+        #: The guestd sessions of both clients, whose end says why Orbit stopped the
+        #: Sandbox.
         self._sessions = (session, file_session)
         #: What counts the OOM kills in it where Docker records none, which both sessions
         #: consult.
@@ -1438,8 +1440,9 @@ class DockerSandbox(Sandbox):
         and the agent sees its process killed. The kill joins the Sandbox's PID namespace
         from a helper container, once the PID's container and start time show it is still the
         process that used the memory, and the Sandbox stays watched. Where its runtime limits
-        the memory, the limit's accounting failed, which is Orbit's failure: the whole Sandbox
-        stops, and its episode ends in an environment error that says what was found.
+        the memory, the limit's accounting failed, which is Orbit's failure: the whole
+        Sandbox stops, and its episode ends in an environment error that says what was
+        found.
         """
         gpu = self.allocation.gpu
         assert gpu is not None and gpu.memory_mb is not None

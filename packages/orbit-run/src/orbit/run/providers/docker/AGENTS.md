@@ -102,8 +102,8 @@ on-link, waiting for its timeout.
 
 **Solution.** The sandbox boots on a network of its own (below), sealed by tc filters on
 `eth0`'s egress, and Orbit's chains in netstack refuse what the seal drops, set by
-`orbit/run/iptables.py` through a privileged `docker exec` on the framework's Python. Sealing
-changes the filters and then the chains; opening, the chains and then the filters.
+`orbit/run/iptables.py` through a privileged `docker exec` on the framework's Python.
+Sealing changes the filters and then the chains; opening, the chains and then the filters.
 
 **Decisions.**
 - The filters are the boundary; the chains only make it fail fast. The privileged exec runs
@@ -122,8 +122,8 @@ changes the filters and then the chains; opening, the chains and then the filter
   which tc replaces in place where it cannot replace a matchall: sealing a sealed sandbox
   never takes its drop away first.
 - The writer is a standard-library script rather than an iptables binary, which the image
-  may lack and Orbit would have to ship and pin. It copies every entry Orbit does not own as it
-  reads it, since netstack reads some back unlike they were set, and replaces a table
+  may lack and Orbit would have to ship and pin. It copies every entry Orbit does not own as
+  it reads it, since netstack reads some back unlike they were set, and replaces a table
   whole, under the xtables lock, so a dockerd's rules in the sandbox survive.
 - No default-route removal: `REJECT` fails every sealed connection at once, another Host
   port included, which route removal cannot.
@@ -460,9 +460,9 @@ in it among the reasons.
   as Docker has stopped it, and one that runs past it lost only its session.
 - Waited on outside the timeout of the call whose session ended: that timeout bounds
   guestd's answer, and a short one would otherwise leave the death unexplained.
-- Only an end of the stream Orbit did not cause, of a session guestd answered on: Orbit closes
-  a session before it destroys, keeps or snapshots the Sandbox, and that end is no death; a
-  guestd that never answered failed to start, which its stderr says at once.
+- Only an end of the stream Orbit did not cause, of a session guestd answered on: Orbit
+  closes a session before it destroys, keeps or snapshots the Sandbox, and that end is no
+  death; a guestd that never answered failed to start, which its stderr says at once.
 
 ## A sandbox that runs out of its memory
 
@@ -529,10 +529,10 @@ stops.
   lost session, as root ending guestd does. A hypervisor the Host's OOM killer ends leaves
   no record in the guest, and its loss stays a lost guest.
 - A stop by Orbit, by its GPU watchdog or its storage watch
-  ([Writable storage](#writable-storage)), is reported as what Orbit stopped the Sandbox for,
-  without reading its state or its watcher: an earlier OOM kill of one process, after which
-  the Sandbox went on, leaves `OOMKilled` set or a count raised, which would make Orbit's stop
-  a loss to memory.
+  ([Writable storage](#writable-storage)), is reported as what Orbit stopped the Sandbox
+  for, without reading its state or its watcher: an earlier OOM kill of one process, after
+  which the Sandbox went on, leaves `OOMKilled` set or a count raised, which would make
+  Orbit's stop a loss to memory.
 
 ## The size of `/dev/shm`
 
@@ -599,17 +599,17 @@ isolated too.
 ## Sharing a GPU by memory
 
 **Problem.** A Task that needs a few GiB of device memory took a whole 80 GB H100, and on a
-Host whose GPUs other users' jobs share, a GPU an Orbit Sandbox took could still be full: its
-exclusive flock said nothing of what others use.
+Host whose GPUs other users' jobs share, a GPU an Orbit Sandbox took could still be full:
+its exclusive flock said nothing of what others use.
 
 **Context.** The Host's `nvidia-smi` reports each GPU's `memory.free` and, to an
 unprivileged user, every user's compute processes by Host PID (driver 570, November 2026); a
 PID's cgroup names its container. Under runc each CUDA process is a row; under gVisor the
 whole sandbox is one, its Sentry, whose memory is nvproxy's count. Other tenants allocate up
 front, grow in steps and start or stop in larger ones (the README's admission has the
-measures). Under rootful Docker Orbit's user cannot signal a container's processes. runsc with
-patch 0004 limits a sandbox's device memory on each GPU by an annotation; nothing limits a
-runc container's.
+measures). Under rootful Docker Orbit's user cannot signal a container's processes. runsc
+with patch 0004 limits a sandbox's device memory on each GPU by an annotation; nothing
+limits a runc container's.
 
 **Solution.** [GPU memory](../README.md#gpu-memory): `gpu_memory_mb` shares a GPU among the
 Sandboxes that name it, admitted by headroom plus a margin under one lock until `docker run`
@@ -621,15 +621,16 @@ error.
 **Decisions.**
 - One lock for the Host's GPUs rather than one per GPU: admitting a shared Sandbox reads
   every GPU's headroom, and the lock must cover the read and `docker run` both. It is named
-  by the Docker daemon's ID in `/tmp`, not kept in Orbit's cache, so that every user and cache
-  that admits through one daemon takes the same lock. The running containers' labels stay
-  the record, so a crashed process holds nothing; what one daemon's Sandboxes reserved and
-  do not use yet is invisible through another daemon.
+  by the Docker daemon's ID in `/tmp`, not kept in Orbit's cache, so that every user and
+  cache that admits through one daemon takes the same lock. The running containers' labels
+  stay the record, so a crashed process holds nothing; what one daemon's Sandboxes reserved
+  and do not use yet is invisible through another daemon.
 - Every Sandbox gets both GPU labels, empty when unused: `docker run --label` overrides an
   image's label of the same name, so a Task image cannot pose as Orbit's record, and the
   labels need no defensive parsing.
-- Headroom subtracts only what Orbit's Sandboxes reserved and do not use yet: what they use is
-  already missing from `memory.free`, and counting it twice would refuse Sandboxes that fit.
+- Headroom subtracts only what Orbit's Sandboxes reserved and do not use yet: what they use
+  is already missing from `memory.free`, and counting it twice would refuse Sandboxes that
+  fit.
 - Among the GPUs that can take a Sandbox, the one with the most headroom does: spreading
   keeps Sandboxes away from GPUs other tenants keep busy, and from the growth of their jobs.
   The price is that a Sandbox that takes its GPU whole can be refused where packing the
@@ -753,9 +754,9 @@ layer the commit adds, and costs one measurement the watch already makes.
 
 **Problem.** A `docker commit` cancelled with its episode, as a Run's cancellation or the
 bound on a snapshot verifier's save cancels it, is killed with its CLI. Had the daemon
-written the image by then, an `orbit-snapshot:<sandbox id>` image would be left that no result
-or RunLock names (November 2026, found reviewing snapshot verification, which saves a solver
-mid-episode).
+written the image by then, an `orbit-snapshot:<sandbox id>` image would be left that no
+result or RunLock names (November 2026, found reviewing snapshot verification, which saves a
+solver mid-episode).
 
 **Context.** Measured on Docker 29.1.3 with the containerd image store, committing a stopped
 container that wrote 1 GiB, 54 s in all: a CLI killed 85, 95 or 99% of the way through left
@@ -765,8 +766,8 @@ failed.
 
 **Solution.** The Sandbox remembers that it was committing until the commit returns.
 Destroying it then removes the container first, which fails any commit of it still in the
-daemon, and then `orbit-snapshot:<sandbox id>`, if the daemon had finished it; a snapshot that
-was handed back is left to its owner.
+daemon, and then `orbit-snapshot:<sandbox id>`, if the daemon had finished it; a snapshot
+that was handed back is left to its owner.
 
 **Decisions.**
 - Removed when the Sandbox is destroyed, which every exit path does, rather than at the

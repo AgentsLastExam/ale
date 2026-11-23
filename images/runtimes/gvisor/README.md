@@ -1,8 +1,8 @@
 # gVisor runtime
 
-This directory builds Orbit's gVisor runtime: `runsc` from an official gVisor release with the
-patches in [`patches/`](patches/) applied in order. The patches are Orbit's own and are not
-sent upstream; a stock `runsc` lacks them.
+This directory builds Orbit's gVisor runtime: `runsc` from an official gVisor release with
+the patches in [`patches/`](patches/) applied in order. The patches are Orbit's own and are
+not sent upstream; a stock `runsc` lacks them.
 
 | Patch | Effect |
 |---|---|
@@ -167,9 +167,9 @@ Measured in `python:3.12-slim` with `--memory 572m`, `--memory-swap` equal to it
 `--oom-score-adj 500`, against runc with `--memory 512m` and no swap, 20 runs with the patch
 and 10 to 30 without; "lost" means the container stopped, "held" is what the process held,
 in 8 MiB steps, when it was killed, and a second, small process ran beside the 300 processes
-and the writer. Rootful is Docker 29.1.3 on Linux 7.0, without patch 0009 Orbit's 0.1.0, whose
-out-of-memory code 0.1.1 shares; rootless is Docker 29.9.3 on Linux 6.12 with no swap on the
-Host, without patch 0009 Orbit's 0.1.1:
+and the writer. Rootful is Docker 29.1.3 on Linux 7.0, without patch 0009 Orbit's 0.1.0,
+whose out-of-memory code 0.1.1 shares; rootless is Docker 29.9.3 on Linux 6.12 with no swap
+on the Host, without patch 0009 Orbit's 0.1.1:
 
 | Workload | Docker | Without patch 0009 | With patch 0009 | runc |
 |---|---|---|---|---|
@@ -203,10 +203,10 @@ Docker's default swap allowance, before patch 0009:
 
 Rootless Docker's default ties the stubs with the Sentry, and when the OOM killer takes the
 Sentry the sandbox ends, so a gVisor container needs `--oom-score-adj` above the inherited
-value; Orbit passes 500. `runsc` cannot hold the Sentry lower instead: an unprivileged process
-cannot go below its `oom_score_adj_min`, the value its user's systemd manager was started
-with (`OOMScoreAdjust` of `user@.service`: 100 in systemd 259, unset and so 0 in systemd
-249).
+value; Orbit passes 500. `runsc` cannot hold the Sentry lower instead: an unprivileged
+process cannot go below its `oom_score_adj_min`, the value its user's systemd manager was
+started with (`OOMScoreAdjust` of `user@.service`: 100 in systemd 259, unset and so 0 in
+systemd 249).
 
 ## GPU memory limit
 
