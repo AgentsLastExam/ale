@@ -343,9 +343,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends docker.io \\
     && rm -rf /var/lib/apt/lists/*
 """
 START_ENGINE = (
+    # A snapshot keeps what the engine left in /run, the pid files of dockerd and of its
+    # containerd among them, whose numbers can name other processes in the Sandbox booted
+    # from it: removed first, as a reboot would.
+    "rm -rf /var/run/docker /var/run/docker.pid; "
     "(dockerd >/tmp/dockerd.log 2>&1 &); "
     "for i in $(seq 120); do docker info >/dev/null 2>&1 && break; sleep 1; done; "
-    "docker info >/dev/null"
+    # The daemon's own words where it did not come up.
+    "docker info >/dev/null || { tail -c 3000 /tmp/dockerd.log >&2; false; }"
 )
 
 

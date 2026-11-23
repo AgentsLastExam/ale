@@ -206,8 +206,9 @@ of the other except under snapshot verification. `keep` leaves the Sandbox runni
 solver may instead request `snapshot`: once the episode is scored its disk is saved and the
 Sandbox destroyed, and any number of later Sandboxes boot from the snapshot. A snapshot
 holds no processes, memory or desktop session, so follow-ups that need them keep the
-Sandbox. A solver to be snapshotted needs a Provider that saves snapshots, so selection
-gives it none that cannot, before anything is provisioned.
+Sandbox; it holds every file they left, such as a daemon's pid file in `/run`, as a
+restarted container does. A solver to be snapshotted needs a Provider that saves
+snapshots, so selection gives it none that cannot, before anything is provisioned.
 Before either, ALE removes every stage of the Task (setup, tests with their Judge state,
 the oracle's calibration case), the verifier directory and known credentials, so a kept
 solver or a snapshot holds only the agent's own state.
