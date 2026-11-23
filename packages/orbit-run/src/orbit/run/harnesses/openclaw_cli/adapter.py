@@ -9,13 +9,13 @@ import uuid
 from pathlib import PurePosixPath
 from typing import Any
 
-from ale.core.errors import AgentError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses.base import (
+from orbit.core.errors import AgentError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -23,7 +23,7 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import OpenClawCliSettings
@@ -46,7 +46,7 @@ class OpenClawCliHarness(CliHarness):
         node = await sandbox.exec(["node", "--version"], timeout_sec=30, identity=Identity.AGENT)
         if not node.ok or not _supported_node(node.stdout):
             raise AgentError(
-                "OpenClaw 2026.7.1 requires Node >=22.22.3; rebuild the ALE base image"
+                "OpenClaw 2026.7.1 requires Node >=22.22.3; rebuild the Orbit base image"
             )
         return await super().install(sandbox)
 
@@ -56,7 +56,7 @@ class OpenClawCliHarness(CliHarness):
         session: HarnessSession,
         resources: EffectiveAgentResources,
     ) -> None:
-        state = agent_path(session.home) / ".openclaw-ale"
+        state = agent_path(session.home) / ".openclaw-orbit"
         workspace = state / "workspace"
         skills_root = workspace / "skills"
         await sandbox.exec(
@@ -94,12 +94,12 @@ class OpenClawCliHarness(CliHarness):
                 }
             },
             "models": {
-                # OpenClaw would otherwise fetch price data; ALE reports tokens only.
+                # OpenClaw would otherwise fetch price data; Orbit reports tokens only.
                 "pricing": {"enabled": False},
                 "providers": {
                     self.settings.provider: {
                         "baseUrl": session.gateway_url + "/v1",
-                        "apiKey": "${ALE_GATEWAY_TOKEN}",
+                        "apiKey": "${ORBIT_GATEWAY_TOKEN}",
                         "api": "openai-responses",
                         "models": [provider_model],
                     }
@@ -169,7 +169,7 @@ class OpenClawCliHarness(CliHarness):
         *,
         native_session_id: str | None,
     ) -> CliCommand:
-        state = agent_path(session.home) / ".openclaw-ale"
+        state = agent_path(session.home) / ".openclaw-orbit"
         requested = native_session_id or str(uuid.uuid4())
         argv = [
             "openclaw",
@@ -197,7 +197,7 @@ class OpenClawCliHarness(CliHarness):
             "OPENCLAW_STATE_DIR": str(state),
             "OPENCLAW_CONFIG_PATH": str(state / "openclaw.json"),
             "OPENCLAW_WORKSPACE_DIR": str(state / "workspace"),
-            "ALE_GATEWAY_TOKEN": session.token,
+            "ORBIT_GATEWAY_TOKEN": session.token,
             "NO_COLOR": "1",
             # Run the CLI in this process. Its respawning launcher would add a second
             # Node process and report any signal death of the CLI, such as an OOM kill,

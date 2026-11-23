@@ -6,7 +6,7 @@ import hashlib
 import os
 from pathlib import Path, PurePosixPath
 
-from ale.core.errors import TaskDefinitionError
+from orbit.core.errors import TaskDefinitionError
 
 __all__ = ["tree_digest"]
 

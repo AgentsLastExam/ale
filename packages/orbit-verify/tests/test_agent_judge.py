@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ale_verify import JudgeError, _agents, _llm, judge
+from orbit_verify import JudgeError, _agents, _llm, judge
 from test_agent_adapters import codex_config, completed
 
 
@@ -19,11 +19,11 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     log = tmp_path / "agent-judge.jsonl"
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"agent": codex_config()}))
-    monkeypatch.setenv("ALE_HOME", str(workspace))
-    monkeypatch.setenv("ALE_STAGE_DIR", str(tmp_path))
-    monkeypatch.setenv("ALE_TASK_INSTRUCTION_PATH", str(instruction))
-    monkeypatch.setenv("ALE_AGENT_JUDGE_LOG_PATH", str(log))
-    monkeypatch.setenv("ALE_VERIFY_CONFIG_PATH", str(config))
+    monkeypatch.setenv("ORBIT_HOME", str(workspace))
+    monkeypatch.setenv("ORBIT_STAGE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_TASK_INSTRUCTION_PATH", str(instruction))
+    monkeypatch.setenv("ORBIT_AGENT_JUDGE_LOG_PATH", str(log))
+    monkeypatch.setenv("ORBIT_VERIFY_CONFIG_PATH", str(config))
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 0)
     # Verification's budget allows three retries.
@@ -195,7 +195,7 @@ def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
     artifact.write_bytes(b"%PDF-1.7\n\xff\xfe\x00")
     trajectory = agent_env["workspace"] / "trajectory.json"
     trajectory.write_text('{"steps":[]}')
-    monkeypatch.setenv("ALE_TRAJECTORY_PATH", str(trajectory))
+    monkeypatch.setenv("ORBIT_TRAJECTORY_PATH", str(trajectory))
     monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
     calls = []
 
@@ -208,7 +208,7 @@ def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
         assert f"file: {artifact}" in kwargs["input"]
         assert (f"solver_trajectory: {trajectory}" in kwargs["input"]) == include_trajectory
         assert (str(trajectory) in kwargs["input"]) == include_trajectory
-        assert ("ALE_TRAJECTORY_PATH" in kwargs["env"]) == include_trajectory
+        assert ("ORBIT_TRAJECTORY_PATH" in kwargs["env"]) == include_trajectory
         assert "%PDF" not in kwargs["input"]
         choice = "invalid" if len(calls) == 1 else "yes"
         return completed(event("thread-1", {"choice": choice, "reasoning": "Checked evidence."}))

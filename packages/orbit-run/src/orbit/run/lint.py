@@ -8,15 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ale.core.errors import TaskDefinitionError
-from ale.core.task import CALIBRATION_DIR, SOLUTION_DIR, Stage, case_entry, case_path
-from ale.core.taskspec import (
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.task import CALIBRATION_DIR, SOLUTION_DIR, Stage, case_entry, case_path
+from orbit.core.taskspec import (
     SOLUTION_CASE,
     OperatingSystem,
     VariableReference,
     is_credential_name,
 )
-from ale.run.tasksets.manifest import (
+from orbit.run.tasksets.manifest import (
     BUILD_SCRIPTS,
     ENVIRONMENT_DIR,
     INSTRUCTION,
@@ -41,16 +41,16 @@ _TOP_LEVEL = {
     Stage.VALIDATION,
     SOLUTION_DIR,
     CALIBRATION_DIR,
-    ".ale-cache",
+    ".orbit-cache",
 }
-#: Harbor's way to run sidecars. ALE has one machine per role, so these would silently do nothing.
+#: Harbor's way to run sidecars. Orbit has one machine per role, so these would silently do nothing.
 _COMPOSE_FILE = "docker-compose.yaml"
 
 
 @dataclass(frozen=True)
 class Finding:
-    """A problem, which fails ``ale lint``, or a warning: what the Task leaves to a default
-    ALE then chooses, or lets change under it, which never fails it."""
+    """A problem, which fails ``orbit lint``, or a warning: what the Task leaves to a default
+    Orbit then chooses, or lets change under it, which never fails it."""
 
     path: Path
     message: str

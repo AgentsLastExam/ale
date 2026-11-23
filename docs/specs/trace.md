@@ -16,13 +16,13 @@ other files may carry only stable identifiers, references, or small run-level pr
 rewards, and unconditional `agent-output-*.txt` files do not exist.
 
 Compatibility boundary: during early development a record is read only by the engine
-commit recorded in its RunLock (`framework.commit`). ALE ships no migrations or legacy
+commit recorded in its RunLock (`framework.commit`). Orbit ships no migrations or legacy
 readers; a record whose shape differs from the reading engine is refused as it is read,
 instead of being reinterpreted with values that were never observed.
 
 ## ATIF trajectory
 
-`trajectory.json` is a Harbor ATIF v1.8 document, not an ALE envelope. It is checked
+`trajectory.json` is a Harbor ATIF v1.8 document, not an Orbit envelope. It is checked
 against that schema before atomic replacement:
 
 ```json
@@ -53,7 +53,7 @@ sampled model output. It stands where it happened, after the model call that pre
 and names the call that ran the program, since a program can outlive the model call that
 started it.
 
-All ALE extensions live under `extra.ale`:
+All Orbit extensions live under `extra.orbit`:
 
 - `native_event_ids`: observed native identities;
 - `transport_call_ids`: Gateway calls correlated after parsing;
@@ -88,14 +88,14 @@ resolvable `subagent_trajectory_ref` entries. A subagent is embedded in the traj
 the agent that spawned it and referenced from the spawning call's result; the root's
 `parse_issues` cover the whole tree. Native resume within an episode extends its
 trajectory. An episode that continues an earlier one records only its own part of the
-native session: it keeps the session's `session_id`, and `extra.ale.resumed_from` names
+native session: it keeps the session's `session_id`, and `extra.orbit.resumed_from` names
 the earlier episode and trajectory and, once their end is found, `native_steps`, the
 session's steps before this episode. If it is not found, the whole session is kept with a
 `continuation_boundary_not_found` parse issue. `continued_trajectory_ref` is not used, as
 the earlier episode's trajectory is final when a later one continues it.
 
 Optional token IDs, masks, log probabilities, sampling metadata, reasoning, and metrics
-are written only from exact observed evidence. ALE never retokenizes text or fabricates
+are written only from exact observed evidence. Orbit never retokenizes text or fabricates
 missing training fields.
 
 ## Transport trace
@@ -121,12 +121,12 @@ Retries are never counted twice. Only a successful provider response (2xx) or a 
 refusal is replayed to a retry of the same request; after a provider error the retry is
 forwarded and recorded as a new `call`. A streamed 2xx response is successful only when it
 reached its dialect's terminal event, listed in the
-[Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md), without an in-band
+[Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md), without an in-band
 error; an interrupted or failed stream is recorded `failed` and forwarded again on retry.
 The Gateway itself sends an agent's call the provider failed again, for at most a minute
 of the provider's failure and before anything reached the client, and records each try as
 a failed `call`
-([Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md#provider-failures)).
+([Gateway README](../../packages/orbit-run/src/orbit/run/gateway/README.md#provider-failures)).
 A call the provider failed does not count toward `max_model_calls`, as it gave the agent
 nothing; one it answered does, a refusal of the request included, and every call's tokens
 count. Failed and refused calls remain visible. Default records contain digests and
@@ -136,12 +136,12 @@ conversation.
 Subscription traffic takes the same path:
 Claude Code, Codex CLI, and Grok Build send every model call to the Gateway, which only
 changes how it authenticates upstream, so those calls are recorded here like API-key calls.
-Provider billing remains external, so ALE records tokens and model calls, never price.
+Provider billing remains external, so Orbit records tokens and model calls, never price.
 
 ## Execution trace
 
-`trace.execution.jsonl` is the chronological diagnostics channel for ALE and task
-stages. One `ale.execution` standard-library logger is bound through `contextvars` to the
+`trace.execution.jsonl` is the chronological diagnostics channel for Orbit and task
+stages. One `orbit.execution` standard-library logger is bound through `contextvars` to the
 current episode, phase, and component. Task scripts do not write JSONL themselves: their
 stdout/stderr is progressively captured by the guest protocol and finalized by the
 command recorder.
@@ -186,7 +186,7 @@ Canonical JSON never embeds base64. No blob manifest exists.
 `result.json` is the episode's atomic terminal truth. A completed result has a non-empty,
 finite named reward map and no failure. Its rewards are `tests/`'s alone. A failed result
 has failure information, and has rewards exactly when verification still completed after the
-agent [stopped early](episode-protocol.md#agent-or-oracle). ALE supplies no primary reward
+agent [stopped early](episode-protocol.md#agent-or-oracle). Orbit supplies no primary reward
 or aggregation policy. Where a result becomes one number, as in an export for training, a
 final status without rewards, the agent's own outcome whose Sandbox went before verification
 such as `memory_exhausted` or `storage_exhausted`, counts as zero, since the agent failed
@@ -231,7 +231,7 @@ or another parallelism runs only the missing episodes. RunLock still records the
 `config_hash`.
 
 `RunConfig.episode_retries` sets the number of additional automatic attempts for an
-incomplete episode; its default is zero. `ale run --episode-retries N` and
+incomplete episode; its default is zero. `orbit run --episode-retries N` and
 `--set episode_retries=N` override the run TOML. Each attempt runs in fresh Sandboxes
 with a new Gateway session and trajectory, preserving the logical episode ID and seed.
 Only `status=completed` stops retries successfully; a completed zero score is still a
@@ -296,9 +296,9 @@ token_data = "none"
   `logs/gateway/`; `digests` is the default.
 - `token_data="exact"` permits exact observed token evidence; `none` is the default.
 
-Exact mode accepts only an explicit upstream `ale_token_data` object containing observed
+Exact mode accepts only an explicit upstream `orbit_token_data` object containing observed
 token IDs, completion log probabilities, sampled mask, sampling temperature, and any
-multimodal processor fields. ALE may preserve a temperature explicitly sent in the
+multimodal processor fields. Orbit may preserve a temperature explicitly sent in the
 request, but never retokenizes text or fabricates missing fields. The temporary evidence
 is correlated by Gateway call ID, moved into the linked ATIF agent step, then deleted;
 malformed evidence fails conversion and remains under `logs/gateway/tokens/`.
@@ -342,11 +342,11 @@ Scalar-only destinations require an explicit caller-supplied aggregation callbac
 The Harbor v1.8 schema source is the adjacent
 `harbor/src/harbor/models/trajectories/` model set. Schema parity is checked by
 `tests/conformance/test_harbor_atif.py`. After reviewing a Harbor version change,
-regenerate the checked fixture from the ALE repository root:
+regenerate the checked fixture from the Orbit repository root:
 
 ```bash
 uv run --project ../harbor python -c \
   'import json; from pathlib import Path; from harbor.models.trajectories import Trajectory; Path("tests/fixtures/atif-v1.8.schema.json").write_text(json.dumps(Trajectory.model_json_schema(), indent=2, sort_keys=True) + "\n")'
 ```
 
-Commit the fixture and the corresponding ALE model/conformance changes together.
+Commit the fixture and the corresponding Orbit model/conformance changes together.

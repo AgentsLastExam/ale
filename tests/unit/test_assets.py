@@ -9,15 +9,15 @@ from types import SimpleNamespace
 import pytest
 from tests.support import edit_task_config
 
-from ale.core.errors import AssetError
-from ale.run.assets import (
+from orbit.core.errors import AssetError
+from orbit.run.assets import (
     _mark_clean,
     asset_status,
     observe_task_assets,
     pull_assets,
     select_asset_repositories,
 )
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 
@@ -79,7 +79,7 @@ def test_old_marker_without_inventory_is_dirty(write_task_repo) -> None:  # type
     asset = task_path / "environment/assets/data.txt"
     asset.parent.mkdir()
     asset.write_text("one")
-    state = repository / ".ale-cache/assets.json"
+    state = repository / ".orbit-cache/assets.json"
     state.parent.mkdir()
     state.write_text(
         json.dumps(

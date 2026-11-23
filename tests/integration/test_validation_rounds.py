@@ -10,17 +10,17 @@ from typing import Any
 
 import pytest
 
-from ale.core.sandbox import Provider
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.firecracker import FirecrackerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.secrets import resolve_task_variables
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.sandbox import Provider
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.firecracker import FirecrackerProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.secrets import resolve_task_variables
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import (
     VM_BASE,
     VM_RESOURCES,
@@ -40,9 +40,9 @@ VERIFY = """\
 import json
 import os
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 
-home = Path(os.environ["ALE_HOME"])
+home = Path(os.environ["ORBIT_HOME"])
 work = home / "work.txt"
 lines = work.read_text().splitlines() if work.is_file() else []
 survivors = home / "survivors"
@@ -54,7 +54,7 @@ turns = {
     for name in ("shown", "written", "mounted")
 }
 # The oracle, which calibration runs, has no trajectory.
-trajectory = os.environ.get("ALE_TRAJECTORY_PATH")
+trajectory = os.environ.get("ORBIT_TRAJECTORY_PATH")
 steps = json.loads(Path(trajectory).read_text())["steps"] if trajectory else []
 prompts = sum(step["source"] == "user" for step in steps)
 reward = round(min(1.0, len(lines) / 3), 2)
@@ -69,8 +69,8 @@ result = {
 }
 write(result, feedback=f"{len(lines)} of 3 lines; the last: {lines[-1] if lines else ''}")
 """
-TEST = '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ALE_VERIFY_PYTHON" verify.py\n'
-TEST_PS1 = "& $env:ALE_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
+TEST = '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ORBIT_VERIFY_PYTHON" verify.py\n'
+TEST_PS1 = "& $env:ORBIT_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
 INSTRUCTION = "Complete the task described here.\n"
 
 
@@ -165,7 +165,7 @@ def _check(result: Any, rounds: int = 2, *, stage: str = "validation", shown: bo
         (result.run_dir / "trajectory.json").read_text()
     )
     users = [step for step in trajectory.steps if step.source == "user"]
-    assert [(step.extra or {}).get("ale", {}).get("validation_round") for step in users] == [
+    assert [(step.extra or {}).get("orbit", {}).get("validation_round") for step in users] == [
         None,
         *range(1, rounds + 1),
     ]
@@ -184,14 +184,14 @@ async def test_an_agent_improves_over_validation_rounds_in_docker(
     # Every round's snapshot is gone, and so is every Sandbox.
     episode = result.episode_id
     images = subprocess.run(
-        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}", "ale-snapshot"],
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}", "orbit-snapshot"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout.split()
     assert not [image for image in images if episode in image]
     containers = subprocess.run(
-        ["docker", "ps", "-aq", "--filter", f"label=ale.episode={episode}"],
+        ["docker", "ps", "-aq", "--filter", f"label=orbit.episode={episode}"],
         capture_output=True,
         text=True,
         check=True,
@@ -294,10 +294,10 @@ async def test_an_agent_improves_over_a_validation_round_in_a_windows_vm(
     tmp_path: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request.getfixturevalue("kvm_host")
-    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
-    monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+    monkeypatch.setattr("orbit.run.task_images.cache_root", lambda: tmp_path / "cache")
     root = tmp_path / "rounds-windows"
     write_task(
         root,
@@ -338,8 +338,8 @@ async def test_calibration_checks_validation_on_each_cases_final_state_in_docker
 ) -> None:
     """Each case's final state is saved, scored by validation/, and then by tests/ in a
     solver booted from it, against each expectation."""
-    from ale.core.config import RunConfig
-    from ale.run.cli.tasks import _calibrate
+    from orbit.core.config import RunConfig
+    from orbit.run.cli.tasks import _calibrate
 
     root = _task(tmp_path / "rounds-calibration", "shared", rounds=0)
     edit_task_config(
@@ -358,7 +358,7 @@ async def test_calibration_checks_validation_on_each_cases_final_state_in_docker
     for case, lines in (("solution", "a\\nb\\nc\\n"), ("calibration/partial", "a\\n")):
         (root / case).mkdir(parents=True, exist_ok=True)
         (root / case / "solve.sh").write_text(
-            f'#!/usr/bin/env bash\nprintf "{lines}" > "${{ALE_HOME:-$HOME}}/work.txt"\n'
+            f'#!/usr/bin/env bash\nprintf "{lines}" > "${{ORBIT_HOME:-$HOME}}/work.txt"\n'
         )
     settings = RunConfig.model_validate({"sandbox": {"providers": ["docker:runc"]}})
     code = await _calibrate(str(root), settings, tmp_path / "runs")

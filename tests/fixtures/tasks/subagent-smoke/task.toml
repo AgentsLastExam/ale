@@ -1,7 +1,7 @@
 # Does a Harness turn a delegated subagent into a subagent trajectory?
 #
 # Only a subagent may write the marker, so a live run shows both that the agent can spawn
-# one and, from the trajectory, that ALE attributes the child's work to the child. The
+# one and, from the trajectory, that Orbit attributes the child's work to the child. The
 # verifier checks the file; live acceptance checks the trajectory. Nothing here needs the
 # parent to receive the child's result, which a one-shot OpenClaw run cannot deliver yet.
 schema_version = "0.2"

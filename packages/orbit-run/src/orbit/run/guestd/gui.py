@@ -15,12 +15,12 @@ from typing import Any
 
 COORDINATE_SPACE = 1000
 #: Where guestd's Cua Driver server listens on Linux.
-_LINUX_SOCKET = "/tmp/ale-cua-driver.sock"
+_LINUX_SOCKET = "/tmp/orbit-cua-driver.sock"
 #: The pipe the Windows boot service (``service.py``) has Cua Driver serve on.
-_WINDOWS_PIPE = r"\\.\pipe\ale-cua-driver"
+_WINDOWS_PIPE = r"\\.\pipe\orbit-cua-driver"
 #: Where the framework installs Cua Driver on Windows; a Linux image has it on PATH.
 _WINDOWS_DRIVER = os.path.join(
-    os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "ALE", "cua-driver", "cua-driver.exe"
+    os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "Orbit", "cua-driver", "cua-driver.exe"
 )
 #: The alias systemd links when a display manager (GDM, LightDM, SDDM) is enabled.
 _DISPLAY_MANAGER = "/etc/systemd/system/display-manager.service"
@@ -87,7 +87,7 @@ def probe_macos_desktop(agent_user: str, driver_path: str, socket_path: str) -> 
 
 
 def _binary() -> str:
-    configured = os.environ.get("ALE_CUA_DRIVER")
+    configured = os.environ.get("ORBIT_CUA_DRIVER")
     if not configured and os.name == "nt" and os.path.isfile(_WINDOWS_DRIVER):
         configured = _WINDOWS_DRIVER
     found = configured or shutil.which("cua-driver") or shutil.which("cua-driver.exe")
@@ -102,10 +102,10 @@ def has_desktop() -> bool:
     A Linux virtual machine has one when its systemd enables a display manager. A container has
     one when its image sets ``DISPLAY`` or ``WAYLAND_DISPLAY``: that is how a desktop image
     tells its processes where to draw, while an image that ships X only as a tool, such as
-    Xvfb for a headless browser, does not. Windows always draws one, and it is ALE's to
+    Xvfb for a headless browser, does not. Windows always draws one, and it is Orbit's to
     drive once the framework has installed Cua Driver, as in every Task image; the bare
     base, booted only to build a Task image, has none to wait for. On macOS the Provider
-    declares one by naming the Driver's socket (``ALE_CUA_DRIVER_SOCKET``) in every sandbox
+    declares one by naming the Driver's socket (``ORBIT_CUA_DRIVER_SOCKET``) in every sandbox
     the agent works in; a verifier or ``build.sh`` VM has none.
     """
     if os.name == "nt":
@@ -113,7 +113,7 @@ def has_desktop() -> bool:
     if sys.platform == "darwin":
         # The Provider starts the framework's Driver in the agent's login session, which the
         # image signs in at boot. Declaring it does not attest capture; readiness probes it.
-        if not os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+        if not os.environ.get("ORBIT_CUA_DRIVER_SOCKET"):
             return False
         try:
             _binary()
@@ -161,7 +161,7 @@ def _invoke(tool: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             "params": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": {"name": "ale-guestd", "version": "1"},
+                "clientInfo": {"name": "orbit-guestd", "version": "1"},
             },
         },
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -232,7 +232,7 @@ def _replies(output: str) -> list[dict[str, Any]]:
 
 
 def _socket() -> str | None:
-    configured = os.environ.get("ALE_CUA_DRIVER_SOCKET")
+    configured = os.environ.get("ORBIT_CUA_DRIVER_SOCKET")
     return configured or (_WINDOWS_PIPE if os.name == "nt" else _LINUX_SOCKET)
 
 
@@ -245,7 +245,7 @@ def _start_server() -> bool:
     and on macOS the Orchard Provider starts it as each sandbox boots.
     """
     global _server
-    if os.name == "nt" or sys.platform == "darwin" or os.environ.get("ALE_CUA_DRIVER_SOCKET"):
+    if os.name == "nt" or sys.platform == "darwin" or os.environ.get("ORBIT_CUA_DRIVER_SOCKET"):
         return False
     if _server is not None and _server.poll() is None:
         return False
@@ -253,7 +253,7 @@ def _start_server() -> bool:
     with contextlib.suppress(FileNotFoundError):
         os.unlink(_LINUX_SOCKET)
     try:
-        log = open("/tmp/ale-cua-driver.log", "ab")  # noqa: SIM115 - handed to the child
+        log = open("/tmp/orbit-cua-driver.log", "ab")  # noqa: SIM115 - handed to the child
         _server = subprocess.Popen(
             [
                 _binary(),
@@ -347,7 +347,7 @@ def session() -> tuple[Any, dict[str, str]]:
     import pwd
 
     try:
-        account = pwd.getpwnam(os.environ.get("ALE_AGENT_USER") or "user")
+        account = pwd.getpwnam(os.environ.get("ORBIT_AGENT_USER") or "user")
     except KeyError as exc:
         raise GuiUnavailable("the agent account does not exist in this image") from exc
     found = _session_environment(account)

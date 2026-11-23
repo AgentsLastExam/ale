@@ -17,20 +17,20 @@ from aiohttp import ClientSession
 from aiohttp.test_utils import TestServer, unused_port
 from tests.support import MemoryProvider, TraceSink, edit_task_config
 
-from ale.core.config import RunConfig
-from ale.core.errors import (
-    AleError,
+from orbit.core.config import RunConfig
+from orbit.core.errors import (
     ConfigError,
     GuestUnreachableError,
+    OrbitError,
     ProviderCapabilityError,
     ProviderCapacityError,
     ProviderStartError,
     StorageExhaustedError,
     TaskDefinitionError,
 )
-from ale.core.fleet import ImageInputs, RunPlan, SandboxStatus
-from ale.core.sandbox import Identity, ImageRef, PreparedTaskImage, Sandbox, SandboxRequest
-from ale.core.taskspec import (
+from orbit.core.fleet import ImageInputs, RunPlan, SandboxStatus
+from orbit.core.sandbox import Identity, ImageRef, PreparedTaskImage, Sandbox, SandboxRequest
+from orbit.core.taskspec import (
     ContainerFeature,
     ImageKind,
     NetworkMode,
@@ -38,17 +38,22 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
-from ale.fleet import images as images_module
-from ale.fleet.control import ControlPlane
-from ale.fleet.node import NodeAgent, NodeSettings, probe
-from ale.fleet.server import control_app
-from ale.fleet.store import Store
-from ale.run.providers import ProviderRegistry
-from ale.run.providers.fleet.provider import FleetClient, FleetProvider, FleetSandbox, _Unreachable
-from ale.run.recording import execution_logging
-from ale.run.scaffold import scaffold_task
-from ale.run.task_images import ImagePreparationResult, prepare_task_image_result
-from ale.run.tasksets.manifest import load_task_folder
+from orbit.fleet import images as images_module
+from orbit.fleet.control import ControlPlane
+from orbit.fleet.node import NodeAgent, NodeSettings, probe
+from orbit.fleet.server import control_app
+from orbit.fleet.store import Store
+from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.fleet.provider import (
+    FleetClient,
+    FleetProvider,
+    FleetSandbox,
+    _Unreachable,
+)
+from orbit.run.recording import execution_logging
+from orbit.run.scaffold import scaffold_task
+from orbit.run.task_images import ImagePreparationResult, prepare_task_image_result
+from orbit.run.tasksets.manifest import load_task_folder
 
 pytestmark = pytest.mark.unit
 
@@ -142,7 +147,7 @@ class Fleet:
 def memory_leaves(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Nodes here lend memory leaves, whose rules the FleetProvider asks of them too."""
     monkeypatch.setattr(
-        "ale.run.providers.fleet.provider.leaf", lambda provider_id: MemoryProvider(provider_id)
+        "orbit.run.providers.fleet.provider.leaf", lambda provider_id: MemoryProvider(provider_id)
     )
 
 
@@ -197,12 +202,12 @@ class TestProvider:
         await provider.preflight()
         sandbox = await provider.create(request(image))
         inner = fleet.providers["node-a"].sandboxes[0]
-        execution = logging.getLogger("ale.execution")
+        execution = logging.getLogger("orbit.execution")
         kept: list[contextvars.Context] = []
         plain = inner.exec
 
         async def logging_exec(argv, **kwargs):  # type: ignore[no-untyped-def]
-            execution.warning("during %s", argv[1], extra={"ale_data": {"gpu": "GPU-0"}})
+            execution.warning("during %s", argv[1], extra={"orbit_data": {"gpu": "GPU-0"}})
             kept.append(contextvars.copy_context())
             return await plain(argv, **kwargs)
 
@@ -315,7 +320,7 @@ class TestProvider:
         self, fleet: Fleet, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         await fleet.add_node("node-a", container_features=frozenset({ContainerFeature.PERF}))
-        monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
+        monkeypatch.setenv("ORBIT_FLEET_TOKEN", TOKEN)
         settings = RunConfig.model_validate(
             {"sandbox": {"providers": ["docker:runc", "fleet"], "fleet": {"url": fleet.url}}}
         )
@@ -386,11 +391,11 @@ class TestProvider:
         image: PreparedTaskImage,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("ale.run.providers.fleet.provider.RECONNECT_SEC", 0.0)
+        monkeypatch.setattr("orbit.run.providers.fleet.provider.RECONNECT_SEC", 0.0)
         # A memory Node prepares an image in no time, so holding it saves nothing and the
         # tie between the Nodes would follow the image key, which the framework is part of.
         monkeypatch.setattr(
-            "ale.fleet.placement._rendezvous", lambda _image, node: int(node != "node-a")
+            "orbit.fleet.placement._rendezvous", lambda _image, node: int(node != "node-a")
         )
         held = await fleet.add_node("node-a")
         await fleet.add_node("node-b")
@@ -487,7 +492,7 @@ class TestProvider:
         assert isinstance(node, MemoryProvider)
         (held,) = node.sandboxes
         ended = (
-            "ALE stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
+            "Orbit stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
             "Task declares"
         )
 
@@ -536,7 +541,7 @@ class TestProvider:
             return ImagePreparationResult(task="built", role="solver", image=built, steps=())
 
         monkeypatch.setattr(images_module, "prepare_task_image_result", prepared)
-        monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
+        monkeypatch.setenv("ORBIT_FLEET_TOKEN", TOKEN)
         settings = RunConfig.model_validate(
             {"sandbox": {"providers": ["fleet"], "fleet": {"url": fleet.url}}}
         )
@@ -589,7 +594,7 @@ class TestProvider:
     ) -> None:
         agent = await fleet.add_node("node-a")
         task = load_task_folder(scaffold_task(tmp_path / "edited"))
-        monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
+        monkeypatch.setenv("ORBIT_FLEET_TOKEN", TOKEN)
         settings = RunConfig.model_validate(
             {"sandbox": {"providers": ["fleet"], "fleet": {"url": fleet.url}}}
         )
@@ -658,7 +663,7 @@ class TestImageKeys:
     def test_a_task_image_is_named_by_its_build_context(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
+        monkeypatch.setenv("ORBIT_FLEET_TOKEN", TOKEN)
         folder = scaffold_task(tmp_path / "keyed")
         first = self.key(folder)
         (folder / "environment" / "setup").mkdir()
@@ -678,15 +683,15 @@ def _fleet_registry() -> ProviderRegistry:
 
 class TestConfiguration:
     def test_the_fleet_is_one_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
+        monkeypatch.setenv("ORBIT_FLEET_TOKEN", TOKEN)
         registry = _fleet_registry()
         fleet = registry.get("fleet")
         assert isinstance(fleet, FleetProvider) and fleet.client is registry.fleet
         assert registry.get("fleet") is fleet
 
     def test_a_fleet_needs_its_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("ALE_FLEET_TOKEN", raising=False)
-        with pytest.raises(ProviderStartError, match="ALE_FLEET_TOKEN"):
+        monkeypatch.delenv("ORBIT_FLEET_TOKEN", raising=False)
+        with pytest.raises(ProviderStartError, match="ORBIT_FLEET_TOKEN"):
             _fleet_registry().get("fleet")
 
     def test_a_fleet_needs_its_control_plane(self) -> None:
@@ -750,7 +755,7 @@ class TestRetention:
         await sandbox.write_file("/home/user/work", b"kept")
         retained = await sandbox.retain(roles=("solver",), reason="kept")
         assert (retained.provider, retained.handle) == ("fleet", f"fleet:{sandbox.sandbox_id}")
-        assert retained.cleanup_command == f"ale sandbox destroy {retained.handle}"
+        assert retained.cleanup_command == f"orbit sandbox destroy {retained.handle}"
         record = fleet.control.sandboxes[sandbox.sandbox_id]
         assert record.status is SandboxStatus.RETAINED
         # No lease ends it, and neither does its agent stopping or a new one starting.
@@ -782,7 +787,7 @@ class TestRetention:
             assert (record.status, record.run_id) == (SandboxStatus.READY, later_client.run_id)
             assert await provider.list_retained() == []
             # Only one Run continues in it.
-            with pytest.raises(AleError, match="not a retained Sandbox"):
+            with pytest.raises(OrbitError, match="not a retained Sandbox"):
                 await provider.attach_retained(
                     retained.handle, request(image, "episode-3"), sandbox.allocation,
                     sandbox.resolved_image,
@@ -829,7 +834,7 @@ class TestRetention:
             await handing_over(agent, sandbox.sandbox_id)
             await agent.stop()
             await fleet.nodes["node-a"].close()
-            with pytest.raises(AleError):
+            with pytest.raises(OrbitError):
                 await attaching
         assert fleet.providers["node-a"].destroyed == []
         restarted = await fleet.add_node("node-a", port=port_of(agent), restart=True)
@@ -910,10 +915,10 @@ class TestValidationRounds:
         Node and leaf that saved the round's snapshot, which the Run removes after them."""
         from tests.support import TurnsHarness, fleet_registry, rounds_task
 
-        from ale.core.sandbox import SandboxRole
-        from ale.core.verdict import Status
-        from ale.run.episode import run_episode
-        from ale.run.protocol.episode_protocol import EpisodeProtocol
+        from orbit.core.sandbox import SandboxRole
+        from orbit.core.verdict import Status
+        from orbit.run.episode import run_episode
+        from orbit.run.protocol.episode_protocol import EpisodeProtocol
 
         await fleet.add_node("plain")
         await fleet.add_node("saving", saves_snapshots=True)

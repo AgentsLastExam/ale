@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from ale.core.blob import (
+from orbit.core.blob import (
     BlobRef,
     BlobText,
     InlineText,
@@ -27,11 +27,11 @@ from ale.core.blob import (
     MediaClass,
     media_class_for,
 )
-from ale.core.episode import EventSink
-from ale.core.lock import RunLock
-from ale.core.result import ResultRecord
-from ale.core.sandbox import ExecResult
-from ale.core.trace import (
+from orbit.core.episode import EventSink
+from orbit.core.lock import RunLock
+from orbit.core.result import ResultRecord
+from orbit.core.sandbox import ExecResult
+from orbit.core.trace import (
     CommandFinished,
     CommandStarted,
     ExecutionEvent,
@@ -39,7 +39,7 @@ from ale.core.trace import (
     PartialOutputRecovered,
     TransportEvent,
 )
-from ale.core.trajectory import AtifTrajectory
+from orbit.core.trajectory import AtifTrajectory
 
 __all__ = [
     "INLINE_TEXT_LIMIT",
@@ -82,7 +82,7 @@ _BLOB_PATH = re.compile(
 )
 
 _LOG_CONTEXT: contextvars.ContextVar[tuple[EventSink, str, str | None, str, Redactor] | None] = (
-    contextvars.ContextVar("ale_execution_context", default=None)
+    contextvars.ContextVar("orbit_execution_context", default=None)
 )
 _HANDLER_LOCK = threading.Lock()
 
@@ -426,13 +426,13 @@ class _ExecutionHandler(logging.Handler):
                 component=component,
                 level=_level(record.levelno),
                 message=redactor(record.getMessage()),
-                data=getattr(record, "ale_data", {}),
+                data=getattr(record, "orbit_data", {}),
             )
         )
 
 
 def install_execution_handler() -> None:
-    logger = logging.getLogger("ale.execution")
+    logger = logging.getLogger("orbit.execution")
     with _HANDLER_LOCK:
         if any(isinstance(handler, _ExecutionHandler) for handler in logger.handlers):
             return

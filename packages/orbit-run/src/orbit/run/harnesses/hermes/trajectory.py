@@ -11,8 +11,8 @@ from typing import Any
 
 import yaml
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifFinalMetrics,
@@ -24,7 +24,7 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
@@ -33,7 +33,7 @@ from ale.run.harnesses.base import (
 )
 
 #: ``HERMES_HOME``.
-STATE = ".hermes-ale"
+STATE = ".hermes-orbit"
 #: Every session of the home, exported after each invocation:
 #: ``<session id>/<time>.jsonl``, one session per line.
 EXPORTS = f"{STATE}/exports"
@@ -409,7 +409,7 @@ def _call(
         tool_call_id=call_id,
         function_name=name,
         arguments=arguments,
-        extra={"ale": extra} if extra else None,
+        extra={"orbit": extra} if extra else None,
     )
 
 
@@ -497,7 +497,7 @@ def _stream_steps(
                             AtifObservationResult(
                                 source_call_id=call_id,
                                 content=_content(result.get("output"), context),
-                                extra={"ale": {"is_error": True}}
+                                extra={"orbit": {"is_error": True}}
                                 if result.get("is_error")
                                 else None,
                             )
@@ -528,7 +528,7 @@ def _failure(result: dict[str, Any]) -> str | None:
 
 
 def _content(value: Any, context: TrajectoryParseContext) -> str | list[AtifContentPart]:
-    """A tool result's text, then each image it names that ALE mirrored."""
+    """A tool result's text, then each image it names that Orbit mirrored."""
     text = _text(value)
     images = []
     for name in dict.fromkeys(_MEDIA.findall(text)):
@@ -592,4 +592,4 @@ def _extra(
     if context.incomplete:
         data["incomplete"] = True
         data["incomplete_reason"] = context.incomplete_reason or "interrupted"
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

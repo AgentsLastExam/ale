@@ -23,7 +23,7 @@ VERIFY_DEFAULT = textwrap.dedent("""
 """).strip()
 
 VERIFY_CHECK = (
-    "from ale_verify import checks, write\n"
+    "from orbit_verify import checks, write\n"
     "check = checks.text_equals('/home/user/output/result.txt', 'hello world')\n"
     "write({'reward': check['score'], 'content': check})\n"
 )
@@ -39,9 +39,9 @@ HELLO_DOCKERFILE = (
 #: ``HELLO_DOCKERFILE`` for a Linux VM Task: its ``environment/build.sh`` on the VM base.
 HELLO_BUILD = (
     "set -euo pipefail\n"
-    'mkdir -p "$ALE_HOME/input" "$ALE_HOME/output"\n'
-    "printf 'world' > \"$ALE_HOME/input/word.txt\"\n"
-    'chown -R user:user "$ALE_HOME/input" "$ALE_HOME/output"\n'
+    'mkdir -p "$ORBIT_HOME/input" "$ORBIT_HOME/output"\n'
+    "printf 'world' > \"$ORBIT_HOME/input/word.txt\"\n"
+    'chown -R user:user "$ORBIT_HOME/input" "$ORBIT_HOME/output"\n'
 )
 
 HELLO_SOLVE = (
@@ -95,9 +95,9 @@ def write_repo() -> Callable[..., Path]:
 
 
 @pytest.fixture
-def isolated_ale_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    cache = tmp_path / "ale-cache"
-    monkeypatch.setenv("ALE_CACHE_DIR", str(cache))
+def isolated_orbit_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    cache = tmp_path / "orbit-cache"
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(cache))
     return cache
 
 

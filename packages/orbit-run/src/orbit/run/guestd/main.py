@@ -1,4 +1,4 @@
-"""ale-guestd — the in-sandbox execution service.
+"""orbit-guestd — the in-sandbox execution service.
 
 Every exec, file transfer and screenshot goes through here, so the host side is
 identical for containers and virtual machines and providers only have to attach a
@@ -64,7 +64,7 @@ GUESTD_VERSION = "0.1.2"
 #: Where a claimed TCP token survives a service restart. /run is tmpfs: a reboot or a disk
 #: saved as an image carries no token forward. Windows keeps it in memory only, because
 #: its image builder saves a running guest's disk.
-DEFAULT_TOKEN_FILE = None if os.name == "nt" else Path("/run/ale/guestd-token")
+DEFAULT_TOKEN_FILE = None if os.name == "nt" else Path("/run/orbit/guestd-token")
 
 
 class _Desync(Exception):
@@ -92,7 +92,7 @@ class Handler:
         operating_system = (
             "windows" if os.name == "nt" else "macos" if sys.platform == "darwin" else "linux"
         )
-        agent_user = os.environ.get("ALE_AGENT_USER") or _current_user()
+        agent_user = os.environ.get("ORBIT_AGENT_USER") or _current_user()
         agent_uid = None
         if os.name != "nt":
             import pwd
@@ -107,7 +107,7 @@ class Handler:
             python=sys.version.split()[0],
             user=_current_user(),
             agent_user=agent_user,
-            agent_home=os.environ.get("ALE_AGENT_HOME") or _home_of(agent_user),
+            agent_home=os.environ.get("ORBIT_AGENT_HOME") or _home_of(agent_user),
             framework_uid=os.geteuid() if os.name != "nt" else None,
             agent_uid=agent_uid,
             gui=has_desktop(),
@@ -146,7 +146,11 @@ class Handler:
             popen_kwargs["start_new_session"] = True
         popen_kwargs.update(_drop_to(params.get("run_as"), env))
         try:
-            if os.name == "nt" and params.get("run_as") and os.environ.get("ALE_AGENT_SUDO") != "1":
+            if (
+                os.name == "nt"
+                and params.get("run_as")
+                and os.environ.get("ORBIT_AGENT_SUDO") != "1"
+            ):
                 # The elevated launcher must never inherit agent-controlled cwd or Python
                 # startup settings. Pass those only to its limited-token child.
                 proc = subprocess.Popen(
@@ -1124,7 +1128,7 @@ class _Server(socketserver.ThreadingTCPServer):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ale-guestd", description="ALE guest service")
+    parser = argparse.ArgumentParser(prog="orbit-guestd", description="Orbit guest service")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--stdio", action="store_true", help="serve one session over stdin/stdout")
     mode.add_argument("--tcp", metavar="HOST:PORT", help="serve over TCP")

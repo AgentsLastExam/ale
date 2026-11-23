@@ -6,12 +6,12 @@ from __future__ import annotations
 import pytest
 from tests.support import CONTAINER_BASE, LIST_POLICIES, check_a_sealed_list, slurm_config
 
-from ale.core.sandbox import Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
-from ale.core.testkit import ProviderConformance
-from ale.run.framework import framework_identity
-from ale.run.providers import missing_features
-from ale.run.providers.slurm import SlurmProvider
+from orbit.core.sandbox import Identity, ImageRef, SandboxRequest
+from orbit.core.taskspec import NetworkPolicy, Resources
+from orbit.core.testkit import ProviderConformance
+from orbit.run.framework import framework_identity
+from orbit.run.providers import missing_features
+from orbit.run.providers.slurm import SlurmProvider
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_slurm]
 

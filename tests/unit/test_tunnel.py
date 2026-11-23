@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from ale.run.guestd.tunnel import CHUNK_BYTES, WINDOW_BYTES, Mux
+from orbit.run.guestd.tunnel import CHUNK_BYTES, WINDOW_BYTES, Mux
 
 pytestmark = pytest.mark.unit
 

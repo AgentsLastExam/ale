@@ -5,7 +5,7 @@ Provision a sandbox, prepare it, let the agent work, score what it left behind.
 Three properties are enforced here rather than trusted to task authors: verification and
 oracle material is absent while the evaluated agent runs, every phase has a deadline,
 and teardown happens on every path out. Tasks own literal paths inside the image-declared
-agent home; ALE owns only staging time, its root-only framework directory and the
+agent home; Orbit owns only staging time, its root-only framework directory and the
 verifier directory a result is written to.
 
 An agent that receives validation rounds works in turns, each after the first in a solver
@@ -29,10 +29,10 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, cast
 
-from ale.core.capability import round_verifier_resources
-from ale.core.config import RunTimeouts
-from ale.core.episode import ArtifactSink, EpisodeContext, Phase
-from ale.core.errors import (
+from orbit.core.capability import round_verifier_resources
+from orbit.core.config import RunTimeouts
+from orbit.core.episode import ArtifactSink, EpisodeContext, Phase
+from orbit.core.errors import (
     AgentError,
     AgentUnsupportedError,
     AllocationEndedError,
@@ -55,7 +55,7 @@ from ale.core.errors import (
     VerificationInfrastructureError,
     VerifierOutputError,
 )
-from ale.core.harness import (
+from orbit.core.harness import (
     AutonomousHarness,
     EffectiveAgentResources,
     Harness,
@@ -64,8 +64,8 @@ from ale.core.harness import (
     ResumeSupport,
     TrajectoryParseContext,
 )
-from ale.core.lock import AleVerifyProvenance, ResumedFrom, SandboxProvenance
-from ale.core.result import (
+from orbit.core.lock import OrbitVerifyProvenance, ResumedFrom, SandboxProvenance
+from orbit.core.result import (
     EpisodeProgress,
     FailureInfo,
     PhaseTiming,
@@ -73,7 +73,7 @@ from ale.core.result import (
     ValidationFeedback,
     ValidationRound,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     ExecOutputSink,
     ExecResult,
     Identity,
@@ -85,8 +85,8 @@ from ale.core.sandbox import (
     SandboxRole,
     ShownDirectory,
 )
-from ale.core.task import Stage, Task
-from ale.core.taskspec import (
+from orbit.core.task import Stage, Task
+from orbit.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
     OperatingSystem,
@@ -96,14 +96,14 @@ from ale.core.taskspec import (
     VerificationMode,
     VerifySpec,
 )
-from ale.core.trace import (
+from orbit.core.trace import (
     PhaseFinished,
     PhaseStarted,
     PolicyApplied,
     TrajectoryLink,
     read_jsonl,
 )
-from ale.core.trajectory import (
+from orbit.core.trajectory import (
     AtifAgent,
     AtifFinalMetrics,
     AtifMetrics,
@@ -111,18 +111,18 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.core.verdict import Status, Verdict
-from ale.run import artifact_files, guestd
-from ale.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
-from ale.run.harnesses import credential_files
-from ale.run.harnesses.builtin import NopHarness, OracleHarness, solution_dir
-from ale.run.protocol.log_mirror import (
+from orbit.core.verdict import Status, Verdict
+from orbit.run import artifact_files, guestd
+from orbit.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
+from orbit.run.harnesses import credential_files
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness, solution_dir
+from orbit.run.protocol.log_mirror import (
     FINAL_SYNC_TIMEOUT_SEC,
     SYNC_INTERVAL_SEC,
     SYNC_TIMEOUT_SEC,
     LogMirror,
 )
-from ale.run.recording import (
+from orbit.run.recording import (
     BlobStore,
     CommandRecorder,
     Redactor,
@@ -131,8 +131,8 @@ from ale.run.recording import (
     execution_logging,
     redact_files,
 )
-from ale.run.verification import installed_ale_verify, verifier_judge_config
-from ale_verify import MAX_FEEDBACK_BYTES, JudgeInvocation, read_result
+from orbit.run.verification import installed_orbit_verify, verifier_judge_config
+from orbit_verify import MAX_FEEDBACK_BYTES, JudgeInvocation, read_result
 
 __all__ = [
     "SETUP_TIMEOUT_SEC",
@@ -221,9 +221,9 @@ class _StageLayout:
 
 def _layout(operating_system: OperatingSystem) -> _StageLayout:
     root: PurePath = (
-        PureWindowsPath("C:/ProgramData/ALE")
+        PureWindowsPath("C:/ProgramData/Orbit")
         if operating_system is OperatingSystem.WINDOWS
-        else PurePosixPath("/opt/ale")
+        else PurePosixPath("/opt/orbit")
     )
     return _StageLayout(root)
 
@@ -252,7 +252,7 @@ def _verifier_dir(operating_system: OperatingSystem) -> PurePath:
     if operating_system is OperatingSystem.WINDOWS:
         return PureWindowsPath("C:/logs/verifier")
     if operating_system is OperatingSystem.MACOS:
-        return PurePosixPath("/opt/ale/logs/verifier")
+        return PurePosixPath("/opt/orbit/logs/verifier")
     return PurePosixPath("/logs/verifier")
 
 
@@ -710,9 +710,9 @@ class EpisodeProtocol:
                 if ctx.agent_stop is None:
                     raise
                 # What stopped the agent stays the reason this Episode has no score.
-                logging.getLogger("ale.execution").warning(
+                logging.getLogger("orbit.execution").warning(
                     "verification after the agent stopped failed",
-                    extra={"ale_data": {"error": type(error).__name__}},
+                    extra={"orbit_data": {"error": type(error).__name__}},
                 )
                 ctx.failure_phase = Phase.AGENT
                 raise ctx.agent_stop from error
@@ -749,7 +749,7 @@ class EpisodeProtocol:
     ) -> SandboxRequest:
         """The solver's request; one that ``validations`` still to come save asks for a leaf
         that saves that many snapshots in a row, and more
-        (:func:`~ale.core.capability.solver_saves`), and that serves the verifier that boots
+        (:func:`~orbit.core.capability.solver_saves`), and that serves the verifier that boots
         from its snapshot too."""
         spec = ctx.spec
         mode = spec.verify.environment_mode
@@ -771,7 +771,7 @@ class EpisodeProtocol:
             resources=spec.resources,
             **_network(ctx, spec.solver_network),
             gateway_url=ctx.session.gateway_url or None,
-            env={"ALE_EPISODE_ID": ctx.episode_id},
+            env={"ORBIT_EPISODE_ID": ctx.episode_id},
             sudo=spec.resources.sudo,
             user=spec.image.user,
         )
@@ -847,7 +847,7 @@ class EpisodeProtocol:
             resources=resources.as_resources(),
             **_network(ctx, placed.network),
             gateway_url=ctx.session.gateway_url or None,
-            env={"ALE_EPISODE_ID": ctx.episode_id},
+            env={"ORBIT_EPISODE_ID": ctx.episode_id},
             sudo=False,
             user=(placed.image or ctx.spec.image).user,
         )
@@ -915,7 +915,7 @@ class EpisodeProtocol:
                 resources=resources,
                 **_network(ctx, validation.network),
                 gateway_url=ctx.session.gateway_url or None,
-                env={"ALE_EPISODE_ID": ctx.episode_id},
+                env={"ORBIT_EPISODE_ID": ctx.episode_id},
                 sudo=False,
                 user=spec.image.user,
             )
@@ -972,9 +972,9 @@ class EpisodeProtocol:
                     raise ProviderCapacityError(
                         f"the booted solver found no room in {BOOT_WAIT_SEC:.0f} s: {error}"
                     ) from error
-                logging.getLogger("ale.execution").info(
+                logging.getLogger("orbit.execution").info(
                     "the booted solver waits for room",
-                    extra={"ale_data": {"error": str(error)}},
+                    extra={"orbit_data": {"error": str(error)}},
                 )
                 await asyncio.sleep(BOOT_RETRY_SEC)
 
@@ -1295,9 +1295,9 @@ class EpisodeProtocol:
         except _Moved as moved:
             solver.continuation = moved.continuation
             with self._traced(ctx, Phase.AGENT):
-                logging.getLogger("ale.execution").info(
+                logging.getLogger("orbit.execution").info(
                     "the solver's Sandbox reached its deadline; the agent's run was cut",
-                    extra={"ale_data": {"left_sec": round(budget.remaining)}},
+                    extra={"orbit_data": {"left_sec": round(budget.remaining)}},
                 )
             return _Cut(None, moved.continuation, ran=True)
         except _AGENT_STOPS as error:
@@ -1332,9 +1332,9 @@ class EpisodeProtocol:
             try:
                 self._record_progress(ctx, budget, "agent", solver)
             except Exception as exc:
-                logging.getLogger("ale.execution").warning(
+                logging.getLogger("orbit.execution").warning(
                     "recording the episode's progress failed; will retry",
-                    extra={"ale_data": {"error": type(exc).__name__}},
+                    extra={"orbit_data": {"error": type(exc).__name__}},
                 )
             if logs is None:
                 continue
@@ -1342,9 +1342,9 @@ class EpisodeProtocol:
                 async with asyncio.timeout(SYNC_TIMEOUT_SEC):
                     await logs.sync()
             except Exception as exc:
-                logging.getLogger("ale.execution").warning(
+                logging.getLogger("orbit.execution").warning(
                     "periodic harness log copy failed; will retry",
-                    extra={"ale_data": {"error": type(exc).__name__}},
+                    extra={"orbit_data": {"error": type(exc).__name__}},
                 )
 
     async def _work(
@@ -1406,11 +1406,11 @@ class EpisodeProtocol:
         snapshot where it lasts, ``lasting`` seconds where given, without running setup
         again, as a validation round boots the next turn's; a ``segment`` of the agent's work
         goes on there."""
-        logger = logging.getLogger("ale.execution")
+        logger = logging.getLogger("orbit.execution")
         with self._traced(ctx, Phase.AGENT):
             logger.info(
                 "the solver's Sandbox reaches its deadline; the solver moves",
-                extra={"ale_data": {"deadline": str(solver.sandbox.deadline)}},
+                extra={"orbit_data": {"deadline": str(solver.sandbox.deadline)}},
             )
             if logs is not None:
                 await self._copy_logs(logs)
@@ -1443,7 +1443,7 @@ class EpisodeProtocol:
         with self._traced(ctx, Phase.AGENT):
             logger.info(
                 "the solver moved",
-                extra={"ale_data": {"handle": handle, "sandbox": booted.sandbox_id}},
+                extra={"orbit_data": {"handle": handle, "sandbox": booted.sandbox_id}},
             )
 
     def _segment_begins(
@@ -1551,7 +1551,7 @@ class EpisodeProtocol:
         snapshot exists while the round's verifier runs.
         """
         mode = ctx.spec.validation_spec.environment_mode
-        logger = logging.getLogger("ale.execution")
+        logger = logging.getLogger("orbit.execution")
         for index in range(1, self.validations + 1):
             if ctx.agent_stop is not None:
                 return
@@ -1580,7 +1580,7 @@ class EpisodeProtocol:
             with self._traced(ctx, Phase.AGENT):
                 logger.info(
                     "the turn ended; a validation round begins",
-                    extra={"ale_data": {"round": index}},
+                    extra={"orbit_data": {"round": index}},
                 )
                 if ctx.agent_started:
                     copied = logs is None or await self._copy_logs(logs)
@@ -1604,7 +1604,7 @@ class EpisodeProtocol:
                 earlier, solver.rounds = solver.rounds, [solver.sandbox]
                 logger.info(
                     "a validation round saved the solver",
-                    extra={"ale_data": {"round": index, "handle": handle}},
+                    extra={"orbit_data": {"round": index, "handle": handle}},
                 )
                 await self._release_rounds(ctx, earlier)
             try:
@@ -1621,7 +1621,7 @@ class EpisodeProtocol:
                 )
                 logger.info(
                     "a validation round booted the next solver",
-                    extra={"ale_data": {"round": index, "handle": handle}},
+                    extra={"orbit_data": {"round": index, "handle": handle}},
                 )
                 return booted
 
@@ -1660,9 +1660,9 @@ class EpisodeProtocol:
             try:
                 await ctx.sandboxes.release(sandbox)
             except RetentionFinalizationError as exc:
-                logging.getLogger("ale.execution").warning(
+                logging.getLogger("orbit.execution").warning(
                     "a validation round's snapshot could not be destroyed yet",
-                    extra={"ale_data": {"error": str(exc)}},
+                    extra={"orbit_data": {"error": str(exc)}},
                 )
 
     def _traced(self, ctx: EpisodeContext, phase: Phase) -> contextlib.AbstractContextManager[None]:
@@ -1683,9 +1683,9 @@ class EpisodeProtocol:
             async with asyncio.timeout(FINAL_SYNC_TIMEOUT_SEC):
                 await logs.sync(final=True)
         except Exception as exc:
-            logging.getLogger("ale.execution").warning(
+            logging.getLogger("orbit.execution").warning(
                 "harness log copy at the end of a turn failed; the final copy retries",
-                extra={"ale_data": {"error": type(exc).__name__}},
+                extra={"orbit_data": {"error": type(exc).__name__}},
             )
             return False
         return not logs.incomplete
@@ -1775,10 +1775,10 @@ class EpisodeProtocol:
             if attempt == 1 and isinstance(outcome, AllocationEndedError) and unreleased is None:
                 ctx.failure_phase = failure_phase
                 with self._traced(ctx, Phase.VALIDATE):
-                    logging.getLogger("ale.execution").warning(
+                    logging.getLogger("orbit.execution").warning(
                         "a validation round's verifier lost its allocation; the round runs "
                         "again on the same snapshot",
-                        extra={"ale_data": {"round": index, "error": str(outcome)}},
+                        extra={"orbit_data": {"round": index, "error": str(outcome)}},
                     )
                 continue
             break
@@ -1798,7 +1798,7 @@ class EpisodeProtocol:
     ) -> str | None:
         """Record round ``index``'s ``outcome``, its score or why it has none, and return the
         feedback text the agent receives."""
-        logger = logging.getLogger("ale.execution")
+        logger = logging.getLogger("orbit.execution")
         if isinstance(outcome, Exception):
             error = outcome
             # The episode goes on, so the failure is the round's, not the episode's.
@@ -1821,7 +1821,9 @@ class EpisodeProtocol:
             with self._traced(ctx, Phase.VALIDATE):
                 logger.warning(
                     "a validation round produced no score",
-                    extra={"ale_data": {"round": index, "status": status.value, "error": message}},
+                    extra={
+                        "orbit_data": {"round": index, "status": status.value, "error": message}
+                    },
                 )
             return None
         reward, feedback = outcome
@@ -1846,7 +1848,8 @@ class EpisodeProtocol:
         )
         with self._traced(ctx, Phase.VALIDATE):
             logger.info(
-                "a validation round scored", extra={"ale_data": {"round": index, "reward": reward}}
+                "a validation round scored",
+                extra={"orbit_data": {"round": index, "reward": reward}},
             )
         return feedback
 
@@ -1860,7 +1863,7 @@ class EpisodeProtocol:
         for item in ctx.agent_resources.mcp_servers:
             server = item.server
             if item.staged_files is not None and isinstance(server, StdioMcpServer):
-                target = _sandbox_path(ctx.spec.os, ctx.home, ".ale-mcp", item.name)
+                target = _sandbox_path(ctx.spec.os, ctx.home, ".orbit-mcp", item.name)
                 await sandbox.upload_dir(
                     str(item.staged_files),
                     target,
@@ -2092,10 +2095,10 @@ class EpisodeProtocol:
         await self._stage_verification_config(ctx, sandbox, stage)
 
         python, destination = await self._site_packages(ctx, sandbox)
-        framework_source, framework_version, framework_hash = installed_ale_verify()
+        framework_source, framework_version, framework_hash = installed_orbit_verify()
         await sandbox.upload_dir(
             str(framework_source),
-            f"{destination}/ale_verify",
+            f"{destination}/orbit_verify",
         )
         # Stage the one pure-Python schema dependency with the verifier package.
         import fastjsonschema
@@ -2103,7 +2106,7 @@ class EpisodeProtocol:
         await sandbox.upload_dir(
             str(Path(fastjsonschema.__file__).parent), f"{destination}/fastjsonschema"
         )
-        await self._probe_package(sandbox, python, "ale-verify", "import ale_verify")
+        await self._probe_package(sandbox, python, "orbit-verify", "import orbit_verify")
         placed = ctx.spec.verify if phase is Phase.VERIFY else ctx.spec.validation_spec
         if (user := placed.user) is not None:
             granted = await sandbox.exec(
@@ -2123,7 +2126,7 @@ class EpisodeProtocol:
                     f"could not give [verifier].user {user} what it verifies with: "
                     + (granted.stderr.strip() or f"exit {granted.exit_code}")
                 )
-        ctx.ale_verify_provenance = AleVerifyProvenance(
+        ctx.orbit_verify_provenance = OrbitVerifyProvenance(
             version=framework_version,
             content_hash=framework_hash,
         )
@@ -2301,7 +2304,7 @@ class EpisodeProtocol:
     ) -> None:
         if ctx.solver_evidence_captured:
             return
-        logger = logging.getLogger("ale.execution")
+        logger = logging.getLogger("orbit.execution")
         # The harness's own logs, in their own place. What the agent produced and how the
         # harness went about producing it are different questions with different owners:
         # the task declares the first because only it knows what its output is, and the
@@ -2315,7 +2318,7 @@ class EpisodeProtocol:
                 collection_failed = True
                 logger.warning(
                     "final harness log copy failed",
-                    extra={"ale_data": {"error": type(exc).__name__}},
+                    extra={"orbit_data": {"error": type(exc).__name__}},
                 )
             collection_failed = collection_failed or logs.incomplete
             # Copied while the agent ran, so only now can the copies lose what they held.
@@ -2345,9 +2348,9 @@ class EpisodeProtocol:
         try:
             return await provision(viewed), viewed
         except ProviderCapabilityError as error:
-            logging.getLogger("ale.execution").warning(
+            logging.getLogger("orbit.execution").warning(
                 "the verifier cannot mount views of the solver's volumes; they are copied",
-                extra={"ale_data": {"error": str(error)}},
+                extra={"orbit_data": {"error": str(error)}},
             )
         reader = await ctx.sandboxes.acquire(
             self._verifier_request(ctx, snapshot=handle).model_copy(
@@ -2409,9 +2412,9 @@ class EpisodeProtocol:
             await sink.collect(
                 sandbox, path, name, artifact.exclude, artifact.destination, restored=not view
             )
-            logging.getLogger("ale.execution").info(
+            logging.getLogger("orbit.execution").info(
                 "artifact collection attempted",
-                extra={"ale_data": {"source": path, "name": name}},
+                extra={"orbit_data": {"source": path, "name": name}},
             )
 
     async def _teardown(
@@ -2432,15 +2435,15 @@ class EpisodeProtocol:
             try:
                 await self._capture_solver_evidence(ctx, sandbox, logs=logs)
             except Exception as exc:
-                logging.getLogger("ale.execution").warning(
+                logging.getLogger("orbit.execution").warning(
                     "interrupted solver evidence capture failed",
-                    extra={"ale_data": {"error": str(exc)}},
+                    extra={"orbit_data": {"error": str(exc)}},
                 )
         if not snapshotted:
             await self._sanitize_for_retention(ctx, sandbox)
         await ctx.sandboxes.release(sandbox)
         await self._release_rounds(ctx, rounds)
-        logging.getLogger("ale.execution").info("sandbox released")
+        logging.getLogger("orbit.execution").info("sandbox released")
 
     async def _sanitize_for_retention(
         self, ctx: EpisodeContext, sandbox: Sandbox, *, for_snapshot: bool = False
@@ -2488,7 +2491,7 @@ class EpisodeProtocol:
     ) -> ExecResult:
         """Empty the framework's stage directories.
 
-        A Windows base creates each one with its own ACL under the protected ALE root, so
+        A Windows base creates each one with its own ACL under the protected Orbit root, so
         there only its contents go.
         """
         paths = [str(_layout(ctx.spec.os).path(name)) for name in names]
@@ -2528,10 +2531,10 @@ class EpisodeProtocol:
         trajectory = self._convert_harness_trajectory(ctx, collection_failed=collection_failed)
         self._persist_trajectory(ctx, trajectory)
         ctx.trajectory_written = True
-        ale = (trajectory.extra or {}).get("ale") or {}
+        orbit = (trajectory.extra or {}).get("orbit") or {}
         if (
             ctx.agent_run is not None
-            and not ale.get("incomplete")
+            and not orbit.get("incomplete")
             and ctx.logging_policy.native_logs == "minimal"
         ):
             shutil.rmtree(ctx.run_dir / "logs" / self.harness.name, ignore_errors=True)
@@ -2574,9 +2577,9 @@ class EpisodeProtocol:
             # The agent finished; a converter defect must not decide its score. Keep the
             # minimal truthful trajectory, say why, and keep the native evidence.
             detail = Redactor(ctx.secrets)(f"{type(exc).__name__}: {exc}")[:500]
-            logging.getLogger("ale.execution").warning(
+            logging.getLogger("orbit.execution").warning(
                 "trajectory conversion failed",
-                extra={"ale_data": {"harness": self.harness.name, "error": detail}},
+                extra={"orbit_data": {"harness": self.harness.name, "error": detail}},
             )
             fallback = Harness.parse_trajectory(
                 self.harness,
@@ -2625,15 +2628,15 @@ class EpisodeProtocol:
         steps = []
         for step in trajectory.steps:
             extra = dict(step.extra or {})
-            ale = dict(extra.get("ale") or {})
+            orbit = dict(extra.get("orbit") or {})
             call_ids = [
                 calls[native_id]
-                for native_id in ale.get("native_event_ids", ())
+                for native_id in orbit.get("native_event_ids", ())
                 if native_id in calls
             ]
             if call_ids:
-                ale["transport_call_ids"] = call_ids
-                extra["ale"] = ale
+                orbit["transport_call_ids"] = call_ids
+                extra["orbit"] = orbit
                 updates: dict[str, object] = {"extra": extra}
                 if len(call_ids) == 1:
                     exact = _exact_token_metrics(ctx.run_dir, call_ids[0])
@@ -2676,29 +2679,29 @@ class EpisodeProtocol:
                     placed.environment_mode, validation=phase is Phase.VALIDATE
                 )
             ),
-            "ALE_STAGE_DIR": str(directory),
-            "ALE_HOME": ctx.home,
+            "ORBIT_STAGE_DIR": str(directory),
+            "ORBIT_HOME": ctx.home,
         }
         if phase is not Phase.SETUP:
             env.update(
                 {
-                    "ALE_EPISODE_ID": ctx.episode_id,
-                    "ALE_LLM_JUDGE_LOG_PATH": str(layout.path(stage, "llm-judge.jsonl")),
-                    "ALE_VERIFY_CONFIG_PATH": str(layout.path(stage, "config.json")),
-                    "ALE_TASK_INSTRUCTION_PATH": str(layout.path(stage, "instruction.md")),
-                    "ALE_AGENT_JUDGE_LOG_PATH": str(layout.path(stage, "agent-judge.jsonl")),
+                    "ORBIT_EPISODE_ID": ctx.episode_id,
+                    "ORBIT_LLM_JUDGE_LOG_PATH": str(layout.path(stage, "llm-judge.jsonl")),
+                    "ORBIT_VERIFY_CONFIG_PATH": str(layout.path(stage, "config.json")),
+                    "ORBIT_TASK_INSTRUCTION_PATH": str(layout.path(stage, "instruction.md")),
+                    "ORBIT_AGENT_JUDGE_LOG_PATH": str(layout.path(stage, "agent-judge.jsonl")),
                     **ctx.verification_command_env,
                 }
             )
             if verify_python is not None:
-                env["ALE_VERIFY_PYTHON"] = verify_python
+                env["ORBIT_VERIFY_PYTHON"] = verify_python
             if trajectory:
-                env["ALE_TRAJECTORY_PATH"] = str(layout.path(stage, "trajectory.json"))
+                env["ORBIT_TRAJECTORY_PATH"] = str(layout.path(stage, "trajectory.json"))
             # Judges retry provider failures until this budget runs out, so a verdict is
             # recorded as failed before the phase deadline kills the verifier.
             if ctx.phase_deadline is not None:
                 remaining = max(0, int(ctx.phase_deadline - time.monotonic()))
-                env["ALE_VERIFY_DEADLINE_SECONDS"] = str(remaining)
+                env["ORBIT_VERIFY_DEADLINE_SECONDS"] = str(remaining)
         assert ctx.execution is not None
         assert ctx.blobs is not None
         execution_id = f"{phase.value}-{len(ctx.phases) + 1}"
@@ -2783,7 +2786,7 @@ class EpisodeProtocol:
         script = (
             "import sys,sysconfig,site;"
             "assert sys.version_info >= (3,12), "
-            "f'ale_verify requires Python 3.12+, got {sys.version.split()[0]}';"
+            "f'orbit_verify requires Python 3.12+, got {sys.version.split()[0]}';"
             f"print({destination})"
         )
         # The image's own Python first, since that is where the Task's packages are; the
@@ -3242,7 +3245,7 @@ def _with_marked_prompts(
             step = steps[at]
             if step.source == "user" and _text(step).strip() == prompt.strip():
                 extra = dict(step.extra or {})
-                extra["ale"] = {**(extra.get("ale") or {}), key: index}
+                extra["orbit"] = {**(extra.get("orbit") or {}), key: index}
                 steps[at] = step.model_copy(update={"extra": extra})
                 found.add(index)
                 position = at + 1
@@ -3279,7 +3282,7 @@ def _continued_segment(trajectory: AtifTrajectory, resume: Resume) -> AtifTrajec
     if source is not None:
         # A first episode began the session; a continuation says where its own part
         # began, unless it could not tell.
-        earlier = ((source.extra or {}).get("ale") or {}).get("resumed_from")
+        earlier = ((source.extra or {}).get("orbit") or {}).get("resumed_from")
         prior = 0 if earlier is None else earlier.get("native_steps")
         if prior is not None and len(trajectory.steps) > prior + len(source.steps):
             end = prior + len(source.steps)
@@ -3290,7 +3293,7 @@ def _continued_segment(trajectory: AtifTrajectory, resume: Resume) -> AtifTrajec
             "reason": "continuation_boundary_not_found",
             "detail": "the earlier episodes' steps are kept: their end was not found",
         }
-        return _with_ale(_with_parse_issue(trajectory, issue), resumed_from=link)
+        return _with_orbit(_with_parse_issue(trajectory, issue), resumed_from=link)
 
     steps = [
         step.model_copy(update={"step_id": index})
@@ -3314,7 +3317,7 @@ def _continued_segment(trajectory: AtifTrajectory, resume: Resume) -> AtifTrajec
             "final_metrics": _segment_metrics(steps),
         }
     )
-    return _with_ale(segment, resumed_from={**link, "native_steps": before})
+    return _with_orbit(segment, resumed_from={**link, "native_steps": before})
 
 
 def _same_step(parsed: AtifStep, recorded: AtifStep) -> bool:
@@ -3346,9 +3349,9 @@ def _segment_metrics(steps: list[AtifStep]) -> AtifFinalMetrics:
     )
 
 
-def _with_ale(trajectory: AtifTrajectory, **fields: object) -> AtifTrajectory:
+def _with_orbit(trajectory: AtifTrajectory, **fields: object) -> AtifTrajectory:
     extra = dict(trajectory.extra or {})
-    extra["ale"] = {**(extra.get("ale") or {}), **fields}
+    extra["orbit"] = {**(extra.get("orbit") or {}), **fields}
     return trajectory.model_copy(update={"extra": extra})
 
 
@@ -3382,7 +3385,7 @@ def _attributed(ctx: EpisodeContext) -> Iterator[None]:
 def _program_failed(error: Exception) -> bool:
     """Whether a Harness reported its program's own failure, in the program's words, behind
     which a model provider failing its calls may be: an AgentError of no narrower kind, or a
-    subscription's login or entitlement as the CLI put it; not what ALE found wrong itself,
+    subscription's login or entitlement as the CLI put it; not what Orbit found wrong itself,
     such as a missing native session or a trajectory it could not convert."""
     return type(error) is AgentError or isinstance(
         error, (SubscriptionAuthenticationError, SubscriptionEntitlementError)
@@ -3391,17 +3394,17 @@ def _program_failed(error: Exception) -> bool:
 
 def _with_parse_issue(trajectory: AtifTrajectory, issue: dict[str, object]) -> AtifTrajectory:
     extra = dict(trajectory.extra or {})
-    ale = dict(extra.get("ale") or {})
-    ale["parse_issues"] = [*ale.get("parse_issues", ()), issue]
-    extra["ale"] = ale
+    orbit = dict(extra.get("orbit") or {})
+    orbit["parse_issues"] = [*orbit.get("parse_issues", ()), issue]
+    extra["orbit"] = orbit
     return trajectory.model_copy(update={"extra": extra})
 
 
 def _mark_incomplete(trajectory: AtifTrajectory, reason: str) -> AtifTrajectory:
     extra = dict(trajectory.extra or {})
-    ale = dict(extra.get("ale") or {})
-    ale.update(incomplete=True, incomplete_reason=reason)
-    extra["ale"] = ale
+    orbit = dict(extra.get("orbit") or {})
+    orbit.update(incomplete=True, incomplete_reason=reason)
+    extra["orbit"] = orbit
     return trajectory.model_copy(update={"extra": extra})
 
 
@@ -3434,7 +3437,7 @@ def _exact_token_metrics(run_dir: Path, call_id: str) -> AtifMetrics | None:
         }
         metrics = AtifMetrics(
             **known,
-            extra={"ale": extra} if extra else None,
+            extra={"orbit": extra} if extra else None,
         )
     except (OSError, TypeError, ValueError) as exc:
         raise TrajectoryConversionError(

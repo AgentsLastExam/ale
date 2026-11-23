@@ -7,14 +7,14 @@ from pathlib import Path, PurePosixPath
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, ConfigError, HarnessLimitError
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
-from ale.core.taskspec import OperatingSystem, StreamableHttpMcpServer
-from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.muse_code import MuseCodeHarness
-from ale.run.recording import BlobStore
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, ConfigError, HarnessLimitError
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
+from orbit.core.taskspec import OperatingSystem, StreamableHttpMcpServer
+from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.muse_code import MuseCodeHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
@@ -143,7 +143,7 @@ async def test_command_reads_the_prompt_file_and_names_its_session() -> None:
         }
     )
     launch = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=None,
@@ -153,7 +153,7 @@ async def test_command_reads_the_prompt_file_and_names_its_session() -> None:
     assert script.startswith(
         "unset CODEX_HOME CLAUDE_CONFIG_DIR; /home/agent/.local/bin/muse exec "
     )
-    assert "--prompt-file /home/agent/.ale-harness/prompt.md" in script
+    assert "--prompt-file /home/agent/.orbit-harness/prompt.md" in script
     assert "--base-url" not in script
     assert "--model test-model" in script
     assert f"--session-id {launch.session_id}" in script
@@ -165,7 +165,7 @@ async def test_command_reads_the_prompt_file_and_names_its_session() -> None:
     assert launch.env["XDG_DATA_HOME"] == "/home/agent/.local/share"
 
     resume = await MuseCodeHarness().prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=RUN_ID,
@@ -178,7 +178,7 @@ async def test_command_reads_the_prompt_file_and_names_its_session() -> None:
 
 async def test_windows_command_runs_the_native_executable() -> None:
     command = await MuseCodeHarness().prepare_command(
-        "C:/Users/Agent/.ale-harness/prompt.md",
+        "C:/Users/Agent/.orbit-harness/prompt.md",
         FakeSandbox(stdout=r"C:\Windows\System32"),  # type: ignore[arg-type]
         session(home=r"C:\Users\Agent"),
         native_session_id=None,
@@ -300,8 +300,8 @@ def write_turns(logs: Path, requested: str | None, *turns: tuple[str, str]) -> N
     for prompt, reply in turns:
         records.append({"prompt": prompt, "session_id": requested, "stdout_offset": len(stdout)})
         stdout += terminal(RUN_ID, reply)
-    write_jsonl(logs / ".ale-harness/invocations.jsonl", records)
-    (logs / ".ale-harness/stdout.log").write_text(stdout)
+    write_jsonl(logs / ".orbit-harness/invocations.jsonl", records)
+    (logs / ".orbit-harness/stdout.log").write_text(stdout)
 
 
 def spawning_session(
@@ -426,7 +426,7 @@ def test_parser_follows_the_session_log(tmp_path: Path) -> None:
     (acting,) = [step for step in trajectory.steps if step.tool_calls]
     assert [(call.function_name, call.extra) for call in acting.tool_calls or ()] == [
         ("bash", None),
-        ("mcp__task_proof__echo", {"ale": {"mcp": {"server": "task-proof", "tool": "echo"}}}),
+        ("mcp__task_proof__echo", {"orbit": {"mcp": {"server": "task-proof", "tool": "echo"}}}),
         ("read_file", None),
     ]
     shell, echo, image = acting.observation.results  # type: ignore[union-attr]
@@ -492,7 +492,7 @@ def test_provider_run_calls_join_the_response_that_made_them(tmp_path: Path) -> 
     found, opened, shell = acting.observation.results  # type: ignore[union-attr]
     assert json.loads(str(found.content)) == {"status": "completed", "results": hits}
     assert found.extra is None
-    assert opened.extra == {"ale": {"is_error": True}}
+    assert opened.extra == {"orbit": {"is_error": True}}
     assert shell.content == "ok"
     assert trajectory.steps[-1].message == "2.34.2"
 
@@ -504,7 +504,7 @@ def test_parser_embeds_the_subagent_its_call_started(tmp_path: Path) -> None:
     trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path, session_id=None))
 
     assert trajectory.session_id == RUN_ID
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
     # Muse delivers the subagent's result to the parent before the parent's next reply.
     assert [(step.source, step.message) for step in trajectory.steps] == [
         ("user", "Spawn a helper."),
@@ -539,7 +539,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
         context(logs, tmp_path, session_id=None, incomplete=True)
     )
 
-    assert "parse_issues" not in trajectory.extra["ale"]  # type: ignore[index]
+    assert "parse_issues" not in trajectory.extra["orbit"]  # type: ignore[index]
     (helper,) = trajectory.subagent_trajectories or ()
     (nested,) = helper.subagent_trajectories or ()
     assert nested.trajectory_id == f"trajectory-subagent-{CHILD_ID}-subagent-grandchild-1"
@@ -549,7 +549,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
     assert spawned.subagent_trajectory_ref[0].trajectory_id == nested.trajectory_id
     # An interrupted run leaves every session in it incomplete.
     for subagent in (helper, nested):
-        assert subagent.extra == {"ale": {"incomplete": True, "incomplete_reason": "interrupted"}}
+        assert subagent.extra == {"orbit": {"incomplete": True, "incomplete_reason": "interrupted"}}
 
 
 def test_a_subagent_without_its_start_attestation_is_unconverted(tmp_path: Path) -> None:
@@ -559,7 +559,7 @@ def test_a_subagent_without_its_start_attestation_is_unconverted(tmp_path: Path)
     trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path, session_id=None))
 
     assert trajectory.subagent_trajectories is None
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unlinked_subagent", "source": CHILD_LOG},
         {"reason": "unconverted_native_sessions", "count": 1, "sources": [CHILD_LOG]},
     ]
@@ -584,7 +584,7 @@ def test_reminder_agents_are_unconverted_without_being_unlinked(tmp_path: Path) 
     trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert trajectory.subagent_trajectories is None
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unconverted_native_sessions", "count": 1, "sources": [reminder]}
     ]
 
@@ -650,7 +650,7 @@ def test_tool_failures_and_failed_runs_are_recorded(tmp_path: Path) -> None:
 
     (result,) = trajectory.steps[1].observation.results  # type: ignore[union-attr]
     assert result.content == "denied"
-    assert result.extra == {"ale": {"is_error": True}}
+    assert result.extra == {"orbit": {"is_error": True}}
     assert (trajectory.steps[-1].source, trajectory.steps[-1].message) == ("system", "boom")
 
 
@@ -666,5 +666,5 @@ def test_without_the_session_each_turn_comes_from_its_prompt_and_stdout(tmp_path
         ("user", "second"),
         ("agent", "SECOND-DONE"),
     ]
-    ale = trajectory.extra["ale"]  # type: ignore[index]
-    assert ale["parse_issues"] == [{"reason": "native_session_unavailable", "session_id": RUN_ID}]
+    orbit = trajectory.extra["orbit"]  # type: ignore[index]
+    assert orbit["parse_issues"] == [{"reason": "native_session_unavailable", "session_id": RUN_ID}]

@@ -1,7 +1,7 @@
 """Opt-in Orchard qualification against the shared Sandbox contract.
 
 Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running, with
-ALE_TEST_ORCHARD=1. The suite builds its image on that Mac once, as ``ale prepare`` would,
+ORBIT_TEST_ORCHARD=1. The suite builds its image on that Mac once, as ``orbit prepare`` would,
 from ``tests/fixtures/tasks/macos-unprivileged``: it signs in ``tester``, an account other
 than ``admin``, so the sudo=false cases apply. Every macOS sandbox has that account's
 desktop, so the desktop capture and input checks always run. Each test destroys the VMs and
@@ -17,22 +17,22 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from ale.core.sandbox import Identity, PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.core.testkit import ProviderConformance
-from ale.run.framework import MACOS_PYTHON
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.providers.orchard import OrchardProvider
-from ale.run.task_images import prepare_task_image
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.sandbox import Identity, PreparedTaskImage, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from orbit.core.testkit import ProviderConformance
+from orbit.run.framework import MACOS_PYTHON
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.session import GatewaySession, SessionRegistry
+from orbit.run.providers.orchard import OrchardProvider
+from orbit.run.task_images import prepare_task_image
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = [
     pytest.mark.conformance,
     pytest.mark.needs_orchard,
     pytest.mark.skipif(
-        os.environ.get("ALE_TEST_ORCHARD") != "1",
-        reason="set ALE_TEST_ORCHARD=1 on a Mac whose local Orchard setup keeps running",
+        os.environ.get("ORBIT_TEST_ORCHARD") != "1",
+        reason="set ORBIT_TEST_ORCHARD=1 on a Mac whose local Orchard setup keeps running",
     ),
 ]
 

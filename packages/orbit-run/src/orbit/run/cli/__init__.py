@@ -1,5 +1,5 @@
-"""Command line interface for ALE."""
+"""Command line interface for Orbit."""
 
-from ale.run.cli.main import app, main
+from orbit.run.cli.main import app, main
 
 __all__ = ["app", "main"]

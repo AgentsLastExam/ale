@@ -3,7 +3,7 @@
 Setup, the agent's stage, artifact collection and verification each take their own turn
 with the sandbox, and each turn depends on something the conformance suite checks one piece
 at a time: who runs, what is uploaded, and when the network is open. Creates billable
-sandboxes, so it needs ``ALE_DAYTONA_API_KEY``.
+sandboxes, so it needs ``ORBIT_DAYTONA_API_KEY``.
 """
 
 from __future__ import annotations
@@ -15,17 +15,17 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.lock import TaskSource
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.session import SessionRegistry
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.daytona import DaytonaProvider
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import RunConfig
+from orbit.core.lock import TaskSource
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.session import SessionRegistry
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers.daytona import DaytonaProvider
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import edit_task_config, provider_registry
 
 pytestmark = [
@@ -33,7 +33,7 @@ pytestmark = [
     pytest.mark.needs_docker,
     pytest.mark.needs_daytona,
     pytest.mark.skipif(
-        not os.environ.get("ALE_DAYTONA_API_KEY"), reason="ALE_DAYTONA_API_KEY is not set"
+        not os.environ.get("ORBIT_DAYTONA_API_KEY"), reason="ORBIT_DAYTONA_API_KEY is not set"
     ),
 ]
 
@@ -199,8 +199,8 @@ async def test_an_allowlisted_task_reaches_its_host_through_the_proxy_and_nothin
 @pytest.mark.asyncio
 @pytest.mark.needs_gpu
 @pytest.mark.skipif(
-    os.environ.get("ALE_TEST_DAYTONA_GPU") != "1",
-    reason="set ALE_TEST_DAYTONA_GPU=1 to run an episode on a Daytona GPU sandbox",
+    os.environ.get("ORBIT_TEST_DAYTONA_GPU") != "1",
+    reason="set ORBIT_TEST_DAYTONA_GPU=1 to run an episode on a Daytona GPU sandbox",
 )
 async def test_a_gpu_task_runs_on_the_gpu_its_lock_records(
     tmp_path: Path, write_repo: Callable[..., Path]

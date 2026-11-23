@@ -9,20 +9,20 @@ from pathlib import Path, PurePosixPath
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, ConfigError, HarnessLimitError
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
-from ale.core.taskspec import StreamableHttpMcpServer
-from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.kimi_code import KimiCodeHarness
-from ale.run.recording import BlobStore
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, ConfigError, HarnessLimitError
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
+from orbit.core.taskspec import StreamableHttpMcpServer
+from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.kimi_code import KimiCodeHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
 SESSION_ID = "session-1"
-SESSION_DIR = f".kimi-ale/sessions/wd-1/{SESSION_ID}"
-CONFIG = "/home/agent/.kimi-ale/config.toml"
+SESSION_DIR = f".kimi-orbit/sessions/wd-1/{SESSION_ID}"
+CONFIG = "/home/agent/.kimi-orbit/config.toml"
 PROMPTS = ("delegate", "second")
 
 
@@ -82,7 +82,7 @@ async def test_configuration_is_episode_local_and_uses_the_gateway(
     config = sandbox.files[CONFIG].decode()
     assert f'type = "{provider}"' in config
     assert f'base_url = "{base_url}"' in config
-    assert 'api_key_env = "ALE_GATEWAY_TOKEN"' in config
+    assert 'api_key_env = "ORBIT_GATEWAY_TOKEN"' in config
     assert 'default_model = "test-model"' in config
     assert '[models."test-model"]' in config
     assert "telemetry = false" in config
@@ -90,9 +90,9 @@ async def test_configuration_is_episode_local_and_uses_the_gateway(
     assert "[thinking]" not in config
     assert "token" not in config.replace("TOKEN", "")
     assert sandbox.uploads == [
-        (str(effective.skills[0].path), "/home/agent/.kimi-ale/skills/resource-proof")
+        (str(effective.skills[0].path), "/home/agent/.kimi-orbit/skills/resource-proof")
     ]
-    servers = json.loads(sandbox.files["/home/agent/.kimi-ale/mcp.json"])["mcpServers"]
+    servers = json.loads(sandbox.files["/home/agent/.kimi-orbit/mcp.json"])["mcpServers"]
     assert servers == {
         "task-proof": {
             "command": "python3",
@@ -144,30 +144,30 @@ async def test_http_mcp_servers_use_the_native_url_form(tmp_path: Path) -> None:
         session(),
         EffectiveAgentResources(mcp_servers=(remote,), digest="sha256:" + "f" * 64),
     )
-    servers = json.loads(sandbox.files["/home/agent/.kimi-ale/mcp.json"])["mcpServers"]
+    servers = json.loads(sandbox.files["/home/agent/.kimi-orbit/mcp.json"])["mcpServers"]
     assert servers == {"remote": {"url": "https://mcp.example/mcp"}}
 
 
 async def test_command_isolates_discovery_and_resumes_the_exact_session() -> None:
     harness = KimiCodeHarness()
     launch = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=None,
     )
     assert launch.session_id is None
-    assert "--skills-dir /home/agent/.kimi-ale/skills" in launch.script
+    assert "--skills-dir /home/agent/.kimi-orbit/skills" in launch.script
     assert "--output-format stream-json" in launch.script
     assert "--session" not in launch.script
     assert launch.script.startswith("unset KIMI_MODEL_NAME ")
-    assert launch.env["KIMI_CODE_HOME"] == "/home/agent/.kimi-ale"
-    assert launch.env["ALE_GATEWAY_TOKEN"] == "token"
+    assert launch.env["KIMI_CODE_HOME"] == "/home/agent/.kimi-orbit"
+    assert launch.env["ORBIT_GATEWAY_TOKEN"] == "token"
     assert launch.env["KIMI_CODE_NO_AUTO_UPDATE"] == "1"
     assert "MSYS2_ARG_CONV_EXCL" not in launch.env
 
     resume = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=SESSION_ID,
@@ -178,14 +178,14 @@ async def test_command_isolates_discovery_and_resumes_the_exact_session() -> Non
 
 async def test_windows_command_keeps_git_bash_from_rewriting_the_prompt() -> None:
     command = await KimiCodeHarness().prepare_command(
-        "C:/Users/Agent/.ale-harness/prompt.md",
+        "C:/Users/Agent/.orbit-harness/prompt.md",
         FakeSandbox(stdout=r"C:\Windows\System32"),  # type: ignore[arg-type]
         session(home=r"C:\Users\Agent"),
         native_session_id=None,
     )
     assert command.env["MSYS2_ARG_CONV_EXCL"] == "*"
     assert command.env["KIMI_SHELL_PATH"] == "C:/Program Files/Git/bin/bash.exe"
-    assert command.env["KIMI_CODE_HOME"] == "C:/Users/Agent/.kimi-ale"
+    assert command.env["KIMI_CODE_HOME"] == "C:/Users/Agent/.kimi-orbit"
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
@@ -269,12 +269,12 @@ def test_session_files_match_only_the_exact_session() -> None:
     assert harness.is_session_file(PurePosixPath(SESSION_DIR, "agents/main/wire.jsonl"), SESSION_ID)
     assert harness.is_session_file(PurePosixPath(SESSION_DIR, "state.json"), SESSION_ID)
     assert not harness.is_session_file(
-        PurePosixPath(".kimi-ale/sessions/.index-dirty", f"{SESSION_ID}.1792989075328"),
+        PurePosixPath(".kimi-orbit/sessions/.index-dirty", f"{SESSION_ID}.1792989075328"),
         SESSION_ID,
     )
     assert not harness.is_session_file(PurePosixPath(SESSION_DIR, "state.json"), SESSION_ID[:-1])
     assert not harness.is_session_file(
-        PurePosixPath(".kimi-ale/sessions/wd_x", SESSION_ID), SESSION_ID
+        PurePosixPath(".kimi-orbit/sessions/wd_x", SESSION_ID), SESSION_ID
     )
 
 
@@ -304,8 +304,8 @@ def write_run(logs: Path, *outputs: str) -> None:
     for prompt, output in zip(PROMPTS, outputs, strict=True):
         records.append({"prompt": prompt, "stdout_offset": offset})
         offset += len(output.encode())
-    write_jsonl(logs / ".ale-harness/invocations.jsonl", records)
-    (logs / ".ale-harness/stdout.log").write_text("".join(outputs))
+    write_jsonl(logs / ".orbit-harness/invocations.jsonl", records)
+    (logs / ".orbit-harness/stdout.log").write_text("".join(outputs))
 
 
 def prompt(agent: str, text: str, **fields: object) -> dict[str, object]:
@@ -434,7 +434,7 @@ def test_unlinked_subagents_and_missing_media_are_reported(tmp_path: Path) -> No
     trajectory = KimiCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert trajectory.subagent_trajectories is None
-    issues = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
+    issues = trajectory.extra["orbit"]["parse_issues"]  # type: ignore[index]
     child = f"{SESSION_DIR}/agents/child-1/wire.jsonl"
     assert {"reason": "unlinked_subagent", "source": child} in issues
     assert any(
@@ -457,7 +457,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
 
     trajectory = KimiCodeHarness().parse_trajectory(context(logs, tmp_path, incomplete=True))
 
-    assert "parse_issues" not in trajectory.extra["ale"]  # type: ignore[index]
+    assert "parse_issues" not in trajectory.extra["orbit"]  # type: ignore[index]
     (helper,) = trajectory.subagent_trajectories or ()
     (nested,) = helper.subagent_trajectories or ()
     assert nested.trajectory_id == "trajectory-subagent-child-1-subagent-child-2"
@@ -471,7 +471,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
     assert result.subagent_trajectory_ref[0].trajectory_id == nested.trajectory_id
     # An interrupted run leaves every agent in it incomplete.
     for subagent in (helper, nested):
-        assert subagent.extra == {"ale": {"incomplete": True, "incomplete_reason": "interrupted"}}
+        assert subagent.extra == {"orbit": {"incomplete": True, "incomplete_reason": "interrupted"}}
 
 
 def test_a_failed_turn_is_recorded_where_it_happened(tmp_path: Path) -> None:
@@ -503,6 +503,8 @@ def test_without_the_session_each_turn_comes_from_its_prompt_and_stdout(tmp_path
         ("user", "second"),
         ("agent", "SECOND-DONE"),
     ]
-    ale = trajectory.extra["ale"]  # type: ignore[index]
-    assert {"reason": "native_session_unavailable", "session_id": SESSION_ID} in ale["parse_issues"]
-    assert ale["limitations"]
+    orbit = trajectory.extra["orbit"]  # type: ignore[index]
+    assert {"reason": "native_session_unavailable", "session_id": SESSION_ID} in orbit[
+        "parse_issues"
+    ]
+    assert orbit["limitations"]

@@ -1,4 +1,4 @@
-"""A real agent delegates to one subagent, and ALE attributes the child's work to it."""
+"""A real agent delegates to one subagent, and Orbit attributes the child's work to it."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def test_real_subagent_work_lands_in_its_own_trajectory(tmp_path: Path, harness:
     )
     result = json.loads((episode / "result.json").read_text())
     trajectory = json.loads((episode / "trajectory.json").read_text())
-    issues = ((trajectory.get("extra") or {}).get("ale") or {}).get("parse_issues", [])
+    issues = ((trajectory.get("extra") or {}).get("orbit") or {}).get("parse_issues", [])
     subagents = trajectory.get("subagent_trajectories") or []
     refs = _refs(trajectory)
 

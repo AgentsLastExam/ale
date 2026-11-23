@@ -16,7 +16,7 @@ writes the Transport Trace.
 | `proxy.py` | non-model egress for Sandbox processes under an allowlist or a blocklist, authenticated by the episode's egress session |
 
 API-key and subscription modes share the same Sandbox-side protocol. Subscription
-credential loading and refresh live in `ale.run.subscription`; configuration is covered
+credential loading and refresh live in `orbit.run.subscription`; configuration is covered
 by [`../../../../../../docs/guides/subscription-auth.md`](../../../../../../docs/guides/subscription-auth.md).
 
 The trust and logging contract is normative in
@@ -91,7 +91,7 @@ Request changes beyond the model:
 
 ### Provider-side network tools
 
-Each dialect names what makes a provider ALE ships reach the network on the agent's
+Each dialect names what makes a provider Orbit ships reach the network on the agent's
 behalf, as that provider documents it. Unless the Task's network is `open`, a request that
 asks for any of it is refused as `web_tools` before it reaches the provider, with status
 400 and `x-should-retry: false`, in the dialect's own error format:

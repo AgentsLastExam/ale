@@ -38,7 +38,7 @@ from ._records import (
 
 #: Invalid or refused verdicts get at most this many further attempts. Transient provider
 #: failures are retried without a count: a Judge decides a score and must finish, so only
-#: verification's own deadline (ALE_VERIFY_DEADLINE_SECONDS) stops them. Without one, as
+#: verification's own deadline (ORBIT_VERIFY_DEADLINE_SECONDS) stops them. Without one, as
 #: when an author runs verify.py directly, they are retried this many times instead.
 REPAIRS = 3
 RETRIES_WITHOUT_DEADLINE = 3
@@ -241,7 +241,7 @@ def _request(
     secret: str,
     evidence: Sequence[tuple[str | bytes, EvidenceReference]] = (),
 ) -> dict[str, Any]:
-    """One Judge request, streamed, without an output ceiling of ALE's choosing.
+    """One Judge request, streamed, without an output ceiling of Orbit's choosing.
 
     Streaming keeps a long reasoning response alive on networks that drop idle
     connections; the stream is read back into the provider's non-streaming shape.
@@ -497,7 +497,7 @@ def _wait_to_retry(failures: int, retry_after: float | None = None) -> bool:
 
 def _time_left() -> float | None:
     """Seconds verification may still spend on retries, or None without a deadline."""
-    budget = os.environ.get("ALE_VERIFY_DEADLINE_SECONDS")
+    budget = os.environ.get("ORBIT_VERIFY_DEADLINE_SECONDS")
     if not budget:
         return None
     elapsed = time.monotonic() - _STARTED

@@ -17,7 +17,7 @@ overlayfs reports only the writable disk's space.
 guest's `df /` shows it before the shutdown, plus what the snapshot it booted from held. A
 microVM booted from it gets a writable disk of `storage_mb` less that, plus the overhead,
 and its recorded storage is that disk's capacity plus what the snapshot holds. Its runner is
-labelled with what the snapshot holds (`ale.firecracker.written_mb`), so a later Run that
+labelled with what the snapshot holds (`orbit.firecracker.written_mb`), so a later Run that
 drives a kept microVM again counts it too. One whose `storage_mb` the snapshot already fills
 is refused before it boots, as the Task's error.
 

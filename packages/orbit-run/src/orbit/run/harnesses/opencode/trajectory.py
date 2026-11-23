@@ -11,8 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
@@ -24,8 +24,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     Invocation,
     NativeResult,
     invocations,
@@ -35,14 +35,14 @@ from ale.run.harnesses.base import (
 )
 
 #: ``OPENCODE_CONFIG_DIR``.
-STATE = ".opencode-ale"
-#: ALE's configuration document, which names each MCP server as declared.
-CONFIG = f"{STATE}/ale.json"
+STATE = ".opencode-orbit"
+#: Orbit's configuration document, which names each MCP server as declared.
+CONFIG = f"{STATE}/orbit.json"
 #: One export per invocation of the session and every session it spawned:
 #: ``<root session id>/<time>/<session id>.json``.
 EXPORTS = f"{STATE}/exports"
 #: The custom provider every model call goes through.
-PROVIDER = "ale"
+PROVIDER = "orbit"
 _DATA_URI = re.compile(r"data:([a-z]+/[a-z0-9.+-]+);base64,(.*)", re.DOTALL)
 #: The image types ATIF records, by the type a data URI names.
 _IMAGES = {
@@ -323,7 +323,7 @@ class _Parse:
             source_call_id=call_id,
             content=content,
             subagent_trajectory_ref=refs or None,
-            extra={"ale": {"is_error": True}} if state.get("status") == "error" else None,
+            extra={"orbit": {"is_error": True}} if state.get("status") == "error" else None,
         )
 
     def _child(
@@ -419,7 +419,7 @@ class _Parse:
                         content=error_text(state.get("error"))
                         if failed
                         else str(state.get("output") or ""),
-                        extra={"ale": {"is_error": True}} if failed else None,
+                        extra={"orbit": {"is_error": True}} if failed else None,
                     )
                 )
             builder.add(
@@ -436,7 +436,7 @@ class _Parse:
             prefix = f"{normalized}_"
             if name.startswith(prefix) and len(name) > len(prefix):
                 tool = name[len(prefix) :]
-                return {"ale": {"mcp": {"server": self.servers[normalized], "tool": tool}}}
+                return {"orbit": {"mcp": {"server": self.servers[normalized], "tool": tool}}}
         return None
 
 
@@ -506,7 +506,7 @@ def _latest_export(
 
 
 def _other_sessions(context: TrajectoryParseContext, session_id: str | None) -> list[Path]:
-    """The newest export of each other session ALE exported in this home."""
+    """The newest export of each other session Orbit exported in this home."""
     base = context.logs_dir / EXPORTS
     found = []
     for directory in sorted(base.iterdir()) if base.is_dir() else ():
@@ -595,4 +595,4 @@ def _extra(
     if context.incomplete:
         data["incomplete"] = True
         data["incomplete_reason"] = context.incomplete_reason or "interrupted"
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

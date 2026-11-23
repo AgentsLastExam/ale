@@ -1,4 +1,4 @@
-"""Strict public contracts for one self-contained ALE Task."""
+"""Strict public contracts for one self-contained Orbit Task."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from pydantic import (
     model_validator,
 )
 
-from ale.core.ids import TaskId, content_hash
+from orbit.core.ids import TaskId, content_hash
 
 __all__ = [
     "DEFAULT_SOLUTION",
@@ -92,7 +92,7 @@ def _task_path(path: str, operating_system: OperatingSystem) -> PurePosixPath | 
     return path_type(path)
 
 
-#: Names the Host's artifact copies keep for ALE: its inventory, and a numbered directory per
+#: Names the Host's artifact copies keep for Orbit: its inventory, and a numbered directory per
 #: declaration without a ``destination``.
 _RESERVED_DESTINATION = re.compile(r"snapshot\.json|[0-9]+")
 
@@ -133,7 +133,7 @@ class Artifact(BaseModel):
             )
         if _RESERVED_DESTINATION.fullmatch(path.parts[0]):
             raise ValueError(
-                f"artifact destination {value!r} takes a name ALE keeps for its own copies"
+                f"artifact destination {value!r} takes a name Orbit keeps for its own copies"
             )
         return path.as_posix()
 
@@ -463,7 +463,7 @@ class ToolProvision(BaseModel):
 class VerificationMode(StrEnum):
     """Where the verifier runs: in the solver's Sandbox (``shared``, Harbor's), in a new one
     of its own image given the declared artifacts (``separate``, Harbor's), or in a new one
-    booted from a snapshot of the solver's disk (``snapshot``, ALE's)."""
+    booted from a snapshot of the solver's disk (``snapshot``, Orbit's)."""
 
     SHARED = "shared"
     SEPARATE = "separate"
@@ -537,7 +537,7 @@ _REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*))?\}", re.DOTALL)
 _EMBEDDED_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 #: The prefix of the framework's own variables: those it sets in the commands it runs, and
 #: the Host configuration it reads, model and Judge keys included.
-_RESERVED_PREFIX = "ALE_"
+_RESERVED_PREFIX = "ORBIT_"
 
 
 class VariableReference(NamedTuple):
@@ -804,7 +804,7 @@ class TaskSpec(BaseModel):
     resolves it."""
     variables: TaskVariables = TaskVariables()
     calibration: tuple[CalibrationCase, ...] = (DEFAULT_SOLUTION,)
-    """Every calibration case, in the order ``ale calibrate`` runs them."""
+    """Every calibration case, in the order ``orbit calibrate`` runs them."""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
@@ -924,7 +924,7 @@ class TaskSpec(BaseModel):
         return self
 
 
-#: The ``task.toml`` format ALE reads, named by the major and minor ALE version that last
+#: The ``task.toml`` format Orbit reads, named by the major and minor Orbit version that last
 #: changed it, as Harbor names its own. A Harbor Task, naming one of Harbor's formats or
 #: none, is read as this one, with a warning; a Task naming any other format fails.
 SCHEMA_VERSION = "0.2"
@@ -935,7 +935,7 @@ _HARBOR_SCHEMA = re.compile(r"1\.[0-9]+")
 HARBOR_ACCOUNT = "root"
 
 #: ``task.toml`` network modes and what they mean for the agent, the oracle and the verifier.
-#: ``blocklist`` is ALE's; Harbor's format has the other three.
+#: ``blocklist`` is Orbit's; Harbor's format has the other three.
 _NETWORK_MODES = {
     "no-network": NetworkMode.BLOCK,
     "allowlist": NetworkMode.ALLOWLIST,
@@ -954,7 +954,7 @@ _VERIFIER_ENVIRONMENT_ONLY = _HARBOR_ENVIRONMENT_ONLY | {
 #: A ``gpu_types`` entry: a GPU model as Harbor names it, such as ``H100`` or ``RTX-PRO-6000``.
 _GpuType = Annotated[str, Field(pattern=r"[A-Za-z0-9]")]
 
-#: Harbor ``task.toml`` keys that ALE does not implement, by table. They fail with a
+#: Harbor ``task.toml`` keys that Orbit does not implement, by table. They fail with a
 #: message saying so rather than as unknown keys, because a Harbor author expects them.
 _UNSUPPORTED_HARBOR_KEYS: dict[tuple[str, ...], frozenset[str]] = {
     (): frozenset({"multi_step_reward_strategy", "source", "steps"}),
@@ -1064,7 +1064,7 @@ def _normal_host(host: str) -> str:
     return network.compressed if "/" in name else network.network_address.compressed
 
 
-#: A ``task.toml`` network mode, as Harbor spells its three, and ALE's ``blocklist``.
+#: A ``task.toml`` network mode, as Harbor spells its three, and Orbit's ``blocklist``.
 _NetworkModeName = Literal["no-network", "allowlist", "blocklist", "public"]
 
 
@@ -1334,7 +1334,7 @@ class _VerifierKeys(BaseModel):
 
 
 class ValidationTable(_VerifierKeys):
-    """``[verifier.validation]``, ALE's: the verifier of validation rounds, wherever it
+    """``[verifier.validation]``, Orbit's: the verifier of validation rounds, wherever it
     differs from ``[verifier]``'s, with every key ``[verifier]`` has. ``TaskConfig`` resolves
     it over ``[verifier]`` (:meth:`VerifierTable.for_validation`)."""
 
@@ -1428,10 +1428,10 @@ class SolutionTable(BaseModel):
 class TaskConfig(BaseModel):
     """The strict authored shape of ``task.toml``.
 
-    A Harbor field keeps Harbor's meaning. A field ALE adds sits in the Harbor table of what
+    A Harbor field keeps Harbor's meaning. A field Orbit adds sits in the Harbor table of what
     it configures, under a name Harbor gives no other meaning, except ``[[calibration]]``,
     which no Harbor table configures. Every key has a default: a Task that leaves out
-    ``schema_version`` or ``[task].name``, which ALE's form writes, still loads, and the
+    ``schema_version`` or ``[task].name``, which Orbit's form writes, still loads, and the
     loader says so.
     """
 
@@ -1483,7 +1483,7 @@ class TaskConfig(BaseModel):
     @property
     def agent_network(self) -> NetworkPolicy:
         """Harbor's resolution for the agent and the oracle: ``[agent]``'s own policy, else
-        ``[environment]``'s baseline, else ALE's default, no network."""
+        ``[environment]``'s baseline, else Orbit's default, no network."""
         return self.agent.network or self.environment.network or NetworkPolicy()
 
     @property
@@ -1491,7 +1491,7 @@ class TaskConfig(BaseModel):
         """Harbor's resolution for ``tests/``: ``[verifier]``'s own policy; else, for a
         verifier with a Sandbox of its own and a ``[verifier.environment]``, that table's
         baseline, open when it names none, as Harbor's separate environment is; else
-        ``[environment]``'s baseline; else open, ALE's default for verification."""
+        ``[environment]``'s baseline; else open, Orbit's default for verification."""
         return self.network_of(self.verifier)
 
     def network_of(self, verifier: VerifierTable) -> NetworkPolicy:
@@ -1522,7 +1522,7 @@ class TaskConfig(BaseModel):
         if value is None or value == SCHEMA_VERSION or _HARBOR_SCHEMA.fullmatch(value):
             return value
         raise ValueError(
-            f'"{value}" is neither ALE\'s format "{SCHEMA_VERSION}" nor one of Harbor\'s, 1.<n>'
+            f'"{value}" is neither Orbit\'s format "{SCHEMA_VERSION}" nor one of Harbor\'s, 1.<n>'
         )
 
     @model_validator(mode="before")
@@ -1540,7 +1540,7 @@ class TaskConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _harbor_keys_ale_lacks(cls, data: Any) -> Any:
+    def _harbor_keys_orbit_lacks(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
         unsupported: list[str] = []
@@ -1550,14 +1550,14 @@ class TaskConfig(BaseModel):
                 table = table.get(part) if isinstance(table, dict) else None
             if isinstance(table, dict):
                 unsupported.extend(
-                    f"{'.'.join((*path, key))} is not supported by ALE"
+                    f"{'.'.join((*path, key))} is not supported by Orbit"
                     for key in sorted(keys & table.keys())
                 )
         artifacts = data.get("artifacts")
         for item in artifacts if isinstance(artifacts, list) else ():
             if isinstance(item, dict):
                 unsupported.extend(
-                    f"artifact {key} is not supported by ALE"
+                    f"artifact {key} is not supported by Orbit"
                     for key in sorted({"service"} & item.keys())
                 )
         if unsupported:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ale.core.errors import (
+from orbit.core.errors import (
     MemoryExhaustedError,
     PhaseTimeoutError,
     ProviderStartError,
@@ -13,8 +13,8 @@ from ale.core.errors import (
     VerificationVerdictError,
     VerifierOutputError,
 )
-from ale.core.verdict import Status, Verdict
-from ale.run.episode import status_for
+from orbit.core.verdict import Status, Verdict
+from orbit.run.episode import status_for
 
 pytestmark = pytest.mark.unit
 
@@ -45,7 +45,7 @@ def test_verification_failures_remain_distinct_terminal_failures(
             Status.MEMORY_EXHAUSTED,
         ),
         (
-            StorageExhaustedError("ALE stopped the sandbox: it wrote 1025 MiB over its image"),
+            StorageExhaustedError("Orbit stopped the sandbox: it wrote 1025 MiB over its image"),
             Status.STORAGE_EXHAUSTED,
         ),
     ],

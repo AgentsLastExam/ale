@@ -10,8 +10,8 @@ dist/
 .pytest_cache/
 .ruff_cache/
 runs/
-.ale/
-.ale-cache/
+.orbit/
+.orbit-cache/
 *.qcow2
 .env*
 *.log*

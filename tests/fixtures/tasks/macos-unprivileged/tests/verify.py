@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ale_verify import write
+from orbit_verify import write
 
 path = Path("/Users/tester/output/result.txt")
 lines = path.read_text().splitlines() if path.is_file() else []

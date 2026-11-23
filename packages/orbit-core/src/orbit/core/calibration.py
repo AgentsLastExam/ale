@@ -1,4 +1,4 @@
-"""Persisted evidence from ``ale calibrate``."""
+"""Persisted evidence from ``orbit calibrate``."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ale.core.taskspec import Expectation
-from ale.core.verdict import Status
+from orbit.core.taskspec import Expectation
+from orbit.core.verdict import Status
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
 _DIGEST = r"^sha256:[0-9a-f]{64}$"

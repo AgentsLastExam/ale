@@ -8,18 +8,18 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import AgentConfig, RunConfig
-from ale.core.harness import AgentRun, AutonomousHarness, EffectiveAgentResources, HarnessSession
-from ale.core.lock import TaskSource
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.session import SessionRegistry
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import DockerProvider
-from ale.run.subscription import resolve_authentication
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import AgentConfig, RunConfig
+from orbit.core.harness import AgentRun, AutonomousHarness, EffectiveAgentResources, HarnessSession
+from orbit.core.lock import TaskSource
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.session import SessionRegistry
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.subscription import resolve_authentication
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -46,20 +46,20 @@ class SubscriptionProbeHarness(AutonomousHarness):
 import json
 from pathlib import Path
 
-home = Path(__import__('os').environ['ALE_HOME'])
+home = Path(__import__('os').environ['ORBIT_HOME'])
 for name in (
     'OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'XAI_API_KEY',
-    'ALE_OPENAI_API_KEY', 'ALE_CLAUDE_CODE_OAUTH_TOKEN', 'ALE_XAI_API_KEY',
+    'ORBIT_OPENAI_API_KEY', 'ORBIT_CLAUDE_CODE_OAUTH_TOKEN', 'ORBIT_XAI_API_KEY',
 ):
     assert name not in __import__('os').environ
-auth = home / '.codex-ale/auth.json'
+auth = home / '.codex-orbit/auth.json'
 assert not auth.exists()
 (home / 'output/result.txt').write_text('hello world')
 raise SystemExit({self.exit_code})
 """
         result = await sandbox.exec(
             ["python3", "-c", script],
-            env={"ALE_HOME": session.home},
+            env={"ORBIT_HOME": session.home},
             identity=Identity.AGENT,
             timeout_sec=timeout_sec,
         )
@@ -80,12 +80,12 @@ async def test_subscription_profile_stays_host_side(
 ) -> None:
     environment = tmp_path / ".env"
     environment.write_text("")
-    monkeypatch.setenv("ALE_ENV_FILE", str(environment))
+    monkeypatch.setenv("ORBIT_ENV_FILE", str(environment))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     ordinary = tmp_path / "home" / ".codex" / "auth.json"
     ordinary.parent.mkdir(parents=True)
     ordinary.write_text('{"ordinary": true}')
-    profile = tmp_path / ".ale" / "auth" / "codex-cli" / "auth.json"
+    profile = tmp_path / ".orbit" / "auth" / "codex-cli" / "auth.json"
     profile.parent.mkdir(parents=True)
     profile.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": "old"}}))
     profile.chmod(0o600)

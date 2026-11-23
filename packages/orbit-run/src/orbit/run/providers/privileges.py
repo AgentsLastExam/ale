@@ -9,11 +9,11 @@ runs as root, so in one only the framework is proven root.
 
 from __future__ import annotations
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
-from ale.core.sandbox import SandboxRequest, SandboxRole
-from ale.core.taskspec import OperatingSystem
-from ale.run import guestd
-from ale.run.transport import GuestClient
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
+from orbit.core.sandbox import SandboxRequest, SandboxRole
+from orbit.core.taskspec import OperatingSystem
+from orbit.run import guestd
+from orbit.run.transport import GuestClient
 
 #: The account's uid, then whether it can elevate without a password ("none": no sudo).
 _PROBE = (
@@ -33,7 +33,7 @@ user, sudo = sys.argv[1], sys.argv[2] == "true"
 if pwd.getpwnam(user).pw_uid == 0:
     # Root is elevated by being root: there is nothing to grant, and nothing can revoke it.
     sys.exit(0 if sudo else 3)
-MARK = "# ALE: the agent's elevation in this sandbox, set at every start"
+MARK = "# Orbit: the agent's elevation in this sandbox, set at every start"
 ADMINISTRATORS = {"sudo", "wheel", "admin"}
 
 
@@ -158,9 +158,9 @@ async def verify_identities(client: GuestClient, agent_user: str, *, sudo: bool)
     agent_uid, elevates = await _probe(client, agent_user)
     if sudo and agent_uid != "0" and elevates != "yes":
         why = (
-            "the image has no sudo, and ALE found no package manager to install it with"
+            "the image has no sudo, and Orbit found no package manager to install it with"
             if elevates == "none"
-            else "sudo refuses the grant ALE made"
+            else "sudo refuses the grant Orbit made"
         )
         raise ProviderCapabilityError(
             f"elevated privileges were requested but {agent_user} cannot elevate in this "

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import jsonschema
 
-from ale_verify import JudgeAttempt, JudgeInvocation, read_result
+from orbit_verify import JudgeAttempt, JudgeInvocation, read_result
 
 
 def test_judge_metadata_round_trips_independently_of_a_result():

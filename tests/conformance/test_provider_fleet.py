@@ -1,6 +1,6 @@
 """The Fleet against the shared Provider contract: a control plane and a Docker Node.
 
-Both run as their own processes on this machine, as `ale-fleet serve` and `ale-fleet node`
+Both run as their own processes on this machine, as `orbit-fleet serve` and `orbit-fleet node`
 would, so every Sandbox the suite creates goes through placement, a grant, the node agent's
 API and the Gateway tunnel before it reaches the Node's Docker Provider.
 """
@@ -21,12 +21,12 @@ from pathlib import Path
 import pytest
 from tests.support import CONTAINER_BASE, LIST_POLICIES, check_a_sealed_list
 
-from ale.core.sandbox import ImageRef
-from ale.core.taskspec import NetworkPolicy
-from ale.core.testkit import ProviderConformance
-from ale.run.framework import framework_identity
-from ale.run.providers import missing_features
-from ale.run.providers.fleet import FleetClient, FleetProvider
+from orbit.core.sandbox import ImageRef
+from orbit.core.taskspec import NetworkPolicy
+from orbit.core.testkit import ProviderConformance
+from orbit.run.framework import framework_identity
+from orbit.run.providers import missing_features
+from orbit.run.providers.fleet import FleetClient, FleetProvider
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_docker]
 
@@ -41,7 +41,7 @@ TOKEN = secrets.token_urlsafe(16)
 CONTROL_PORT = _free_port()
 NODE_PORT = _free_port()
 CONTROL = f"http://127.0.0.1:{CONTROL_PORT}"
-ALE_FLEET = str(Path(sys.executable).with_name("ale-fleet"))
+ORBIT_FLEET = str(Path(sys.executable).with_name("orbit-fleet"))
 
 
 def _nodes() -> list[dict]:
@@ -55,16 +55,16 @@ def _nodes() -> list[dict]:
 @pytest.fixture(scope="module", autouse=True)
 def fleet(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     root = tmp_path_factory.mktemp("fleet")
-    env = os.environ | {"ALE_FLEET_TOKEN": TOKEN, "ALE_CACHE_DIR": str(root / "node-cache")}
+    env = os.environ | {"ORBIT_FLEET_TOKEN": TOKEN, "ORBIT_CACHE_DIR": str(root / "node-cache")}
     logs = [(root / "control.log").open("wb"), (root / "node.log").open("wb")]
     processes = [
         subprocess.Popen(
-            [ALE_FLEET, "serve", "--host", "127.0.0.1", "--port", str(CONTROL_PORT),
+            [ORBIT_FLEET, "serve", "--host", "127.0.0.1", "--port", str(CONTROL_PORT),
              "--db", str(root / "fleet.db")],
             env=env, stdout=logs[0], stderr=subprocess.STDOUT,
         ),
         subprocess.Popen(
-            [ALE_FLEET, "node", "--control-plane", CONTROL,
+            [ORBIT_FLEET, "node", "--control-plane", CONTROL,
              "--address", f"http://127.0.0.1:{NODE_PORT}", "--port", str(NODE_PORT),
              "--name", "conformance", "--provider", "docker:runc"],
             env=env, stdout=logs[1], stderr=subprocess.STDOUT,

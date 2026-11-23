@@ -1,6 +1,6 @@
 """Finish a prepared Windows base offline, before compact.sh rewrites it.
 
-Run by compact.sh inside ALE's VM builder, next to ``framework_windows.py``, whose disk
+Run by compact.sh inside Orbit's VM builder, next to ``framework_windows.py``, whose disk
 helpers it uses. These steps need Windows not to be running: Tamper Protection keeps
 Defender's services on while it runs, and it holds its page file open.
 """
@@ -36,7 +36,7 @@ REMOVED = (
 
 def main(image: Path) -> int:
     try:
-        with tempfile.TemporaryDirectory(prefix="ale-hives-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="orbit-hives-") as temporary:
             hives = Path(temporary)
             for hive in ("SYSTEM", "SOFTWARE"):
                 disk.guestfish(
@@ -73,7 +73,7 @@ def main(image: Path) -> int:
             )
             print(f"disabled: {', '.join(present)}", flush=True)
     except disk.Lacks as reason:
-        print(f"ALE: {reason}", file=sys.stderr)
+        print(f"Orbit: {reason}", file=sys.stderr)
         return 1
     return 0
 

@@ -13,8 +13,8 @@ import pytest
 from tests.support import edit_task_config
 from typer.testing import CliRunner
 
-from ale.core.errors import AssetError
-from ale.run.asset_git import (
+from orbit.core.errors import AssetError
+from orbit.run.asset_git import (
     AssetCheckpoint,
     check_assets,
     checkpoint_assets,
@@ -25,13 +25,13 @@ from ale.run.asset_git import (
     restore_assets,
     write_record,
 )
-from ale.run.assets import (
+from orbit.run.assets import (
     asset_status,
     ensure_asset_repository,
     push_assets,
     select_asset_repositories,
 )
-from ale.run.cli.main import app
+from orbit.run.cli.main import app
 
 pytestmark = pytest.mark.unit
 
@@ -42,7 +42,7 @@ def git(root: Path, *args: str) -> str:
 
 @pytest.fixture
 def asset_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from ale.run import asset_git
+    from orbit.run import asset_git
 
     if shutil.which("git-lfs") is None:
         pytest.skip("git-lfs is required for the local asset Git contract test")
@@ -179,7 +179,7 @@ def test_empty_assets_cli_stays_offline_and_writes_null_commit(
     task = write_task_repo() / "tasks/demo"
     (task / "tests/assets").mkdir()
     monkeypatch.setattr(
-        "ale.run.asset_git.ensure_asset_repository",
+        "orbit.run.asset_git.ensure_asset_repository",
         lambda *_: pytest.fail("empty task contacted HF"),
     )
     record = tmp_path / "checkpoint.json"
@@ -255,12 +255,12 @@ def test_a_new_dataset_is_gated_before_it_is_public(
         def add_collection_item(self, *args: object, **kwargs: object) -> None:
             calls.append(("collection", args))
 
-    monkeypatch.delenv("ALE_ASSETS_COLLECTION", raising=False)
-    monkeypatch.setenv("ALE_HF_TOKEN", "hf-checkout-token")
+    monkeypatch.delenv("ORBIT_ASSETS_COLLECTION", raising=False)
+    monkeypatch.setenv("ORBIT_HF_TOKEN", "hf-checkout-token")
     if configured is None:
-        monkeypatch.delenv("ALE_ASSETS_NAMESPACE", raising=False)
+        monkeypatch.delenv("ORBIT_ASSETS_NAMESPACE", raising=False)
     else:
-        monkeypatch.setenv("ALE_ASSETS_NAMESPACE", configured)
+        monkeypatch.setenv("ORBIT_ASSETS_NAMESPACE", configured)
     monkeypatch.setattr("huggingface_hub.HfApi", Api)
     assert ensure_asset_repository("tasks-example") == (
         f"{namespace}/tasks-example",
@@ -300,8 +300,8 @@ def test_an_existing_dataset_keeps_its_owner_s_settings(monkeypatch: pytest.Monk
         def add_collection_item(self, *args: object, **kwargs: object) -> None:
             pass
 
-    monkeypatch.delenv("ALE_ASSETS_COLLECTION", raising=False)
-    monkeypatch.delenv("ALE_ASSETS_NAMESPACE", raising=False)
+    monkeypatch.delenv("ORBIT_ASSETS_COLLECTION", raising=False)
+    monkeypatch.delenv("ORBIT_ASSETS_NAMESPACE", raising=False)
     monkeypatch.setattr("huggingface_hub.HfApi", Api)
     ensure_asset_repository("tasks-example")
     assert changed == []
@@ -422,7 +422,7 @@ def test_checkpoint_rejects_symlinked_stages_before_any_upload(
     shutil.rmtree(task / "environment")
     (task / "environment").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(
-        "ale.run.asset_git.ensure_asset_repository",
+        "orbit.run.asset_git.ensure_asset_repository",
         lambda *_: pytest.fail("unsafe Task contacted HF"),
     )
     with pytest.raises(AssetError, match="real directory"):
@@ -436,7 +436,7 @@ def test_publication_retry_does_not_overwrite_an_updated_pr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
-    from ale.run import asset_git
+    from orbit.run import asset_git
 
     task = write_task_repo(asset_roots=("tests/assets",)) / "tasks/demo"
     checkpoint = checkpoint_assets(task, workspace=tmp_path / "assets", branch="brew/demo")

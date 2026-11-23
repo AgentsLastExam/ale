@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from ale.run.guestd import gui, main
+from orbit.run.guestd import gui, main
 
 pytestmark = pytest.mark.unit
 
@@ -26,8 +26,8 @@ def test_macos_framework_capture_and_input_use_task_account(
     monkeypatch.setattr(gui.os, "geteuid", lambda: 0)
     monkeypatch.setattr(gui.os, "stat", lambda path: type("Stat", (), {"st_uid": 502})())
     monkeypatch.setattr(pwd, "getpwuid", lambda uid: account)
-    monkeypatch.setenv("ALE_CUA_DRIVER", "/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
-    monkeypatch.setenv("ALE_CUA_DRIVER_SOCKET", "/tmp/artist.sock")
+    monkeypatch.setenv("ORBIT_CUA_DRIVER", "/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
+    monkeypatch.setenv("ORBIT_CUA_DRIVER_SOCKET", "/tmp/artist.sock")
     monkeypatch.setenv("HOME", "/var/root")
     identities = []
     monkeypatch.setattr(gui.os, "setgid", lambda gid: identities.append(("gid", gid)))
@@ -72,8 +72,8 @@ def test_macos_framework_capture_and_input_use_task_account(
 def test_health_identifies_macos_and_both_process_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
     account = pwd.getpwuid(os.getuid())
     monkeypatch.setattr(main.sys, "platform", "darwin")
-    monkeypatch.setenv("ALE_AGENT_USER", account.pw_name)
-    monkeypatch.setenv("ALE_AGENT_HOME", account.pw_dir)
+    monkeypatch.setenv("ORBIT_AGENT_USER", account.pw_name)
+    monkeypatch.setenv("ORBIT_AGENT_HOME", account.pw_dir)
     health = main.Handler(lambda _: None).op_health(1, {})["data"]
     assert health["os"] == "macos"
     assert health["framework_uid"] == os.geteuid()
@@ -83,7 +83,7 @@ def test_health_identifies_macos_and_both_process_accounts(monkeypatch: pytest.M
 
 def test_macos_requires_a_preconfigured_desktop_service(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gui.sys, "platform", "darwin")
-    monkeypatch.delenv("ALE_CUA_DRIVER_SOCKET", raising=False)
+    monkeypatch.delenv("ORBIT_CUA_DRIVER_SOCKET", raising=False)
     monkeypatch.setattr(gui.shutil, "which", lambda _: "/usr/local/bin/cua-driver")
     assert not gui.has_desktop()
     assert not gui._start_server()
@@ -92,8 +92,8 @@ def test_macos_requires_a_preconfigured_desktop_service(monkeypatch: pytest.Monk
 def test_macos_desktop_reports_actual_driver_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gui.sys, "platform", "darwin")
     monkeypatch.setattr(gui.os, "geteuid", lambda: 501)
-    monkeypatch.setenv("ALE_CUA_DRIVER_SOCKET", "/tmp/ale-desktop.sock")
-    monkeypatch.setenv("ALE_CUA_DRIVER", "/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
+    monkeypatch.setenv("ORBIT_CUA_DRIVER_SOCKET", "/tmp/orbit-desktop.sock")
+    monkeypatch.setenv("ORBIT_CUA_DRIVER", "/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
     calls: list[list[str]] = []
 
     def run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -103,7 +103,7 @@ def test_macos_desktop_reports_actual_driver_failure(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(gui.subprocess, "run", run)
     assert gui.has_desktop()
     assert not gui.available()
-    assert calls[0][-2:] == ["--socket", "/tmp/ale-desktop.sock"]
+    assert calls[0][-2:] == ["--socket", "/tmp/orbit-desktop.sock"]
 
 
 def test_macos_agent_demotion_sets_account_and_resets_groups(

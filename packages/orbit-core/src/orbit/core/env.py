@@ -31,7 +31,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ale.core.trace import DesktopAction
+from orbit.core.trace import DesktopAction
 
 __all__ = ["Observation", "StepResult", "TaskEnv"]
 

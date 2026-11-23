@@ -1,13 +1,13 @@
 """A Linux VM's volumes, mounted as it boots, before any session starts.
 
-The framework installs this file as ``/opt/ale/volumes.py`` on the framework's Python, so
+The framework installs this file as ``/opt/orbit/volumes.py`` on the framework's Python, so
 like guestd it is standard-library only.
 
-* As the guest boots, ``ale-volumes.service`` runs it with the Sandbox's volumes, which the
+* As the guest boots, ``orbit-volumes.service`` runs it with the Sandbox's volumes, which the
   Provider hands it in QEMU's firmware configuration: each path that is a directory on the
   disk, with no link on its way, becomes an overlay of that directory under a layer of its
-  own on the disk, ``/opt/ale/volumes/<name>``, which a snapshot of the disk keeps and a VM
-  booted from it mounts again. What it mounted it writes to ``/run/ale/volumes.json``.
+  own on the disk, ``/opt/orbit/volumes/<name>``, which a snapshot of the disk keeps and a VM
+  booted from it mounts again. What it mounted it writes to ``/run/orbit/volumes.json``.
 * Once the guest is up, guestd runs it with ``views``, the paths of another Sandbox's
   snapshot to view and the serial of that snapshot's disk, which the Provider has just
   attached read-only: each becomes an overlay of what that disk holds there, its directory
@@ -25,12 +25,12 @@ import sys
 import time
 from pathlib import Path
 
-CONFIG = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/ale/volumes/raw")
-VOLUMES = "/opt/ale/volumes"
-VIEWS = "/opt/ale/views"
+CONFIG = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/orbit/volumes/raw")
+VOLUMES = "/opt/orbit/volumes"
+VIEWS = "/opt/orbit/views"
 #: Where a viewed snapshot's disk is mounted.
-VIEWED = "/opt/ale/viewed"
-MOUNTED = Path("/run/ale/volumes.json")
+VIEWED = "/opt/orbit/viewed"
+MOUNTED = Path("/run/orbit/volumes.json")
 #: How long udev may take to name the viewed disk.
 DISK_WAIT_SEC = 60
 

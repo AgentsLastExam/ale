@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ale.run.guestd import gui
+from orbit.run.guestd import gui
 
 pytestmark = pytest.mark.unit
 
@@ -54,7 +54,7 @@ def _program(path: Path, subsystem: int) -> Path:
 
 
 def test_only_console_programs_start_with_a_hidden_window(tmp_path: Path) -> None:
-    from ale.run.guestd import windows
+    from orbit.run.guestd import windows
 
     _program(tmp_path / "notepad.exe", 2)
     _program(tmp_path / "git.exe", 3)
@@ -229,7 +229,7 @@ def test_screenshot_can_return_a_private_file_instead_of_inline_data(monkeypatch
     import hashlib
     import sys
 
-    from ale.run.guestd.main import Handler
+    from orbit.run.guestd.main import Handler
 
     png = b"\x89PNG\r\n\x1a\n" + b"pixels" * 800_000
     monkeypatch.setitem(sys.modules, "gui", gui)

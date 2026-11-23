@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale_verify import ConfigurationError, JudgeError, _llm, probe_judge
-from ale_verify._io import EvidenceError, inline_evidence, read_file_evidence, read_text_evidence
+from orbit_verify import ConfigurationError, JudgeError, _llm, probe_judge
+from orbit_verify._io import EvidenceError, inline_evidence, read_file_evidence, read_text_evidence
 
 
 class Response:
@@ -52,7 +52,7 @@ def http_error(code: int, body: str = "{}", headers: dict[str, str] | None = Non
 @pytest.fixture(autouse=True)
 def fresh_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_llm, "_max_output", {})
-    monkeypatch.delenv("ALE_VERIFY_DEADLINE_SECONDS", raising=False)
+    monkeypatch.delenv("ORBIT_VERIFY_DEADLINE_SECONDS", raising=False)
 
 
 def schema():
@@ -305,7 +305,7 @@ def test_provider_error_and_missing_credential_are_sanitized(
         raise urllib.error.URLError("provider-secret endpoint failed")
 
     monkeypatch.setattr(_llm.urllib.request, "urlopen", fail)
-    monkeypatch.setenv("ALE_VERIFY_DEADLINE_SECONDS", "0")
+    monkeypatch.setenv("ORBIT_VERIFY_DEADLINE_SECONDS", "0")
     with pytest.raises(JudgeError) as caught:
         call()
     assert "provider-secret" not in str(caught.value)
@@ -438,8 +438,8 @@ def test_mixed_evidence_reaches_each_protocol_and_survives_repair(
 def test_public_judge_sends_media_bytes_and_records_original_evidence(
     monkeypatch, tmp_path, raw, mime
 ) -> None:  # type: ignore[no-untyped-def]
-    from ale_verify import judge
-    from ale_verify._io import digest
+    from orbit_verify import judge
+    from orbit_verify._io import digest
 
     path = tmp_path / "artifact"
     path.write_bytes(raw)
@@ -447,8 +447,8 @@ def test_public_judge_sends_media_bytes_and_records_original_evidence(
     settings.write_text(json.dumps({"llm": config()}))
     record_path = tmp_path / "verification.json"
     monkeypatch.setenv("JUDGE_KEY", "secret")
-    monkeypatch.setenv("ALE_VERIFY_CONFIG_PATH", str(settings))
-    monkeypatch.setenv("ALE_LLM_JUDGE_LOG_PATH", str(record_path))
+    monkeypatch.setenv("ORBIT_VERIFY_CONFIG_PATH", str(settings))
+    monkeypatch.setenv("ORBIT_LLM_JUDGE_LOG_PATH", str(record_path))
 
     def open_(request, timeout):  # type: ignore[no-untyped-def]
         parts = json.loads(request.data)["input"][0]["content"]
@@ -606,7 +606,7 @@ def test_a_stream_cut_short_is_retried_as_a_transient_failure(monkeypatch) -> No
 
 def test_provider_overload_is_retried_without_a_count_and_honours_retry_after(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("JUDGE_KEY", "secret")
-    monkeypatch.setenv("ALE_VERIFY_DEADLINE_SECONDS", "3600")
+    monkeypatch.setenv("ORBIT_VERIFY_DEADLINE_SECONDS", "3600")
     slept: list[float] = []
     monkeypatch.setattr(_llm.time, "sleep", slept.append)
     failures = [http_error(529), http_error(429, headers={"retry-after": "7"})] * 4
@@ -665,7 +665,7 @@ def test_a_rejected_request_fails_at_once(monkeypatch) -> None:  # type: ignore[
 
 def test_retries_stop_when_verification_budget_is_spent(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("JUDGE_KEY", "secret")
-    monkeypatch.setenv("ALE_VERIFY_DEADLINE_SECONDS", "40")
+    monkeypatch.setenv("ORBIT_VERIFY_DEADLINE_SECONDS", "40")
     clock = [0.0]
     monkeypatch.setattr(
         _llm,

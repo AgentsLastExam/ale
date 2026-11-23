@@ -16,18 +16,18 @@ from typing import Any
 
 import pytest
 
-from ale.core.errors import AgentError, ModelProviderError
-from ale.core.harness import EffectiveAgentResources, HarnessSession
-from ale.core.sandbox import Identity
-from ale.core.taskspec import OperatingSystem
-from ale.core.trace import read_jsonl
-from ale.run.episode import _model_provider_failure
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.protocol import episode_protocol
-from ale.run.recording import EpisodeRecording
+from orbit.core.errors import AgentError, ModelProviderError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession
+from orbit.core.sandbox import Identity
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.trace import read_jsonl
+from orbit.run.episode import _model_provider_failure
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.protocol import episode_protocol
+from orbit.run.recording import EpisodeRecording
 from tests.integration.scripted_model import ScriptedModel
 from tests.support import cli_os, cli_sandbox
 

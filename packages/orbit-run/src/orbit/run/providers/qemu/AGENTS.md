@@ -26,7 +26,7 @@ it off for good.
   whoever sits at the screen, which no unattended episode can do.
 - `open_egress` and a power-off give the settings back, since the framework's own phases
   run as the same account and a snapshot outlives the relay. What guestd changed is kept
-  in `%ProgramData%\ALE`, which only SYSTEM and Administrators may write, so a guestd the
+  in `%ProgramData%\Orbit`, which only SYSTEM and Administrators may write, so a guestd the
   service restarts still restores it.
 
 ## `curl.exe` fails its revocation check under `allowlist`
@@ -72,7 +72,7 @@ tmpfs, ended with nothing to say why, an environment error that is retried.
 **Context.** Measured with the VM base at 4096 MiB and Firecracker's microVM at 1024 MiB
 (November 2026):
 - The guest kernel's OOM killer ended only the allocator
-  (`task_memcg=/system.slice/ale-guestd.service`), but the commands guestd starts are in its
+  (`task_memcg=/system.slice/orbit-guestd.service`), but the commands guestd starts are in its
   unit, and systemd's default `OOMPolicy=stop` then stopped the unit
   (`Failed with result 'oom-kill'`) and restarted guestd a second later, its connections
   gone.
@@ -113,7 +113,7 @@ own lower directory: unmounted, the directory is as it was. Windows has no union
 system, and a disk whose signature matches one online is kept offline until brought online,
 which gives it a new one.
 
-**Solution.** On Linux, `ale-volumes.service`, ordered before guestd, the display manager
+**Solution.** On Linux, `orbit-volumes.service`, ordered before guestd, the display manager
 and logins, mounts each volume as an overlay of the disk's own directory under a layer on
 the same disk, from what the runner passes with `-fw_cfg`. On Windows a volume stays a
 directory. A verifier that views a snapshot's volumes gets the snapshot's disk once the

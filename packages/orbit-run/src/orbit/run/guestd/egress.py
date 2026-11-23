@@ -39,11 +39,11 @@ _IDLE_SEC = 60
 #: with its run, and an agent with administrator rights can stop Windows' service. Only the
 #: framework reads it.
 if os.name == "nt":
-    _CHANGED = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "ALE", "system-proxy.json")
+    _CHANGED = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "Orbit", "system-proxy.json")
 elif sys.platform == "darwin":
-    _CHANGED = Path("/var/db/ale/system-proxy.json")
+    _CHANGED = Path("/var/db/orbit/system-proxy.json")
 else:
-    _CHANGED = Path("/run/ale/system-proxy.json")
+    _CHANGED = Path("/run/orbit/system-proxy.json")
 
 _lock = threading.Lock()
 _relay: Relay | None = None

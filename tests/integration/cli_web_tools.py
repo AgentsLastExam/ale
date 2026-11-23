@@ -33,36 +33,36 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from ale.core.harness import EffectiveAgentResources, HarnessSession
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.trace import read_jsonl
-from ale.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
-from ale.run.gateway.server import REQUEST_PATHS, Gateway
-from ale.run.gateway.session import GatewaySession, Upstream
-from ale.run.harnesses._npm import agent_python
-from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
-from ale.run.harnesses.base import CliHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.droid import DroidHarness
-from ale.run.harnesses.forgecode import ForgecodeHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.hermes import HermesHarness
-from ale.run.harnesses.kimi_code import KimiCodeHarness
-from ale.run.harnesses.muse_code import MuseCodeHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
-from ale.run.harnesses.pi_cli import PiCliHarness
-from ale.run.harnesses.qwen_code import QwenCodeHarness
-from ale.run.harnesses.zcode import ZCodeHarness
-from ale.run.recording import EpisodeRecording
+from orbit.core.harness import EffectiveAgentResources, HarnessSession
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
+from orbit.run.gateway.server import REQUEST_PATHS, Gateway
+from orbit.run.gateway.session import GatewaySession, Upstream
+from orbit.run.harnesses._npm import agent_python
+from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
+from orbit.run.harnesses.base import CliHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.droid import DroidHarness
+from orbit.run.harnesses.forgecode import ForgecodeHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.hermes import HermesHarness
+from orbit.run.harnesses.kimi_code import KimiCodeHarness
+from orbit.run.harnesses.muse_code import MuseCodeHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
+from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.harnesses.qwen_code import QwenCodeHarness
+from orbit.run.harnesses.zcode import ZCodeHarness
+from orbit.run.recording import EpisodeRecording
 from tests.integration.cli_desktop import MODELS, cli_harnesses
 from tests.integration.scripted_model import Call, ScriptedModel
 from tests.support import cli_os, cli_sandbox
 
-PROMPT = "Search the web for the ALE web tools proof, then answer."
-QUERY = "ale-web-tools-proof"
+PROMPT = "Search the web for the Orbit web tools proof, then answer."
+QUERY = "orbit-web-tools-proof"
 #: Matches no tool, so a model with no script answers at once.
 _NO_TOOL = r"(?!)"
 #: The Gateway's reading of each dialect: the provider-side network tools a request asks for.
@@ -114,7 +114,7 @@ SEARCHES: dict[type[CliHarness], Search] = {
     # Their hosted search answers only for their vendors' own URLs, never the Gateway's.
     OpenClawCliHarness: Search("openai-responses"),
     QwenCodeHarness: Search("openai-chat-completions"),
-    # No provider-side network tool under ALE's configuration.
+    # No provider-side network tool under Orbit's configuration.
     DroidHarness: Search("anthropic"),
     ForgecodeHarness: Search("anthropic"),
     HermesHarness: Search("openai-chat-completions"),

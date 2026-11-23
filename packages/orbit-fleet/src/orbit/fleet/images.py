@@ -21,16 +21,16 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from ale.core.episode import EpisodeContext
-from ale.core.errors import AleError, ProviderCapabilityError
-from ale.core.fleet import ImageHolding, ImageInputs
-from ale.core.sandbox import PreparedTaskImage, Provider
-from ale.core.task import Task
-from ale.core.taskspec import ImageKind, ImageSpec, OperatingSystem
-from ale.core.verdict import Rewards
-from ale.run.process import run
-from ale.run.task_images import prepare_task_image_result, prepare_verifier_image_result
-from ale.run.tasksets.manifest import TaskFolder
+from orbit.core.episode import EpisodeContext
+from orbit.core.errors import OrbitError, ProviderCapabilityError
+from orbit.core.fleet import ImageHolding, ImageInputs
+from orbit.core.sandbox import PreparedTaskImage, Provider
+from orbit.core.task import Task
+from orbit.core.taskspec import ImageKind, ImageSpec, OperatingSystem
+from orbit.core.verdict import Rewards
+from orbit.run.process import run
+from orbit.run.task_images import prepare_task_image_result, prepare_verifier_image_result
+from orbit.run.tasksets.manifest import TaskFolder
 
 __all__ = ["Lend", "NodeImages"]
 
@@ -152,7 +152,7 @@ class NodeImages:
                 provider = self._lend(record.image.kind, inputs.os)
                 try:
                     await provider.prepare_image(record.image)
-                except AleError:
+                except OrbitError:
                     self._forget(key)
                 else:
                     # The recorded image, which admission compares a creating request to.

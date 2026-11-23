@@ -7,12 +7,12 @@ the [Task quality standard](task-quality-standard.md); scoring and Judge APIs be
 [Verification](verification.md).
 
 The format is based on Harbor's task format (`task.toml`, `environment/`, `tests/`,
-`solution/`). A field ALE implements as Harbor does keeps Harbor's name, table and meaning.
-A field ALE adds sits in the Harbor table of what it configures, under a name Harbor gives
+`solution/`). A field Orbit implements as Harbor does keeps Harbor's name, table and meaning.
+A field Orbit adds sits in the Harbor table of what it configures, under a name Harbor gives
 no other meaning: a separate namespace would not stop one name meaning two things, and would
 have to mirror every table it extends. The exception is `[[calibration]]`, which no Harbor
-table configures; `validation/` and `calibration/` are ALE's directories. `schema_version`
-is the ALE version, major and minor, in which the format last changed, and ALE accepts
+table configures; `validation/` and `calibration/` are Orbit's directories. `schema_version`
+is the Orbit version, major and minor, in which the format last changed, and Orbit accepts
 exactly that value, so a file written for another format fails as it loads instead of being
 read with a different meaning.
 
@@ -32,12 +32,12 @@ my-task/
 │   ├── test.sh                # test.ps1 on Windows
 │   ├── verify.py
 │   └── Dockerfile             # optional separate-verifier image (context tests/)
-├── validation/                # ALE; optional verifier whose results the agent receives
+├── validation/                # Orbit; optional verifier whose results the agent receives
 │   ├── test.sh                # as tests/test.sh
 │   └── verify.py
 ├── solution/                  # the reference solution, as in Harbor
 │   └── solve.sh               # solve.ps1 on Windows
-└── calibration/               # ALE; optional further known final states and their scores
+└── calibration/               # Orbit; optional further known final states and their scores
     └── missing-summary/       # one directory per further case
         └── solve.sh
 ```
@@ -56,7 +56,7 @@ macOS, `test.ps1` and `solve.ps1` on Windows; every further
 - `image` alone is used directly.
 
 Windows and macOS Tasks run only in VMs, so a Dockerfile fails there. A Linux image used
-directly is a VM when `image` is an absolute path to a qcow2 or names an ALE VM disk, and a
+directly is a VM when `image` is an absolute path to a qcow2 or names an Orbit VM disk, and a
 container when it names a container image
 ([Sandbox image](sandbox-image.md#source-selection-and-identity)). Every image build has
 `environment/` as its context, `setup/` excluded.
@@ -65,12 +65,12 @@ container when it names a container image
 
 `task.toml` is strict, and small. Only `schema_version` and `[task].name` are required; every
 other key has a default, so a Task states what makes it different. An unknown key fails, and a
-Harbor key ALE does not implement fails with a message saying so. The annotated shape below
-describes every key of ALE's format, with `ALE` marking the ones Harbor does not have; the
-Harbor keys ALE also reads, so that a Harbor Task loads with few edits, are in
-[Harbor compatibility](#harbor-compatibility). A Task ALE can read but that departs from this
+Harbor key Orbit does not implement fails with a message saying so. The annotated shape below
+describes every key of Orbit's format, with `Orbit` marking the ones Harbor does not have; the
+Harbor keys Orbit also reads, so that a Harbor Task loads with few edits, are in
+[Harbor compatibility](#harbor-compatibility). A Task Orbit can read but that departs from this
 form loads with a warning, which every command that loads it prints and the RunLock records
-in `task.warnings`; only an error fails `ale lint`.
+in `task.warnings`; only an error fails `orbit lint`.
 
 ```toml
 schema_version = "0.2"                      # required; exactly this
@@ -92,15 +92,15 @@ network_justification = "the Task reads one publisher's live catalog"
 
 [environment]                               # the solver's machine
 os = "linux"                                # linux | windows | macos; default linux
-# image = "registry.example/image:tag"      # ALE; used directly, or a build script's base
+# image = "registry.example/image:tag"      # Orbit; used directly, or a build script's base
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
 cpus = 2                                    # whole CPUs; default 2
 memory_mb = 8192                            # default 8192
 storage_mb = 8192                           # writable storage; default the Provider's
 gpus = 0                                    # GPU count, not indices; default 0
 # gpu_types = ["RTX-PRO-6000", "L40S"]      # models any of which will do; default any
-# gpu_memory_mb = 8192                      # ALE; MiB needed on each GPU; default whole GPUs
-container_features = []                     # ALE; such as ["perf", "mount"]; default none
+# gpu_memory_mb = 8192                      # Orbit; MiB needed on each GPU; default whole GPUs
+container_features = []                     # Orbit; such as ["perf", "mount"]; default none
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
 
@@ -117,32 +117,32 @@ user = "user"                               # account in the image; default user
 timeout_sec = 1800                          # positive seconds; default 1800
 network_mode = "allowlist"                  # no-network | allowlist | blocklist | public; default no-network
 allowed_hosts = ["catalog.example.org"]     # required, and only, for allowlist
-# blocked_hosts = ["github.com"]            # ALE; required, and only, for blocklist
-sudo = false                                # ALE; sudo works exactly when true, always for root (Administrator on Windows)
-# workdir = "project"                       # ALE; where the agent starts; default its home
-validation_rounds = 0                       # ALE; validation results it gets; default 0
+# blocked_hosts = ["github.com"]            # Orbit; required, and only, for blocklist
+sudo = false                                # Orbit; sudo works exactly when true, always for root (Administrator on Windows)
+# workdir = "project"                       # Orbit; where the agent starts; default its home
+validation_rounds = 0                       # Orbit; validation results it gets; default 0
 
 [verifier]
 timeout_sec = 600                           # positive seconds; default 600
-environment_mode = "separate"               # shared | separate | snapshot (ALE)
+environment_mode = "separate"               # shared | separate | snapshot (Orbit)
 env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 # network_mode = "no-network"               # default public
 # allowed_hosts = ["pypi.org"]              # with allowlist, as in [agent]
-# blocked_hosts = ["github.com"]            # ALE; with blocklist, as in [agent]
+# blocked_hosts = ["github.com"]            # Orbit; with blocklist, as in [agent]
 
 [verifier.environment]                      # a separate or snapshot verifier's own sandbox
-# image = "registry.example/verifier:tag"   # ALE; separate only; not with tests/Dockerfile
+# image = "registry.example/verifier:tag"   # Orbit; separate only; not with tests/Dockerfile
 build_timeout_sec = 3600                    # separate only; default 3600
 cpus = 1                                    # default [environment].cpus
 memory_mb = 4096                            # default [environment].memory_mb
 storage_mb = 8192                           # default the Provider's
 gpus = 0                                    # default 0
 # gpu_types = ["H100"]                      # default any
-# gpu_memory_mb = 4096                      # ALE; default whole GPUs
-container_features = []                     # ALE; default none
+# gpu_memory_mb = 4096                      # Orbit; default whole GPUs
+container_features = []                     # Orbit; default none
 env = {}                                    # replaces [environment].env
 
-[verifier.validation]                       # ALE; the rounds' verifier; default [verifier]
+[verifier.validation]                       # Orbit; the rounds' verifier; default [verifier]
 timeout_sec = 300                           # every [verifier] key, each over [verifier]'s
 environment_mode = "snapshot"               # shared | separate | snapshot
 env = { SPLIT = "validation" }              # over [verifier].env, by variable
@@ -157,7 +157,7 @@ cpus = 2                                    # here [verifier.environment]'s 1 ot
 [solution]
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
 
-[[calibration]]                             # ALE; one per added case or changed default
+[[calibration]]                             # Orbit; one per added case or changed default
 name = "missing-summary"                    # lowercase slug: calibration/missing-summary/
 expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or [lo, hi]
 # expect_validation = { reward = 1 }        # validation/'s instead; default expect
@@ -179,14 +179,14 @@ that same destination; do not declare one path while instructing the agent to us
 `artifacts` accepts file paths, directory paths, and globs such as `*.sgf` or `**/*.json`. A
 relative path is below the directory the agent starts in. A table adds `exclude`, patterns that
 match as `tar --exclude` does, as in Harbor: `.venv` is that name at any depth and `*.pyc` every
-such file. ALE never walks what it leaves out, so a dependency tree costs nothing.
+such file. Orbit never walks what it leaves out, so a dependency tree costs nothing.
 `destination` is where the Host keeps the copy: a relative path below the
 episode's `artifacts/`, where a path lands as that name and a glob's matches below it. Without
 one, each declaration gets a numbered directory there; those names and the inventory,
-`snapshot.json`, are ALE's, and destinations may not overlap. A verifier still receives every
+`snapshot.json`, are Orbit's, and destinations may not overlap. A verifier still receives every
 copy at its source path.
 
-ALE copies each match according to its actual type and skips links, missing paths, and copy
+Orbit copies each match according to its actual type and skips links, missing paths, and copy
 failures. No link is followed anywhere on an artifact's path, a directory above it included:
 one the agent made could point at a file only the framework may read. These are fixed
 defaults; the verifier decides how to score the resulting output. A copy stops at 100,000
@@ -230,7 +230,7 @@ across it fails and a move across it copies. A Task's instruction says so where 
 
 - `shared`: in the solver's Sandbox, with its resources. It sees the solver's whole machine,
   processes included, and what it does changes the solver.
-- `snapshot`, ALE's: in a new Sandbox booted from a snapshot of the solver, with resources
+- `snapshot`, Orbit's: in a new Sandbox booted from a snapshot of the solver, with resources
   of its own. It sees the solver's whole disk but none of its processes, and nothing it does
   reaches the solver.
 - `separate`: in a new Sandbox of the verifier's image, with resources of its own. It sees
@@ -292,7 +292,7 @@ code, which often needs what the agent may not reach. Under `no-network` a verif
 reaches the Gateway, so its [Judges](verification.md#judge-tools) work. Setup, the Harness's installation and image builds
 have the network, since they are the Task's trusted preparation and ours; enforcement is
 specified in [Security](security.md). The quality standard owns resource feasibility and
-network-policy selection. `ale lint` requires `[metadata].network_justification` when the
+network-policy selection. `orbit lint` requires `[metadata].network_justification` when the
 agent's network is `public` or `blocklist`.
 
 `[environment]` resources are the whole Sandbox's allocation. The image's own processes, such
@@ -314,7 +314,7 @@ Sandbox lost to either ends its Episode
 its own disk, as Windows and macOS do, keeps its paging. A Linux Sandbox's `/dev/shm` holds
 half its `memory_mb`, as on a Linux machine of that memory, so that processes that share
 memory through it, such as PyTorch's DataLoader workers, get the same room on every Provider
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#memory)).
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#memory)).
 
 ### GPUs
 
@@ -333,12 +333,12 @@ Every Provider gives the Sandbox only accepted models, or refuses it before any 
 runs: a Task that names models would fail on others, and that failure would be scored as
 the agent's. The RunLock records the requested names beside the models observed in the
 Sandbox. How each Provider chooses is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-models).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#gpu-models).
 
 `gpu_memory_mb` is the device memory, in MiB, that the Sandbox needs on each of its GPUs,
 and requires `gpus`. It counts everything its processes allocate there, each process's CUDA
 context included, whose size
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#gpu-memory) gives.
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#gpu-memory) gives.
 Without it the Sandbox takes its GPUs whole. With it, a Provider that shares GPUs may give
 each to several such Sandboxes, holding each to what it named, so a Task that uses a few GiB
 does not take a whole 80 GB GPU; a Provider that does not gives whole GPUs, of a model with
@@ -377,7 +377,7 @@ size.
 A VM has a kernel of its own, so a VM image takes none: naming one fails as the Task loads
 when its folder makes it a VM, and before anything is prepared when its registry does. Which
 Provider gives which feature, and how, is in
-[Providers](../../packages/ale-run/src/ale/run/providers/README.md#container-features).
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#container-features).
 
 ### Variables
 
@@ -395,11 +395,11 @@ Harbor's `env` tables set environment variables for the Task's commands:
 A separate or snapshot verifier without `[verifier.environment]` receives
 `[environment].env`, because Harbor copies `[environment]` for it. `[verifier].env` and
 `[solution].env` win over the table beneath them, and a variable the framework or the
-Harness sets for a command wins over every table. Names beginning with `ALE_` are the
+Harness sets for a command wins over every table. Names beginning with `ORBIT_` are the
 framework's.
 
 A value is a literal or a whole-value reference, `${NAME}` or `${NAME:-default}`. References
-resolve from the checkout's `.env` (`ALE_ENV_FILE` overrides) and nothing else: a variable
+resolve from the checkout's `.env` (`ORBIT_ENV_FILE` overrides) and nothing else: a variable
 only exported in the operator's shell, such as their own `GITHUB_TOKEN`, never reaches a
 Sandbox by accident. An empty value counts as unset, as in a shell. `run`, `calibrate` and
 `reverify` resolve every selected Task before any image is built, Sandbox started or model
@@ -411,7 +411,7 @@ Sandbox's configuration or a Host command line, so container and VM, Linux, Wind
 macOS receive them the same way.
 
 A variable is a credential when its name, or the name it refers to, contains `KEY`, `SECRET`,
-`TOKEN` (not `TOKENS`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `ale lint` fails a credential
+`TOKEN` (not `TOKENS`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `orbit lint` fails a credential
 written as a literal or with a non-empty default; it is written `${NAME}` and its value lives
 in the `.env`. Credential values from the `.env` are redacted from every record of the
 episode (see [Trace](trace.md)), except values that are only digits or a boolean word, which
@@ -419,14 +419,14 @@ cannot be told apart from ordinary output. Artifacts are the agent's output and 
 exactly. The RunLock records each variable's table, name and source (literal, `.env` or
 default), never its value.
 
-These tables never carry the Host's own credentials. A Task cannot refer to an `ALE_`
+These tables never carry the Host's own credentials. A Task cannot refer to an `ORBIT_`
 variable, and a resolved value equal to a model, Judge or Provider key fails resolution:
 those keys reach a model only through the Gateway
 ([Security](security.md#3-provider-credentials-stay-on-the-host)).
 
 ## environment/
 
-The image is the reproducible initial computer state supplied to the agent. Start from the ALE
+The image is the reproducible initial computer state supplied to the agent. Start from the Orbit
 GUI base matching the Task OS and sandbox (macOS has none: name a Tart image, as below),
 then add every stable dependency, service, file, permission, and piece of initial state
 required by the Task. The Linux bases are:
@@ -435,8 +435,8 @@ required by the Task. The Linux bases are:
 - VM: `ghcr.io/agentslastexam/vm-ubuntu24-base` (Ubuntu 24.04), a VM disk for
   `[environment].image`.
 
-Name an exact version, such as `:0.1.1`, never `latest`; `ale new-task` writes the container
-base's current version, and `ale lint` warns about a registry `FROM` or `image` with no tag or
+Name an exact version, such as `:0.1.1`, never `latest`; `orbit new-task` writes the container
+base's current version, and `orbit lint` warns about a registry `FROM` or `image` with no tag or
 `latest`. A Task keeps building from the version it names until its author moves it
 ([Sandbox image](sandbox-image.md#versions)).
 
@@ -470,7 +470,7 @@ image = "ghcr.io/agentslastexam/vm-ubuntu24-base:0.2.0"
 set -euo pipefail
 apt-get update
 apt-get install -y --no-install-recommends sqlite3
-install -d -o user -g user "$ALE_HOME/output"
+install -d -o user -g user "$ORBIT_HOME/output"
 ```
 
 A Windows Task provides `environment/build.ps1`; its base includes WinGet and Chocolatey:
@@ -485,32 +485,32 @@ image = "ghcr.io/agentslastexam/vm-windows10-base:0.1.3"
 $ErrorActionPreference = 'Stop'
 choco install -y 7zip --no-progress
 if ($LASTEXITCODE -ne 0) { throw "7zip installation failed: $LASTEXITCODE" }
-Copy-Item .\input.txt "$env:ALE_HOME\input.txt"
+Copy-Item .\input.txt "$env:ORBIT_HOME\input.txt"
 ```
 
-`ale prepare TASK` boots a temporary VM of the base that already runs ALE's current guestd
+`orbit prepare TASK` boots a temporary VM of the base that already runs Orbit's current guestd
 and Cua Driver, copies `environment/`, less `setup/`, into it and runs the script under the
 framework's identity (root, Administrator on Windows) with that directory as cwd,
-`ALE_HOME` set to the agent home and the network open. The copy's files are not executable,
+`ORBIT_HOME` set to the agent home and the network open. The copy's files are not executable,
 whatever their mode in the folder, as every upload's are not
 ([Permissions](sandbox-image.md#permissions)), so the script runs a helper through its
 interpreter, `bash install.sh` rather than `./install.sh`. It then removes the directory and
 keeps the VM's disk as the Task's layer on the base. A Linux or Windows base must already
-have the `[agent].user` account, because ALE installs the framework for it before the script
+have the `[agent].user` account, because Orbit installs the framework for it before the script
 runs. Scripts may use the system's package managers or local unattended installers; pin
 package versions where supported and check native command exit codes. Scripts must finish
 within `build_timeout_sec`; nonzero exits fail the build. Suppress installer reboots; builds
-requiring a mid-script restart are unsupported. ALE owns shutdown. Copy required files out
+requiring a mid-script restart are unsupported. Orbit owns shutdown. Copy required files out
 of the build directory to their final locations, and set the owner of what the script
 writes for the agent. Only that context is staged, and the whole build is cached by base,
 builder, and every file in it.
 
 A macOS Task (`os = "macos"`) builds the same way on a Tart image named by `image`, with
-`environment/build.sh`. `ale prepare TASK` boots the base with ALE's framework installed for
-`admin`, the account ALE controls the VM through, which the base must therefore sign in,
+`environment/build.sh`. `orbit prepare TASK` boots the base with Orbit's framework installed for
+`admin`, the account Orbit controls the VM through, which the base must therefore sign in,
 runs `bash build.sh` there as for Linux, and keeps the VM's disk as a local image on the
-Mac. ALE frames the result for `[agent].user` when a sandbox first uses it, so `build.sh`
-may create that account; `ALE_HOME` is then `/Users/<user>`, the home the build must give
+Mac. Orbit frames the result for `[agent].user` when a sandbox first uses it, so `build.sh`
+may create that account; `ORBIT_HOME` is then `/Users/<user>`, the home the build must give
 it, and the build fails if the account is missing or lives elsewhere. Such an account must
 sign in automatically with its first login settings done, as the
 [macOS guide](../guides/macos-orchard.md#choose-an-image) says.
@@ -532,7 +532,7 @@ explicitly set required ownership, write and execute permissions instead of rely
 `instruction.md` is the evaluated-agent instruction, used verbatim. Its input and output paths
 refer to the declared initial environment and artifacts. Use literal sandbox paths:
 `/home/user/...` on Linux, `/Users/user/...` on macOS and `C:\Users\user\...` on Windows.
-ALE does not add or rewrite a workspace prefix.
+Orbit does not add or rewrite a workspace prefix.
 
 ## Skills and MCP servers
 
@@ -547,7 +547,7 @@ Skill. The Harness copies its contents to the agent's skills directory before th
 `[[environment.mcp_servers]]` uses Harbor's `name`, `transport`, `command`, `args`, `url` and
 `headers`. `transport` is `stdio` or `streamable-http`. A stdio server is a program in the
 image; one that needs its own directory or variables starts through a wrapper script there. A
-`streamable-http` URL must be reachable under `[agent]`'s network, which ALE checks before any
+`streamable-http` URL must be reachable under `[agent]`'s network, which Orbit checks before any
 Sandbox exists: under `allowlist` or `blocklist` that means `https`.
 
 `headers` belongs to a `streamable-http` server. As in Harbor, and unlike an `env` value, a
@@ -570,18 +570,18 @@ that run; the RunLock records what the run used. See
 
 `tests/test.sh` (or Windows `tests/test.ps1`) evaluates the final outcome and writes its
 `reward` to `/logs/verifier/reward.json` (Windows `C:\logs\verifier\reward.json`; macOS,
-whose root volume is read-only, `/opt/ale/logs/verifier/reward.json`). Verifier
-implementation conventionally lives in `tests/verify.py`. ALE uploads the whole directory to
+whose root volume is read-only, `/opt/orbit/logs/verifier/reward.json`). Verifier
+implementation conventionally lives in `tests/verify.py`. Orbit uploads the whole directory to
 its root-only stage directory, not to Harbor's `/tests`, and runs the entry with that
 directory as cwd. Stage code uses ordinary relative paths; solver outputs use literal
-absolute paths. Before each tests entrypoint starts, ALE selects a Python 3.12+: the image's
+absolute paths. Before each tests entrypoint starts, Orbit selects a Python 3.12+: the image's
 own when it has one, since that is where the Task installs what `verify.py` imports, and
-otherwise the framework's own. It stages `ale_verify` and its JSON Schema library into that
-interpreter's site-packages, checks the import, then sets `ALE_VERIFY_PYTHON` in the
+otherwise the framework's own. It stages `orbit_verify` and its JSON Schema library into that
+interpreter's site-packages, checks the import, then sets `ORBIT_VERIFY_PYTHON` in the
 entrypoint's process environment.
 It is available to the tests and their child processes, including during `calibrate` and
 `reverify`; it is not initialized by the image build, setup stage, or SDK import.
-ALE does not install Python into the image's environment or replace the solver's default
+Orbit does not install Python into the image's environment or replace the solver's default
 interpreter. The agent's model session is closed once its last turn ends, in every episode,
 so a `tests/` that runs the agent's program cannot use the agent's model session
 ([Security](security.md#5-answers-are-absent-not-hidden)).
@@ -591,13 +591,13 @@ The Linux and macOS entry is:
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$ALE_VERIFY_PYTHON" verify.py
+exec "$ORBIT_VERIFY_PYTHON" verify.py
 ```
 
 The Windows entry is:
 
 ```powershell
-& $env:ALE_VERIFY_PYTHON .\verify.py
+& $env:ORBIT_VERIFY_PYTHON .\verify.py
 exit $LASTEXITCODE
 ```
 
@@ -614,13 +614,13 @@ set's cannot overfit to the test set except through what the validation set shar
 
 `validation/` has the contract of [`tests/`](#tests): the entry `test.sh` (`test.ps1` on
 Windows), conventionally `verify.py`, writes `reward.json` and optionally
-`verification.json` and [`feedback.md`](verification.md#feedback), and may use `ale_verify`
+`verification.json` and [`feedback.md`](verification.md#feedback), and may use `orbit_verify`
 and Judges. It is staged only when it runs, in its own root-only stage directory,
-`/opt/ale/validation` (`C:\ProgramData\ALE\validation` on Windows), where its entry runs
-with `ALE_STAGE_DIR` set, as `tests/`'s does. It is absent during every turn of the agent,
+`/opt/orbit/validation` (`C:\ProgramData\Orbit\validation` on Windows), where its entry runs
+with `ORBIT_STAGE_DIR` set, as `tests/`'s does. It is absent during every turn of the agent,
 as `tests/` is.
 
-Rounds run in `[verifier]`'s verifier unless ALE's `[verifier.validation]` says otherwise,
+Rounds run in `[verifier]`'s verifier unless Orbit's `[verifier.validation]` says otherwise,
 since a round often needs less, or other things, than the final score: a shorter limit, a
 smaller Sandbox, a sealed network. That table takes every key `[verifier]` takes, each over
 `[verifier]`'s: a key it sets replaces the verifier's, a table it sets merges into the
@@ -698,7 +698,7 @@ checks for if the test set is to stay unseen.
 ## calibration/
 
 Calibration cases are known final states with the scores each must receive, as a grader
-reads anchor essays before marking: when `tests/` changes, `ale calibrate` shows at once
+reads anchor essays before marking: when `tests/` changes, `orbit calibrate` shows at once
 whether every case still scores as declared, and reviewers can judge the cases and their
 expected scores without running anything. An attempt to cheat is a case like any other,
 expected to earn 0. `[[calibration]]` is a top-level table, laid out as Harbor's `[[steps]]`
@@ -731,7 +731,7 @@ In each case, its directory's `solve.sh` (`solve.ps1` on Windows) supplies the c
 state: it may execute a solution normally or write that state directly from reference data
 it carries. It runs as the oracle, with `[solution].env`, and like `tests/` it is absent
 while an evaluated agent works. `calibration/` holds only the further case directories, and
-`ale lint` refuses any other entry there, a link or a `solution/` included. A directory
+`orbit lint` refuses any other entry there, a link or a `solution/` included. A directory
 there without an entry fails the Task as it loads, so a case cannot exist without its
 expectation.
 
@@ -746,7 +746,7 @@ takes an interval; a missing key, or a value that is not a number, fails the cas
 
 A Task with `validation/` checks it in every case too, and a Task without it whose
 `[agent].validation_rounds` is above 0 checks `tests/` as a round runs it, with a validation
-check rather than a round: `ale calibrate` runs the stage that validates, `validation/` or
+check rather than a round: `orbit calibrate` runs the stage that validates, `validation/` or
 else `tests/`, once on the case's final state, before `tests/` scores it, with no turn after
 it. `expect` applies to both, unless an entry's `expect_validation`, by the same rules, says
 what `validation/`'s result must be; it is refused without `validation/`, where `expect`
@@ -755,17 +755,17 @@ agent's, so such a Task needs a Provider that saves snapshots for calibration to
 shared verification `tests/` then runs in a Sandbox booted from that snapshot: like a round,
 it sees no process the oracle left running.
 
-How `ale calibrate` runs the cases is defined in
+How `orbit calibrate` runs the cases is defined in
 [the episode protocol](episode-protocol.md#calibration).
 
 ## Harbor compatibility
 
-ALE also reads these Harbor keys and files, with Harbor's meaning, so that a Harbor Task loads
-with few edits. They are not part of ALE's format: a new Task uses the form the sections above
+Orbit also reads these Harbor keys and files, with Harbor's meaning, so that a Harbor Task loads
+with few edits. They are not part of Orbit's format: a new Task uses the form the sections above
 describe.
 
 - `schema_version` may be left out, or name Harbor's `1.<n>`, or be Harbor's root-level
-  `version`: ALE reads the Task as a Harbor Task, in its own format with the defaults
+  `version`: Orbit reads the Task as a Harbor Task, in its own format with the defaults
   below, with a warning and `task.harbor` in the RunLock. Any other version fails.
 - Without `[task].name`, a Task is named `<repository>/<folder>`; a name may use Harbor's
   characters, both cases and `.`.
@@ -781,7 +781,7 @@ describe.
   `[verifier.validation.environment].workdir` for validation rounds, replace it for a verifier
   with a Sandbox of its own. Setup and the oracle keep their stage directories.
 - `[verifier].user` is the account, by name or uid, that `tests/` runs as on Linux and macOS,
-  and `[verifier.validation].user` that of validation rounds; Windows refuses it, since verification there runs as Administrator. ALE then
+  and `[verifier.validation].user` that of validation rounds; Windows refuses it, since verification there runs as Administrator. Orbit then
   gives that one account the stage directory and the verifier directory, which are otherwise
   the framework's alone, so a verifier running as an account the agent controls, such as
   `[agent].user`, can be changed by what the agent left: that is the Task's choice.
@@ -791,7 +791,7 @@ describe.
   failure counts only once `start_period_sec` (default 0) has passed, and `retries` (default 3)
   failures in a row fail the Episode as a Task error; attempts are `interval_sec` (default 5)
   apart, `start_interval_sec` (default 5) during the start period, and each may take
-  `timeout_sec` (default 30). ALE's form is a setup that starts the service and waits until it
+  `timeout_sec` (default 30). Orbit's form is a setup that starts the service and waits until it
   is ready.
 - `network_mode` in `[environment]`, with its `allowed_hosts` or `blocked_hosts`, is the default
   of both the agent's and the verifier's network, and in `[verifier.environment]` that of a
@@ -806,16 +806,16 @@ describe.
   `streamable-http`. An `sse` server follows a `streamable-http` server's rules for its URL,
   network and `headers`. Each Harness configures it as Harbor's adapter for its agent does, and
   one whose agent has no SSE transport is refused before any Sandbox exists
-  ([Harnesses](../../packages/ale-run/src/ale/run/harnesses/README.md#mcp-transports)).
+  ([Harnesses](../../packages/orbit-run/src/orbit/run/harnesses/README.md#mcp-transports)).
 
-Nothing in ALE replaces Harbor's multi-step Tasks (`steps`, `multi_step_reward_strategy`),
-compose sidecars (`docker-compose.yaml`, which `ale lint` refuses, an artifact's `service`,
+Nothing in Orbit replaces Harbor's multi-step Tasks (`steps`, `multi_step_reward_strategy`),
+compose sidecars (`docker-compose.yaml`, which `orbit lint` refuses, an artifact's `service`,
 `[[verifier.collect]]`) or TPU selection (`tpu`), and a Task that sets one fails to load. An
 origin belongs in `[metadata]`, so there is no root-level `source`.
 
 These values differ from Harbor's:
 
-- `validation/` and `[agent].validation_rounds` are ALE's: a verifier whose results the
+- `validation/` and `[agent].validation_rounds` are Orbit's: a verifier whose results the
   agent receives between its turns; see [validation/](#validation).
 - A Sandbox always has a size and a time limit, the same on every Provider so that scores
   compare, and its network stays closed until a Task opens it, so some defaults differ: `cpus`
@@ -823,23 +823,23 @@ These values differ from Harbor's:
   backend and sets no time limit; `[agent].user` is `user`, not the image's `USER`;
   `[agent].network_mode` is `no-network`, not `public`; `build_timeout_sec` is 3600, not 600.
   The agent runs in its Sandbox, so the default size leaves it a CPU beside the Task's work.
-- `os = "windows"` is a VM with `.ps1` stage entries, because ALE runs Windows in VMs, where
+- `os = "windows"` is a VM with `.ps1` stage entries, because Orbit runs Windows in VMs, where
   PowerShell is always available; Harbor's is a Windows container with `.bat` entries.
-- `os = "macos"` is ALE's: a macOS VM with `.sh` stage entries, which Harbor does not run.
+- `os = "macos"` is Orbit's: a macOS VM with `.sh` stage entries, which Harbor does not run.
 - `artifacts` may be globs, and nothing is collected undeclared, where Harbor always collects
   `/logs/artifacts`.
 - `${NAME}` in an `env` table resolves from the checkout's `.env`, not the process environment,
   and an empty value counts as unset; see [Variables](#variables).
 - A `skills_dir` that does not exist fails the Episode.
 - `tests/Dockerfile` without separate verification fails, where Harbor ignores it.
-- `environment_mode` also takes `snapshot`, ALE's: a verifier booted from a snapshot of the
+- `environment_mode` also takes `snapshot`, Orbit's: a verifier booted from a snapshot of the
   solver; see [Verification topology](#verification-topology).
 - The reference solution, `solution/` as in Harbor, is also the [calibration case](#calibration)
   `solution`; further cases live in `calibration/<name>/`, and a `calibration/solution/`
   fails as the Task loads.
 - `gpu_types` holds at least one name and requires `gpus`, and every Provider honors it,
   where Harbor's Docker environment ignores it; see [GPUs](#gpus).
-- `network_mode = "blocklist"` with `blocked_hosts` is ALE's: every public host but those
+- `network_mode = "blocklist"` with `blocked_hosts` is Orbit's: every public host but those
   listed; see [Resources and network](#resources-and-network).
 - `allowed_hosts` and `blocked_hosts` refuse entries that reach the Host; see
   [Resources and network](#resources-and-network).

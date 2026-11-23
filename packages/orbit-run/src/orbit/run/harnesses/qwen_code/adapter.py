@@ -10,13 +10,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ale.core.errors import ConfigError, HarnessLimitError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses.base import (
+from orbit.core.errors import ConfigError, HarnessLimitError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -24,7 +24,7 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import QwenCodeSettings
@@ -85,7 +85,7 @@ class QwenCodeHarness(CliHarness):
         protocol, provider, suffix, wire_api = _PROVIDERS[self.gateway_dialect]
         route: dict[str, Any] = {
             "id": session.model,
-            "envKey": "ALE_GATEWAY_TOKEN",
+            "envKey": "ORBIT_GATEWAY_TOKEN",
             "baseUrl": session.gateway_url + suffix,
         }
         if wire_api is not None:
@@ -178,7 +178,7 @@ class QwenCodeHarness(CliHarness):
             # a Sandbox's memory limit does not bound; Node's own default respects it.
             "QWEN_CODE_NO_RELAUNCH": "1",
             "NO_COLOR": "1",
-            "ALE_GATEWAY_TOKEN": session.token,
+            "ORBIT_GATEWAY_TOKEN": session.token,
         }
         return CliCommand(script, env, requested)
 

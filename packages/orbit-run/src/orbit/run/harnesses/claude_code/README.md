@@ -1,6 +1,6 @@
 # Claude Code
 
-Runs `claude --print --output-format=stream-json` with the prompt on stdin. ALE pins its
+Runs `claude --print --output-format=stream-json` with the prompt on stdin. Orbit pins its
 own `CLAUDE_CONFIG_DIR` at `.claude-config`, so the native session lives in
 `.claude-config/projects/<project>/<session id>.jsonl`, with subagent sessions below
 `<session id>/subagents/`.
@@ -14,7 +14,7 @@ stream-only `result` events after the record that preceded them. A subagent sess
 `agent-<id>.meta.json` beside it.
 
 WebSearch runs Anthropic's `web_search` server tool in a request of its own, so unless
-the Task's network is `open` ALE adds it to `--disallowedTools`. WebFetch fetches from
+the Task's network is `open` Orbit adds it to `--disallowedTools`. WebFetch fetches from
 inside the Sandbox and stays under its network policy.
 
 Claude Code 2.1.227 sends a failed request again ten times, for a 408, 409, 429 or 5xx

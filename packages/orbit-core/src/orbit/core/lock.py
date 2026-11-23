@@ -17,13 +17,13 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ale.core.config import RunTimeouts
-from ale.core.errors import ProvenanceIncompleteError
-from ale.core.harness import NativeContinuation
-from ale.core.ids import TaskId
-from ale.core.result import SandboxOutcome
-from ale.core.sandbox import ResourceAllocation
-from ale.core.taskspec import (
+from orbit.core.config import RunTimeouts
+from orbit.core.errors import ProvenanceIncompleteError
+from orbit.core.harness import NativeContinuation
+from orbit.core.ids import TaskId
+from orbit.core.result import SandboxOutcome
+from orbit.core.sandbox import ResourceAllocation
+from orbit.core.taskspec import (
     ImageKind,
     ImageSpec,
     NetworkMode,
@@ -35,7 +35,6 @@ from ale.core.taskspec import (
 __all__ = [
     "AgentProvenance",
     "AgentResourceProvenance",
-    "AleVerifyProvenance",
     "AssetProvenance",
     "AuthenticationProvenance",
     "FrameworkProvenance",
@@ -44,6 +43,7 @@ __all__ = [
     "ImageProvenance",
     "JudgeProvenance",
     "LimitTermination",
+    "OrbitVerifyProvenance",
     "ResourceProvenance",
     "ResumedFrom",
     "RunLock",
@@ -121,7 +121,7 @@ class TaskProvenance(BaseModel):
     """Read as a Harbor Task: its ``schema_version`` is Harbor's or absent, so Harbor's
     defaults applied where it sets none."""
     warnings: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
-    """Where the Task departs from ALE's form, as loading it said."""
+    """Where the Task departs from Orbit's form, as loading it said."""
 
 
 class ImageProvenance(BaseModel):
@@ -268,7 +268,7 @@ class VerificationProvenance(BaseModel):
     """The network the verifier ran with."""
 
 
-class AleVerifyProvenance(BaseModel):
+class OrbitVerifyProvenance(BaseModel):
     model_config = _FROZEN
 
     version: str
@@ -336,7 +336,7 @@ class RunLock(BaseModel):
     sandbox: SandboxProvenance | None = None
     config_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     seed: int
-    ale_verify: AleVerifyProvenance | None = None
+    orbit_verify: OrbitVerifyProvenance | None = None
     judges: tuple[JudgeProvenance, ...] = ()
     asset: AssetProvenance | None = None
     verification: VerificationProvenance = VerificationProvenance()

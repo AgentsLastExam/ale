@@ -8,8 +8,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifFinalMetrics,
@@ -22,8 +22,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     mirrored_files,
@@ -32,8 +32,8 @@ from ale.run.harnesses.base import (
     unconverted,
 )
 
-#: ALE always runs OpenClaw as agent `main`.
-SESSIONS = ".openclaw-ale/agents/main/sessions"
+#: Orbit always runs OpenClaw as agent `main`.
+SESSIONS = ".openclaw-orbit/agents/main/sessions"
 #: OpenClaw's index of the sessions in `SESSIONS`, by session key.
 INDEX = f"{SESSIONS}/sessions.json"
 #: The token counts of a native ``usage`` record; any native price report is ignored.
@@ -155,11 +155,11 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     )
     if not events:
         extra = dict(trajectory.extra or {})
-        ale = dict(extra.get("ale") or {})
-        ale["limitations"] = [
+        orbit = dict(extra.get("orbit") or {})
+        orbit["limitations"] = [
             "Only CLI response summaries are available; native tool history is absent."
         ]
-        extra["ale"] = ale
+        extra["orbit"] = orbit
         trajectory = trajectory.model_copy(update={"extra": extra})
     return trajectory
 
@@ -234,7 +234,7 @@ def _session_trajectory(
     issues: list[dict[str, Any]],
     consumed: set[Path],
 ) -> AtifTrajectory | None:
-    """A spawned session's transcript, which no ALE invocation or printed result describes.
+    """A spawned session's transcript, which no Orbit invocation or printed result describes.
 
     Its first user message is the task its parent delegated, as OpenClaw framed it.
     """
@@ -467,7 +467,7 @@ def _results(
                 results[call_id] = AtifObservationResult(
                     source_call_id=call_id,
                     content=_block_content(block.get("content"), context),
-                    extra={"ale": {"is_error": True}} if block.get("is_error") else None,
+                    extra={"orbit": {"is_error": True}} if block.get("is_error") else None,
                 )
             if role != "toolResult":
                 continue
@@ -480,7 +480,7 @@ def _results(
             results[call_id] = AtifObservationResult(
                 source_call_id=call_id,
                 content=_block_content(value, context),
-                extra={"ale": {"is_error": True}} if error else None,
+                extra={"orbit": {"is_error": True}} if error else None,
             )
     for call_id, refs in spawned.items():
         results[call_id] = results[call_id].model_copy(update={"subagent_trajectory_ref": refs})
@@ -536,7 +536,7 @@ def _mcp_extra(name: str) -> dict[str, Any] | None:
     if "__" not in logical:
         return None
     server, tool = logical.split("__", 1)
-    return {"ale": {"mcp": {"server": server, "tool": tool}}}
+    return {"orbit": {"mcp": {"server": server, "tool": tool}}}
 
 
 def _extra(context: TrajectoryParseContext, issues: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -546,4 +546,4 @@ def _extra(context: TrajectoryParseContext, issues: list[dict[str, Any]]) -> dic
     if context.incomplete:
         data["incomplete"] = True
         data["incomplete_reason"] = context.incomplete_reason or "interrupted"
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

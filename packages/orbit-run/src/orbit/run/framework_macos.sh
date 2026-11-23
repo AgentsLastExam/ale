@@ -1,12 +1,12 @@
 #!/bin/sh
-# Install the ALE framework into a stopped Tart VM's disk, offline, as root on the Mac.
+# Install the Orbit framework into a stopped Tart VM's disk, offline, as root on the Mac.
 #
 # usage: framework-macos DISK USER CONTROL IDENTITY < payload.tar
 #
-# DISK is the disk.img of an ale-frame-* Tart VM owned by the calling user, USER the account
+# DISK is the disk.img of an orbit-frame-* Tart VM owned by the calling user, USER the account
 # the VM signs in to its desktop (the Task's, or CONTROL's for a build.sh VM), CONTROL the
 # account the Provider logs in as, and IDENTITY the framework identity recorded in
-# /opt/ale/framework. The payload holds the framework's python/ tree,
+# /opt/orbit/framework. The payload holds the framework's python/ tree,
 # driver.tar.gz and guestd/*.py. On success it prints the account's home and uid as JSON.
 #
 # The disk is the image's own, so nothing on it is trusted: no path is followed through a
@@ -20,7 +20,7 @@ LC_ALL=C
 export PATH LC_ALL
 
 fail() {
-    echo "ALE: $*" >&2
+    echo "Orbit: $*" >&2
     exit 1
 }
 
@@ -39,13 +39,13 @@ case "$identity" in
     *) fail "invalid framework identity" ;;
 esac
 case "$disk" in
-    /*/ale-frame-*/disk.img) ;;
-    *) fail "the disk must be the disk.img of an ale-frame-* VM" ;;
+    /*/orbit-frame-*/disk.img) ;;
+    *) fail "the disk must be the disk.img of an orbit-frame-* VM" ;;
 esac
 [ -f "$disk" ] && [ ! -L "$disk" ] || fail "the disk is not a regular file"
 [ "$(stat -f %u "$disk")" = "$caller" ] || fail "the disk does not belong to the caller"
 
-staging=$(mktemp -d /private/var/run/ale-framework.XXXXXX)
+staging=$(mktemp -d /private/var/run/orbit-framework.XXXXXX)
 mnt=$staging/mnt
 dev=
 cleanup() {
@@ -114,7 +114,7 @@ done
     fail "the account '$user' does not exist in this image; create it in the image or" \
         "name an existing account with [agent].user in task.toml"
 [ -f "$mnt/private/var/db/dslocal/nodes/Default/users/$control.plist" ] ||
-    fail "the image has no '$control' account, which ALE logs in to the VM as"
+    fail "the image has no '$control' account, which Orbit logs in to the VM as"
 uid=$(account "$user" uid) && gid=$(account "$user" gid) && home=$(account "$user" home) ||
     fail "the account '$user' has no uid, group or home"
 case "$uid" in "" | *[!0-9]* | 0) fail "the account '$user' must not be root" ;; esac
@@ -127,7 +127,7 @@ esac
 need "${home#/}"
 [ -d "$mnt$home" ] || fail "the account '$user' has no home directory"
 
-# ALE drives the desktop of this account, so the image must sign it in at boot.
+# Orbit drives the desktop of this account, so the image must sign it in at boot.
 need Library/Preferences/com.apple.loginwindow.plist
 [ "$(plutil -extract autoLoginUser raw "$mnt/Library/Preferences/com.apple.loginwindow.plist" \
     2>/dev/null)" = "$user" ] ||
@@ -138,17 +138,17 @@ need private/etc/kcpassword
 
 # The framework: guestd, for root alone, on a Python of its own that every account may run
 # and only root may change.
-need opt/ale
+need opt/orbit
 [ -d "$mnt/opt" ] || mkdir -m 0755 "$mnt/opt"
-rm -rf "$mnt/opt/ale"
-mkdir -m 0755 "$mnt/opt/ale"
+rm -rf "$mnt/opt/orbit"
+mkdir -m 0755 "$mnt/opt/orbit"
 [ -x "$staging/payload/python/bin/python3" ] || fail "the payload has no framework Python"
-ditto "$staging/payload/python" "$mnt/opt/ale/python"
-chown -R 0:0 "$mnt/opt/ale"
-chmod -R go-w "$mnt/opt/ale/python"
-mkdir -m 0700 "$mnt/opt/ale/guestd"
-cp -P "$staging"/payload/guestd/*.py "$mnt/opt/ale/guestd/"
-chmod 0600 "$mnt"/opt/ale/guestd/*.py
+ditto "$staging/payload/python" "$mnt/opt/orbit/python"
+chown -R 0:0 "$mnt/opt/orbit"
+chmod -R go-w "$mnt/opt/orbit/python"
+mkdir -m 0700 "$mnt/opt/orbit/guestd"
+cp -P "$staging"/payload/guestd/*.py "$mnt/opt/orbit/guestd/"
+chmod 0600 "$mnt"/opt/orbit/guestd/*.py
 
 # Cua Driver, signed, where LaunchServices starts it under its own identity.
 tar -xzf "$staging/payload/driver.tar.gz" -C "$staging/driver"
@@ -224,12 +224,12 @@ cat "$staging/approvals.plist" > "$approvals"
 chown "$uid:$gid" "$approvals"
 chmod 0600 "$approvals"
 
-# The account ALE logs in as: Remote Login on, and sudo without a password.
-need private/etc/sudoers.d/ale-control
+# The account Orbit logs in as: Remote Login on, and sudo without a password.
+need private/etc/sudoers.d/orbit-control
 [ -d "$mnt/private/etc/sudoers.d" ] || mkdir -m 0755 "$mnt/private/etc/sudoers.d"
-printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$control" > "$mnt/private/etc/sudoers.d/ale-control"
-chown 0:0 "$mnt/private/etc/sudoers.d/ale-control"
-chmod 0440 "$mnt/private/etc/sudoers.d/ale-control"
+printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$control" > "$mnt/private/etc/sudoers.d/orbit-control"
+chown 0:0 "$mnt/private/etc/sudoers.d/orbit-control"
+chmod 0440 "$mnt/private/etc/sudoers.d/orbit-control"
 overrides=private/var/db/com.apple.xpc.launchd/disabled.plist
 need "$overrides"
 [ ! -f "$mnt/$overrides" ] || cp "$mnt/$overrides" "$staging/disabled.plist"
@@ -240,5 +240,5 @@ cat "$staging/disabled.plist" > "$mnt/$overrides"
 chown 0:0 "$mnt/$overrides"
 chmod 0644 "$mnt/$overrides"
 
-printf '%s\n' "$identity" > "$mnt/opt/ale/framework"
+printf '%s\n' "$identity" > "$mnt/opt/orbit/framework"
 printf '{"agent_home": "%s", "agent_uid": %s}\n' "$home" "$uid"

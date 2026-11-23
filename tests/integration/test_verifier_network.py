@@ -9,14 +9,14 @@ from typing import Any
 
 import pytest
 
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.session import SessionRegistry
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.session import SessionRegistry
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import CONTAINER_BASE, provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]

@@ -1,7 +1,7 @@
 """macOS sandboxes on the local Orchard controller and Tart worker.
 
-``scripts/setup_macos.py`` runs both on this Mac. Every VM ALE creates is a clone of a local
-image that carries the framework (``framing``). ALE owns only the VMs it creates,
+``scripts/setup_macos.py`` runs both on this Mac. Every VM Orbit creates is a clone of a local
+image that carries the framework (``framing``). Orbit owns only the VMs it creates,
 which last one episode unless kept; it never adopts a VM it did not create, nor changes the
 images it is given. Each sandbox the agent works in shows the desktop its image signs the
 Task's account in to.
@@ -25,10 +25,10 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds
-from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
-from ale.core.ids import content_hash
-from ale.core.sandbox import (
+from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds
+from orbit.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
     ExecOutputSink,
@@ -47,13 +47,13 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem
-from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
-from ale.run.images import resolve_registry_reference
-from ale.run.providers import relay
-from ale.run.providers.desktop import require_resolution
-from ale.run.providers.orchard import client as orchard_client
-from ale.run.providers.orchard.client import (
+from orbit.core.taskspec import NetworkMode, OperatingSystem
+from orbit.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
+from orbit.run.images import resolve_registry_reference
+from orbit.run.providers import relay
+from orbit.run.providers.desktop import require_resolution
+from orbit.run.providers.orchard import client as orchard_client
+from orbit.run.providers.orchard.client import (
     CONTROL_ACCOUNT,
     LocalOrchard,
     OrchardClient,
@@ -69,8 +69,8 @@ from ale.run.providers.orchard.client import (
     softnet_policy,
     vm_spec,
 )
-from ale.run.providers.orchard.desktop import await_desktop
-from ale.run.providers.orchard.framing import (
+from orbit.run.providers.orchard.desktop import await_desktop
+from orbit.run.providers.orchard.framing import (
     FORGET_DISPLAYS,
     FramedImage,
     at_resolution,
@@ -78,8 +78,8 @@ from ale.run.providers.orchard.framing import (
     framed_record,
     remove_locks,
 )
-from ale.run.providers.privileges import set_elevation, verify_identities
-from ale.run.transport import GuestClient
+from orbit.run.providers.privileges import set_elevation, verify_identities
+from orbit.run.transport import GuestClient
 
 _IMAGE = re.compile(
     r"^(?P<repository>[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?/"
@@ -88,7 +88,7 @@ _IMAGE = re.compile(
     r"(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?"
     r"(?:@(?P<digest>sha256:[0-9a-f]{64}))?$"
 )
-_ROOT = "/opt/ale"
+_ROOT = "/opt/orbit"
 #: The framework's Python is named by its path, never found on PATH, as on Linux.
 _PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _READ_CHUNK_BYTES = 64 * 1024
@@ -101,8 +101,8 @@ _RECONNECT_TIMEOUT_SEC = 120
 _OPEN_POLICY: tuple[tuple[str, ...], tuple[str, ...]] = (("0.0.0.0/0",), ())
 #: guestd from the sources framing installed, on the framework's Python.
 _GUESTD = (
-    "import os,runpy,sys; os.chdir('/'); sys.path.insert(0,'/opt/ale/guestd'); "
-    "runpy.run_path('/opt/ale/guestd/main.py',run_name='__main__')"
+    "import os,runpy,sys; os.chdir('/'); sys.path.insert(0,'/opt/orbit/guestd'); "
+    "runpy.run_path('/opt/orbit/guestd/main.py',run_name='__main__')"
 )
 #: Prints the home of the account named by its argument, or nothing when there is none.
 _ACCOUNT_HOME = (
@@ -157,7 +157,7 @@ HANDLE_PREFIX = "orchard:"
 #: How a handle names a snapshot: ``orchard:snapshot:<id>``.
 SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 #: The local Tart image that holds a snapshot, before its ID.
-SNAPSHOT_IMAGE = "ale-snapshot-"
+SNAPSHOT_IMAGE = "orbit-snapshot-"
 
 # Stops the Gateway relay listening on the fixed port, as a VM a later episode continues in
 # has for the episode that kept it, and waits for the port to free.
@@ -172,7 +172,7 @@ exit 1
 
 def _owned_vm(handle: str) -> tuple[str, str]:
     name, separator, uid = handle.removeprefix(HANDLE_PREFIX).partition(":")
-    if not handle.startswith(HANDLE_PREFIX) or not separator or not name.startswith("ale-"):
+    if not handle.startswith(HANDLE_PREFIX) or not separator or not name.startswith("orbit-"):
         raise ProviderCapabilityError(f"{handle!r} is not an Orchard VM handle")
     return name, uid
 
@@ -190,7 +190,7 @@ def _check_environment(env: dict[str, str]) -> None:
     ):
         raise ProviderCapabilityError("Invalid guest environment variable")
     if any(
-        key.startswith(("DYLD_", "LD_", "PYTHON", "ALE_CUA_"))
+        key.startswith(("DYLD_", "LD_", "PYTHON", "ORBIT_CUA_"))
         or key in {"PATH", "HOME", "SHELL", "ENV", "BASH_ENV"}
         for key in env
     ):
@@ -222,14 +222,14 @@ async def _open_guests(
     """Two guest service sessions in the VM, the second for file reads while the first
     runs a long command, after checking the guest is the account's framed macOS."""
     env = dict(request.env) | {
-        "ALE_AGENT_USER": request.user,
-        "ALE_AGENT_HOME": agent_home,
+        "ORBIT_AGENT_USER": request.user,
+        "ORBIT_AGENT_HOME": agent_home,
         "PATH": _PATH,
         "HOME": "/var/root",
     }
     if agent:
-        env["ALE_CUA_DRIVER"] = MACOS_DRIVER
-        env["ALE_CUA_DRIVER_SOCKET"] = MACOS_DRIVER_SOCKET
+        env["ORBIT_CUA_DRIVER"] = MACOS_DRIVER
+        env["ORBIT_CUA_DRIVER_SOCKET"] = MACOS_DRIVER_SOCKET
     guest_argv = [
         "sudo",
         "-n",
@@ -273,7 +273,7 @@ async def _open_guests(
 class _Retained:
     """A VM kept running past its episode, or a snapshot of one, as this Mac records it.
 
-    Orchard keeps no labels on a VM, so the record is how ALE knows the VM is retained,
+    Orchard keeps no labels on a VM, so the record is how Orbit knows the VM is retained,
     and what a later episode boots or drives: the local image, and the account framing
     found in it.
     """
@@ -423,7 +423,7 @@ class OrchardSandbox(Sandbox):
                     f"{cleanup_error}"
                 )
                 primary.add_note(detail)
-                logging.getLogger("ale.execution").error(detail)
+                logging.getLogger("orbit.execution").error(detail)
             raise
         return ExecResult(
             exit_code=code,
@@ -574,7 +574,7 @@ class OrchardSandbox(Sandbox):
                 if primary is None:
                     raise
                 primary.add_note(f"Screenshot temporary file cleanup failed: {exc}")
-                logging.getLogger("ale.execution").warning(
+                logging.getLogger("orbit.execution").warning(
                     "Screenshot temporary file cleanup failed for %s: %s", self.sandbox_id, exc
                 )
 
@@ -598,7 +598,7 @@ class OrchardSandbox(Sandbox):
         await self._local.save(self._owned, image.runtime_ref)
 
     async def _shut_down(self) -> None:
-        """Shut the guest down from inside, as a disk ALE keeps needs."""
+        """Shut the guest down from inside, as a disk Orbit keeps needs."""
         # The relay ends with this boot; the disk keeps the account's own settings.
         await relay.stop(self._client, self.request)
         self._relay = None
@@ -632,7 +632,7 @@ class OrchardSandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
         )
 
     async def retain(
@@ -656,7 +656,7 @@ class OrchardSandbox(Sandbox):
         The display mode its desktop saved is forgotten first, as framing forgets the first
         login's, so each VM booted from it starts at its own resolution.
         """
-        snapshot_id = self._owned.name.removeprefix("ale-")
+        snapshot_id = self._owned.name.removeprefix("orbit-")
         image = f"{SNAPSHOT_IMAGE}{snapshot_id}"
         forgotten = await self._orchard.exec(self._owned.name, ["sudo", "-n", *FORGET_DISPLAYS])
         if forgotten.exit_code:
@@ -770,7 +770,7 @@ class OrchardProvider(Provider):
         if image.kind is not ImageKind.VM:
             raise ProviderCapabilityError("Orchard only accepts VM images")
         if isinstance(image, PreparedTaskImage) and image.source != "external-ref":
-            # A Task image ALE built and keeps on the local worker.
+            # A Task image Orbit built and keeps on the local worker.
             if image.runtime_ref not in await self._local().local_images():
                 raise ProviderCapabilityError(f"the local image {image.runtime_ref} is missing")
             return image
@@ -825,10 +825,10 @@ class OrchardProvider(Provider):
             and not needs.resources.sudo
             and role is not SandboxRole.VERIFIER
         ):
-            # Revoking would take the account's sudo from ALE too, which runs as root
+            # Revoking would take the account's sudo from Orbit too, which runs as root
             # through it.
             problems.append(
-                f"ALE controls macOS VMs through the {CONTROL_ACCOUNT} account, which keeps "
+                f"Orbit controls macOS VMs through the {CONTROL_ACCOUNT} account, which keeps "
                 "passwordless sudo, so a Task that runs as it must declare [agent].sudo = true; "
                 "use another account for a Task without elevated privileges"
             )
@@ -916,7 +916,7 @@ class OrchardProvider(Provider):
         *,
         retarget: bool,
     ) -> OrchardSandbox:
-        """A running ALE VM booted from ``source``, driven through new guest sessions;
+        """A running Orbit VM booted from ``source``, driven through new guest sessions;
         ``retarget`` points its Gateway relay at this request's Gateway.
 
         Its Softnet rules, not this run's configuration, say whether it is sealed now: a
@@ -978,7 +978,7 @@ class OrchardProvider(Provider):
         allocation: ResourceAllocation,
         image: ResolvedImage,
     ) -> OrchardSandbox:
-        """A running VM this Mac's Orchard started for ALE, driven again through new guest
+        """A running VM this Mac's Orchard started for Orbit, driven again through new guest
         sessions; the Gateway relay inside it outlives the sessions that started it.
 
         A kept VM is checked against the image its record names: the request of a later
@@ -1030,7 +1030,7 @@ class OrchardProvider(Provider):
                 else:
                     present, running = record.boots.name in images, False
                 if not present:
-                    _forget(record.handle)  # deleted outside ALE
+                    _forget(record.handle)  # deleted outside Orbit
                     continue
                 found.append(
                     {
@@ -1041,7 +1041,7 @@ class OrchardProvider(Provider):
                         "image": record.boots.name,
                         "gpus": (),
                         "running": running,
-                        "cleanup_command": f"ale sandbox destroy {record.handle}",
+                        "cleanup_command": f"orbit sandbox destroy {record.handle}",
                     }
                 )
         finally:
@@ -1127,7 +1127,7 @@ class OrchardProvider(Provider):
         try:
             await client.start()
             spec = vm_spec(
-                "ale-" + uuid.uuid4().hex,
+                "orbit-" + uuid.uuid4().hex,
                 boot,
                 cpus=request.resources.cpus,
                 memory_mb=request.resources.memory_mb,

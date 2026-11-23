@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
-from ale.core.errors import ProviderStartError
+from orbit.core.errors import ProviderStartError
 
 __all__ = ["run"]
 

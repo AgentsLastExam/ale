@@ -8,8 +8,8 @@ import json
 from pathlib import PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
@@ -20,7 +20,7 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
@@ -32,7 +32,7 @@ from ale.run.harnesses.base import (
 )
 
 #: ``--session-dir``: one flat directory of ``<timestamp>_<session id>.jsonl`` files.
-SESSIONS = ".pi-ale/sessions"
+SESSIONS = ".pi-orbit/sessions"
 #: Stop reasons pi's own print mode reports as failures.
 _FAILED = {"error", "aborted", "length"}
 
@@ -165,19 +165,21 @@ def _convert(
             if isinstance(details, dict) and {"server", "tool"} <= details.keys():
                 # A direct MCP call names its logical server and tool.
                 servers[call_id] = {
-                    "ale": {"mcp": {"server": str(details["server"]), "tool": str(details["tool"])}}
+                    "orbit": {
+                        "mcp": {"server": str(details["server"]), "tool": str(details["tool"])}
+                    }
                 }
             results[call_id] = AtifObservationResult(
                 source_call_id=call_id,
                 content=_content(message.get("content"), context),
-                extra={"ale": {"is_error": True}} if message.get("isError") else None,
+                extra={"orbit": {"is_error": True}} if message.get("isError") else None,
             )
     prompts = 0
     for entry in entries:
         kind = entry.get("type")
         timestamp = entry.get("timestamp") if isinstance(entry.get("timestamp"), str) else None
         extra = (
-            {"ale": {"native_event_ids": [entry["id"]]}}
+            {"orbit": {"native_event_ids": [entry["id"]]}}
             if isinstance(entry.get("id"), str)
             else None
         )
@@ -329,7 +331,7 @@ def _mcp_extra(name: str) -> dict[str, Any] | None:
     )
     if not server or not tool:
         return None
-    return {"ale": {"mcp": {"server": server, "tool": tool}}}
+    return {"orbit": {"mcp": {"server": server, "tool": tool}}}
 
 
 def _extra(
@@ -345,4 +347,4 @@ def _extra(
     if context.incomplete:
         data["incomplete"] = True
         data["incomplete_reason"] = context.incomplete_reason or "interrupted"
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

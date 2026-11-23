@@ -18,9 +18,9 @@ if ($currentUser -ne $AgentUser) {
     throw "Run prepare.ps1 as '$AgentUser' so its per-user settings apply to that account."
 }
 
-$work = "$env:ProgramData\ALE\install"
-$setup = "$env:ProgramData\ALE\setup"
-$tests = "$env:ProgramData\ALE\tests"
+$work = "$env:ProgramData\Orbit\install"
+$setup = "$env:ProgramData\Orbit\setup"
+$tests = "$env:ProgramData\Orbit\tests"
 New-Item -ItemType Directory -Path $work, $setup, $tests -Force | Out-Null
 
 $python = "C:\Python312\python.exe"
@@ -60,9 +60,9 @@ if (-not (Test-Path $python)) {
 & $python -c "import sys; assert sys.version_info >= (3, 12), sys.version"
 
 # The framework (guestd, Cua Driver, the service that starts them) is not part of the base:
-# ALE installs it into a layer on the disk before it boots, and its service locks this
-# directory down at every boot. These are the directories ALE stages Task files in.
-icacls "$env:ProgramData\ALE" /inheritance:r /grant:r `
+# Orbit installs it into a layer on the disk before it boots, and its service locks this
+# directory down at every boot. These are the directories Orbit stages Task files in.
+icacls "$env:ProgramData\Orbit" /inheritance:r /grant:r `
     "SYSTEM:(OI)(CI)(F)" "Administrators:(OI)(CI)(F)" | Out-Null
 foreach ($stage in $setup, $tests) {
     icacls $stage /inheritance:r /grant:r `
@@ -70,16 +70,16 @@ foreach ($stage in $setup, $tests) {
 }
 # A seed an earlier recipe prepared also carries a guestd of its own, the logon tasks that
 # started it and its firewall rule.
-foreach ($task in "ALE Guestd Session", "ALE Guestd") {
+foreach ($task in "Orbit Guestd Session", "Orbit Guestd") {
     Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
 }
-Get-NetFirewallRule -DisplayName "ALE guestd" -ErrorAction SilentlyContinue |
+Get-NetFirewallRule -DisplayName "Orbit guestd" -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule
 foreach ($leftover in "guestd", "start-guestd.ps1", "start-session.ps1", "debloat.ps1") {
-    Remove-Item "$env:ProgramData\ALE\$leftover" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:ProgramData\Orbit\$leftover" -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# The seed came from GCP, but the prepared disk runs behind ALE's QEMU runner.  Leaving
+# The seed came from GCP, but the prepared disk runs behind Orbit's QEMU runner.  Leaving
 # cloud agents enabled adds minute-long metadata timeouts to every cold boot.
 Get-Service | Where-Object {
     $_.Name -match "GCE|Google" -or $_.DisplayName -match "GCE|Google"
@@ -98,10 +98,10 @@ Get-Service | Where-Object { $_.DisplayName -like "VMware*" } | ForEach-Object {
 Get-Process -Name "vmtoolsd", "vmwaretray" -ErrorAction SilentlyContinue | `
     Stop-Process -Force -ErrorAction SilentlyContinue
 & "$PSScriptRoot\debloat.ps1" -AgentUser $AgentUser
-if (-not (Test-Path "$env:ProgramData\ALE\debloat.done")) {
-    throw "Windows base cleanup did not complete; inspect C:\ProgramData\ALE\debloat.log."
+if (-not (Test-Path "$env:ProgramData\Orbit\debloat.done")) {
+    throw "Windows base cleanup did not complete; inspect C:\ProgramData\Orbit\debloat.log."
 }
-Remove-Item "$env:ProgramData\ALE\debloat.done", "$env:ProgramData\ALE\debloat.log" -Force
+Remove-Item "$env:ProgramData\Orbit\debloat.done", "$env:ProgramData\Orbit\debloat.log" -Force
 & "$PSScriptRoot\tools.ps1"
 
 # The screen, filesystem and timestamps must begin every episode in one predictable locale.
@@ -222,4 +222,4 @@ Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue
 
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "ALE Windows base preparation completed. Shut down completely (Fast Startup is off)."
+Write-Host "Orbit Windows base preparation completed. Shut down completely (Fast Startup is off)."

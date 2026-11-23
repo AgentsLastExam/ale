@@ -9,23 +9,23 @@ from pathlib import Path, PurePosixPath
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import (
+from orbit.core.config import load_run_config
+from orbit.core.errors import (
     AgentError,
     AgentUnsupportedError,
     ConfigError,
     HarnessLimitError,
 )
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
-from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
-from ale.run.harnesses.forgecode import ForgecodeHarness
-from ale.run.recording import BlobStore
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
+from orbit.run.harnesses.forgecode import ForgecodeHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-STATE = "/home/agent/.forge-ale"
+STATE = "/home/agent/.forge-orbit"
 SESSION_ID = "0b7c5f1e-6f39-4f0a-9d47-6a0f0c8f3a11"
 
 
@@ -190,18 +190,18 @@ async def test_each_invocation_continues_one_conversation_and_exports_it(
     native_session_id: str | None,
 ) -> None:
     command = await ForgecodeHarness().prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=native_session_id,
     )
     assert native_session_id is None or command.session_id == native_session_id
     requested = shlex.quote(str(command.session_id))
-    assert f"forge --conversation-id {requested} < /home/agent/.ale-harness/prompt.md;" in (
+    assert f"forge --conversation-id {requested} < /home/agent/.orbit-harness/prompt.md;" in (
         command.script
     )
     assert f"forge conversation dump {requested} < /dev/null" in command.script
-    assert f"/home/agent/.forge-ale/dumps/{command.session_id}" in command.script
+    assert f"/home/agent/.forge-orbit/dumps/{command.session_id}" in command.script
     assert command.script.endswith("exit $status")
     assert command.env["FORGE_CONFIG"] == STATE
     assert command.env["FORGE_UPDATES__FREQUENCY"] == "never"
@@ -257,7 +257,7 @@ async def test_exit_zero_without_a_finished_turn_fails_and_limits_are_typed() ->
 
 def test_session_files_are_the_conversations_exports() -> None:
     harness = ForgecodeHarness()
-    dumps = PurePosixPath(".forge-ale/dumps")
+    dumps = PurePosixPath(".forge-orbit/dumps")
     assert harness.is_session_file(dumps / SESSION_ID / "20261026T051937Z.json", SESSION_ID)
     assert not harness.is_session_file(dumps / f"{SESSION_ID}.json", SESSION_ID)
     assert not harness.is_session_file(dumps / SESSION_ID / "x.txt", SESSION_ID)
@@ -283,7 +283,7 @@ def message(role: str, content: str, **fields: object) -> dict[str, object]:
 
 
 def write_dump(root: Path, conversation: dict[str, object], related: list[object]) -> None:
-    path = root / ".forge-ale/dumps" / SESSION_ID / "20261026T000000Z.json"
+    path = root / ".forge-orbit/dumps" / SESSION_ID / "20261026T000000Z.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"conversation": conversation, "related_conversations": related}))
 
@@ -353,17 +353,17 @@ def test_a_launch_and_its_resume_convert_in_native_order(tmp_path: Path) -> None
 
 def test_without_an_export_each_turn_keeps_its_prompt_and_outcome(tmp_path: Path) -> None:
     write_resumed_run(tmp_path)
-    shutil.rmtree(tmp_path / ".forge-ale/dumps")
+    shutil.rmtree(tmp_path / ".forge-orbit/dumps")
     trajectory = ForgecodeHarness().parse_trajectory(recorded_context(tmp_path))
 
     assert [(step.source, step.message) for step in trajectory.steps] == [
         ("user", prompt) for prompt in RESUMED_PROMPTS
     ]
-    ale = trajectory.extra["ale"]  # type: ignore[index]
-    assert ale["parse_issues"] == [
+    orbit = trajectory.extra["orbit"]  # type: ignore[index]
+    assert orbit["parse_issues"] == [
         {"reason": "native_session_unavailable", "session_id": SESSION_ID}
     ]
-    assert ale["limitations"]
+    assert orbit["limitations"]
 
 
 def delegation(call_id: str, child_id: str) -> list[dict[str, object]]:
@@ -391,8 +391,8 @@ def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
     child_id = "11111111-2222-3333-4444-555555555555"
     grandchild_id = "66666666-7777-8888-9999-000000000000"
     record(tmp_path, "Delegate.", out=stdout(f"● [00:00:00] Initialize {SESSION_ID}"))
-    (tmp_path / ".forge-ale/.mcp.json").parent.mkdir(parents=True)
-    (tmp_path / ".forge-ale/.mcp.json").write_text(json.dumps({"mcpServers": {"Task-Proof": {}}}))
+    (tmp_path / ".forge-orbit/.mcp.json").parent.mkdir(parents=True)
+    (tmp_path / ".forge-orbit/.mcp.json").write_text(json.dumps({"mcpServers": {"Task-Proof": {}}}))
     write_dump(
         tmp_path,
         {
@@ -464,7 +464,7 @@ def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
     agent = trajectory.steps[1]
     assert agent.reasoning_content == "plan"
     _, derive = agent.tool_calls or ()
-    assert derive.extra == {"ale": {"mcp": {"server": "Task-Proof", "tool": "derive"}}}
+    assert derive.extra == {"orbit": {"mcp": {"server": "Task-Proof", "tool": "derive"}}}
     delegated, failed = agent.observation.results  # type: ignore[union-attr]
     (ref,) = delegated.subagent_trajectory_ref or ()
     assert ref.session_id == child_id
@@ -478,8 +478,8 @@ def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
     assert [ref.trajectory_id for ref in nested.subagent_trajectory_ref or ()] == [
         grandchild.trajectory_id
     ]
-    assert failed.extra == {"ale": {"is_error": True}} and failed.content == "boom"
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert failed.extra == {"orbit": {"is_error": True}} and failed.content == "boom"
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unlinked_subagent", "session_id": "orphan-a"},
         {"reason": "unlinked_subagent", "session_id": "orphan-b"},
     ]

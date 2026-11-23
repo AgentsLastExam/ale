@@ -9,7 +9,7 @@ With an overlay on the root (runsc's default root:self, or root:memory) and
 with a read-only root, runsc mounts the tmpfs as before; an explicit /tmp
 mount and a non-empty /tmp are left alone as before.
 
-Why: ALE runs every sandbox with --overlay2=none so that a container's writes
+Why: Orbit runs every sandbox with --overlay2=none so that a container's writes
 stay in its Docker filesystem, as under runc: docker commit keeps them in a
 snapshot, docker cp reads them, and they take disk, not the container's
 memory. The internal tmpfs broke that for the /tmp of an image whose /tmp is

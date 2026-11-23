@@ -42,9 +42,9 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds
-from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskError
-from ale.core.sandbox import (
+from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError, TaskError
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
     ExecOutputSink,
@@ -63,16 +63,16 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem
-from ale.run import HELPER_RUNTIME, ale_image, guestd
-from ale.run.framework import with_framework
-from ale.run.images import acquire_lock, resolve_container_image, resolve_prepared_container_image
-from ale.run.process import run
-from ale.run.providers import relay
-from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import volumes as docker_volumes
-from ale.run.providers.privileges import set_and_prove_elevation
-from ale.run.providers.runner import (
+from orbit.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem
+from orbit.run import HELPER_RUNTIME, guestd, orbit_image
+from orbit.run.framework import with_framework
+from orbit.run.images import acquire_lock, resolve_container_image, resolve_prepared_container_image
+from orbit.run.process import run
+from orbit.run.providers import relay
+from orbit.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
+from orbit.run.providers.docker import volumes as docker_volumes
+from orbit.run.providers.privileges import set_and_prove_elevation
+from orbit.run.providers.runner import (
     HOST_IP,
     Console,
     connect_guest,
@@ -82,15 +82,15 @@ from ale.run.providers.runner import (
     read_guest_token,
     url_port,
 )
-from ale.run.sources import cache_root
-from ale.run.transport import GuestClient
+from orbit.run.sources import cache_root
+from orbit.run.transport import GuestClient
 
 __all__ = ["FirecrackerProvider", "FirecrackerSandbox"]
 
 #: The image that hosts the microVM and converts disks for it (images/runtimes/firecracker-runner).
-RUNNER_IMAGE = os.environ.get("ALE_FIRECRACKER_RUNNER", ale_image("ale-firecracker-runner"))
+RUNNER_IMAGE = os.environ.get("ORBIT_FIRECRACKER_RUNNER", orbit_image("orbit-firecracker-runner"))
 #: The guest kernel inside the runner image, shared by every microVM.
-KERNEL = "/opt/ale/vmlinux"
+KERNEL = "/opt/orbit/vmlinux"
 
 GUEST_PORT = guestd.PORT
 GUEST_IP = "172.30.0.2"
@@ -106,7 +106,7 @@ RUNNER_VIEWS = "/views"
 RUNNER_STORAGE = "/storage"
 #: The init the kernel starts, run by the framework's Python, and the files it reads.
 INIT_SOURCE = Path(__file__).with_name("guest_init.py")
-GUEST_DIR = "/opt/ale/firecracker"
+GUEST_DIR = "/opt/orbit/firecracker"
 
 #: Firecracker boots in a fraction of a second; this covers the image's own start.
 BOOT_TIMEOUT_SEC = 120
@@ -133,14 +133,14 @@ STORAGE_OVERHEAD_MB = 512
 #: one. Firecracker's virtio-mmio devices are few, so the chain is capped.
 MAX_LAYERS = 8
 
-MANAGED_LABEL = "ale.firecracker.managed"
-EPISODE_LABEL = "ale.firecracker.episode"
-ROLE_LABEL = "ale.firecracker.role"
-RETENTION_LABEL = "ale.firecracker.retention"
-STORAGE_LABEL = "ale.firecracker.storage"
+MANAGED_LABEL = "orbit.firecracker.managed"
+EPISODE_LABEL = "orbit.firecracker.episode"
+ROLE_LABEL = "orbit.firecracker.role"
+RETENTION_LABEL = "orbit.firecracker.retention"
+STORAGE_LABEL = "orbit.firecracker.storage"
 #: What the snapshot a microVM booted from holds over its image, in MiB, which a later Run
 #: that drives the kept microVM again counts as its own.
-WRITTEN_LABEL = "ale.firecracker.written_mb"
+WRITTEN_LABEL = "orbit.firecracker.written_mb"
 HANDLE_PREFIX = "firecracker:"
 SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 SNAPSHOT_RECORD = "snapshot.json"
@@ -149,7 +149,7 @@ DISK_RECORD = "disk.json"
 
 #: The runner's nat chain that sends the fixed Gateway port to the port the Host serves the
 #: Gateway on; a later run's Gateway replaces its rule.
-GATEWAY_CHAIN = "ALE_GATEWAY"
+GATEWAY_CHAIN = "ORBIT_GATEWAY"
 
 
 async def _connect(host_port: int, token: str, console: Console) -> GuestClient:
@@ -272,7 +272,7 @@ def _view_devices(layers: int, disks: int, paths: Sequence[str]) -> dict[str, ob
 def _inject(tar_path: Path, image: dict[str, object]) -> tuple[int, int]:
     """Append the init and the image's run configuration to an exported rootfs tar.
 
-    Returns the blocks and entries the filesystem must hold. ``/opt/ale`` is root-only
+    Returns the blocks and entries the filesystem must hold. ``/opt/orbit`` is root-only
     already, as the framework layer leaves it.
     """
     blocks = entries = 0
@@ -550,7 +550,7 @@ class FirecrackerSandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
         )
 
     async def _power_off(self) -> None:
@@ -606,7 +606,7 @@ class FirecrackerSandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
         )
 
 
@@ -683,7 +683,7 @@ class FirecrackerProvider(Provider):
         if shutil.which("docker") is None:
             problems.append("docker is not on PATH; the runner image is what holds Firecracker")
         # Only Docker's daemon opens /dev/kvm, for the runner container, so the account
-        # running ALE needs no access to it of its own.
+        # running Orbit needs no access to it of its own.
         if not Path("/dev/kvm").exists():
             problems.append("/dev/kvm is missing: this host has no hardware virtualisation")
         if not Path("/dev/net/tun").exists():
@@ -738,7 +738,7 @@ class FirecrackerProvider(Provider):
             )
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
-        container = f"ale-fc-{uuid.uuid4().hex[:10]}"
+        container = f"orbit-fc-{uuid.uuid4().hex[:10]}"
         storage = self.overlay_dir / sandbox_id
         storage.mkdir(parents=True, exist_ok=True)
         try:
@@ -746,7 +746,7 @@ class FirecrackerProvider(Provider):
             self._write_config(
                 storage,
                 request,
-                container.removeprefix("ale-fc-"),
+                container.removeprefix("orbit-fc-"),
                 len(layers),
                 volumes=volumes,
                 views=_view_devices(len(layers), len(viewed), viewed_paths),
@@ -846,7 +846,7 @@ class FirecrackerProvider(Provider):
         if code != 0:
             raise ProviderCapabilityError(
                 f"the Firecracker runner {self.runner_image} is unavailable; build it with "
-                f"images/build.sh ale-firecracker-runner: {stderr.strip()}"
+                f"images/build.sh orbit-firecracker-runner: {stderr.strip()}"
             )
         key = hashlib.sha256(
             "\n".join(
@@ -884,7 +884,7 @@ class FirecrackerProvider(Provider):
         partial.mkdir(parents=True)
         try:
             code, created, stderr = await _run(
-                "docker", "create", "--entrypoint", "/ale-none", image, timeout=120
+                "docker", "create", "--entrypoint", "/orbit-none", image, timeout=120
             )
             if code != 0:
                 raise ProviderStartError(f"could not export {image}: {stderr.strip()}")
@@ -944,7 +944,7 @@ class FirecrackerProvider(Provider):
         env = dict(request.env)
         env[CONTAINER_VARIABLE] = str(request.desktop_resolution)
         if gateway := _sandbox_gateway(request.gateway_url):
-            env["ALE_GATEWAY_URL"] = gateway
+            env["ORBIT_GATEWAY_URL"] = gateway
         sandbox = {
             "hostname": hostname,
             "address": GUEST_IP,
@@ -1117,7 +1117,7 @@ class FirecrackerProvider(Provider):
     async def _await_desktop(self, client: GuestClient, timeout_sec: float = 180) -> None:
         """Wait until a screenshot shows something drawn.
 
-        The image's X server answers before its session paints: in a microVM of the ALE
+        The image's X server answers before its session paints: in a microVM of the Orbit
         container base the first capture, three seconds in, was black.
         """
         loop = asyncio.get_running_loop()
@@ -1146,7 +1146,9 @@ class FirecrackerProvider(Provider):
     def _owned_storage(self, handle: str, record: dict) -> Path:
         labels = record.get("Config", {}).get("Labels", {}) or {}
         if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
-            raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained Firecracker sandbox")
+            raise ProviderCapabilityError(
+                f"{handle!r} is not an Orbit-retained Firecracker sandbox"
+            )
         storage = labels.get(STORAGE_LABEL, "")
         mounted = {
             mount.get("Source", "")
@@ -1154,7 +1156,7 @@ class FirecrackerProvider(Provider):
             if mount.get("Type") == "bind" and mount.get("Destination") == RUNNER_STORAGE
         }
         if not storage or storage not in mounted:
-            raise ProviderCapabilityError(f"{handle!r} has no ALE-owned Firecracker storage")
+            raise ProviderCapabilityError(f"{handle!r} has no Orbit-owned Firecracker storage")
         return Path(storage)
 
     async def list_retained(self) -> list[dict[str, object]]:
@@ -1192,7 +1194,7 @@ class FirecrackerProvider(Provider):
                         ),
                         "gpus": (),
                         "running": bool(record.get("State", {}).get("Running")),
-                        "cleanup_command": f"ale sandbox destroy {HANDLE_PREFIX}{container}",
+                        "cleanup_command": f"orbit sandbox destroy {HANDLE_PREFIX}{container}",
                     }
                 )
         return sorted(found, key=lambda item: str(item["handle"]))
@@ -1206,7 +1208,7 @@ class FirecrackerProvider(Provider):
             try:
                 record = self._snapshot_record(handle)
             except (ProviderCapabilityError, ProviderStartError):
-                continue  # not one ALE saved, or one still being saved
+                continue  # not one Orbit saved, or one still being saved
             found.append(
                 {
                     "provider": "firecracker",
@@ -1216,7 +1218,7 @@ class FirecrackerProvider(Provider):
                     "image": record.get("identity", ""),
                     "gpus": (),
                     "running": False,
-                    "cleanup_command": f"ale sandbox destroy {handle}",
+                    "cleanup_command": f"orbit sandbox destroy {handle}",
                 }
             )
         return found
@@ -1242,7 +1244,7 @@ class FirecrackerProvider(Provider):
             or any(not isinstance(disk, str) or "/" in disk for disk in disks)
             or not all((directory / disk).is_file() for disk in disks)
         ):
-            raise ProviderCapabilityError(f"{handle!r} is not an ALE snapshot")
+            raise ProviderCapabilityError(f"{handle!r} is not an Orbit snapshot")
         return record
 
     def _snapshot_image(
@@ -1330,7 +1332,7 @@ class FirecrackerProvider(Provider):
         labels = record.get("Config", {}).get("Labels", {}) or {}
         role = labels.get(ROLE_LABEL, "")
         if role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}:
-            raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
+            raise ProviderCapabilityError(f"{handle!r} is not a retained Orbit solver sandbox")
         if not record.get("State", {}).get("Running"):
             raise ProviderStartError(f"retained sandbox {handle!r} is not running")
         mounts = {mount.get("Destination"): mount for mount in record.get("Mounts", ())}
@@ -1360,7 +1362,7 @@ class FirecrackerProvider(Provider):
             await client.close()
             raise
         attached = FirecrackerSandbox(
-            sandbox_id=container.removeprefix("ale-fc-"),
+            sandbox_id=container.removeprefix("orbit-fc-"),
             request=attached_request,
             container=container,
             storage=storage,

@@ -35,16 +35,16 @@ from urllib.parse import urlsplit
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, WSMsgType
 
-import ale.core.errors as errors
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, closest, unmet
-from ale.core.errors import (
-    AleError,
+import orbit.core.errors as errors
+from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, closest, unmet
+from orbit.core.errors import (
     GuestUnreachableError,
+    OrbitError,
     ProviderCapabilityError,
     ProviderStartError,
     TaskDefinitionError,
 )
-from ale.core.fleet import (
+from orbit.core.fleet import (
     IDENTIFIER,
     PROTOCOL_VERSION,
     STDOUT,
@@ -72,8 +72,8 @@ from ale.core.fleet import (
     SandboxNotice,
     SandboxStatus,
 )
-from ale.core.ids import content_hash
-from ale.core.sandbox import (
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import (
     ExecOutputSink,
     ExecResult,
     Identity,
@@ -90,11 +90,11 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskSpec
-from ale.run.framework import fleet_framework_identity
-from ale.run.providers import leaf
-from ale.run.providers.fleet.tunnel import RunTunnel
-from ale.run.sources import cache_root
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskSpec
+from orbit.run.framework import fleet_framework_identity
+from orbit.run.providers import leaf
+from orbit.run.providers.fleet.tunnel import RunTunnel
+from orbit.run.sources import cache_root
 
 __all__ = ["FleetClient", "FleetProvider", "FleetSandbox"]
 
@@ -134,10 +134,10 @@ def _sandbox_id(episode_id: str) -> str:
     return f"{stem}-{uuid.uuid4().hex[:8]}"
 
 
-def _failure(body: ErrorBody) -> AleError:
+def _failure(body: ErrorBody) -> OrbitError:
     """The error a Node's Sandbox raised, as the same kind here."""
     kind = getattr(errors, body.error, None)
-    if isinstance(kind, type) and issubclass(kind, AleError):
+    if isinstance(kind, type) and issubclass(kind, OrbitError):
         with contextlib.suppress(TypeError):
             return kind(body.message)
     return ProviderStartError(f"{body.error}: {body.message}")
@@ -373,7 +373,7 @@ class FleetClient:
     async def release(self, sandbox_id: str) -> None:
         try:
             await self._request("POST", f"{self.url}/v1/sandboxes/{sandbox_id}/release")
-        except AleError as error:
+        except OrbitError as error:
             _log.warning("could not release %s: %s", sandbox_id, error)
 
     async def retain(self, sandbox_id: str, retention: Retention) -> None:
@@ -439,7 +439,7 @@ class FleetClient:
     async def report_episode(self, episode_id: str, task: str, status: str) -> None:
         """Tell the control plane where an episode is, for its progress pages."""
         report = EpisodeReport(task=task, status=status)  # type: ignore[arg-type]
-        with contextlib.suppress(AleError):
+        with contextlib.suppress(OrbitError):
             await self._request(
                 "POST",
                 f"{self.url}/v1/runs/{self.run_id}/episodes/{episode_id}",
@@ -448,7 +448,7 @@ class FleetClient:
             )
 
     async def report(self, sandbox_id: str, **timings: float) -> None:
-        with contextlib.suppress(AleError):
+        with contextlib.suppress(OrbitError):
             await self._request(
                 "POST", f"{self.url}/v1/sandboxes/{sandbox_id}/report", json=timings
             )
@@ -505,7 +505,7 @@ class FleetClient:
                     data=LeaseRenewal(lease_sec=LEASE_SEC).model_dump_json(),
                     timeout=30,
                 )
-            except AleError as error:
+            except OrbitError as error:
                 _log.warning("renewing leases on %s failed: %s", node.name, error)
 
     async def node_create(self, node: _Node, sandbox_id: str, body: CreateSandbox) -> bytes:
@@ -607,7 +607,7 @@ class FleetClient:
     async def _keepalive(self, sandbox_id: str) -> None:
         while True:
             await asyncio.sleep(KEEPALIVE_SEC)
-            with contextlib.suppress(AleError):
+            with contextlib.suppress(OrbitError):
                 await self.placement(sandbox_id)
 
 
@@ -891,7 +891,7 @@ class FleetProvider(Provider):
                     "status": view.status.value,
                     "gpus": (),
                     "running": view.kind == "sandbox" and view.status is SandboxStatus.RETAINED,
-                    "cleanup_command": f"ale sandbox destroy {handle}",
+                    "cleanup_command": f"orbit sandbox destroy {handle}",
                 }
             )
         return found
@@ -1122,10 +1122,10 @@ class FleetSandbox(Sandbox):
         """Log what the Node's leaf logged about the Sandbox in the context of the command it
         logged for, as a leaf of this process logs: the episode's execution trace records it
         in the phase that ran the command."""
-        logger = logging.getLogger("ale.execution")
+        logger = logging.getLogger("orbit.execution")
         for notice in notices:
             context = self._contexts[notice.call]
-            context.run(logger.log, notice.level, notice.message, extra={"ale_data": notice.data})
+            context.run(logger.log, notice.level, notice.message, extra={"orbit_data": notice.data})
 
     async def _take_notices(self) -> None:
         """Record the notices the Node still holds, before this Run lets go of the Sandbox;
@@ -1226,7 +1226,7 @@ class FleetSandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
             gpu_devices=gpu_devices,
         )
 
@@ -1239,7 +1239,7 @@ class FleetSandbox(Sandbox):
             await self._client.release(self.sandbox_id)
             try:
                 await self._client.node_delete(self.node, self.sandbox_id)
-            except AleError as error:
+            except OrbitError as error:
                 # Its lease runs out on the Node, which then destroys it.
                 _log.warning(
                     "destroying %s on %s failed: %s", self.sandbox_id, self.node.name, error

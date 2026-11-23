@@ -1,9 +1,9 @@
 """The Daytona backend against the shared Provider contract.
 
-Creates real, billable sandboxes on Daytona, so it runs only when ``ALE_DAYTONA_API_KEY`` is
+Creates real, billable sandboxes on Daytona, so it runs only when ``ORBIT_DAYTONA_API_KEY`` is
 set and is selected with ``-m needs_daytona``. Daytona allocates whole GiB; the request
 hook rounds the suite's small default resources up to that, which the Provider itself
-refuses to do. ``ALE_TEST_DAYTONA_GPU=1`` also runs the suite on GPU sandboxes.
+refuses to do. ``ORBIT_TEST_DAYTONA_GPU=1`` also runs the suite on GPU sandboxes.
 """
 
 from __future__ import annotations
@@ -18,20 +18,20 @@ from collections.abc import AsyncIterator
 import pytest
 from tests.support import CONTAINER_BASE
 
-from ale.core.sandbox import Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.core.testkit import ProviderConformance
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.providers import missing_features
-from ale.run.providers.daytona.provider import DAEMON_PORTS, DaytonaProvider
+from orbit.core.sandbox import Identity, ImageRef, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from orbit.core.testkit import ProviderConformance
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.session import GatewaySession, SessionRegistry
+from orbit.run.providers import missing_features
+from orbit.run.providers.daytona.provider import DAEMON_PORTS, DaytonaProvider
 
 pytestmark = [
     pytest.mark.conformance,
     pytest.mark.needs_docker,
     pytest.mark.needs_daytona,
     pytest.mark.skipif(
-        not os.environ.get("ALE_DAYTONA_API_KEY"), reason="ALE_DAYTONA_API_KEY is not set"
+        not os.environ.get("ORBIT_DAYTONA_API_KEY"), reason="ORBIT_DAYTONA_API_KEY is not set"
     ),
 ]
 
@@ -132,7 +132,7 @@ class TestDaytonaProvider(ProviderConformance):
 
     provider = DaytonaProvider()
     image = ImageRef(kind="container", reference=CONTAINER_BASE)
-    gui_image = image  # the ALE container base is a desktop image, and Daytona must run it
+    gui_image = image  # the Orbit container base is a desktop image, and Daytona must run it
     missing_features = staticmethod(missing_features)
 
     async def request(self, **overrides: object) -> SandboxRequest:
@@ -253,7 +253,7 @@ class TestDaytonaProvider(ProviderConformance):
 
     @pytest.mark.asyncio
     async def test_a_pattern_reaches_its_name_and_the_names_below_it(self) -> None:
-        """As ALE's own proxy matches it, so a Task gets the same hosts on every Provider."""
+        """As Orbit's own proxy matches it, so a Task gets the same hosts on every Provider."""
         pattern = NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("*.example.com",))
         async with _gateway() as port, _egress_proxy(pattern) as (proxy, token):
             request = await self.request(
@@ -294,7 +294,7 @@ print(count.value)
 """
 
 #: Loads the library the NVIDIA Vulkan ICD names and initializes EGL on every device through
-#: GLVND, as an offscreen renderer does, so it needs nothing beyond the ALE base. Prints the
+#: GLVND, as an offscreen renderer does, so it needs nothing beyond the Orbit base. Prints the
 #: vendors of the devices that initialized.
 RENDERING = r"""
 import ctypes, json
@@ -325,8 +325,8 @@ print(json.dumps(vendors))
 
 @pytest.mark.needs_gpu
 @pytest.mark.skipif(
-    os.environ.get("ALE_TEST_DAYTONA_GPU") != "1",
-    reason="set ALE_TEST_DAYTONA_GPU=1 to run the suite on Daytona GPU sandboxes",
+    os.environ.get("ORBIT_TEST_DAYTONA_GPU") != "1",
+    reason="set ORBIT_TEST_DAYTONA_GPU=1 to run the suite on Daytona GPU sandboxes",
 )
 class TestDaytonaGpuProvider(TestDaytonaProvider):
     """Every assertion again on sandboxes with an H100, which Daytona runs in its GPU region,

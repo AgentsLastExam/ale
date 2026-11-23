@@ -3,7 +3,7 @@
 Daytona builds a sandbox from an image reference that its builder can pull. The prepared
 image lives in the local Docker store, so it is adapted, pushed to Daytona's own registry
 and referenced there by digest. Nothing is rebuilt remotely: the bytes Daytona runs are
-the bytes ALE prepared, plus one small layer.
+the bytes Orbit prepared, plus one small layer.
 
 The adaptation layer exists because Daytona starts its own daemon as the image's final
 ``USER`` and runs every command, including ours over SSH, as that user. The framework
@@ -13,7 +13,7 @@ unauthenticated local ports (see ``provider.py``).
 
 The registry credentials Daytona hands out expire within the hour, and its builder only
 authenticates to registries registered with the organization. The Provider therefore keeps
-one organization registry entry (``ale-transient``) holding the current credentials.
+one organization registry entry (``orbit-transient``) holding the current credentials.
 """
 
 from __future__ import annotations
@@ -30,19 +30,19 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.core.ids import content_hash
-from ale.run.images import acquire_lock, resolve_loaded_image
-from ale.run.process import run
-from ale.run.providers.daytona.api import DaytonaApi
-from ale.run.sources import cache_root
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError
+from orbit.core.ids import content_hash
+from orbit.run.images import acquire_lock, resolve_loaded_image
+from orbit.run.process import run
+from orbit.run.providers.daytona.api import DaytonaApi
+from orbit.run.sources import cache_root
 
 __all__ = ["ImageConfig", "ImagePublisher", "PublishedImage", "image_config"]
 
 #: Bump when the adaptation layer changes, so every image is adapted and pushed again.
 ADAPTER_VERSION = 1
-REGISTRY_ENTRY = "ale-transient"
-REPOSITORY = "ale-task"
+REGISTRY_ENTRY = "orbit-transient"
+REPOSITORY = "orbit-task"
 _REFRESH_BEFORE = timedelta(minutes=15)
 
 #: POSIX sh, so it works in any Linux image. Mirrors how the framework layer installs sudo.
@@ -60,12 +60,12 @@ elif command -v yum >/dev/null 2>&1; then yum install -y iptables && yum clean a
 elif command -v apk >/dev/null 2>&1; then apk add --no-cache iptables ip6tables
 elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install iptables
 else
-    echo "ALE: Daytona needs iptables in the image, which has neither it nor a package" \
+    echo "Orbit: Daytona needs iptables in the image, which has neither it nor a package" \
         "manager to install it with" >&2
     exit 1
 fi
 if ! command -v iptables >/dev/null 2>&1 || ! command -v ip6tables >/dev/null 2>&1; then
-    echo "ALE: installing iptables did not provide iptables and ip6tables" >&2
+    echo "Orbit: installing iptables did not provide iptables and ip6tables" >&2
     exit 1
 fi
 """
@@ -76,7 +76,7 @@ class PublishedImage:
     """An adapted image in Daytona's registry."""
 
     ref: str
-    """``<registry>/<project>/ale-task@sha256:<manifest digest>``: what the sandbox builds from."""
+    """``<registry>/<project>/orbit-task@sha256:<manifest digest>``: what the sandbox builds from."""
     digest: str
     framed_id: str
     """The local image the Task prepared, with the framework layer."""
@@ -152,11 +152,11 @@ class ImagePublisher:
     # --- adaptation ------------------------------------------------------------
 
     async def _adapt(self, framed_id: str, key: str) -> str:
-        base = f"ale-daytona-base:{framed_id.removeprefix('sha256:')}"
+        base = f"orbit-daytona-base:{framed_id.removeprefix('sha256:')}"
         code, _, stderr = await _docker("tag", framed_id, base)
         if code != 0:
             raise ProviderStartError(f"could not reference the prepared image: {stderr.strip()}")
-        with tempfile.TemporaryDirectory(prefix="ale-daytona-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="orbit-daytona-") as temporary:
             context = Path(temporary)
             (context / "Dockerfile").write_text(
                 "\n".join(
@@ -164,7 +164,7 @@ class ImagePublisher:
                         f"FROM {base}",
                         "USER root",
                         "RUN " + json.dumps(["/bin/sh", "-c", _FIREWALL_TOOLS]),
-                        f"LABEL ale.daytona={json.dumps(key)}",
+                        f"LABEL orbit.daytona={json.dumps(key)}",
                     ]
                 )
                 + "\n"
@@ -172,13 +172,13 @@ class ImagePublisher:
             metadata_file = context / "metadata.json"
             code, _, stderr = await _docker(
                 "buildx", "build", "--load", "--provenance=false", "--sbom=false",
-                "--tag", f"ale-daytona:{key.removeprefix('sha256:')[:16]}",
+                "--tag", f"orbit-daytona:{key.removeprefix('sha256:')[:16]}",
                 "--metadata-file", str(metadata_file), str(context),
                 timeout=1800,
             )  # fmt: skip
             if code != 0:
                 explained = [
-                    line.split("ALE: ", 1)[1] for line in stderr.splitlines() if "ALE: " in line
+                    line.split("Orbit: ", 1)[1] for line in stderr.splitlines() if "Orbit: " in line
                 ]
                 raise ProviderCapabilityError(
                     "could not adapt the Task image for Daytona: "
@@ -279,7 +279,7 @@ def _parse_time(value: str) -> datetime:
 @contextlib.asynccontextmanager
 async def _logged_in(access: dict[str, str]) -> AsyncIterator[dict[str, str]]:
     """A Docker client configuration holding the registry login, kept out of ``~/.docker``."""
-    with tempfile.TemporaryDirectory(prefix="ale-docker-") as config:
+    with tempfile.TemporaryDirectory(prefix="orbit-docker-") as config:
         environment = {**os.environ, "DOCKER_CONFIG": config}
         code, _, stderr = await _docker(
             "login", access["registryUrl"], "-u", access["username"], "--password-stdin",

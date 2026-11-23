@@ -1,4 +1,4 @@
-# ALE's gVisor runtime, as gVisor's release tarball lays it out: runsc, the containerd shim
+# Orbit's gVisor runtime, as gVisor's release tarball lays it out: runsc, the containerd shim
 # and the sidecars runsc runs from gvisor-bin/ next to itself, all from one patched build.
 #
 # Nothing runs this image as a sandbox: an operator copies /gvisor onto the Host and
@@ -11,9 +11,9 @@ FROM scratch
 ADD gvisor.tar.bz2 /gvisor/
 
 ARG GVISOR_TAG
-LABEL org.opencontainers.image.source="https://github.com/AgentsLastExam/ale" \
-      org.opencontainers.image.description="gVisor runsc with ALE's patches" \
-      ale.role="gvisor-runtime" \
-      ale.gvisor.release="${GVISOR_TAG}"
+LABEL org.opencontainers.image.source="https://github.com/AgentsLastExam/orbit" \
+      org.opencontainers.image.description="gVisor runsc with Orbit's patches" \
+      orbit.role="gvisor-runtime" \
+      orbit.gvisor.release="${GVISOR_TAG}"
 
 ENTRYPOINT ["/gvisor/runsc"]

@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest
 
-from ale.run.providers.docker import DockerProvider
-from ale.run.scaffold import scaffold_task
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.scaffold import scaffold_task
 from tests.support import edit_task_config
 
 from .trajectory import LIVE, run_task
@@ -60,7 +60,7 @@ SECOND = (
 )
 VERIFY_FIRST = """\
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 output = Path("/home/user/output")
 log = output / "log.txt"
 lines = [line.strip() for line in log.read_text().splitlines()] if log.is_file() else []
@@ -69,7 +69,7 @@ write({"reward": float(names == ["log.txt"] and lines == ["first"])})
 """
 VERIFY_SECOND = """\
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 output = Path("/home/user/output")
 log, word = output / "log.txt", output / "word.txt"
 lines = [line.strip() for line in log.read_text().splitlines()] if log.is_file() else []
@@ -164,10 +164,10 @@ def test_a_cli_continues_its_session_from_its_retained_solver(
         after = _read(episode, "trajectory.json")
         assert after["schema_version"] == "ATIF-v1.8"
         assert after["session_id"] == before["session_id"]
-        ale = after["extra"]["ale"]
-        issues = [issue["reason"] for issue in ale.get("parse_issues", ())]
-        assert "continuation_boundary_not_found" not in issues, ale["parse_issues"]
-        assert ale["resumed_from"] == {
+        orbit = after["extra"]["orbit"]
+        issues = [issue["reason"] for issue in orbit.get("parse_issues", ())]
+        assert "continuation_boundary_not_found" not in issues, orbit["parse_issues"]
+        assert orbit["resumed_from"] == {
             "episode_id": started["episode_id"],
             "trajectory_id": before["trajectory_id"],
             "native_steps": len(before["steps"]),

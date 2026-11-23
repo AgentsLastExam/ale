@@ -10,10 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
-from ale.run.guestd import gui
-from ale.run.providers.orchard import desktop as orchard_desktop
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError
+from orbit.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
+from orbit.run.guestd import gui
+from orbit.run.providers.orchard import desktop as orchard_desktop
 
 pytestmark = pytest.mark.unit
 
@@ -29,8 +29,8 @@ def desktop(monkeypatch):
     monkeypatch.setattr(gui.sys, "platform", "darwin")
     monkeypatch.setattr(gui.os, "geteuid", lambda: 502)
     monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=502))
-    monkeypatch.setenv("ALE_CUA_DRIVER", DRIVER)
-    monkeypatch.setenv("ALE_CUA_DRIVER_SOCKET", SOCKET)
+    monkeypatch.setenv("ORBIT_CUA_DRIVER", DRIVER)
+    monkeypatch.setenv("ORBIT_CUA_DRIVER_SOCKET", SOCKET)
     console = SimpleNamespace(st_uid=502)
     socket = SimpleNamespace(st_uid=502, st_mode=stat.S_IFSOCK | 0o600)
     monkeypatch.setattr(gui.os, "stat", lambda path: console)
@@ -107,7 +107,7 @@ def test_desktop_probe_checks_real_agent_socket_access(desktop, monkeypatch):
         gui.probe_macos_desktop("evaluator", DRIVER, SOCKET)
 
 
-@pytest.mark.parametrize("key", ["ALE_CUA_DRIVER", "ALE_CUA_DRIVER_SOCKET"])
+@pytest.mark.parametrize("key", ["ORBIT_CUA_DRIVER", "ORBIT_CUA_DRIVER_SOCKET"])
 def test_desktop_probe_rejects_different_agent_tool_configuration(desktop, monkeypatch, key):
     monkeypatch.setenv(key, "/different")
     with pytest.raises(gui.DesktopIdentityError, match="configuration"):

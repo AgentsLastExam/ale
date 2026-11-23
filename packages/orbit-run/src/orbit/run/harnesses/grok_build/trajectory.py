@@ -8,8 +8,8 @@ import re
 from pathlib import PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
@@ -19,8 +19,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     mirrored_files,
@@ -33,7 +33,7 @@ from ale.run.harnesses.base import (
 _DATA_URL = re.compile(r"data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=_-]+)")
 
 
-SESSIONS = ".grok-ale/sessions"
+SESSIONS = ".grok-orbit/sessions"
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -153,7 +153,9 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                     AtifObservationResult(
                         source_call_id=call_id,
                         content=_content(results[call_id].get("content"), context),
-                        extra=({"ale": {"is_error": True}} if errors.get(call_id, False) else None),
+                        extra=(
+                            {"orbit": {"is_error": True}} if errors.get(call_id, False) else None
+                        ),
                     )
                 )
         message = _message(event.get("content"))
@@ -312,7 +314,7 @@ def _mcp_extra(name: str) -> dict[str, Any] | None:
     if "__" not in logical:
         return None
     server, tool = logical.split("__", 1)
-    return {"ale": {"mcp": {"server": server, "tool": tool}}}
+    return {"orbit": {"mcp": {"server": server, "tool": tool}}}
 
 
 def _parse_extra(
@@ -331,4 +333,4 @@ def _parse_extra(
         data["limitations"] = [
             "Native tool and conversation records are unavailable; stdout text only."
         ]
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

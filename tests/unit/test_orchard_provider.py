@@ -15,9 +15,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ale.core.capability import Arch, SandboxNeeds
-from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import (
+from orbit.core.capability import Arch, SandboxNeeds
+from orbit.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
+from orbit.core.sandbox import (
     DesktopResolution,
     Identity,
     ImageKind,
@@ -26,20 +26,20 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.providers import privileges
-from ale.run.providers.fleet import FleetProvider
-from ale.run.providers.orchard import client as orchard_client
-from ale.run.providers.orchard import framing as orchard_framing
-from ale.run.providers.orchard import provider as orchard
-from ale.run.providers.orchard.client import OrchardExecResult
-from ale.run.providers.orchard.framing import FramedImage
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from orbit.run.providers import privileges
+from orbit.run.providers.fleet import FleetProvider
+from orbit.run.providers.orchard import client as orchard_client
+from orbit.run.providers.orchard import framing as orchard_framing
+from orbit.run.providers.orchard import provider as orchard
+from orbit.run.providers.orchard.client import OrchardExecResult
+from orbit.run.providers.orchard.framing import FramedImage
 
 pytestmark = pytest.mark.unit
 
 REF = "registry.example/macos@sha256:" + "a" * 64
 FRAMED = FramedImage(
-    name="ale-framed-" + "f" * 32,
+    name="orbit-framed-" + "f" * 32,
     identity="sha256:" + "f" * 64,
     agent_home="/Users/user",
     agent_uid=501,
@@ -558,7 +558,7 @@ async def test_failed_stop_is_not_successful_destruction(backend, monkeypatch):
     [
         {"assignedCPU": 99},
         {"assignedMemory": 128},
-        {"image": "ale-framed-other"},
+        {"image": "orbit-framed-other"},
     ],
 )
 async def test_actual_observation_differs_from_request(backend, monkeypatch, change):
@@ -673,9 +673,9 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(
     import sys
     from pathlib import Path
 
-    from ale.core.sandbox import ResolvedImage, ResourceAllocation
-    from ale.run import guestd
-    from ale.run.transport import GuestClient, StdioTransport
+    from orbit.core.sandbox import ResolvedImage, ResourceAllocation
+    from orbit.run import guestd
+    from orbit.run.transport import GuestClient, StdioTransport
 
     provider, api, _ = backend
     req = await request(provider, user=pwd.getpwuid(os.getuid()).pw_name)
@@ -763,7 +763,7 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(
         monkeypatch.setattr(orchard, "MACOS_PYTHON", sys.executable)
         me = pwd.getpwuid(os.getuid())
         assert await sandbox.account_home(me.pw_name) == me.pw_dir
-        assert await sandbox.account_home("ale-no-such-account") is None
+        assert await sandbox.account_home("orbit-no-such-account") is None
         await sandbox.open_egress()
         await sandbox.close_egress()
         assert (await task).ok
@@ -1300,7 +1300,7 @@ async def test_screenshots_use_bounded_reads_and_always_remove_the_guest_file(
         ):
             await sandbox.screenshot()
     assert len(removed) == 1 and not guest.files
-    assert removed[0].startswith("/opt/ale/screenshot-")
+    assert removed[0].startswith("/opt/orbit/screenshot-")
     if failure in ("oversize", "capture"):
         assert not reads
 
@@ -1315,9 +1315,9 @@ async def test_large_screenshot_round_trip_over_bounded_guest_responses(
     import sys
     import zlib
 
-    from ale.run.guestd import gui
-    from ale.run.guestd.main import Handler
-    from ale.run.transport import GuestClient
+    from orbit.run.guestd import gui
+    from orbit.run.guestd.main import Handler
+    from orbit.run.transport import GuestClient
 
     def chunk(kind: bytes, body: bytes) -> bytes:
         return (
@@ -1481,7 +1481,7 @@ async def test_a_build_vm_changes_nothing_for_the_agent_and_keeps_its_disk(backe
     sandbox = await provider.create_builder(await request(provider, sudo=False))
     assert not elevation_changes(guest)
     assert not api.desktops
-    assert not any(f"ALE_CUA_DRIVER={orchard.MACOS_DRIVER}" in argv for argv in argvs)
+    assert not any(f"ORBIT_CUA_DRIVER={orchard.MACOS_DRIVER}" in argv for argv in argvs)
     # Agent commands search this PATH too, so it names no directory only root may enter;
     # a lookup through one fails with EACCES instead of "not found".
     assert argvs and all("PATH=/usr/bin:/bin:/usr/sbin:/sbin" in argv for argv in argvs)
@@ -1494,11 +1494,11 @@ async def test_a_build_vm_changes_nothing_for_the_agent_and_keeps_its_disk(backe
             save=AsyncMock(side_effect=lambda *a: saved.append(a)), shut_down=shut_down
         ),
     )
-    image = sandbox.request.prepared_image.model_copy(update={"runtime_ref": "ale-built-x"})
+    image = sandbox.request.prepared_image.model_copy(update={"runtime_ref": "orbit-built-x"})
     await sandbox.save_image(image)
     # The guest shuts itself down, so everything the build wrote is on the kept disk.
     shut_down.assert_awaited_once_with(api, sandbox._owned)
-    assert saved and saved[0][1] == "ale-built-x"
+    assert saved and saved[0][1] == "orbit-built-x"
     await sandbox.destroy()
 
 
@@ -1522,7 +1522,7 @@ async def test_an_agent_waits_for_its_desktop(backend, monkeypatch, role, probed
         await request(provider, sudo=True, role=role, desktop_resolution=wanted)
     )
     assert api.desktops == ([("user", 501)] if probed else [])
-    driver = f"ALE_CUA_DRIVER={orchard.MACOS_DRIVER}"
+    driver = f"ORBIT_CUA_DRIVER={orchard.MACOS_DRIVER}"
     assert all((driver in argv) is probed for argv in argvs)
     # Every VM boots the framed image's clone for the Run's resolution; the agent's
     # desktop is checked to have it, and the image the RunLock records stays the same.
@@ -1682,7 +1682,7 @@ async def test_a_kept_vm_is_listed_continued_and_destroyed(mac):
     )
     retained = await sandbox.retain(roles=("solver",), reason="kept")
     assert (retained.provider, retained.handle) == ("orchard", sandbox.handle)
-    assert retained.cleanup_command == f"ale sandbox destroy {sandbox.handle}"
+    assert retained.cleanup_command == f"orbit sandbox destroy {sandbox.handle}"
     assert fake.deleted == []
     listed = await provider.list_retained()
     assert [(item["handle"], item["running"]) for item in listed] == [(sandbox.handle, True)]
@@ -1801,7 +1801,7 @@ async def test_a_kept_verifier_is_not_continued_in(mac):
 
 
 @pytest.mark.asyncio
-async def test_a_vm_deleted_outside_ale_is_no_longer_listed(mac):
+async def test_a_vm_deleted_outside_orbit_is_no_longer_listed(mac):
     provider, fake = mac
     sandbox = await provider.create(await request(provider, retention="keep"))
     await sandbox.retain(roles=("solver",), reason="kept")
@@ -1815,8 +1815,8 @@ async def test_a_vm_deleted_outside_ale_is_no_longer_listed(mac):
 async def test_a_snapshot_boots_later_vms_with_its_files(mac):
     provider, fake = mac
     source, saved = await saved_snapshot(provider)
-    snapshot_id = source.sandbox_id.removeprefix("ale-")
-    image = f"ale-snapshot-{snapshot_id}"
+    snapshot_id = source.sandbox_id.removeprefix("orbit-")
+    image = f"orbit-snapshot-{snapshot_id}"
     assert saved.handle == f"orchard:snapshot:{snapshot_id}"
     # The display mode the desktop saved is forgotten before the guest shuts down, so each
     # VM booted from the snapshot starts at its own resolution.
@@ -1863,7 +1863,7 @@ async def test_a_snapshot_boots_later_vms_with_its_files(mac):
 async def test_a_snapshot_goes_with_its_clones_once_no_vm_boots_from_it(mac, tmp_path):
     provider, fake = mac
     source, saved = await saved_snapshot(provider)
-    image = f"ale-snapshot-{source.sandbox_id.removeprefix('ale-')}"
+    image = f"orbit-snapshot-{source.sandbox_id.removeprefix('orbit-')}"
     wide = DesktopResolution(width=1366, height=768)
     await (await provider.create(await request(provider, snapshot=saved.handle))).destroy()
     booted = await provider.create(

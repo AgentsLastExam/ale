@@ -22,9 +22,9 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ale.core.capability import CapabilityProfile, GpuHold, accepts_model, closest, unmet
-from ale.core.fleet import NodeDeclaration, SandboxDemand
-from ale.core.taskspec import ImageKind, OperatingSystem, Resources
+from orbit.core.capability import CapabilityProfile, GpuHold, accepts_model, closest, unmet
+from orbit.core.fleet import NodeDeclaration, SandboxDemand
+from orbit.core.taskspec import ImageKind, OperatingSystem, Resources
 
 __all__ = [
     "Busy",

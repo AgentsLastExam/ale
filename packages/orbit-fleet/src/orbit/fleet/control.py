@@ -1,7 +1,7 @@
 """The control plane's rules: register Nodes, place Sandboxes and reconcile with rosters.
 
 Everything here is synchronous and takes the time from one clock, so a test drives it
-step by step; :mod:`ale.fleet.server` puts it behind HTTP and runs :meth:`tick`.
+step by step; :mod:`orbit.fleet.server` puts it behind HTTP and runs :meth:`tick`.
 
 The ledger is only ever an estimate of what the Nodes hold. Each heartbeat carries a
 Node's full roster, and every disagreement resolves toward what the Node reports:
@@ -30,8 +30,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import NoReturn
 
-from ale.core.capability import closest, unmet
-from ale.core.fleet import (
+from orbit.core.capability import closest, unmet
+from orbit.core.fleet import (
     PROTOCOL_VERSION,
     AcquireRequest,
     AssignedNode,
@@ -54,7 +54,7 @@ from ale.core.fleet import (
     StartReport,
     sign_grant,
 )
-from ale.fleet.placement import (
+from orbit.fleet.placement import (
     Busy,
     Choice,
     NodeView,
@@ -66,7 +66,7 @@ from ale.fleet.placement import (
     short_in_all,
     unservable,
 )
-from ale.fleet.status import (
+from orbit.fleet.status import (
     Counts,
     FleetStatus,
     ImageCopies,
@@ -76,7 +76,7 @@ from ale.fleet.status import (
     SandboxRow,
     TaskProgress,
 )
-from ale.fleet.store import (
+from orbit.fleet.store import (
     Event,
     NodeRecord,
     RunRecord,

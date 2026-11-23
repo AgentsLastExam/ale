@@ -9,8 +9,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifFinalMetrics,
@@ -22,8 +22,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     mirrored_files,
@@ -33,9 +33,9 @@ from ale.run.harnesses.base import (
     unconverted,
 )
 
-SESSIONS = ".codex-ale/sessions"
+SESSIONS = ".codex-orbit/sessions"
 #: Where `CODEX_ROLLOUT_TRACE_ROOT` points: one bundle per `codex exec` process.
-TRACES = ".codex-ale/rollout-traces"
+TRACES = ".codex-orbit/rollout-traces"
 _CALL_TYPES = frozenset(
     ("function_call", "custom_tool_call", "web_search_call", "tool_search_call")
 )
@@ -113,7 +113,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         trajectory_id=context.trajectory_id, session_id=expected, agent=_agent(context)
     )
     # The rollout is the complete ordered conversation. Its user messages include context
-    # Codex injects, so a turn starts only at the exact prompt ALE sent. Turns the rollout
+    # Codex injects, so a turn starts only at the exact prompt Orbit sent. Turns the rollout
     # does not contain fall back to that invocation's stdout events.
     prompts = [item.prompt.strip() for item in recorded]
     native_turns = 0
@@ -141,7 +141,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if kind not in _CALL_TYPES and kind != "reasoning" and payload.get("role") != "assistant":
             continue
         if not native_turns:
-            # The conversation began without the prompt ALE sent; keep it and say so.
+            # The conversation began without the prompt Orbit sent; keep it and say so.
             issues.append({"reason": "prompt_not_in_native_session", "invocation": 1})
             builder.add(source="user", message=recorded[0].prompt)
             native_turns = 1
@@ -246,7 +246,7 @@ def _thread_trajectory(
     issues: list[dict[str, Any]],
     consumed: set[Path],
 ) -> AtifTrajectory | None:
-    """A spawned thread's rollout, which no ALE invocation or stdout describes.
+    """A spawned thread's rollout, which no Orbit invocation or stdout describes.
 
     Each input its parent sent is recorded as a ``user_message`` event; the context
     Codex injects into the conversation is not, so it stays out as it does for the root.
@@ -397,7 +397,7 @@ def _stream_steps(
                         tool_call_id=item_id,
                         function_name=f"mcp__{server}__{tool}",
                         arguments=_dict(item.get("arguments")),
-                        extra={"ale": {"mcp": {"server": server, "tool": tool}}},
+                        extra={"orbit": {"mcp": {"server": server, "tool": tool}}},
                     )
                 ],
                 observation=(
@@ -529,7 +529,7 @@ def _native_call(
             if value is None:
                 value = item.get("result") if item.get("result") is not None else error
         function_name = f"mcp__{server}__{name}"
-        extra = {"ale": {"mcp": {"server": server, "tool": name}}}
+        extra = {"orbit": {"mcp": {"server": server, "tool": name}}}
     else:
         function_name = _function_name(namespace, name)
     return (
@@ -662,7 +662,7 @@ def _script_call(
         tool_call_id=call_id,
         function_name=function_name,
         arguments=arguments,
-        extra={"ale": extra} if extra else None,
+        extra={"orbit": extra} if extra else None,
     )
     result = _trace_payload(context, bundle, call.ended.get("result_payload"), issues)
     if result.get("type") == "code_mode_response":
@@ -708,7 +708,7 @@ def _observation(
             AtifObservationResult(
                 source_call_id=call_id,
                 content=content,
-                extra={"ale": {"is_error": True}} if error else None,
+                extra={"orbit": {"is_error": True}} if error else None,
             )
         ]
     )
@@ -862,7 +862,7 @@ def _session_result_content(
                     )
                 )
             else:
-                # An image ALE cannot store stays visible as the record it was.
+                # An image Orbit cannot store stays visible as the record it was.
                 text = json.dumps(block, ensure_ascii=False, default=str)
                 parts.append(AtifContentPart(type="text", text=text))
     return parts or json.dumps(value, ensure_ascii=False, default=str)
@@ -875,4 +875,4 @@ def _extra(context: TrajectoryParseContext, issues: list[dict[str, Any]]) -> dic
     if context.incomplete:
         data["incomplete"] = True
         data["incomplete_reason"] = context.incomplete_reason or "interrupted"
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

@@ -15,9 +15,9 @@ from __future__ import annotations
 import logging
 from urllib.parse import quote
 
-from ale.core.errors import GuestUnreachableError, ProviderStartError
-from ale.core.sandbox import ResourceAllocation, SandboxRequest
-from ale.run.transport import GuestClient
+from orbit.core.errors import GuestUnreachableError, ProviderStartError
+from orbit.core.sandbox import ResourceAllocation, SandboxRequest
+from orbit.run.transport import GuestClient
 
 __all__ = ["start", "stop", "variables"]
 
@@ -59,7 +59,7 @@ async def stop(client: GuestClient, request: SandboxRequest) -> None:
     try:
         await client.egress_relay(None)
     except (GuestUnreachableError, TimeoutError) as error:
-        logging.getLogger("ale.execution").warning(
+        logging.getLogger("orbit.execution").warning(
             "could not give the agent account its own system proxy back: %s", error
         )
 

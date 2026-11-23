@@ -1,12 +1,12 @@
 [project]
-name = "ale-run"
+name = "orbit-run"
 version = "0.2.0"
-description = "ALE orchestrator: providers, gateway, guest service, harnesses, CLI"
+description = "Orbit orchestrator: providers, gateway, guest service, harnesses, CLI"
 requires-python = ">=3.12"
 dependencies = [
     "huggingface-hub>=0.27",
-    "ale-core",
-    "ale-verify",
+    "orbit-core",
+    "orbit-verify",
     "typer>=0.15",
     "aiohttp>=3.11",
     "pyyaml>=6.0",
@@ -15,20 +15,20 @@ dependencies = [
 ]
 
 [project.scripts]
-ale = "ale.run.cli.main:main"
+orbit = "orbit.run.cli.main:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv.sources]
-ale-core = { workspace = true }
-ale-verify = { workspace = true }
+orbit-core = { workspace = true }
+orbit-verify = { workspace = true }
 
-# `ale` is a PEP 420 namespace package shared with ale-core and ale-fleet: there is
-# deliberately no src/ale/__init__.py in any of them.
+# `orbit` is a PEP 420 namespace package shared with orbit-core and orbit-fleet: there is
+# deliberately no src/orbit/__init__.py in any of them.
 [tool.hatch.build.targets.wheel]
-packages = ["src/ale"]
+packages = ["src/orbit"]
 
 [tool.hatch.build]
-artifacts = ["src/ale/run/presets/*.toml"]
+artifacts = ["src/orbit/run/presets/*.toml"]

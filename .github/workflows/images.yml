@@ -1,9 +1,9 @@
 name: images
 
-# Every ALE image is published once per version and never again: a version the registry
+# Every Orbit image is published once per version and never again: a version the registry
 # already has is skipped, so an image never changes under the engines and Tasks that use it.
-# The builder and runner share the engine's version (packages/ale-run/pyproject.toml); a
-# base has its own (BASES in packages/ale-run/src/ale/run/__init__.py), and so does the
+# The builder and runner share the engine's version (packages/orbit-run/pyproject.toml); a
+# base has its own (BASES in packages/orbit-run/src/orbit/run/__init__.py), and so does the
 # gVisor runtime (VERSION in images/runtimes/gvisor/build.sh). To publish a changed image,
 # raise its version.
 
@@ -12,8 +12,8 @@ on:
     branches: [main]
     paths:
       - 'images/**'
-      - 'packages/ale-run/pyproject.toml'
-      - 'packages/ale-run/src/ale/run/__init__.py'
+      - 'packages/orbit-run/pyproject.toml'
+      - 'packages/orbit-run/src/orbit/run/__init__.py'
   pull_request:
     paths:
       - 'images/**'
@@ -50,13 +50,13 @@ jobs:
           - repository: container-ubuntu22-base
             dockerfile: images/base/container-ubuntu22/Dockerfile
             context: images/base/container-ubuntu22
-          - repository: ale-vm-materializer
+          - repository: orbit-vm-materializer
             dockerfile: images/builders/vm-materializer/Dockerfile
             context: images/builders/vm-materializer
-          - repository: ale-qemu-runner
+          - repository: orbit-qemu-runner
             dockerfile: images/runtimes/qemu-runner/Dockerfile
             context: images/runtimes/qemu-runner
-          - repository: ale-firecracker-runner
+          - repository: orbit-firecracker-runner
             dockerfile: images/runtimes/firecracker-runner/Dockerfile
             context: images/runtimes/firecracker-runner
     steps:
@@ -76,8 +76,8 @@ jobs:
         id: release
         run: |
           case "${{ matrix.repository }}" in
-            *-base) version=$(sed -n 's/.*"${{ matrix.repository }}": "\([0-9.]*\)".*/\1/p' packages/ale-run/src/ale/run/__init__.py) ;;
-            *) version=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/ale-run/pyproject.toml) ;;
+            *-base) version=$(sed -n 's/.*"${{ matrix.repository }}": "\([0-9.]*\)".*/\1/p' packages/orbit-run/src/orbit/run/__init__.py) ;;
+            *) version=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/orbit-run/pyproject.toml) ;;
           esac
           [ -n "$version" ] || { echo "::error::no version for ${{ matrix.repository }}"; exit 1; }
           image="ghcr.io/agentslastexam/${{ matrix.repository }}:$version"
@@ -99,8 +99,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ALE's Linux VM base is a VM disk, not a container image: its build.sh makes the disk
-  # from its Dockerfile's root filesystem with the VM builder, and `ale vm-image push`
+  # Orbit's Linux VM base is a VM disk, not a container image: its build.sh makes the disk
+  # from its Dockerfile's root filesystem with the VM builder, and `orbit vm-image push`
   # publishes it. Its version is in BASES, like the container base's.
   vm-ubuntu24-base:
     if: github.event_name != 'workflow_dispatch' || inputs.promote_repository == ''
@@ -125,7 +125,7 @@ jobs:
       - name: Check whether this version is published
         id: release
         run: |
-          version=$(sed -n 's/.*"vm-ubuntu24-base": "\([0-9.]*\)".*/\1/p' packages/ale-run/src/ale/run/__init__.py)
+          version=$(sed -n 's/.*"vm-ubuntu24-base": "\([0-9.]*\)".*/\1/p' packages/orbit-run/src/orbit/run/__init__.py)
           [ -n "$version" ] || { echo "::error::no version for vm-ubuntu24-base"; exit 1; }
           image="ghcr.io/agentslastexam/vm-ubuntu24-base:$version"
           echo "image=$image" >> "$GITHUB_OUTPUT"
@@ -147,7 +147,7 @@ jobs:
         with:
           enable-cache: true
 
-      # build.sh and `ale vm-image push` read the disk with qemu-img, which the runner
+      # build.sh and `orbit vm-image push` read the disk with qemu-img, which the runner
       # lacks.
       - name: Install qemu-img
         if: steps.release.outputs.published == 'false'
@@ -158,16 +158,16 @@ jobs:
       - name: Build
         if: steps.release.outputs.published == 'false'
         run: |
-          images/build.sh ale-vm-materializer
+          images/build.sh orbit-vm-materializer
           images/base/vm-ubuntu24/build.sh "$RUNNER_TEMP/vm-ubuntu24-base.qcow2"
 
       - name: Publish
         if: steps.release.outputs.published == 'false' && github.event_name != 'pull_request'
         run: >-
-          uv run ale vm-image push "$RUNNER_TEMP/vm-ubuntu24-base.qcow2"
+          uv run orbit vm-image push "$RUNNER_TEMP/vm-ubuntu24-base.qcow2"
           "${{ steps.release.outputs.image }}"
 
-  # ALE's gVisor runtime is built by gVisor's own Bazel build, which build.sh runs before
+  # Orbit's gVisor runtime is built by gVisor's own Bazel build, which build.sh runs before
   # it builds the image, and has its own version: VERSION in that script.
   gvisor:
     if: github.event_name != 'workflow_dispatch' || inputs.promote_repository == ''
@@ -191,8 +191,8 @@ jobs:
         id: release
         run: |
           version=$(sed -n 's/^VERSION=\([0-9.]*\)$/\1/p' images/runtimes/gvisor/build.sh)
-          [ -n "$version" ] || { echo "::error::no version for ale-gvisor"; exit 1; }
-          image="ghcr.io/agentslastexam/ale-gvisor:$version"
+          [ -n "$version" ] || { echo "::error::no version for orbit-gvisor"; exit 1; }
+          image="ghcr.io/agentslastexam/orbit-gvisor:$version"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
             echo "$image is already published and stays as it is"

@@ -5,7 +5,7 @@ way every reference implementation does it. Two worktrees can then point at diff
 providers without fighting over a shared file, and "what credentials did this run use?"
 is answered by looking at the tree the run came from.
 
-Every name ALE reads carries an ``ALE_`` prefix, so a checkout's credentials never collide
+Every name Orbit reads carries an ``ORBIT_`` prefix, so a checkout's credentials never collide
 with the variables the operator's own tools read. API keys loaded here remain Host-side
 behind the Gateway. Checkout-local subscription credentials are resolved separately and
 also remain Host-side.
@@ -23,10 +23,10 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Literal
 
-from ale.core.errors import ConfigError
-from ale.core.lock import TaskVariableProvenance
-from ale.core.task import ResolvedVariables, Task
-from ale.core.taskspec import (
+from orbit.core.errors import ConfigError
+from orbit.core.lock import TaskVariableProvenance
+from orbit.core.task import ResolvedVariables, Task
+from orbit.core.taskspec import (
     TaskVariables,
     VariableReference,
     is_credential_header,
@@ -53,11 +53,11 @@ EXAMPLE_FILE = ".env.example"
 def find_env_file(start: Path | None = None) -> Path | None:
     """Locate the environment file for a checkout.
 
-    ``ALE_ENV_FILE`` wins when set, so a run can point at a different provider without
+    ``ORBIT_ENV_FILE`` wins when set, so a run can point at a different provider without
     editing anything; otherwise walk up from the working directory to the repository
     root, which makes the file work from anywhere inside a tree.
     """
-    if override := os.environ.get("ALE_ENV_FILE"):
+    if override := os.environ.get("ORBIT_ENV_FILE"):
         path = Path(override).expanduser()
         return path if path.is_file() else None
 
@@ -105,7 +105,7 @@ _COMMON_VALUE = re.compile(r"\d*|true|false|yes|no", re.IGNORECASE)
 
 
 def host_credentials(names: Iterable[str] = ()) -> dict[str, str]:
-    """The Host's own credentials: every credential-named ``ALE_`` variable and ``names``.
+    """The Host's own credentials: every credential-named ``ORBIT_`` variable and ``names``.
 
     ``names`` are the variables a run configuration points its keys at instead, such as
     ``gateway.api_key_env``.
@@ -114,7 +114,7 @@ def host_credentials(names: Iterable[str] = ()) -> dict[str, str]:
     return {
         name: value
         for name, value in os.environ.items()
-        if value and (name in named or (name.startswith("ALE_") and is_credential_name(name)))
+        if value and (name in named or (name.startswith("ORBIT_") and is_credential_name(name)))
     }
 
 
@@ -255,11 +255,11 @@ PROVIDER_URLS = {
 def provider_endpoint(provider: str) -> tuple[str, str]:
     """The variable holding a provider's key, and the endpoint that key belongs to.
 
-    Both come from the provider's name, ``ALE_<PROVIDER>_API_KEY`` and
-    ``ALE_<PROVIDER>_BASE_URL``, so a key is only ever paired with its own provider's URL;
+    Both come from the provider's name, ``ORBIT_<PROVIDER>_API_KEY`` and
+    ``ORBIT_<PROVIDER>_BASE_URL``, so a key is only ever paired with its own provider's URL;
     an unset URL selects the provider's own API.
     """
-    prefix = f"ALE_{provider.upper()}"
+    prefix = f"ORBIT_{provider.upper()}"
     url = os.environ.get(f"{prefix}_BASE_URL", "").strip() or PROVIDER_URLS[provider]
     return f"{prefix}_API_KEY", url.rstrip("/")
 
@@ -297,9 +297,9 @@ def provider_credentials(
 
 
 def hf_token() -> str | Literal[False]:
-    """The Hugging Face token ALE passes to every Hub call, from ``ALE_HF_TOKEN``.
+    """The Hugging Face token Orbit passes to every Hub call, from ``ORBIT_HF_TOKEN``.
 
     ``False`` makes ``huggingface_hub`` look no further, so neither the operator's own
-    ``HF_TOKEN`` nor a cached login decides which account ALE acts as.
+    ``HF_TOKEN`` nor a cached login decides which account Orbit acts as.
     """
-    return os.environ.get("ALE_HF_TOKEN", "").strip() or False
+    return os.environ.get("ORBIT_HF_TOKEN", "").strip() or False

@@ -9,7 +9,7 @@ the API's own operations. Style and script live in this file; there is no build 
 
 from __future__ import annotations
 
-from ale.fleet.status import FleetStatus
+from orbit.fleet.status import FleetStatus
 
 __all__ = ["render"]
 
@@ -482,12 +482,12 @@ setInterval(live, 1000);
 _PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ALE Fleet</title><style>__STYLE__</style></head><body><div class="page">
-<div class="top"><h1>ALE Fleet</h1>
+<title>Orbit Fleet</title><style>__STYLE__</style></head><body><div class="page">
+<div class="top"><h1>Orbit Fleet</h1>
 <div class="live" id="live"><span class="dot"></span><span id="live-text">live</span>
 · <a href="/v1/status">JSON</a></div></div>
 <div class="alert" id="alert" hidden></div>
-<noscript><p class="alert">This page draws with JavaScript; <code>ale-fleet status</code>
+<noscript><p class="alert">This page draws with JavaScript; <code>orbit-fleet status</code>
 prints the same document.</p></noscript>
 <div class="tiles" id="summary"></div>
 <section><div class="head"><h2>Nodes</h2></div><div class="cards" id="nodes"></div></section>

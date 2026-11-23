@@ -71,7 +71,9 @@ def main() -> int:
             check=False,
         )
         if done.returncode != 0:
-            print(f"ALE: qemu-io could not discard: {done.stderr or done.stdout}", file=sys.stderr)
+            print(
+                f"Orbit: qemu-io could not discard: {done.stderr or done.stdout}", file=sys.stderr
+            )
             return 1
         subprocess.run(["qemu-img", "check", "-q", disk], check=True)
     after = _held(disk)
@@ -153,7 +155,7 @@ def _volumes(disk: str) -> Iterator[Volume]:
                     r"part_num: (\d+)\s+part_start: (\d+)", fish("part-list", whole)
                 )
             }
-            with tempfile.TemporaryDirectory(prefix="ale-ntfs-") as temporary:
+            with tempfile.TemporaryDirectory(prefix="orbit-ntfs-") as temporary:
                 boot, bitmap = Path(temporary) / "boot", Path(temporary) / "bitmap"
                 fish("download-offset", device, str(boot), "0", "512")
                 # Inode 6 is $Bitmap: one bit per cluster, set when it is in use.

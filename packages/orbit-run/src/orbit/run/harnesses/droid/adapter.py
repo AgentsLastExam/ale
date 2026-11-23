@@ -10,13 +10,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ale.core.errors import AgentUnsupportedError, ConfigError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses.base import (
+from orbit.core.errors import AgentUnsupportedError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -24,7 +24,7 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import DroidSettings
@@ -33,8 +33,8 @@ DEFAULT_CLI_VERSION = "0.249.0"
 #: Droid keeps all of its state in ``<FACTORY_HOME_OVERRIDE>/.factory``.
 STATE = trajectory.STATE
 #: The custom model's display name; Droid addresses it as ``custom:<name, dashed>-<index>``.
-_DISPLAY_NAME = "ALE Gateway"
-_MODEL_ID = "custom:ALE-Gateway-0"
+_DISPLAY_NAME = "Orbit Gateway"
+_MODEL_ID = "custom:Orbit-Gateway-0"
 #: The BYOK provider type that speaks each Gateway dialect. Droid appends ``/v1/messages``
 #: to an Anthropic base URL itself, and ``/chat/completions`` or ``/responses`` to the others.
 _PROVIDERS = {
@@ -124,7 +124,7 @@ class DroidHarness(CliHarness):
             "displayName": _DISPLAY_NAME,
             "baseUrl": session.gateway_url + suffix,
             # Resolved from the environment for each request; the file keeps the reference.
-            "apiKey": "${ALE_GATEWAY_TOKEN}",
+            "apiKey": "${ORBIT_GATEWAY_TOKEN}",
             "provider": provider,
         }
         if self.settings.no_image_support != "default":
@@ -170,7 +170,7 @@ class DroidHarness(CliHarness):
             "FACTORY_HOME_OVERRIDE": str(agent_path(session.home) / PurePosixPath(STATE).parent),
             "FACTORY_DROID_AUTO_UPDATE_ENABLED": "false",
             "OTEL_CUSTOMER_ENABLED": "false",
-            "ALE_GATEWAY_TOKEN": session.token,
+            "ORBIT_GATEWAY_TOKEN": session.token,
             "NO_COLOR": "1",
         }
         return CliCommand("unset FACTORY_API_KEY; " + shlex.join(argv), env, requested)

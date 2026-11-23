@@ -1,15 +1,15 @@
-"""Install the ALE framework into a Windows VM disk without booting it.
+"""Install the Orbit framework into a Windows VM disk without booting it.
 
 Run by ``framework.frame_disk`` inside the VM builder, never on the Host: libguestfs mounts
 the disk from a small appliance VM and edits the registry hives with hivex, so nothing the
 disk holds executes. Standard library only, since it runs on the builder's system Python.
 
 What it installs is the Windows counterpart of the Linux layer: guestd, Cua Driver and the
-framework's own Python under ``C:\\ProgramData\\ALE``, a boot service on that Python that
+framework's own Python under ``C:\\ProgramData\\Orbit``, a boot service on that Python that
 starts guestd and Cua Driver in the agent's session (``guestd/service.py``), and the
-identity of the framework in ``C:\\ProgramData\\ALE\\framework``.
+identity of the framework in ``C:\\ProgramData\\Orbit\\framework``.
 It checks first that the disk can run them, and says what it lacks in a line starting
-``ALE: ``.
+``Orbit: ``.
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ import tempfile
 from pathlib import Path
 
 CONFIG = "/Windows/System32/config"
-ROOT = "/ProgramData/ALE"
-SERVICE = "ALEGuestd"
+ROOT = "/ProgramData/Orbit"
+SERVICE = "OrbitGuestd"
 #: Where the framework's own Python lands, which the service runs on.
-PYTHON = r"C:\ProgramData\ALE\python\python.exe"
+PYTHON = r"C:\ProgramData\Orbit\python\python.exe"
 #: What libguestfs says when NTFS was not shut down cleanly and so mounts read-only.
 UNCLEAN = ("hibernat", "unclean", "unsafe state", "read-only file system")
 
@@ -44,7 +44,7 @@ def main() -> int:
     parser.add_argument("--runner-address", required=True)
     args = parser.parse_args()
     try:
-        with tempfile.TemporaryDirectory(prefix="ale-hives-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="orbit-hives-") as temporary:
             hives = Path(temporary)
             guestfish(args.disk, f"download {CONFIG}/SYSTEM {hives}/SYSTEM", readonly=True)
             guestfish(args.disk, f"download {CONFIG}/SOFTWARE {hives}/SOFTWARE", readonly=True)
@@ -66,7 +66,7 @@ def main() -> int:
                 """,
             )
     except Lacks as reason:
-        print(f"ALE: {reason}", file=sys.stderr)
+        print(f"Orbit: {reason}", file=sys.stderr)
         return 1
     return 0
 
@@ -170,7 +170,7 @@ def control_set(hives: Path) -> str:
 
 def service_key(hives: Path, user: str, runner_address: str) -> str:
     """The registry text that makes Windows start the framework's service at boot."""
-    script = r"C:\ProgramData\ALE\guestd\service.py"
+    script = r"C:\ProgramData\Orbit\guestd\service.py"
     image = f'"{PYTHON}" -I -S "{script}" "{user}" {runner_address}'
     return "\r\n".join(
         [
@@ -182,7 +182,7 @@ def service_key(hives: Path, user: str, runner_address: str) -> str:
             '"ErrorControl"=dword:00000001',
             f'"ImagePath"={quote(image)}',
             '"ObjectName"="LocalSystem"',
-            '"DisplayName"="ALE guest service"',
+            '"DisplayName"="Orbit guest service"',
             "",
         ]
     )

@@ -15,9 +15,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ale.core.errors import AssetError
-from ale.core.task import CALIBRATION_DIR
-from ale.run.assets import (
+from orbit.core.errors import AssetError
+from orbit.core.task import CALIBRATION_DIR
+from orbit.run.assets import (
     ASSET_ROOTS,
     AssetLocation,
     AssetRepositorySelection,
@@ -32,8 +32,8 @@ from ale.run.assets import (
     observe_task_assets,
     validate_asset_paths,
 )
-from ale.run.secrets import hf_token
-from ale.run.tasksets.manifest import TaskFolder
+from orbit.run.secrets import hf_token
+from orbit.run.tasksets.manifest import TaskFolder
 
 
 class AssetCheckpoint(BaseModel):
@@ -127,7 +127,7 @@ def _paths(checkpoint: AssetCheckpoint) -> list[str]:
 
 
 def _metadata(workspace: Path) -> Path:
-    return Path(_git(workspace, "rev-parse", "--absolute-git-dir")) / "ale-assets.json"
+    return Path(_git(workspace, "rev-parse", "--absolute-git-dir")) / "orbit-assets.json"
 
 
 def _initialize(
@@ -135,7 +135,7 @@ def _initialize(
 ) -> AssetCheckpoint:
     root = selection.repository_root
     common = Path(_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    repository = common / "ale-assets/repository"
+    repository = common / "orbit-assets/repository"
     with _repository_lock(common, exclusive=True):
         if workspace.exists():
             checkpoint = read_checkpoint(_metadata(workspace))
@@ -161,7 +161,7 @@ def _initialize(
             )
             _git(repository, "lfs", "install", "--local")
             excludes = repository / ".git/info/exclude"
-            excludes.write_text(excludes.read_text() + "\n.ale-cache/\n")
+            excludes.write_text(excludes.read_text() + "\n.orbit-cache/\n")
         else:
             _git(repository, "fetch", "origin", "main")
         base = _git(repository, "rev-parse", "refs/remotes/origin/main")
@@ -227,9 +227,9 @@ def checkpoint_assets(
             _git(
                 workspace,
                 "-c",
-                "user.name=ALE",
+                "user.name=Orbit",
                 "-c",
-                "user.email=ale@agents-last-exam.org",
+                "user.email=orbit@agents-last-exam.org",
                 "commit",
                 "-m",
                 f"Update {checkpoint.task_path} assets",
@@ -289,7 +289,7 @@ def check_assets(task: Path, checkpoint: AssetCheckpoint) -> None:
 
 @contextmanager
 def _materialized(checkpoint: AssetCheckpoint) -> Iterator[Path]:
-    with tempfile.TemporaryDirectory(prefix="ale-assets-") as directory:
+    with tempfile.TemporaryDirectory(prefix="orbit-assets-") as directory:
         root = Path(directory) / "tree"
         if checkpoint.commit is None:
             root.mkdir()
@@ -415,7 +415,7 @@ def publish_assets(
         reference = "refs/heads/main"
     else:
         api = HfApi(token=hf_token())
-        marker = f"<!-- ale-assets:{checkpoint.task_path}:{checkpoint.commit} -->"
+        marker = f"<!-- orbit-assets:{checkpoint.task_path}:{checkpoint.commit} -->"
         if output.exists():
             saved = json.loads(output.read_text())
             if (

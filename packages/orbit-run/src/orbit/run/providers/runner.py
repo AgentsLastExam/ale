@@ -17,15 +17,15 @@ import zlib
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ale.core.errors import (
+from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
 )
-from ale.run import guestd
-from ale.run.process import run
-from ale.run.transport import GuestClient, TcpTransport
+from orbit.run import guestd
+from orbit.run.process import run
+from orbit.run.transport import GuestClient, TcpTransport
 
 __all__ = [
     "GUEST_TOKEN_FILE",
@@ -115,7 +115,7 @@ class _RunnerTransport(TcpTransport):
         return line
 
     async def close(self) -> None:
-        # ALE closes a connection before it destroys, keeps or snapshots the Sandbox; one
+        # Orbit closes a connection before it destroys, keeps or snapshots the Sandbox; one
         # that never answered is still connecting.
         self._closing = self._answered
         await super().close()

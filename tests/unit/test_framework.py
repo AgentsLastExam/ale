@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 from tests.support import FakeQemuImg, write_qcow2
 
-from ale.core.errors import ProviderStartError, TaskDefinitionError
-from ale.core.sandbox import PreparedTaskImage
-from ale.core.taskspec import OperatingSystem
-from ale.run import framework, guestd
-from ale.run.framework import (
+from orbit.core.errors import ProviderStartError, TaskDefinitionError
+from orbit.core.sandbox import PreparedTaskImage
+from orbit.core.taskspec import OperatingSystem
+from orbit.run import framework, guestd
+from orbit.run.framework import (
     KEEP_ALIVE,
     LABEL,
     MARKER,
@@ -28,8 +28,8 @@ from ale.run.framework import (
     windows_framework_identity,
     with_framework,
 )
-from ale.run.guestd import gui
-from ale.run.images import chain_identity
+from orbit.run.guestd import gui
+from orbit.run.images import chain_identity
 
 pytestmark = pytest.mark.unit
 
@@ -38,7 +38,7 @@ pytestmark = pytest.mark.unit
 def qemu_img(monkeypatch: pytest.MonkeyPatch) -> FakeQemuImg:
     """The chain helpers' ``qemu-img``, on disks ``write_qcow2`` made."""
     fake = FakeQemuImg()
-    monkeypatch.setattr("ale.run.images._run", fake)
+    monkeypatch.setattr("orbit.run.images._run", fake)
     return fake
 
 
@@ -67,7 +67,7 @@ def test_the_layer_identity_follows_everything_it_is_built_from(
 async def test_the_layer_is_built_on_the_task_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pythons: Path
 ) -> None:
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path))
     driver = tmp_path / "cua-driver-release"
     driver.mkdir()
     (driver / "cua-driver").write_bytes(b"driver")
@@ -97,11 +97,11 @@ async def test_the_layer_is_built_on_the_task_image(
     layered = await with_framework("task", user="app")
     assert layered == "sha256:" + "2" * 64
     dockerfile = built["dockerfile"]
-    assert dockerfile.startswith("FROM ale-framework-base:" + "1" * 64)
-    assert "COPY guestd/ /opt/ale/guestd/" in dockerfile
+    assert dockerfile.startswith("FROM orbit-framework-base:" + "1" * 64)
+    assert "COPY guestd/ /opt/orbit/guestd/" in dockerfile
     assert "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver" in dockerfile
     identity = framework_identity(user="app", vm=False)
-    setup = ["/bin/sh", "/opt/ale/setup.sh", "app", identity, "/tmp/python"]
+    setup = ["/bin/sh", "/opt/orbit/setup.sh", "app", identity, "/tmp/python"]
     # The Python is mounted for the setup to install, never copied into the layer twice.
     assert (
         "RUN --mount=type=bind,from=python,target=/tmp/python " + json.dumps(setup)
@@ -110,7 +110,7 @@ async def test_the_layer_is_built_on_the_task_image(
     assert dockerfile.rstrip().splitlines()[-2] == "USER app"
     assert set(guestd.FILES) <= set(built["files"])
     # A container's guestd is started by its Provider; only a VM disk boots it.
-    assert "ale-guestd.service" not in built["files"]
+    assert "orbit-guestd.service" not in built["files"]
     # The same layer again is a no-op.
     images["task"] = {**images["task"], "Labels": {}}
     assert await with_framework("task", user="app") == layered
@@ -120,7 +120,7 @@ async def test_the_layer_is_built_on_the_task_image(
 async def test_a_kept_alive_layer_runs_harbor_s_command_and_stays_as_prepared(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path))
     driver = tmp_path / "cua-driver-release"
     driver.mkdir()
     (driver / "cua-driver").write_bytes(b"driver")
@@ -176,7 +176,7 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
             next(a for a in argv if a.endswith(",dst=/framework,readonly")).split(",")[1][4:]
         )
         seen["files"] = sorted(path.name for path in context.rglob("*"))
-        seen["unit"] = (context / "ale-guestd.service").read_text()
+        seen["unit"] = (context / "orbit-guestd.service").read_text()
         return 0, "", ""
 
     monkeypatch.setattr(framework, "_run", run)
@@ -192,14 +192,14 @@ async def test_a_vm_disk_gets_the_same_pieces_offline(
     assert argv[argv.index("--add") + 1] == str(disk)
     identity = framework_identity(user="app", vm=True)
     setup = argv[argv.index("--run-command") + 1]
-    assert setup == f"/bin/sh /opt/ale/setup.sh app {identity} /tmp/python"
+    assert setup == f"/bin/sh /opt/orbit/setup.sh app {identity} /tmp/python"
     assert f"type=bind,src={pythons / 'linux' / 'python'},dst=/python,readonly" in argv
     assert "/python:/tmp" in argv
     assert argv[-2:] == ("--delete", "/tmp/python")  # after the setup installed it
-    assert "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service" in argv
+    assert "/framework/orbit-guestd.service:/etc/systemd/system/orbit-guestd.service" in argv
     assert set(guestd.FILES) <= set(seen["files"])  # type: ignore[arg-type]
-    assert "Environment=ALE_AGENT_USER=app" in str(seen["unit"])
-    assert f"ExecStart={guestd.PYTHON['linux']} -I /opt/ale/guestd/main.py" in str(seen["unit"])
+    assert "Environment=ORBIT_AGENT_USER=app" in str(seen["unit"])
+    assert f"ExecStart={guestd.PYTHON['linux']} -I /opt/orbit/guestd/main.py" in str(seen["unit"])
     assert "WorkingDirectory=/\n" in str(seen["unit"])
     # A command the OOM killer ends goes alone; systemd's default would stop guestd too.
     assert "OOMPolicy=continue\n" in str(seen["unit"])
@@ -214,7 +214,7 @@ async def test_a_disk_that_cannot_be_framed_fails_with_the_reason(
     reason = "the agent account 'app' does not exist in this image"
 
     async def run(*argv: str, timeout: float = 300) -> tuple[int, str, str]:
-        return 1, f"ALE: {reason}\n", "virt-customize: error: command failed"
+        return 1, f"Orbit: {reason}\n", "virt-customize: error: command failed"
 
     monkeypatch.setattr(framework, "_run", run)
     with pytest.raises(TaskDefinitionError) as failure:
@@ -229,7 +229,7 @@ async def test_a_disk_that_cannot_be_framed_fails_with_the_reason(
 
 def test_a_framing_failure_gives_each_reason_once() -> None:
     """buildx repeats a failed step's output in its summary."""
-    stderr = "#7 0.21 ALE: no glibc\n#7 ERROR: exit code 1\n > [4/4] RUN:\n0.21 ALE: no glibc\n"
+    stderr = "#7 0.21 Orbit: no glibc\n#7 ERROR: exit code 1\n > [4/4] RUN:\n0.21 Orbit: no glibc\n"
     assert framework._explained(stderr) == "no glibc"
 
 
@@ -274,7 +274,7 @@ def framing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, qemu_img: FakeQemuImg
 ) -> dict[str, object]:
     """``framed_disk`` with ``qemu-img``, the builder and the disks' markers stubbed out."""
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "cache"))
     seen: dict[str, object] = {"framed": [], "carried": {}, "qemu-img": qemu_img}
 
     async def builder_identity() -> str:
@@ -383,9 +383,9 @@ async def test_docker_frames_an_image_unless_it_carries_exactly_this_framework(
 ) -> None:
     from types import SimpleNamespace
 
-    from ale.core.sandbox import ResolvedImage
-    from ale.core.taskspec import ImageKind
-    from ale.run.providers.docker import provider as docker
+    from orbit.core.sandbox import ResolvedImage
+    from orbit.core.taskspec import ImageKind
+    from orbit.run.providers.docker import provider as docker
 
     original = "sha256:" + "1" * 64
     framed = "sha256:" + "2" * 64
@@ -412,9 +412,9 @@ async def test_docker_frames_an_image_unless_it_carries_exactly_this_framework(
 async def test_qemu_frames_a_disk_unless_it_carries_exactly_this_framework(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ale.core.sandbox import ResolvedImage, SandboxRequest
-    from ale.core.taskspec import NetworkPolicy, Resources
-    from ale.run.providers.qemu import provider as qemu
+    from orbit.core.sandbox import ResolvedImage, SandboxRequest
+    from orbit.core.taskspec import NetworkPolicy, Resources
+    from orbit.run.providers.qemu import provider as qemu
 
     original = "sha256:" + "1" * 64
     framed = "sha256:" + "2" * 64
@@ -495,7 +495,7 @@ def test_cua_driver_is_downloaded_once_and_verified(
     payload: bytes,
     binary: str,
 ) -> None:
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path))
     downloads: list[str] = []
 
     class Response(io.BytesIO):
@@ -516,7 +516,7 @@ def test_cua_driver_is_downloaded_once_and_verified(
     assert len(downloads) == 1 and downloads[0].endswith(f"/{asset}")
     # A different release behind the same name is refused.
     monkeypatch.setitem(framework._CUA_DRIVER, platform, (asset, "0" * 64))
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "fresh"))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "fresh"))
     with pytest.raises(Exception, match="pinned checksum"):
         framework._cua_driver(platform)
 
@@ -525,7 +525,7 @@ def test_the_framework_python_is_downloaded_once_and_verified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.undo()  # the real _python, not the stand-ins
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path))
     payload = _tar({"python/bin/python3.12": b"elf", "python/lib/python3.12/os.py": b""})
     downloads: list[str] = []
 
@@ -566,7 +566,7 @@ def test_the_macos_payload_carries_the_shared_python_tree_and_the_whole_driver(
     # The macOS Python is the release every other system pins, built for Apple Silicon.
     asset, _ = framework._PYTHON["macos"]
     assert asset.startswith(f"cpython-3.12.15+{framework.PYTHON_RELEASE}-aarch64-apple-darwin")
-    assert framework.MACOS_PYTHON == "/opt/ale/python/bin/python3" == guestd.PYTHON["macos"]
+    assert framework.MACOS_PYTHON == "/opt/orbit/python/bin/python3" == guestd.PYTHON["macos"]
 
 
 @pytest.mark.asyncio

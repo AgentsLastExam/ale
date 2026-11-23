@@ -17,16 +17,16 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.lock import TaskSource
-from ale.core.sandbox import Identity
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import RunConfig
+from orbit.core.lock import TaskSource
+from orbit.core.sandbox import Identity
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import edit_task_config, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -153,7 +153,7 @@ class TestWhatTheAgentCanReach:
         with_oracle(
             task_root,
             """
-            if cat /opt/ale/guestd/main.py >/dev/null 2>&1; then echo yes > /home/user/output/saw
+            if cat /opt/orbit/guestd/main.py >/dev/null 2>&1; then echo yes > /home/user/output/saw
             else echo no > /home/user/output/saw; fi
             """,
         )
@@ -170,7 +170,7 @@ class TestWhatTheAgentCanReach:
         with_oracle(
             task_root,
             """
-            if touch /etc/ale-probe 2>/dev/null; then echo yes > /home/user/output/wrote
+            if touch /etc/orbit-probe 2>/dev/null; then echo yes > /home/user/output/wrote
             else echo no > /home/user/output/wrote; fi
             """,
         )

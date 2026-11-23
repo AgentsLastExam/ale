@@ -6,11 +6,11 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from ale.core.harness import ResolvedMcpServer
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
-from ale.run.tools.cua_desktop_mcp import SCREENSHOT_MAX_DIMENSION
+from orbit.core.harness import ResolvedMcpServer
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer
+from orbit.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
+from orbit.run.tools.cua_desktop_mcp import SCREENSHOT_MAX_DIMENSION
 
 __all__ = ["CUA_DESKTOP_NAME", "resolved_cua_desktop", "stage_cua_desktop"]
 
@@ -37,7 +37,7 @@ def resolved_cua_desktop(
     # names. On macOS the Provider starts the Driver, so the server is told where it is
     # rather than starting its own.
     environment = (
-        {"ALE_CUA_DRIVER": MACOS_DRIVER, "ALE_CUA_DRIVER_SOCKET": MACOS_DRIVER_SOCKET}
+        {"ORBIT_CUA_DRIVER": MACOS_DRIVER, "ORBIT_CUA_DRIVER_SOCKET": MACOS_DRIVER_SOCKET}
         if operating_system is OperatingSystem.MACOS
         else {}
     )
@@ -57,7 +57,7 @@ def resolved_cua_desktop(
             name=CUA_DESKTOP_NAME,
             transport="stdio",
             command=command,
-            args=("{home}/.ale-cua-desktop/cua_desktop_mcp.py",),
+            args=("{home}/.orbit-cua-desktop/cua_desktop_mcp.py",),
             environment=environment,
         ),
         source_layers=("run",),
@@ -72,7 +72,7 @@ def resolved_cua_desktop(
 async def stage_cua_desktop(sandbox: Sandbox, home: str) -> str:
     """Stage the built-in implementation and return its sandbox directory."""
     path_type = PureWindowsPath if sandbox.request.os.value == "windows" else PurePosixPath
-    root = path_type(home) / ".ale-cua-desktop"
+    root = path_type(home) / ".orbit-cua-desktop"
     for source in _SOURCES:
         await sandbox.write_file(
             str(root / source.name), source.read_bytes(), identity=Identity.AGENT

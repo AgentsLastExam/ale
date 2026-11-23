@@ -7,11 +7,11 @@ It gates Kimi's `ReadMediaFile` tool and attached images, not an MCP tool's imag
 Kimi sends whatever the model.
 
 Runs Kimi Code's print mode, `kimi --prompt --output-format stream-json`, with
-`KIMI_CODE_HOME=.kimi-ale` and `--skills-dir .kimi-ale/skills`, so neither the
+`KIMI_CODE_HOME=.kimi-orbit` and `--skills-dir .kimi-orbit/skills`, so neither the
 operator's nor the project's Skill directories are discovered. The model, its Gateway
-endpoint and its native controls are written to `.kimi-ale/config.toml`; the episode
-token is read from `ALE_GATEWAY_TOKEN` on each request and never written. MCP servers go
-to the user-level `.kimi-ale/mcp.json`. The workspace is not marked trusted, so a
+endpoint and its native controls are written to `.kimi-orbit/config.toml`; the episode
+token is read from `ORBIT_GATEWAY_TOKEN` on each request and never written. MCP servers go
+to the user-level `.kimi-orbit/mcp.json`. The workspace is not marked trusted, so a
 project-level `.kimi-code/mcp.json` stays disabled.
 
 Each Gateway dialect selects Kimi's own provider for it: `kimi` for Chat Completions, the
@@ -30,7 +30,7 @@ longer one fails at launch instead of being truncated. Kimi chooses the session 
 and reports it in its final `session.resume_hint` line; a resume passes it to
 `--session`. A failed turn prints nothing on stdout and exits 1 with the cause on stderr.
 
-A session is `.kimi-ale/sessions/<work directory bucket>/<session id>/`. The parser
+A session is `.kimi-orbit/sessions/<work directory bucket>/<session id>/`. The parser
 follows `agents/main/wire.jsonl` in native order. A subagent becomes an embedded
 trajectory when the caller's wire holds a `subagent.spawned` record naming the calling
 tool call, that call has a result, and the subagent's own `agents/<id>/wire.jsonl` is

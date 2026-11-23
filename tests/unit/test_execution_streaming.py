@@ -9,15 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.episode import Phase
-from ale.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
-from ale.core.sandbox import ExecResult, SandboxFile
-from ale.core.task import ResolvedVariables, Stage
-from ale.core.taskspec import Healthcheck, NetworkMode, NetworkPolicy, OperatingSystem, VerifySpec
-from ale.core.trace import read_jsonl
-from ale.run.harnesses.builtin import NopHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.recording import EpisodeRecording
+from orbit.core.episode import Phase
+from orbit.core.errors import PhaseTimeoutError, TaskError, VerifierOutputError
+from orbit.core.sandbox import ExecResult, SandboxFile
+from orbit.core.task import ResolvedVariables, Stage
+from orbit.core.taskspec import Healthcheck, NetworkMode, NetworkPolicy, OperatingSystem, VerifySpec
+from orbit.core.trace import read_jsonl
+from orbit.run.harnesses.builtin import NopHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
 
@@ -100,7 +100,7 @@ async def test_setup_nonzero_keeps_received_stdout(tmp_path: Path) -> None:
         await EpisodeProtocol(NopHarness())._run_stage(
             ctx,
             sandbox,
-            Path("/opt/ale/setup"),
+            Path("/opt/orbit/setup"),
             Phase.SETUP,  # type: ignore[arg-type]
             stage=Stage.SETUP,
         )
@@ -121,7 +121,7 @@ async def test_setup_timeout_keeps_received_output(tmp_path: Path) -> None:
         await EpisodeProtocol(NopHarness())._run_stage(
             ctx,
             sandbox,
-            Path("/opt/ale/setup"),
+            Path("/opt/orbit/setup"),
             Phase.SETUP,  # type: ignore[arg-type]
             stage=Stage.SETUP,
         )
@@ -197,12 +197,16 @@ async def test_verifier_learns_how_much_of_its_phase_is_left(tmp_path: Path) -> 
     ctx = context(tmp_path)
     sandbox = StageSandbox(ExecResult(exit_code=0))
     protocol = EpisodeProtocol(NopHarness())
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY, stage=Stage.TESTS)  # type: ignore[arg-type]
-    assert "ALE_VERIFY_DEADLINE_SECONDS" not in sandbox.env
+    await protocol._run_stage(
+        ctx, sandbox, Path("/opt/orbit/tests"), Phase.VERIFY, stage=Stage.TESTS
+    )  # type: ignore[arg-type]
+    assert "ORBIT_VERIFY_DEADLINE_SECONDS" not in sandbox.env
 
     ctx.phase_deadline = time.monotonic() + 100
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY, stage=Stage.TESTS)  # type: ignore[arg-type]
-    assert 98 <= int(sandbox.env["ALE_VERIFY_DEADLINE_SECONDS"]) <= 100
+    await protocol._run_stage(
+        ctx, sandbox, Path("/opt/orbit/tests"), Phase.VERIFY, stage=Stage.TESTS
+    )  # type: ignore[arg-type]
+    assert 98 <= int(sandbox.env["ORBIT_VERIFY_DEADLINE_SECONDS"]) <= 100
 
 
 @pytest.mark.asyncio
@@ -213,20 +217,20 @@ async def test_selected_verifier_python_is_only_exposed_during_verification(tmp_
     await protocol._run_stage(
         ctx,
         sandbox,
-        Path("/opt/ale/setup"),
+        Path("/opt/orbit/setup"),
         Phase.SETUP,  # type: ignore[arg-type]
         stage=Stage.SETUP,
     )
-    assert "ALE_VERIFY_PYTHON" not in sandbox.env
+    assert "ORBIT_VERIFY_PYTHON" not in sandbox.env
     await protocol._run_stage(
         ctx,
         sandbox,
-        Path("/opt/ale/tests"),
+        Path("/opt/orbit/tests"),
         Phase.VERIFY,
         stage=Stage.TESTS,
         verify_python="python3.12",  # type: ignore[arg-type]
     )
-    assert sandbox.env["ALE_VERIFY_PYTHON"] == "python3.12"
+    assert sandbox.env["ORBIT_VERIFY_PYTHON"] == "python3.12"
 
 
 @pytest.mark.asyncio
@@ -240,7 +244,7 @@ async def test_concurrent_episode_output_never_crosses_files(tmp_path: Path) -> 
                 ExecResult(exit_code=0),
                 chunks=(("stdout", name.encode()),),
             ),  # type: ignore[arg-type]
-            Path("/opt/ale/setup"),
+            Path("/opt/orbit/setup"),
             Phase.SETUP,
             stage=Stage.SETUP,
         )
@@ -260,16 +264,22 @@ async def test_a_harbor_workdir_is_where_verification_runs(
     ctx = context(tmp_path)
     sandbox = StageSandbox(ExecResult(exit_code=0))
     protocol = EpisodeProtocol(NopHarness())
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY, stage=Stage.TESTS)  # type: ignore[arg-type]
-    assert (sandbox.cwd, sandbox.argv) == ("/opt/ale/tests", ["bash", "test.sh"])
+    await protocol._run_stage(
+        ctx, sandbox, Path("/opt/orbit/tests"), Phase.VERIFY, stage=Stage.TESTS
+    )  # type: ignore[arg-type]
+    assert (sandbox.cwd, sandbox.argv) == ("/opt/orbit/tests", ["bash", "test.sh"])
     ctx.spec.verify = VerifySpec(workdir=workdir)
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY, stage=Stage.TESTS)  # type: ignore[arg-type]
-    assert (sandbox.cwd, sandbox.argv) == (cwd, ["bash", "/opt/ale/tests/test.sh"])
-    assert sandbox.env["ALE_STAGE_DIR"] == "/opt/ale/tests"
+    await protocol._run_stage(
+        ctx, sandbox, Path("/opt/orbit/tests"), Phase.VERIFY, stage=Stage.TESTS
+    )  # type: ignore[arg-type]
+    assert (sandbox.cwd, sandbox.argv) == (cwd, ["bash", "/opt/orbit/tests/test.sh"])
+    assert sandbox.env["ORBIT_STAGE_DIR"] == "/opt/orbit/tests"
     # Setup keeps its own directory: Harbor's working directory is the agent's and the
     # verifier's.
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/setup"), Phase.SETUP, stage=Stage.SETUP)  # type: ignore[arg-type]
-    assert sandbox.cwd == "/opt/ale/setup"
+    await protocol._run_stage(
+        ctx, sandbox, Path("/opt/orbit/setup"), Phase.SETUP, stage=Stage.SETUP
+    )  # type: ignore[arg-type]
+    assert sandbox.cwd == "/opt/orbit/setup"
 
 
 class CheckedSandbox:
@@ -302,7 +312,7 @@ async def test_the_healthcheck_follows_harbor_s_docker_semantics(
     async def no_wait(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr("ale.run.protocol.episode_protocol.asyncio.sleep", no_wait)
+    monkeypatch.setattr("orbit.run.protocol.episode_protocol.asyncio.sleep", no_wait)
     ctx = context(tmp_path)
     ctx.spec.healthcheck = Healthcheck(command="curl -sf localhost:8080", **check)
     ctx.spec.workdir = None
@@ -323,13 +333,17 @@ async def test_harbor_s_verifier_user_runs_verification_and_not_setup(tmp_path: 
     ctx.spec.verify = VerifySpec(user="1000")
     sandbox = StageSandbox(ExecResult(exit_code=0))
     protocol = EpisodeProtocol(NopHarness())
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/tests"), Phase.VERIFY, stage=Stage.TESTS)  # type: ignore[arg-type]
+    await protocol._run_stage(
+        ctx, sandbox, Path("/opt/orbit/tests"), Phase.VERIFY, stage=Stage.TESTS
+    )  # type: ignore[arg-type]
     python, flag, _drop, user, *command = sandbox.argv
     assert (python, flag, user, command) == (
-        "/opt/ale/python/bin/python3",
+        "/opt/orbit/python/bin/python3",
         "-c",
         "1000",
         ["bash", "test.sh"],
     )
-    await protocol._run_stage(ctx, sandbox, Path("/opt/ale/setup"), Phase.SETUP, stage=Stage.SETUP)  # type: ignore[arg-type]
+    await protocol._run_stage(
+        ctx, sandbox, Path("/opt/orbit/setup"), Phase.SETUP, stage=Stage.SETUP
+    )  # type: ignore[arg-type]
     assert sandbox.argv == ["bash", "setup.sh"]

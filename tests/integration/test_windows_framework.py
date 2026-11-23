@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.sandbox import Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
-from ale.run import guestd
-from ale.run.framework import WINDOWS_MARKER, windows_framework_identity
-from ale.run.providers.qemu import QemuProvider
+from orbit.core.sandbox import Identity, ImageRef, SandboxRequest
+from orbit.core.taskspec import NetworkPolicy, OperatingSystem, Resources
+from orbit.run import guestd
+from orbit.run.framework import WINDOWS_MARKER, windows_framework_identity
+from orbit.run.providers.qemu import QemuProvider
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker, pytest.mark.needs_kvm]
 
@@ -23,10 +23,10 @@ POWERSHELL = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
 async def test_a_bare_windows_disk_boots_with_the_framework_closed_to_the_agent(
     tmp_path: Path,
 ) -> None:
-    disk = os.environ.get("ALE_TEST_WINDOWS_IMAGE")
+    disk = os.environ.get("ORBIT_TEST_WINDOWS_IMAGE")
     if not disk:
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to an ALE Windows base disk")
-    user = os.environ.get("ALE_TEST_WINDOWS_USER", "user")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to an Orbit Windows base disk")
+    user = os.environ.get("ORBIT_TEST_WINDOWS_USER", "user")
     provider = QemuProvider(image=Path(disk), overlay_dir=tmp_path / "overlays")
     request = SandboxRequest(
         episode_id=f"framework-{uuid.uuid4().hex[:8]}",
@@ -38,22 +38,22 @@ async def test_a_bare_windows_disk_boots_with_the_framework_closed_to_the_agent(
         network=NetworkPolicy(mode="open"),
     )
     async with await provider.create(request) as sandbox:
-        marker = await sandbox.read_file(r"C:\ProgramData\ALE" + "\\framework")
+        marker = await sandbox.read_file(r"C:\ProgramData\Orbit" + "\\framework")
         assert marker.decode().strip() == windows_framework_identity(user=user)
         assert WINDOWS_MARKER.endswith("/framework")
         # The agent cannot read or change the framework it is driven through.
         read = await sandbox.exec(
-            [*POWERSHELL, r"Get-Content C:\ProgramData\ALE\guestd\main.py -TotalCount 1"],
+            [*POWERSHELL, r"Get-Content C:\ProgramData\Orbit\guestd\main.py -TotalCount 1"],
             identity=Identity.AGENT,
         )
         assert not read.ok
         write = await sandbox.exec(
-            [*POWERSHELL, r"Set-Content C:\ProgramData\ALE\guestd\planted.py 'x'"],
+            [*POWERSHELL, r"Set-Content C:\ProgramData\Orbit\guestd\planted.py 'x'"],
             identity=Identity.AGENT,
         )
         assert not write.ok
         # Cua Driver alone stays runnable, as on Linux: the agent's cua-desktop runs it.
-        driver = r"C:\ProgramData\ALE\cua-driver"
+        driver = r"C:\ProgramData\Orbit\cua-driver"
         run = await sandbox.exec(
             [driver + r"\cua-driver.exe", "--version"], identity=Identity.AGENT
         )
@@ -66,7 +66,7 @@ async def test_a_bare_windows_disk_boots_with_the_framework_closed_to_the_agent(
         report = await sandbox.exec(
             [
                 *POWERSHELL,
-                "(Get-Service ALEGuestd).Status; "
+                "(Get-Service OrbitGuestd).Status; "
                 "Get-CimInstance Win32_Process "
                 "| Where-Object { $_.Name -match '^(python|cua-driver)' } "
                 '| ForEach-Object { "session=$($_.SessionId) $($_.CommandLine)" }',

@@ -12,7 +12,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ale.run.gateway.session import CallUsage
+from orbit.run.gateway.session import CallUsage
 
 __all__ = [
     "METHODS",
@@ -68,7 +68,7 @@ class PolicyRefusal:
     message: str
 
     def body(self) -> dict[str, Any]:
-        return error_body(self.code, self.status, self.message, f"ALE_{self.policy.upper()}")
+        return error_body(self.code, self.status, self.message, f"ORBIT_{self.policy.upper()}")
 
 
 def policy_refusal(http_method: str, target: str, alt: str | None) -> PolicyRefusal | None:
@@ -80,7 +80,7 @@ def policy_refusal(http_method: str, target: str, alt: str | None) -> PolicyRefu
             "unsupported_method",
             404,
             "NOT_FOUND",
-            f"the ALE Gateway forwards only {', '.join(f'models/*:{name}' for name in METHODS)}, "
+            f"the Orbit Gateway forwards only {', '.join(f'models/*:{name}' for name in METHODS)}, "
             f"not {http_method} v1beta/{target}",
         )
     if METHODS[method] and alt != "sse":
@@ -89,7 +89,7 @@ def policy_refusal(http_method: str, target: str, alt: str | None) -> PolicyRefu
             "unsupported_method",
             400,
             "INVALID_ARGUMENT",
-            "the ALE Gateway streams only server-sent events; send alt=sse",
+            "the Orbit Gateway streams only server-sent events; send alt=sse",
         )
     return None
 
@@ -122,7 +122,7 @@ def _dicts(value: object) -> list[dict[str, Any]]:
 
 def policy_body(policy: str, message: str) -> dict[str, Any]:
     """A request policy's refusal, as the Google error a Gemini client reports at once."""
-    return error_body(REFUSAL_STATUS, "FAILED_PRECONDITION", message, f"ALE_{policy.upper()}")
+    return error_body(REFUSAL_STATUS, "FAILED_PRECONDITION", message, f"ORBIT_{policy.upper()}")
 
 
 def _call_usage(metadata: object) -> CallUsage:
@@ -216,7 +216,7 @@ def error_body(
     info = {
         "@type": "type.googleapis.com/google.rpc.ErrorInfo",
         "reason": reason,
-        "domain": "ale.gateway",
+        "domain": "orbit.gateway",
         "metadata": metadata or {},
     }
     return {"error": {"code": code, "message": message, "status": status, "details": [info]}}
@@ -232,7 +232,7 @@ def refusal_body(
         REFUSAL_STATUS,
         "FAILED_PRECONDITION",
         f"{limit} limit reached ({value:g})",
-        "ALE_LIMIT_REACHED",
+        "ORBIT_LIMIT_REACHED",
         {
             "layer": "gateway",
             "limit": limit,

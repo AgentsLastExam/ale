@@ -17,7 +17,7 @@ Three choices are worth stating, because each has a plausible alternative:
   future ``reset()`` would use. An image build and a snapshot keep that overlay as a
   layer of its own rather than flattening it into a standalone disk.
 * **The guest service over a forwarded port.** One codebase, two transports: the same
-  ``ale-guestd`` that Docker drives over exec-stdio is reached here over TCP.
+  ``orbit-guestd`` that Docker drives over exec-stdio is reached here over TCP.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import (
+from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
     ExecOutputSink,
@@ -57,11 +57,11 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, OperatingSystem, Resources
-from ale.run import HELPER_RUNTIME, ale_image, guestd
-from ale.run.framework import MATERIALIZER_IMAGE, frame_disk, framed_disk
-from ale.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
-from ale.run.images import (
+from orbit.core.taskspec import NetworkMode, OperatingSystem, Resources
+from orbit.run import HELPER_RUNTIME, guestd, orbit_image
+from orbit.run.framework import MATERIALIZER_IMAGE, frame_disk, framed_disk
+from orbit.run.gpu import GpuLease, normalize_pci_bdf, parse_nvidia_smi
+from orbit.run.images import (
     base_layer,
     chain_mounts,
     layer_identity,
@@ -73,12 +73,12 @@ from ale.run.images import (
     resolve_vm_image,
     set_parent,
 )
-from ale.run.process import run
-from ale.run.providers import relay
-from ale.run.providers.desktop import require_resolution
-from ale.run.providers.docker.provider import only_vanished
-from ale.run.providers.privileges import set_and_prove_elevation
-from ale.run.providers.runner import (
+from orbit.run.process import run
+from orbit.run.providers import relay
+from orbit.run.providers.desktop import require_resolution
+from orbit.run.providers.docker.provider import only_vanished
+from orbit.run.providers.privileges import set_and_prove_elevation
+from orbit.run.providers.runner import (
     HOST_IP,
     Console,
     connect_guest,
@@ -88,8 +88,8 @@ from ale.run.providers.runner import (
     read_guest_token,
     url_port,
 )
-from ale.run.sources import cache_root
-from ale.run.transport import GuestClient
+from orbit.run.sources import cache_root
+from orbit.run.transport import GuestClient
 
 __all__ = [
     "QemuProvider",
@@ -105,7 +105,7 @@ VM_STORAGE_OVERHEAD_MB = 1024
 #: permissions, guest bridge and signal handling a QEMU-in-a-container needs; ours is
 #: published under our own namespace so a run does not depend on an image someone else
 #: can move, and differs only in what its entrypoint checks and says.
-RUNNER_IMAGE = os.environ.get("ALE_QEMU_RUNNER", ale_image("ale-qemu-runner"))
+RUNNER_IMAGE = os.environ.get("ORBIT_QEMU_RUNNER", orbit_image("orbit-qemu-runner"))
 
 #: Where the runner expects the disk to boot, and the address it presents the host at.
 #: Runner-side forwarding and the rewritten gateway URL both target the latter.
@@ -130,12 +130,12 @@ GUEST_BRIDGE = "docker"
 BOOT_TIMEOUT_SEC = 300
 _NVIDIA_QUERY = "uuid,name,pci.bus_id,driver_version"
 
-MANAGED_LABEL = "ale.qemu.managed"
-EPISODE_LABEL = "ale.qemu.episode"
-ROLE_LABEL = "ale.qemu.role"
-RETENTION_LABEL = "ale.qemu.retention"
-GPU_LABEL = "ale.qemu.gpus"
-STORAGE_LABEL = "ale.qemu.storage"
+MANAGED_LABEL = "orbit.qemu.managed"
+EPISODE_LABEL = "orbit.qemu.episode"
+ROLE_LABEL = "orbit.qemu.role"
+RETENTION_LABEL = "orbit.qemu.retention"
+GPU_LABEL = "orbit.qemu.gpus"
+STORAGE_LABEL = "orbit.qemu.storage"
 HANDLE_PREFIX = "qemu:"
 SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 #: A snapshot is a directory holding its disk, a layer on the disk its Task's image resolves
@@ -146,7 +146,7 @@ SNAPSHOT_RECORD = "snapshot.json"
 VOLUMES_CONFIG = "volumes.json"
 #: The serial by which a guest finds the disk of the snapshot it views, and the SCSI
 #: controller, of its own, it is attached to.
-VIEW_SERIAL = "ale-view"
+VIEW_SERIAL = "orbit-view"
 VIEW_BUS = "aleviews"
 #: The runner's QEMU monitor, inside its container.
 MONITOR_PORT = 7100
@@ -181,7 +181,7 @@ if ($disk.IsOffline) {{ Set-Disk -Number $disk.Number -IsOffline $false }}
 if ($disk.IsReadOnly) {{ Set-Disk -Number $disk.Number -IsReadOnly $false }}
 $partition = Get-Partition -DiskNumber $disk.Number | Sort-Object Size -Descending |
     Select-Object -First 1
-$root = 'C:\ProgramData\ALE\viewed'
+$root = 'C:\ProgramData\Orbit\viewed'
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 $partition | Add-PartitionAccessPath -AccessPath "$root\"
 foreach ($path in $paths) {{
@@ -194,7 +194,7 @@ foreach ($path in $paths) {{
 
 #: The runner's nat chain that sends the fixed Gateway port to the port the Host serves the
 #: Gateway on; a later run's Gateway replaces its rule.
-GATEWAY_CHAIN = "ALE_GATEWAY"
+GATEWAY_CHAIN = "ORBIT_GATEWAY"
 
 
 @dataclass(frozen=True)
@@ -611,7 +611,7 @@ class QemuSandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
         )
 
     async def _power_off(self) -> None:
@@ -699,7 +699,7 @@ class QemuSandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {self.handle}",
+            cleanup_command=f"orbit sandbox destroy {self.handle}",
             gpu_devices=gpu_devices,
         )
 
@@ -763,7 +763,7 @@ class QemuProvider(Provider):
         if shutil.which("qemu-img") is None:
             problems.append("qemu-img is not on PATH (apt install qemu-utils)")
         # Only Docker's daemon opens /dev/kvm, for the runner and the VM builder
-        # containers, so the account running ALE needs no access to it of its own.
+        # containers, so the account running Orbit needs no access to it of its own.
         if not Path("/dev/kvm").exists():
             problems.append(
                 "/dev/kvm is missing: this host has no hardware virtualisation, so the "
@@ -771,7 +771,7 @@ class QemuProvider(Provider):
             )
         if self.fixture_image is not None and not self.fixture_image.is_file():
             problems.append(
-                f"no injected guest image at {self.fixture_image}; run ale prepare on a VM Task"
+                f"no injected guest image at {self.fixture_image}; run orbit prepare on a VM Task"
             )
 
         if problems:
@@ -1029,7 +1029,7 @@ class QemuProvider(Provider):
         onto it, so one image serves every concurrent episode and none of them can write
         to it.
         """
-        name = f"ale-qemu-{uuid.uuid4().hex[:10]}"
+        name = f"orbit-qemu-{uuid.uuid4().hex[:10]}"
         layers = await chain_mounts(base_image)
         if viewed is not None:
             # Its chain shares the layers below with the disk's, which are mounted once.
@@ -1071,9 +1071,9 @@ class QemuProvider(Provider):
             f"-global VGA.vgamem_mb={VGA_MEMORY_MB}",
         ]
         if request.os is OperatingSystem.WINDOWS and request.sudo:
-            arguments.append("-smbios type=1,serial=ale-sudo")
+            arguments.append("-smbios type=1,serial=orbit-sudo")
         if request.os is OperatingSystem.LINUX:
-            arguments.append(f"-fw_cfg name=opt/ale/volumes,file=/storage/{VOLUMES_CONFIG}")
+            arguments.append(f"-fw_cfg name=opt/orbit/volumes,file=/storage/{VOLUMES_CONFIG}")
         if viewed is not None:
             # The viewed disk is attached to it once the guest is up (_attach_view).
             arguments.append(f"-device virtio-scsi-pci,id={VIEW_BUS}")
@@ -1083,7 +1083,7 @@ class QemuProvider(Provider):
             argv += ["--device=/dev/vfio/vfio", "--ulimit", "memlock=-1:-1"]
             for group in sorted({gpu.group for gpu in gpus}):
                 argv += [f"--device=/dev/vfio/{group}"]
-            argv += ["--env", f"ALE_QEMU_VFIO_DEVICES={','.join(gpu.bdf for gpu in gpus)}"]
+            argv += ["--env", f"ORBIT_QEMU_VFIO_DEVICES={','.join(gpu.bdf for gpu in gpus)}"]
         argv += [self.runner_image]
 
         code, stdout, stderr = await _run(*argv, timeout=180)
@@ -1156,7 +1156,7 @@ class QemuProvider(Provider):
             return tuple(views["paths"])
         if operating_system is OperatingSystem.LINUX:
             if views:
-                argv = [guestd.PYTHON["linux"], "-I", "/opt/ale/volumes.py", "views"]
+                argv = [guestd.PYTHON["linux"], "-I", "/opt/orbit/volumes.py", "views"]
                 code, out, err, _ = await client.exec(
                     [*argv, views["serial"], json.dumps(views["paths"])]
                 )
@@ -1165,7 +1165,7 @@ class QemuProvider(Provider):
                 return tuple(json.loads(out.splitlines()[-1]))
             if not given.get("volumes"):
                 return ()
-            code, out, err, _ = await client.exec(["cat", "/run/ale/volumes.json"])
+            code, out, err, _ = await client.exec(["cat", "/run/orbit/volumes.json"])
             if code:
                 raise ProviderStartError(f"the guest mounted no volumes: {err.strip()}")
             return tuple(json.loads(out))
@@ -1411,7 +1411,7 @@ class QemuProvider(Provider):
                 required = "Administrator" if expected else "limited"
                 raise ProviderCapabilityError(
                     f"Windows {role} must run with a {required} token; rebuild the image "
-                    f"with the current ALE framework and UAC enabled: {stderr.strip()}"
+                    f"with the current Orbit framework and UAC enabled: {stderr.strip()}"
                 )
 
     async def list_retained(self) -> list[dict[str, object]]:
@@ -1449,7 +1449,7 @@ class QemuProvider(Provider):
                     "image": record.get("Image", ""),
                     "gpus": tuple(filter(None, labels.get(GPU_LABEL, "").split(","))),
                     "running": bool(record.get("State", {}).get("Running")),
-                    "cleanup_command": f"ale sandbox destroy {HANDLE_PREFIX}{container}",
+                    "cleanup_command": f"orbit sandbox destroy {HANDLE_PREFIX}{container}",
                 }
             )
         return sorted(found, key=lambda item: str(item["handle"]))
@@ -1463,7 +1463,7 @@ class QemuProvider(Provider):
             try:
                 record = self._snapshot_record(handle)
             except (ProviderCapabilityError, ProviderStartError):
-                continue  # not a snapshot ALE saved, or one still being saved
+                continue  # not a snapshot Orbit saved, or one still being saved
             found.append(
                 {
                     "provider": "qemu",
@@ -1475,13 +1475,13 @@ class QemuProvider(Provider):
                     ),
                     "gpus": (),
                     "running": False,
-                    "cleanup_command": f"ale sandbox destroy {handle}",
+                    "cleanup_command": f"orbit sandbox destroy {handle}",
                 }
             )
         return found
 
     def _snapshot_record(self, handle: str) -> dict[str, str]:
-        """A snapshot's record, once its directory is shown to hold one ALE saved."""
+        """A snapshot's record, once its directory is shown to hold one Orbit saved."""
         name = handle.removeprefix(SNAPSHOT_PREFIX)
         if not handle.startswith(SNAPSHOT_PREFIX) or not name or "/" in name or name[0] == ".":
             raise ProviderCapabilityError(f"{handle!r} is not a QEMU snapshot handle")
@@ -1497,7 +1497,7 @@ class QemuProvider(Provider):
             or record.get("managed") is not True
             or not (directory / SNAPSHOT_DISK).is_file()
         ):
-            raise ProviderCapabilityError(f"{handle!r} is not an ALE snapshot")
+            raise ProviderCapabilityError(f"{handle!r} is not an Orbit snapshot")
         return record
 
     async def _snapshot_image(
@@ -1557,7 +1557,7 @@ class QemuProvider(Provider):
         await self._destroy(handle, retained=False)
 
     async def _destroy(self, handle: str, *, retained: bool) -> None:
-        """Remove an ALE runner and its overlay by its handle. ``retained`` requires a kept
+        """Remove an Orbit runner and its overlay by its handle. ``retained`` requires a kept
         one; otherwise one that is already gone needs nothing."""
         if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
@@ -1573,7 +1573,7 @@ class QemuProvider(Provider):
         labels = record.get("Config", {}).get("Labels", {}) or {}
         kept = labels.get(RETENTION_LABEL) == "keep"
         if labels.get(MANAGED_LABEL) != "true" or (retained and not kept):
-            kind = "ALE-retained" if retained else "ALE"
+            kind = "Orbit-retained" if retained else "Orbit"
             raise ProviderCapabilityError(f"{handle!r} is not an {kind} QEMU sandbox")
         storage = labels.get(STORAGE_LABEL, "")
         mounted_storage = {
@@ -1582,7 +1582,7 @@ class QemuProvider(Provider):
             if mount.get("Type") == "bind" and mount.get("Destination") == "/storage"
         }
         if not storage or storage not in mounted_storage:
-            raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
+            raise ProviderCapabilityError(f"{handle!r} has no valid Orbit-owned QEMU overlay")
         code, _, stderr = await _run("docker", "rm", "-f", container, timeout=60)
         if code != 0:
             raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
@@ -1623,7 +1623,7 @@ class QemuProvider(Provider):
         *,
         retained: bool,
     ) -> QemuSandbox:
-        """A running ALE VM as a Sandbox again; ``retained`` requires a kept solver."""
+        """A running Orbit VM as a Sandbox again; ``retained`` requires a kept solver."""
         if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a QEMU sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
@@ -1634,12 +1634,12 @@ class QemuProvider(Provider):
         labels = record.get("Config", {}).get("Labels", {}) or {}
         role = labels.get(ROLE_LABEL, "")
         if labels.get(MANAGED_LABEL) != "true" or role not in {r.value for r in SandboxRole}:
-            raise ProviderCapabilityError(f"{handle!r} is not an ALE QEMU sandbox")
+            raise ProviderCapabilityError(f"{handle!r} is not an Orbit QEMU sandbox")
         if retained and (
             labels.get(RETENTION_LABEL) != "keep"
             or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
         ):
-            raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
+            raise ProviderCapabilityError(f"{handle!r} is not a retained Orbit solver sandbox")
         if not record.get("State", {}).get("Running"):
             raise ProviderStartError(f"sandbox {handle!r} is not running")
         storage = labels.get(STORAGE_LABEL, "")
@@ -1649,7 +1649,7 @@ class QemuProvider(Provider):
             if mount.get("Type") == "bind" and mount.get("Destination") == "/storage"
         }
         if not storage or storage not in mounted_storage:
-            raise ProviderCapabilityError(f"{handle!r} has no valid ALE-owned QEMU overlay")
+            raise ProviderCapabilityError(f"{handle!r} has no valid Orbit-owned QEMU overlay")
         # The disk the runner's overlay sits on, not merely one of the layers it mounts.
         booted = await layer_parent(Path(storage) / "data.qcow2")
         if booted is None or booted.resolve() != Path(image.observed_ref).resolve():
@@ -1680,7 +1680,7 @@ class QemuProvider(Provider):
             await client.close()
             raise
         sandbox = QemuSandbox(
-            sandbox_id=container.removeprefix("ale-qemu-"),
+            sandbox_id=container.removeprefix("orbit-qemu-"),
             request=attached_request,
             container=container,
             storage=Path(storage),
@@ -1737,7 +1737,7 @@ def _mounted_layers(record: dict) -> set[str]:
 
 
 def _is_snapshot(disk: Path) -> bool:
-    """Whether a disk is the layer of a snapshot ALE saved."""
+    """Whether a disk is the layer of a snapshot Orbit saved."""
     return disk.name == SNAPSHOT_DISK and (disk.parent / SNAPSHOT_RECORD).is_file()
 
 
@@ -1745,12 +1745,12 @@ async def _discard_free_space(disk: Path, operating_system: OperatingSystem) -> 
     """Discard the clusters of a stopped VM's overlay that hold only free space, in the VM
     builder: on Windows ``ntfs_discard.py``, which reads NTFS's own free bitmap, and on
     Linux ``LINUX_DISCARD``. Its layers below are only read."""
-    name = f"ale-discard-{uuid.uuid4().hex[:12]}"
+    name = f"orbit-discard-{uuid.uuid4().hex[:12]}"
     if operating_system is OperatingSystem.WINDOWS:
         tool = [
-            "--mount", f"type=bind,src={NTFS_DISCARD},dst=/ale/ntfs_discard.py,readonly",
+            "--mount", f"type=bind,src={NTFS_DISCARD},dst=/orbit/ntfs_discard.py,readonly",
             "--entrypoint", "python3", MATERIALIZER_IMAGE,
-            "/ale/ntfs_discard.py", str(disk.resolve()),
+            "/orbit/ntfs_discard.py", str(disk.resolve()),
         ]  # fmt: skip
     else:
         tool = [

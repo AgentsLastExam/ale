@@ -31,12 +31,12 @@ import time
 from pathlib import Path
 
 SANDBOXES = Path("sandboxes")
-SNAPSHOT_REPOSITORY = "localhost/ale-snapshot"
-LOADED_REPOSITORY = "localhost/ale-image"
+SNAPSHOT_REPOSITORY = "localhost/orbit-snapshot"
+LOADED_REPOSITORY = "localhost/orbit-image"
 #: Below the cache: the images prepared for the cluster, each by its key.
 IMAGES = "images"
 #: Each allocation's Podman store on its node, below ``$SLURM_TMPDIR`` or ``/tmp``.
-STORE_PREFIX = "ale-slurm-"
+STORE_PREFIX = "orbit-slurm-"
 #: In each store, the ID of the job it belongs to.
 OWNER = "job"
 #: Below each store: plain layers, overlays' work directories, views' mount points, and a
@@ -108,7 +108,7 @@ def container(index: str) -> str:
 
 def layer_id(index: str, number: int) -> str:
     """A layer's name, unique beyond its allocation, whose snapshot another may load."""
-    return f"{Path.cwd().name.removeprefix('ale-')[:6]}.{index}.{number}"
+    return f"{Path.cwd().name.removeprefix('orbit-')[:6]}.{index}.{number}"
 
 
 def mount_volumes(
@@ -128,7 +128,7 @@ def mount_volumes(
         path, kind = str(spec["path"]), spec["kind"]
         lowers: list[str] = []
         if kind == "fresh":
-            name = "ale-" + layer
+            name = "orbit-" + layer
             subprocess.run(
                 [*command, "volume", "create", name], check=True, stdout=subprocess.DEVNULL
             )
@@ -350,7 +350,7 @@ def runtime_binary(command: list[str], version: str) -> Path:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not runtime.is_dir():
             source = output(
-                *command, "create", "ghcr.io/agentslastexam/ale-gvisor:" + version, "/bin/true"
+                *command, "create", "ghcr.io/agentslastexam/orbit-gvisor:" + version, "/bin/true"
             )
             with tempfile.TemporaryDirectory(dir=cache) as temporary:
                 dest = Path(temporary) / "runtime"
@@ -498,7 +498,7 @@ def prepare() -> None:
             base, digests = read("built"), []
         step = "framework"
         base = "sha256:" + base.removeprefix("sha256:")
-        tag = "localhost/ale-framework-base:" + base.removeprefix("sha256:")[:12]
+        tag = "localhost/orbit-framework-base:" + base.removeprefix("sha256:")[:12]
         subprocess.run([*command, "tag", base, tag], check=True)
         user = output(*command, "image", "inspect", "-f", "{{.Config.User}}", base)
         lines = [f"FROM {tag}", *framework["body"], *([f"USER {user}"] if user else [])]
@@ -542,7 +542,7 @@ def supervise() -> None:
         load_layers(command, directory, spec.get("layers") or {})
         runsc = str(runtime_binary(command, spec["version"]))
         version = output(runsc, "--version").splitlines()[0]
-        if not version.endswith("+ale." + spec["version"]):
+        if not version.endswith("+orbit." + spec["version"]):
             raise RuntimeError(f"unexpected gVisor build {version}")
         if spec["gpus"]:
             supported = output(runsc, "nvproxy", "list-supported-drivers").split()

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Build ALE's Linux VM base disk, once per version: this directory's Dockerfile gives its
+# Build Orbit's Linux VM base disk, once per version: this directory's Dockerfile gives its
 # root filesystem and initramfs, which the VM builder's mkosi makes a bootable disk
-# (materialize.sh). OUTPUT is written uncompressed, as `ale vm-image push` publishes it:
+# (materialize.sh). OUTPUT is written uncompressed, as `orbit vm-image push` publishes it:
 #
 #   images/base/vm-ubuntu24/build.sh OUTPUT.qcow2
-#   uv run ale vm-image push OUTPUT.qcow2 ghcr.io/agentslastexam/vm-ubuntu24-base:VERSION
+#   uv run orbit vm-image push OUTPUT.qcow2 ghcr.io/agentslastexam/vm-ubuntu24-base:VERSION
 #
 # The work files (about three times the disk) go beside OUTPUT; put it on a fast local
 # disk. The VM builder is the engine's; while its version is unpublished,
-# `images/build.sh ale-vm-materializer` builds it first.
+# `images/build.sh orbit-vm-materializer` builds it first.
 set -euo pipefail
 
 (( $# == 1 )) || { echo "usage: $0 OUTPUT.qcow2" >&2; exit 2; }
@@ -17,7 +17,7 @@ output=$(realpath -m "$1")
 [[ ! -e $output ]] || { echo "ERROR: $output exists" >&2; exit 1; }
 mkdir -p "$(dirname "$output")"
 builder=$(cd "$root" && uv run python -c \
-    'from ale.run.framework import MATERIALIZER_IMAGE; print(MATERIALIZER_IMAGE)')
+    'from orbit.run.framework import MATERIALIZER_IMAGE; print(MATERIALIZER_IMAGE)')
 
 work=$(mktemp -d "$(dirname "$output")/.vm-ubuntu24-base.XXXXXX")
 image="" container=""

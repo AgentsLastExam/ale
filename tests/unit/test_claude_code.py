@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import (
+from orbit.core.errors import (
     AgentUnsupportedError,
     BudgetExceededError,
     ConfigError,
@@ -17,12 +17,12 @@ from ale.core.errors import (
     NativeContinuationError,
     TrajectoryReferenceError,
 )
-from ale.core.harness import HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import ExecResult, SandboxFile
-from ale.run.harnesses.base import STDOUT_PATH
-from ale.run.harnesses.builtin import NopHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.recording import BlobStore
+from orbit.core.harness import HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import ExecResult, SandboxFile
+from orbit.run.harnesses.base import STDOUT_PATH
+from orbit.run.harnesses.builtin import NopHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
@@ -79,7 +79,7 @@ def test_invalid_limit_values_fail(value: object) -> None:
 
 def test_native_limits_are_classified_and_gateway_refusals_left_to_the_gateway() -> None:
     gateway = ClaudeCodeHarness().classify_failure(
-        '{"type":"ale_limit_reached","ale":{"limit":"max_total_tokens","value":400000}}'
+        '{"type":"orbit_limit_reached","orbit":{"limit":"max_total_tokens","value":400000}}'
     )
     native = ClaudeCodeHarness(settings={"max_turns": 12}).classify_failure(
         "Error: reached max turns"
@@ -114,7 +114,7 @@ class FakeSandbox:
             for path in re.findall(r": > (\S+)", command):
                 self.files[path] = b""
             return ExecResult(exit_code=0)
-        prompt = self.files["/home/agent/.ale-harness/prompt.md"].decode()
+        prompt = self.files["/home/agent/.orbit-harness/prompt.md"].decode()
         self.prompts.append(prompt)
         match = re.search(r"--(?:session-id|resume) ([^ ]+)", command)
         assert match
@@ -124,7 +124,7 @@ class FakeSandbox:
             json.dumps({"type": "result", "session_id": session_id, "result": prompt}).encode()
             + b"\n"
         )
-        self.files["/home/agent/.ale-harness/stdout.log"] += line
+        self.files["/home/agent/.orbit-harness/stdout.log"] += line
         return ExecResult(exit_code=0)
 
     async def read_file(self, path, *, offset=0, length=None):
@@ -293,7 +293,7 @@ def test_stream_json_parser_preserves_atif_tool_grouping_and_parse_issues(
                                     "type": "tool_use",
                                     "id": "tool-mcp-1",
                                     "name": "mcp__docs__search",
-                                    "input": {"query": "ALE"},
+                                    "input": {"query": "Orbit"},
                                 },
                                 {
                                     "type": "tool_use",
@@ -368,10 +368,10 @@ def test_stream_json_parser_preserves_atif_tool_grouping_and_parse_issues(
         "tool-mcp-2",
     ]
     cua = agent.tool_calls[2]
-    assert cua.extra["ale"]["mcp"] == {"server": "cua-desktop", "tool": "click"}
-    assert cua.extra["ale"]["normalized_action"]["type"] == "click"
+    assert cua.extra["orbit"]["mcp"] == {"server": "cua-desktop", "tool": "click"}
+    assert cua.extra["orbit"]["normalized_action"]["type"] == "click"
     assert first.session_id == "session-1"
-    assert first.extra["ale"]["parse_issues"][0]["reason"] == "malformed_json"
+    assert first.extra["orbit"]["parse_issues"][0]["reason"] == "malformed_json"
 
 
 def test_stream_json_parser_keeps_missing_result_absent(tmp_path: Path) -> None:
@@ -385,7 +385,7 @@ def test_stream_json_parser_keeps_missing_result_absent(tmp_path: Path) -> None:
                             "type": "tool_use",
                             "id": "missing-result",
                             "name": "mcp__docs__search",
-                            "input": {"query": "ALE"},
+                            "input": {"query": "Orbit"},
                         }
                     ]
                 },
@@ -480,7 +480,7 @@ def test_stream_json_parser_externalizes_document_and_binary_results(
 
     parsed = ClaudeCodeHarness().parse_trajectory(parse_context(tmp_path))
     result = parsed.steps[1].observation.results[0]
-    refs = result.extra["ale"]["attachments"]
+    refs = result.extra["orbit"]["attachments"]
     assert [ref["media_type"] for ref in refs] == [
         "application/pdf",
         "application/octet-stream",
@@ -794,8 +794,8 @@ def test_native_subagent_is_linked_through_its_meta_file(tmp_path: Path) -> None
     assert [call.function_name for call in write.tool_calls] == ["Bash"]
     # Only the native record has the child's reply; stdout stops at its last call.
     assert final.message == "DONE"
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
-    # The native result reports a price; ALE reports tokens only.
+    assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
+    # The native result reports a price; Orbit reports tokens only.
     assert "cost" not in trajectory.model_dump_json()
 
 
@@ -805,7 +805,7 @@ def test_native_subagent_without_its_meta_file_stays_reported(tmp_path: Path) ->
 
     trajectory = ClaudeCodeHarness().parse_trajectory(parse)
 
-    assert trajectory.extra["ale"]["parse_issues"] == [
+    assert trajectory.extra["orbit"]["parse_issues"] == [
         {"reason": "unlinked_subagent", "source": f"{CHILD_LOG}.jsonl"}
     ]
 
@@ -852,7 +852,7 @@ def test_resumed_turns_stay_in_order_without_a_repeated_final_answer(tmp_path: P
         "".join(json.dumps(event) + "\n" for event in segment).encode() for segment in segments
     ]
     stdout_log(tmp_path).write_bytes(b"".join(stdout))
-    (tmp_path / ".ale-harness/invocations.jsonl").write_text(
+    (tmp_path / ".orbit-harness/invocations.jsonl").write_text(
         json.dumps({"prompt": "first", "session_id": "root", "stdout_offset": 0})
         + "\n"
         + json.dumps({"prompt": "second", "session_id": "root", "stdout_offset": len(stdout[0])})
@@ -875,7 +875,7 @@ def test_without_a_native_session_each_turn_starts_with_its_recorded_prompt(
     first = json.dumps({"type": "result", "session_id": "root", "result": "ONE"}) + "\n"
     second = json.dumps({"type": "result", "session_id": "root", "result": "TWO"}) + "\n"
     stdout_log(tmp_path).write_text(first + second)
-    (tmp_path / ".ale-harness/invocations.jsonl").write_text(
+    (tmp_path / ".orbit-harness/invocations.jsonl").write_text(
         json.dumps({"prompt": "first", "stdout_offset": 0})
         + "\n"
         + json.dumps({"prompt": "second", "stdout_offset": len(first)})
@@ -888,6 +888,6 @@ def test_without_a_native_session_each_turn_starts_with_its_recorded_prompt(
         ("user", "second"),
         ("agent", "TWO"),
     ]
-    assert trajectory.extra["ale"]["parse_issues"] == [
+    assert trajectory.extra["orbit"]["parse_issues"] == [
         {"reason": "native_session_unavailable", "session_id": "root"}
     ]

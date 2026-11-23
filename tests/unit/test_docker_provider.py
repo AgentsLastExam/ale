@@ -20,18 +20,18 @@ from unittest.mock import AsyncMock
 import pytest
 from tests.support import TraceSink
 
-import ale.run
-import ale.run.providers.docker.provider as docker_provider
-from ale.core.capability import GpuHold, GpuModel
-from ale.core.config import ProviderId
-from ale.core.errors import (
+import orbit.run
+import orbit.run.providers.docker.provider as docker_provider
+from orbit.core.capability import GpuHold, GpuModel
+from orbit.core.config import ProviderId
+from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
     StorageExhaustedError,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
     GpuDevice,
@@ -43,10 +43,10 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
-from ale.run import guestd, iptables
-from ale.run.providers import memory
-from ale.run.providers.docker import (
+from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
+from orbit.run import guestd, iptables
+from orbit.run.providers import memory
+from orbit.run.providers.docker import (
     gpu_sharing,
     gvisor,
     kata,
@@ -56,7 +56,7 @@ from ale.run.providers.docker import (
     tc,
     volumes,
 )
-from ale.run.providers.docker.provider import (
+from orbit.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
     RUNTIMES,
@@ -70,8 +70,8 @@ from ale.run.providers.docker.provider import (
     _sandbox_gateway,
     _Session,
 )
-from ale.run.recording import execution_logging
-from ale.run.transport import GuestClient
+from orbit.run.recording import execution_logging
+from orbit.run.transport import GuestClient
 
 pytestmark = pytest.mark.unit
 
@@ -148,7 +148,7 @@ async def test_a_relay_carries_both_ways_and_passes_each_end_on(
 
     server = await asyncio.start_server(host, "0.0.0.0", 0)
     port = server.sockets[0].getsockname()[1]
-    await ports.hold("ale-a", [port])
+    await ports.hold("orbit-a", [port])
     reader, writer = await asyncio.open_connection("127.0.0.1", listening[port])
     writer.write(sent)
     writer.write_eof()
@@ -162,16 +162,16 @@ async def test_a_relay_listens_while_any_holder_holds_its_port(
     ports_here: tuple[rootless.HostPorts, dict[int, int]],
 ) -> None:
     ports, listening = ports_here
-    await ports.hold("ale-a", [41000])
-    await ports.hold("ale-b", [41000])
+    await ports.hold("orbit-a", [41000])
+    await ports.hold("orbit-b", [41000])
     assert len(listening) == 1
-    ports.release("ale-a")
+    ports.release("orbit-a")
     # Nothing serves 41000 on the Host: the relay takes the connection, then resets it.
     reader, writer = await asyncio.open_connection("127.0.0.1", listening[41000])
     with pytest.raises(ConnectionResetError):
         await reader.read()
     writer.close()
-    ports.release("ale-b")
+    ports.release("orbit-b")
     await asyncio.sleep(0)
     with pytest.raises(ConnectionRefusedError):
         await asyncio.open_connection("127.0.0.1", listening[41000])
@@ -190,13 +190,13 @@ async def test_nothing_is_relayed_where_the_bridges_are_in_this_namespace(
 
     monkeypatch.setattr(rootless, "_listen", listen)
     ports = rootless.HostPorts(here)
-    await ports.hold("ale-a", [41000])
-    await ports.hold("ale-b", [41000, 41001])
-    ports.release("ale-a")
+    await ports.hold("orbit-a", [41000])
+    await ports.hold("orbit-b", [41000, 41001])
+    ports.release("orbit-a")
     assert len(looked) == 1  # this process stays where it is
 
 
-#: A sandbox's addresses on its own network, ``ale-net-e1``, whose bridge holds the Host at
+#: A sandbox's addresses on its own network, ``orbit-net-e1``, whose bridge holds the Host at
 #: 172.18.0.1, as a scripted docker CLI reports them.
 SANDBOX_IP, SANDBOX_MAC, BRIDGE_MAC = "172.18.0.5", "02:42:ac:12:00:05", "02:42:aa:bb:cc:01"
 PEERS = tc.Peers(host_ip="172.18.0.1", host_mac=BRIDGE_MAC, ip=SANDBOX_IP, mac=SANDBOX_MAC)
@@ -235,7 +235,7 @@ def _scripted_reply(argv: tuple[str, ...]) -> tuple[int, str, str]:
         return 0, "172.18.0.1\n", ""
     if argv[:2] == ("inspect", "--format") and "MacAddress" in argv[2]:
         return 0, f"{SANDBOX_IP} {SANDBOX_MAC}\n", ""
-    if argv[:3] == ("run", "--rm", "--name") and argv[3].startswith("ale-mac-"):
+    if argv[:3] == ("run", "--rm", "--name") and argv[3].startswith("orbit-mac-"):
         return 0, f"{BRIDGE_MAC}\n", ""
     if argv[-1] == "/etc/resolv.conf":
         return 0, RESOLV_CONF, ""
@@ -249,7 +249,7 @@ def _scripted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
         calls.append(argv)
         return _scripted_reply(argv)
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     return calls
 
 
@@ -261,7 +261,7 @@ def _measured_at_commit(monkeypatch: pytest.MonkeyPatch) -> None:
     async def written(container: str) -> int:
         return WRITTEN
 
-    monkeypatch.setattr("ale.run.providers.docker.provider.storage.written", written)
+    monkeypatch.setattr("orbit.run.providers.docker.provider.storage.written", written)
 
 
 def _created(calls: list[tuple[str, ...]]) -> list[tuple[str, IPv4Network, str, bool]]:
@@ -281,16 +281,16 @@ def _created(calls: list[tuple[str, ...]]) -> list[tuple[str, IPv4Network, str, 
 
 def _helpers(calls: list[tuple[str, ...]]) -> list[list[str]]:
     """The commands of each run of the network helper in the sandbox's namespace."""
-    return [call[-1].split(" && ") for call in calls if "container:ale-e1" in call]
+    return [call[-1].split(" && ") for call in calls if "container:orbit-e1" in call]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("network", ["ale-net-e1", None])
+@pytest.mark.parametrize("network", ["orbit-net-e1", None])
 async def test_the_fixed_port_is_routed_to_the_gateway_and_an_isolated_sandbox_confined(
     monkeypatch: pytest.MonkeyPatch, network: str | None
 ) -> None:
     calls = _scripted(monkeypatch)
-    await _RuncConfinement(network, "172.18.0.1").wire("ale-e1", request())
+    await _RuncConfinement(network, "172.18.0.1").wire("orbit-e1", request())
     (rules,) = _helpers(calls)
     assert len(calls) == 1  # the Host's address was read as the sandbox started
     assert rules[2] == (
@@ -326,7 +326,7 @@ async def test_a_runc_sandbox_reaches_the_host_at_its_own_networks_gateway(
     else:
         ((name, subnet, gateway, internal),) = _created(calls)
         assert (started.network, internal, inspected) == (name, True, [])
-        assert name == "ale-net-e1-abcdef" and started.host_ip == gateway == str(subnet[1])
+        assert name == "orbit-net-e1-abcdef" and started.host_ip == gateway == str(subnet[1])
 
 
 @pytest.mark.asyncio
@@ -335,7 +335,7 @@ async def test_a_reattaching_run_replaces_the_gateway_route_and_adds_its_port(
 ) -> None:
     calls = _scripted(monkeypatch)
     later = request(gateway_url="http://0.0.0.0:42000")
-    await _RuncConfinement("ale-net-e1", "172.18.0.1").wire("ale-e1", later, reattached=True)
+    await _RuncConfinement("orbit-net-e1", "172.18.0.1").wire("orbit-e1", later, reattached=True)
     rules = calls[-1][-1].split(" && ")
     assert rules[0] == (
         f"{{ iptables -w -t nat -N {GATEWAY_CHAIN} || iptables -w -t nat -F {GATEWAY_CHAIN}; }}"
@@ -351,7 +351,7 @@ async def test_an_open_sandbox_without_a_gateway_needs_no_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _scripted(monkeypatch)
-    await _RuncConfinement(None, "172.18.0.1").wire("ale-e1", request(gateway_url=None))
+    await _RuncConfinement(None, "172.18.0.1").wire("orbit-e1", request(gateway_url=None))
     assert calls == []
 
 
@@ -366,7 +366,7 @@ def _sandbox() -> DockerSandbox:
     sandbox = DockerSandbox.__new__(DockerSandbox)
     sandbox._sealed = False
     sandbox.sandbox_id = "e1-abcdef"
-    sandbox.container = "ale-e1-abcdef"
+    sandbox.container = "orbit-e1-abcdef"
     sandbox.request = request(retention="snapshot")
     sandbox.agent_user = "user"
     sandbox.allocation = ResourceAllocation(
@@ -432,21 +432,21 @@ async def test_a_snapshot_commits_the_stopped_container_without_its_gpus(
     _measured_at_commit(monkeypatch)
     retained = await _sandbox().snapshot(roles=("solver",), reason="kept")
     assert calls == [
-        ("stop", "--time", "30", "ale-e1-abcdef"),
+        ("stop", "--time", "30", "orbit-e1-abcdef"),
         (
             "commit",
             "--change",
-            "LABEL ale.retention=snapshot",
+            "LABEL orbit.retention=snapshot",
             "--change",
-            'LABEL ale.gpus=""',
+            'LABEL orbit.gpus=""',
             "--change",
-            'LABEL ale.gpu_memory_mb=""',
+            'LABEL orbit.gpu_memory_mb=""',
             "--change",
-            f"LABEL ale.prepared={DIGEST}",
+            f"LABEL orbit.prepared={DIGEST}",
             "--change",
-            f"LABEL ale.written={WRITTEN}",
-            "ale-e1-abcdef",
-            "ale-snapshot:e1-abcdef",
+            f"LABEL orbit.written={WRITTEN}",
+            "orbit-e1-abcdef",
+            "orbit-snapshot:e1-abcdef",
         ),
     ]
     assert retained.handle == "docker:snapshot:e1-abcdef"
@@ -464,14 +464,14 @@ async def test_a_snapshot_of_a_snapshot_holds_what_both_wrote(
     sandbox = _sandbox()
     sandbox.written = 5 << 20
     await sandbox.snapshot(roles=("solver",), reason="kept")
-    assert f"LABEL ale.written={(5 << 20) + WRITTEN}" in calls[1]
+    assert f"LABEL orbit.written={(5 << 20) + WRITTEN}" in calls[1]
 
 
 @pytest.mark.asyncio
 async def test_a_commit_cut_short_leaves_no_snapshot_behind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A commit may have finished in the daemon as ALE gave up on it: destroying the Sandbox
+    """A commit may have finished in the daemon as Orbit gave up on it: destroying the Sandbox
     removes its container, which fails a commit still under way, then the image it named,
     and only one never handed back."""
     calls = _scripted(monkeypatch)
@@ -483,7 +483,7 @@ async def test_a_commit_cut_short_leaves_no_snapshot_behind(
             raise asyncio.CancelledError
         return _scripted_reply(argv)
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     sandbox = _sandbox()
     sandbox.confinement = SimpleNamespace(remove=AsyncMock())  # type: ignore[assignment]
     sandbox.state = SandboxState.READY
@@ -491,7 +491,7 @@ async def test_a_commit_cut_short_leaves_no_snapshot_behind(
         await sandbox.snapshot(roles=("solver",), reason="kept")
     await sandbox.destroy()
     removed = [call[:2] for call in calls if call[0] in {"rm", "rmi"}]
-    assert removed == [("rm", "-f"), ("rmi", "ale-snapshot:e1-abcdef")]
+    assert removed == [("rm", "-f"), ("rmi", "orbit-snapshot:e1-abcdef")]
 
     kept = _sandbox()
     kept.confinement = SimpleNamespace(remove=AsyncMock())  # type: ignore[assignment]
@@ -512,32 +512,32 @@ async def test_a_snapshot_boots_only_for_the_tasks_prepared_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     labels = {
-        "ale.managed": "true",
-        "ale.retention": "snapshot",
-        "ale.episode": "e1",
-        "ale.role": "solver",
-        "ale.prepared": DIGEST,
+        "orbit.managed": "true",
+        "orbit.retention": "snapshot",
+        "orbit.episode": "e1",
+        "orbit.role": "solver",
+        "orbit.prepared": DIGEST,
     }
 
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
-        assert argv[:3] == ("image", "inspect", "ale-snapshot:e1-abcdef")
+        assert argv[:3] == ("image", "inspect", "orbit-snapshot:e1-abcdef")
         return 0, _snapshot_inspect(labels), ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     provider = DockerProvider()
     image, written = await provider._snapshot_image("docker:snapshot:e1-abcdef", request())
     assert (image.observed_identity, image.observed_ref) == ("sha256:" + "5" * 64,) * 2
     assert image.prepared_identity == DIGEST
     assert written == 0
-    labels["ale.written"] = "4096"
+    labels["orbit.written"] = "4096"
     _, written = await provider._snapshot_image("docker:snapshot:e1-abcdef", request())
     assert written == 4096
 
-    labels["ale.prepared"] = "sha256:" + "1" * 64
+    labels["orbit.prepared"] = "sha256:" + "1" * 64
     with pytest.raises(ProviderCapabilityError, match="prepared solver image"):
         await provider._snapshot_image("docker:snapshot:e1-abcdef", request())
-    labels["ale.managed"] = "false"
-    with pytest.raises(ProviderCapabilityError, match="not an ALE snapshot"):
+    labels["orbit.managed"] = "false"
+    with pytest.raises(ProviderCapabilityError, match="not an Orbit snapshot"):
         await provider.destroy_retained("docker:snapshot:e1-abcdef")
 
 
@@ -551,18 +551,18 @@ async def test_a_snapshot_is_listed_and_destroyed_by_its_handle(
         if argv[0] == "ps":
             return 0, "", ""
         if argv[0] == "images":
-            assert "reference=ale-snapshot:*" in argv
+            assert "reference=orbit-snapshot:*" in argv
             return 0, "e1-abcdef\nby-hand\n", ""
         if argv[:2] == ("image", "inspect"):
-            mine = argv[2] == "ale-snapshot:e1-abcdef"
-            labels = {"ale.managed": "true", "ale.retention": "snapshot", "ale.episode": "e1"}
+            mine = argv[2] == "orbit-snapshot:e1-abcdef"
+            labels = {"orbit.managed": "true", "orbit.retention": "snapshot", "orbit.episode": "e1"}
             return 0, _snapshot_inspect(labels if mine else {}), ""
         if argv[0] == "rmi":
             removed.append(argv[1])
             return (1, "", "conflict: image is being used") if len(removed) == 1 else (0, "", "")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     provider = DockerProvider()
     assert [record["handle"] for record in await provider.list_retained()] == [
         "docker:snapshot:e1-abcdef"
@@ -570,11 +570,11 @@ async def test_a_snapshot_is_listed_and_destroyed_by_its_handle(
     with pytest.raises(ProviderStartError, match="being used"):
         await provider.destroy_retained("docker:snapshot:e1-abcdef")
     await provider.destroy_retained("docker:snapshot:e1-abcdef")
-    assert removed == ["ale-snapshot:e1-abcdef"] * 2
+    assert removed == ["orbit-snapshot:e1-abcdef"] * 2
 
 
 async def test_a_provider_without_snapshots_refuses_them_before_anything_starts() -> None:
-    from ale.run.providers.daytona import DaytonaProvider
+    from orbit.run.providers.daytona import DaytonaProvider
 
     with pytest.raises(ProviderCapabilityError, match="saves and boots no snapshots"):
         await DaytonaProvider().accepts(request(retention="snapshot", network=NetworkPolicy()))
@@ -586,9 +586,9 @@ async def test_a_provider_without_snapshots_refuses_them_before_anything_starts(
 
 
 def test_every_helper_container_of_ales_runs_under_runc() -> None:
-    """ALE's own containers, its runners, builders and netfilter helper, need what runc
+    """Orbit's own containers, its runners, builders and netfilter helper, need what runc
     gives them of the Host, whatever runtime the daemon starts others with."""
-    root = Path(ale.run.__file__).parent
+    root = Path(orbit.run.__file__).parent
     helpers: list[str] = []
     unpinned: list[str] = []
     for path in sorted(root.rglob("*.py")):
@@ -619,13 +619,13 @@ def test_every_helper_container_of_ales_runs_under_runc() -> None:
 
 def _helper_commands(call: tuple[str, ...]) -> list[str]:
     assert call[:7] == (
-        "run", "--rm", "--runtime", "runc", "--network", "container:ale-e1", "--cap-add"
+        "run", "--rm", "--runtime", "runc", "--network", "container:orbit-e1", "--cap-add"
     )  # fmt: skip
     return call[-1].split(" && ")
 
 
 def _on_own_bridge(kind: type[_KataConfinement] | type[_GvisorConfinement]) -> Any:
-    return kind(_Networks(), "ale-net-e1", "172.18.0.1", BRIDGE_MAC)
+    return kind(_Networks(), "orbit-net-e1", "172.18.0.1", BRIDGE_MAC)
 
 
 @pytest.mark.asyncio
@@ -645,7 +645,7 @@ async def test_a_kata_or_gvisor_sandbox_boots_on_a_network_of_its_own(
     calls = _scripted(monkeypatch)
     wanted = request(network=NetworkPolicy(mode=mode))
     confinement = await kind.start("e1-abcdef", wanted, _Networks())
-    network = "ale-net-e1-abcdef"
+    network = "orbit-net-e1-abcdef"
     ((name, _, gateway, internal),) = _created(calls)
     assert (name, internal) == (network, False)
     # On the network itself, removed by name before the sandbox starts there.
@@ -655,20 +655,20 @@ async def test_a_kata_or_gvisor_sandbox_boots_on_a_network_of_its_own(
     assert calls[-1] == ("rm", "-f", name)
     assert confinement.host_ip == gateway and confinement.host_mac == BRIDGE_MAC
     assert confinement.run_args(mode is not NetworkMode.OPEN)[:4] == [
-        "--network", network, "--label", f"ale.bridge-mac={BRIDGE_MAC}"
+        "--network", network, "--label", f"orbit.bridge-mac={BRIDGE_MAC}"
     ]  # fmt: skip
     calls.clear()
-    await confinement.wire("ale-e1", wanted)
-    assert await confinement.peers("ale-e1") == dataclasses.replace(PEERS, host_ip=gateway)
+    await confinement.wire("orbit-e1", wanted)
+    assert await confinement.peers("orbit-e1") == dataclasses.replace(PEERS, host_ip=gateway)
     (address,) = [call for call in calls if call[0] == "inspect"]
     assert f'index .NetworkSettings.Networks "{network}"' in address[2]
     assert not [call for call in calls if call[:2] == ("run", "--rm") and "--name" in call]
     (resolved,) = [call for call in calls if call[:3] == ("exec", "-u", "0")]
-    assert resolved[3:7] == ("ale-e1", guestd.PYTHON["linux"], "-I", "-c")
+    assert resolved[3:7] == ("orbit-e1", guestd.PYTHON["linux"], "-I", "-c")
     assert resolved[-1] == RESOLV_CONF
     if mode is not NetworkMode.OPEN:
         # Sealed first: nothing but the seal's own helper runs between the start and it.
-        sealing = [index for index, call in enumerate(calls) if "container:ale-e1" in call]
+        sealing = [index for index, call in enumerate(calls) if "container:orbit-e1" in call]
         assert sealing and sealing[0] < calls.index(resolved)
     read = [call for call in calls if call[-1] == "/etc/resolv.conf"]
     assert read == [
@@ -678,14 +678,14 @@ async def test_a_kata_or_gvisor_sandbox_boots_on_a_network_of_its_own(
         )
     ]  # fmt: skip
     calls.clear()
-    await confinement.wire("ale-e1", wanted, reattached=True)
+    await confinement.wire("orbit-e1", wanted, reattached=True)
     assert not [call for call in calls if call[:3] == ("exec", "-u", "0")]
     sandbox = _sandbox()
     sandbox.confinement = confinement
     sandbox.state = SandboxState.READY
     calls.clear()
     await sandbox.destroy()
-    assert calls == [("rm", "-f", "-v", "ale-e1-abcdef"), ("network", "rm", network)]
+    assert calls == [("rm", "-f", "-v", "orbit-e1-abcdef"), ("network", "rm", network)]
 
 
 @pytest.mark.asyncio
@@ -711,7 +711,7 @@ async def test_a_destroyed_sandbox_removes_its_network_whatever_its_container_re
             )
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     sandbox = _sandbox()
     sandbox.confinement = _on_own_bridge(_KataConfinement)
     sandbox.state = SandboxState.READY
@@ -721,8 +721,8 @@ async def test_a_destroyed_sandbox_removes_its_network_whatever_its_container_re
                 await sandbox.destroy()
         else:
             await sandbox.destroy()
-    assert calls[-1] == ("network", "rm", "ale-net-e1")
-    assert "could not remove network ale-net-e1: " in caplog.text
+    assert calls[-1] == ("network", "rm", "orbit-net-e1")
+    assert "could not remove network orbit-net-e1: " in caplog.text
 
 
 @pytest.mark.asyncio
@@ -753,17 +753,17 @@ async def test_the_bridges_mac_is_read_on_the_network_by_a_helper_gone_before_it
             return answer
         return 1, "", "No such container"
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     if read is None:
-        with pytest.raises(ProviderStartError, match=r"ale-net-e1's bridge|timed out"):
-            await docker_provider._bridge_mac("ale-net-e1", "172.18.0.1")
+        with pytest.raises(ProviderStartError, match=r"orbit-net-e1's bridge|timed out"):
+            await docker_provider._bridge_mac("orbit-net-e1", "172.18.0.1")
     else:
-        assert await docker_provider._bridge_mac("ale-net-e1", "172.18.0.1") == read
+        assert await docker_provider._bridge_mac("orbit-net-e1", "172.18.0.1") == read
     run, removed = calls
     name = run[run.index("--name") + 1]
-    assert run[:4] == ("run", "--rm", "--name", name) and name.startswith("ale-mac-")
+    assert run[:4] == ("run", "--rm", "--name", name) and name.startswith("orbit-mac-")
     assert run[4:12] == (
-        "--runtime", "runc", "--network", "ale-net-e1", "--entrypoint", "bash",
+        "--runtime", "runc", "--network", "orbit-net-e1", "--entrypoint", "bash",
         docker_provider.NETFILTER_IMAGE, "-c",
     )  # fmt: skip
     assert run[12:] == (docker_provider._NEIGHBOUR_MAC, "bash", "172.18.0.1")
@@ -774,7 +774,7 @@ async def test_the_bridges_mac_is_read_on_the_network_by_a_helper_gone_before_it
 async def test_a_sandbox_that_records_no_bridge_mac_is_not_reattached() -> None:
     """A helper on its network would be its neighbour, so the MAC comes from its label."""
     with pytest.raises(ProviderCapabilityError, match="records no MAC"):
-        await _GvisorConfinement.found(("ale-net-e1",), _Networks(), {})
+        await _GvisorConfinement.found(("orbit-net-e1",), _Networks(), {})
 
 
 REPLACE = "tc filter replace dev"
@@ -794,7 +794,7 @@ async def test_a_kata_sandbox_is_confined_by_tc_filters_outside_its_vm(
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)),
         proxy_url="http://172.18.0.1:9443",
     )
-    await _on_own_bridge(_KataConfinement).wire("ale-e1", proxied)
+    await _on_own_bridge(_KataConfinement).wire("orbit-e1", proxied)
     (filters,) = _helpers(calls)
     tap, veth, host = kata.TAP, kata.VETH, "172.18.0.1"
     assert filters == [
@@ -830,7 +830,7 @@ async def test_an_open_kata_sandbox_gets_only_the_gateway_route(
 ) -> None:
     calls = _scripted(monkeypatch)
     await _on_own_bridge(_KataConfinement).wire(
-        "ale-e1", request(network=NetworkPolicy(mode=NetworkMode.OPEN))
+        "orbit-e1", request(network=NetworkPolicy(mode=NetworkMode.OPEN))
     )
     (filters,) = _helpers(calls)
     put = [item for item in filters if item.startswith(REPLACE)]
@@ -845,7 +845,7 @@ async def test_a_reattaching_run_replaces_only_the_kata_gateway_filters(
     blocked sandbox no longer has goes."""
     calls = _scripted(monkeypatch)
     later = request(gateway_url="http://0.0.0.0:42000")
-    await _on_own_bridge(_KataConfinement).wire("ale-e1", later, reattached=True)
+    await _on_own_bridge(_KataConfinement).wire("orbit-e1", later, reattached=True)
     (filters,) = _helpers(calls)
     put = [item for item in filters if item.startswith(REPLACE)]
     assert all(" pref 10 " in item for item in put) and len(put) == 2
@@ -870,7 +870,7 @@ async def test_a_kata_sandbox_opens_and_seals_egress_with_its_tc_filters(
         return 0, "", "", False
 
     sandbox = _sandbox()
-    sandbox.container = "ale-e1"
+    sandbox.container = "orbit-e1"
     sandbox.confinement = _on_own_bridge(_KataConfinement)
     sandbox._sealed = False
     sandbox._client = SimpleNamespace(exec=guest_exec)  # type: ignore[assignment]
@@ -898,8 +898,8 @@ def test_the_seal_probe_reads_the_drop_the_seal_puts_in_place(module: Any) -> No
 def _netstack_state(call: tuple[str, ...]) -> dict[str, Any]:
     """The state a privileged exec of the iptables writer sets, checked to be one it
     takes."""
-    assert call[:5] == ("exec", "--privileged", "-u", "0", "ale-e1")
-    assert call[5:8] == ("/opt/ale/python/bin/python3", "-I", "-c")
+    assert call[:5] == ("exec", "--privileged", "-u", "0", "orbit-e1")
+    assert call[5:8] == ("/opt/orbit/python/bin/python3", "-I", "-c")
     assert call[8] == Path(iptables.__file__).read_text()
     iptables.plan(call[9])
     return json.loads(call[9])
@@ -915,18 +915,18 @@ async def test_a_gvisor_sandbox_is_sealed_outside_and_refused_inside(
 ) -> None:
     """netstack reads every frame through a packet socket before tc's ingress, so the seal
     is on the veth's egress, where the wire carries the Gateway's own port, and only from
-    the sandbox's own addresses to the bridge's; ALE's chains in netstack route the fixed
+    the sandbox's own addresses to the bridge's; Orbit's chains in netstack route the fixed
     port and refuse what the seal drops."""
     calls = _scripted(monkeypatch)
     proxied = request(
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)),
         proxy_url="http://172.18.0.1:9443",
     )
-    await _on_own_bridge(_GvisorConfinement).wire("ale-e1", proxied)
+    await _on_own_bridge(_GvisorConfinement).wire("orbit-e1", proxied)
     (filters,) = _helpers(calls)
     (netstack,) = _netstack_calls(calls)
     assert calls.index(netstack) > max(
-        calls.index(call) for call in calls if "container:ale-e1" in call
+        calls.index(call) for call in calls if "container:orbit-e1" in call
     )
     egress = f"{REPLACE} {gvisor.VETH} egress"
     host = "172.18.0.1"
@@ -947,7 +947,7 @@ async def test_a_gvisor_sandbox_is_sealed_outside_and_refused_inside(
     episode = {"dst": host, "proto": "tcp", "dports": [41000, 9443]}
     assert tables["nat"] == {
         "chains": {
-            "ALE_GATEWAY": [
+            "ORBIT_GATEWAY": [
                 {
                     "dst": host,
                     "proto": "tcp",
@@ -956,30 +956,30 @@ async def test_a_gvisor_sandbox_is_sealed_outside_and_refused_inside(
                 }
             ]
         },
-        "jumps": {"OUTPUT": ["ALE_GATEWAY"]},
+        "jumps": {"OUTPUT": ["ORBIT_GATEWAY"]},
     }
     assert tables["filter"]["chains"] == {
-        "ALE_HOST": [
+        "ORBIT_HOST": [
             episode | {"target": "ACCEPT"},
             {"dst": host, "proto": "tcp", "target": "REJECT_TCP_RESET"},
             {"dst": host, "target": "REJECT"},
         ],
-        "ALE_SEAL": [
+        "ORBIT_SEAL": [
             {"out": "lo", "target": "ACCEPT"},
             episode | {"target": "ACCEPT"},
             {"proto": "tcp", "target": "REJECT_TCP_RESET"},
             {"target": "REJECT"},
         ],
-        "ALE_INPUT": [
+        "ORBIT_INPUT": [
             {"in": "lo", "target": "ACCEPT"},
             {"ctstate": ["ESTABLISHED", "RELATED"], "target": "ACCEPT"},
             {"target": "DROP"},
         ],
     }
     assert tables["filter"]["jumps"] == {
-        "OUTPUT": ["ALE_HOST", "ALE_SEAL"],
-        "FORWARD": ["ALE_HOST", "ALE_SEAL"],
-        "INPUT": ["ALE_INPUT"],
+        "OUTPUT": ["ORBIT_HOST", "ORBIT_SEAL"],
+        "FORWARD": ["ORBIT_HOST", "ORBIT_SEAL"],
+        "INPUT": ["ORBIT_INPUT"],
     }
 
 
@@ -991,7 +991,7 @@ async def test_an_open_gvisor_sandbox_gets_only_the_gateway_route_in_netstack(
     """No filter outside it, and the privileged writer runs only for a Gateway to route."""
     calls = _scripted(monkeypatch)
     await _on_own_bridge(_GvisorConfinement).wire(
-        "ale-e1", request(network=NetworkPolicy(mode=NetworkMode.OPEN), gateway_url=gateway_url)
+        "orbit-e1", request(network=NetworkPolicy(mode=NetworkMode.OPEN), gateway_url=gateway_url)
     )
     assert _helpers(calls) == []
     if gateway_url is None:
@@ -999,7 +999,7 @@ async def test_an_open_gvisor_sandbox_gets_only_the_gateway_route_in_netstack(
         return
     (netstack,) = _netstack_calls(calls)
     tables = _netstack_state(netstack)["tables"]
-    assert list(tables["nat"]["chains"]) == ["ALE_GATEWAY"] and tables["filter"] == {}
+    assert list(tables["nat"]["chains"]) == ["ORBIT_GATEWAY"] and tables["filter"] == {}
 
 
 @pytest.mark.asyncio
@@ -1017,11 +1017,11 @@ async def test_a_reattaching_run_replaces_only_the_gvisor_gateway_filters(
             return 0, "action order 1: gact action drop", ""
         return await scripted(*argv, **kwargs)
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     confinement = _on_own_bridge(_GvisorConfinement)
     later = request(gateway_url="http://0.0.0.0:42000")
-    await confinement.wire("ale-e1", later, reattached=True)
-    assert await confinement.sealed("ale-e1", {}) is True
+    await confinement.wire("orbit-e1", later, reattached=True)
+    assert await confinement.sealed("orbit-e1", {}) is True
     filters, probe = _helpers(calls)
     assert probe == [gvisor.SEAL_PROBE]
     put = [item for item in filters if item.startswith(REPLACE)]
@@ -1031,8 +1031,8 @@ async def test_a_reattaching_run_replaces_only_the_gvisor_gateway_filters(
     ]
     (netstack,) = _netstack_calls(calls)
     tables = _netstack_state(netstack)["tables"]
-    assert tables["filter"]["chains"]["ALE_SEAL"]  # still sealed
-    assert tables["nat"]["chains"]["ALE_GATEWAY"][0]["target"] == {"DNAT": "172.18.0.1:42000"}
+    assert tables["filter"]["chains"]["ORBIT_SEAL"]  # still sealed
+    assert tables["nat"]["chains"]["ORBIT_GATEWAY"][0]["target"] == {"DNAT": "172.18.0.1:42000"}
 
 
 @pytest.mark.asyncio
@@ -1043,9 +1043,9 @@ async def test_a_gvisor_sandbox_opens_inside_first_and_seals_outside_first(
     while they still pass; sealing again replaces the filters, never removing the drop."""
     calls = _scripted(monkeypatch)
     sandbox = _sandbox()
-    sandbox.container = "ale-e1"
+    sandbox.container = "orbit-e1"
     confinement = _on_own_bridge(_GvisorConfinement)
-    await confinement.wire("ale-e1", request())
+    await confinement.wire("orbit-e1", request())
     calls.clear()
     sandbox.confinement = confinement
     sandbox._sealed = True
@@ -1054,11 +1054,11 @@ async def test_a_gvisor_sandbox_opens_inside_first_and_seals_outside_first(
     async def nothing(*_args: object, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr("ale.run.providers.docker.provider.relay.stop", nothing)
-    monkeypatch.setattr("ale.run.providers.docker.provider.relay.start", nothing)
+    monkeypatch.setattr("orbit.run.providers.docker.provider.relay.stop", nothing)
+    monkeypatch.setattr("orbit.run.providers.docker.provider.relay.start", nothing)
     await sandbox.open_egress()
     (inside, outside) = calls
-    assert _netstack_state(inside)["tables"]["filter"]["chains"]["ALE_SEAL"] == []
+    assert _netstack_state(inside)["tables"]["filter"]["chains"]["ORBIT_SEAL"] == []
     assert _helper_commands(outside)[-1] == (
         f'test -z "$(tc filter show dev {gvisor.VETH} egress pref 21)"'
     )
@@ -1066,7 +1066,7 @@ async def test_a_gvisor_sandbox_opens_inside_first_and_seals_outside_first(
     await sandbox.close_egress()
     (outside, inside) = calls
     assert _helper_commands(outside) == gvisor.seal(PEERS)
-    assert _netstack_state(inside)["tables"]["filter"]["chains"]["ALE_SEAL"]
+    assert _netstack_state(inside)["tables"]["filter"]["chains"]["ORBIT_SEAL"]
 
 
 @pytest.mark.parametrize("isolated", [True, False])
@@ -1085,7 +1085,7 @@ def test_every_netstack_state_is_one_the_writer_takes(
     plans = iptables.plan(json.dumps(state))
     assert set(plans) == {"nat", "filter"}
     chains, _ = plans["filter"]
-    assert set(chains) == ({"ALE_HOST", "ALE_SEAL", "ALE_INPUT"} if isolated else set())
+    assert set(chains) == ({"ORBIT_HOST", "ORBIT_SEAL", "ORBIT_INPUT"} if isolated else set())
 
 
 def test_a_gvisor_sandbox_holds_the_declared_memory_and_what_the_sentry_takes() -> None:
@@ -1096,7 +1096,7 @@ def test_a_gvisor_sandbox_holds_the_declared_memory_and_what_the_sentry_takes() 
 def test_gvisor_is_registered_as_its_readme_shows() -> None:
     """Every name, with exactly these arguments: raw sockets but no packet socket writes,
     and nf_tables without raw sockets."""
-    readme = (Path(ale.run.__file__).parents[5] / "images/runtimes/gvisor/README.md").read_text()
+    readme = (Path(orbit.run.__file__).parents[5] / "images/runtimes/gvisor/README.md").read_text()
     shown = json.loads(readme.split("```json\n", 1)[1].split("```", 1)[0])["runtimes"]
     assert {name: tuple(entry["runtimeArgs"]) for name, entry in shown.items()} == {
         "runsc": ("--overlay2=none", "--allow-suid", "--nvproxy-allowed-driver-capabilities=all"),
@@ -1140,22 +1140,22 @@ async def test_a_watcher_counts_the_oom_kills_docker_does_not_record(
         return object()
 
     monkeypatch.setattr(docker_provider.memory.GuestEvents, "start", start)
-    watcher = await docker_provider._watcher("ale-e1", docker_provider.RUNTIMES[runtime])
+    watcher = await docker_provider._watcher("orbit-e1", docker_provider.RUNTIMES[runtime])
     assert started == ([watched] if watched else [])
     assert (watcher is None) is (watched is None)
 
 
-def test_the_gvisor_build_ale_runs_is_the_one_its_build_script_makes() -> None:
+def test_the_gvisor_build_orbit_runs_is_the_one_its_build_script_makes() -> None:
     """And the one both READMEs name, in its version string and the path it installs to."""
-    root = Path(ale.run.__file__).parents[5]
+    root = Path(orbit.run.__file__).parents[5]
     build = (root / "images/runtimes/gvisor/build.sh").read_text()
     (version,) = re.findall(r"^VERSION=([0-9.]+)$", build, re.MULTILINE)
-    assert version == gvisor.VERSION and f"+ale.{version}" == gvisor.BUILD
-    for readme in ("images/runtimes/gvisor", "packages/ale-run/src/ale/run/providers"):
+    assert version == gvisor.VERSION and f"+orbit.{version}" == gvisor.BUILD
+    for readme in ("images/runtimes/gvisor", "packages/orbit-run/src/orbit/run/providers"):
         path = root / readme / "README.md"
         text = path.read_text()
-        named = re.findall(r"\+ale\.([0-9][0-9.]*[0-9])", text)
-        named += re.findall(r"ale-gvisor/([0-9][0-9.]*[0-9])", text)
+        named = re.findall(r"\+orbit\.([0-9][0-9.]*[0-9])", text)
+        named += re.findall(r"orbit-gvisor/([0-9][0-9.]*[0-9])", text)
         named += re.findall(r"^version=([0-9.]+)$", text, re.MULTILINE)
         assert named and set(named) == {version}, f"{path} names {sorted(set(named))}"
 
@@ -1222,17 +1222,17 @@ async def test_a_sandbox_that_died_says_why_when_its_session_ends(
         if argv[0] == "wait":
             deadlines.append(timeout)
             if waited is None:
-                raise ProviderStartError(f"docker wait ale-e1 timed out after {timeout:g}s")
+                raise ProviderStartError(f"docker wait orbit-e1 timed out after {timeout:g}s")
             return (
                 waited,
                 "137\n" if waited == 0 else "",
                 "" if waited == 0 else "No such container",
             )
-        assert argv == ("inspect", "--format", "{{json .State}}", "ale-e1")
+        assert argv == ("inspect", "--format", "{{json .State}}", "orbit-e1")
         return 0, json.dumps(state), ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    session = _Session(["sh", "-c", "echo {}; sleep 0.2; echo urpc EOF >&2"], "ale-e1", 512)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
+    session = _Session(["sh", "-c", "echo {}; sleep 0.2; echo urpc EOF >&2"], "orbit-e1", 512)
     await session.start()
     assert await session.recv() == "{}"
     with pytest.raises(GuestUnreachableError) as ended:
@@ -1264,12 +1264,12 @@ async def test_a_kata_sandbox_lost_after_an_oom_kill_in_its_guest_says_so(
             return 0, "255\n", ""
         return 0, json.dumps({"Running": False, "ExitCode": 255, "OOMKilled": False}), ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     watcher = await memory.GuestEvents.start(
         ["sh", "-c", "echo oom 0 oom_kill 0; sleep 0.3; echo oom 0 oom_kill 13"],
         counter="its cgroup",
     )
-    session = _Session(["sh", "-c", "echo {}; sleep 0.1"], "ale-e1", 512, watcher)
+    session = _Session(["sh", "-c", "echo {}; sleep 0.1"], "orbit-e1", 512, watcher)
     await session.start()
     assert await session.recv() == "{}"
     with pytest.raises(GuestUnreachableError) as ended:
@@ -1305,12 +1305,12 @@ async def test_a_gvisor_sandbox_lost_after_an_oom_kill_says_which_kernel_made_it
             return 0, "137\n", ""
         return 0, json.dumps({"Running": False, "ExitCode": 137, "OOMKilled": oom_killed}), ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     counts = "oom_kill_disable 0 under_oom 0 oom_kill"
     watcher = await memory.GuestEvents.start(
         ["sh", "-c", f"echo {counts} 0; sleep 0.3; echo {counts} {sentry}"], counter="the Sentry"
     )
-    session = _Session(["sh", "-c", "echo {}; sleep 0.1"], "ale-e1", 512, watcher)
+    session = _Session(["sh", "-c", "echo {}; sleep 0.1"], "orbit-e1", 512, watcher)
     await session.start()
     assert await session.recv() == "{}"
     with pytest.raises(GuestUnreachableError) as ended:
@@ -1328,21 +1328,21 @@ async def test_a_gvisor_sandbox_lost_after_an_oom_kill_says_which_kernel_made_it
 @pytest.mark.parametrize(
     "stopped",
     [
-        GuestUnreachableError("the sandbox itself died: ALE's GPU memory watchdog stopped it"),
+        GuestUnreachableError("the sandbox itself died: Orbit's GPU memory watchdog stopped it"),
         StorageExhaustedError(
-            "ALE stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
+            "Orbit stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
             "Task declares"
         ),
     ],
 )
-async def test_a_sandbox_ale_stopped_is_no_memory_death_whatever_its_memory(
+async def test_a_sandbox_orbit_stopped_is_no_memory_death_whatever_its_memory(
     monkeypatch: pytest.MonkeyPatch, stopped: GuestUnreachableError
 ) -> None:
     """The GPU watchdog's stop of a gVisor Sandbox whose GPU memory limit failed, or the
-    storage watch's of one that wrote past its storage_mb, is ALE's doing, whatever Docker
+    storage watch's of one that wrote past its storage_mb, is Orbit's doing, whatever Docker
     recorded: its OOMKilled, which an earlier kill may have set, is not even read."""
     calls = _scripted(monkeypatch)
-    session = _Session(["sh", "-c", "echo {}"], "ale-e1", 512)
+    session = _Session(["sh", "-c", "echo {}"], "orbit-e1", 512)
     session.stopped = stopped
     await session.start()
     assert await session.recv() == "{}"
@@ -1365,10 +1365,10 @@ async def test_a_death_is_explained_whatever_the_timeout_of_the_call_it_ended(
             return 0, "137\n", ""
         return 0, json.dumps({"Running": False, "OOMKilled": False, "ExitCode": 137}), ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     reply = json.dumps({"id": 1, "ok": True, "data": {}})
     guestd = f"read request; echo '{reply}'; read request; echo urpc EOF >&2"
-    session = _Session(["sh", "-c", guestd], "ale-e1", 512)
+    session = _Session(["sh", "-c", guestd], "orbit-e1", 512)
     client = GuestClient(session)
     await session.start()
     try:
@@ -1400,11 +1400,11 @@ async def test_a_guestd_that_fails_to_start_says_why_at_once(
             argv = ["sh", "-c", "echo 'guestd: bad interpreter' >&2; exit 1"]
             super().__init__(argv, container, *args)
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    monkeypatch.setattr("ale.run.providers.docker.provider._Session", Failing)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._Session", Failing)
     started = time.monotonic()
     with pytest.raises(ProviderStartError) as failed:
-        await DockerProvider()._connect("ale-e1", "user", 512)
+        await DockerProvider()._connect("orbit-e1", "user", 512)
     assert str(failed.value) == (
         "guest service did not answer: guest session closed: guestd: bad interpreter"
     )
@@ -1412,17 +1412,17 @@ async def test_a_guestd_that_fails_to_start_says_why_at_once(
 
 
 @pytest.mark.asyncio
-async def test_a_session_ale_ends_or_that_never_answered_is_no_death(
+async def test_a_session_orbit_ends_or_that_never_answered_is_no_death(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Closing it, as ALE does before it destroys, keeps or snapshots a Sandbox, or using it
+    """Closing it, as Orbit does before it destroys, keeps or snapshots a Sandbox, or using it
     unstarted asks nothing of Docker."""
     calls = _scripted(monkeypatch)
-    unstarted = _Session(["cat"], "ale-e1", 512)
+    unstarted = _Session(["cat"], "orbit-e1", 512)
     with pytest.raises(GuestUnreachableError, match="transport is not started") as raised:
         await unstarted.recv()
     assert await unstarted.explain(raised.value) is raised.value
-    session = _Session(["sh", "-c", "echo {}; cat"], "ale-e1", 512)
+    session = _Session(["sh", "-c", "echo {}; cat"], "orbit-e1", 512)
     await session.start()
     assert await session.recv() == "{}"
     pending = asyncio.ensure_future(session.recv())
@@ -1445,13 +1445,13 @@ async def test_guestd_is_reached_isolated_in_the_root_directory_through_a_sessio
         return {}
 
     monkeypatch.setattr(_Session, "start", started)
-    monkeypatch.setattr("ale.run.transport.GuestClient.health", healthy)
-    transport = await DockerProvider()._connect("ale-e1", "user", 512)
-    assert transport.client._transport is transport and transport.container == "ale-e1"
+    monkeypatch.setattr("orbit.run.transport.GuestClient.health", healthy)
+    transport = await DockerProvider()._connect("orbit-e1", "user", 512)
+    assert transport.client._transport is transport and transport.container == "orbit-e1"
     assert transport._argv == [
-        "docker", "exec", "-i", "--user", "0", "--env", "ALE_AGENT_USER=user",
-        "--workdir", "/", "ale-e1",
-        "/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/main.py", "--stdio",
+        "docker", "exec", "-i", "--user", "0", "--env", "ORBIT_AGENT_USER=user",
+        "--workdir", "/", "orbit-e1",
+        "/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/main.py", "--stdio",
     ]  # fmt: skip
 
 
@@ -1476,7 +1476,7 @@ async def test_an_allowlist_seal_relays_the_agent_once_the_container_is_confined
         return "127.0.0.1:41999" if proxy else None
 
     sandbox = _sandbox()
-    sandbox.container = "ale-e1"
+    sandbox.container = "orbit-e1"
     sandbox.request = request(
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("a.b",)),
         proxy_url="http://0.0.0.0:9443",
@@ -1485,7 +1485,7 @@ async def test_an_allowlist_seal_relays_the_agent_once_the_container_is_confined
     sandbox.allocation = sandbox.allocation.model_copy(
         update={"desktop_resolution": DesktopResolution() if desktop else None}
     )
-    sandbox.confinement = _RuncConfinement("ale-net-e1", "172.18.0.1")
+    sandbox.confinement = _RuncConfinement("orbit-net-e1", "172.18.0.1")
     sandbox._sealed = False
     sandbox._client = SimpleNamespace(exec=guest_exec, egress_relay=egress_relay)  # type: ignore[assignment]
 
@@ -1496,10 +1496,10 @@ async def test_an_allowlist_seal_relays_the_agent_once_the_container_is_confined
 
     bypass = str([HOST_ALIAS, "localhost", "127.0.0.1"])
     assert calls == [
-        ("network", "disconnect", "bridge", "ale-e1"),
+        ("network", "disconnect", "bridge", "orbit-e1"),
         ("egress_relay", f"http://t0ken:@{HOST_ALIAS}:9443", bypass, str(desktop)),
         ("egress_relay", "None", "()", "False"),
-        ("network", "connect", "bridge", "ale-e1"),
+        ("network", "connect", "bridge", "orbit-e1"),
     ]
     assert seen[0] is not None and seen[0]["HTTPS_PROXY"] == "http://127.0.0.1:41999"
     assert seen[0]["NO_PROXY"] == f"{HOST_ALIAS},localhost,127.0.0.1"
@@ -1510,16 +1510,16 @@ async def test_an_allowlist_seal_relays_the_agent_once_the_container_is_confined
 @pytest.mark.parametrize(
     ("mode", "runtime", "networks", "drop", "sealed"),
     [
-        (NetworkMode.ALLOWLIST, "runc", ("ale-net-e1",), False, True),
-        (NetworkMode.ALLOWLIST, "runc", ("ale-net-e1", "bridge"), False, False),
+        (NetworkMode.ALLOWLIST, "runc", ("orbit-net-e1",), False, True),
+        (NetworkMode.ALLOWLIST, "runc", ("orbit-net-e1", "bridge"), False, False),
         (NetworkMode.OPEN, "runc", ("bridge",), False, False),
-        (NetworkMode.ALLOWLIST, kata.RUNTIME, ("ale-net-e1",), True, True),
-        (NetworkMode.ALLOWLIST, kata.RUNTIME, ("ale-net-e1",), False, False),
-        (NetworkMode.OPEN, kata.RUNTIME, ("ale-net-e1",), True, False),
-        (NetworkMode.ALLOWLIST, gvisor.RUNTIME, ("ale-net-e1",), True, True),
-        (NetworkMode.ALLOWLIST, gvisor.NET_RAW, ("ale-net-e1",), True, True),
-        (NetworkMode.ALLOWLIST, gvisor.RUNTIME, ("ale-net-e1",), False, False),
-        (NetworkMode.OPEN, gvisor.RUNTIME, ("ale-net-e1",), True, False),
+        (NetworkMode.ALLOWLIST, kata.RUNTIME, ("orbit-net-e1",), True, True),
+        (NetworkMode.ALLOWLIST, kata.RUNTIME, ("orbit-net-e1",), False, False),
+        (NetworkMode.OPEN, kata.RUNTIME, ("orbit-net-e1",), True, False),
+        (NetworkMode.ALLOWLIST, gvisor.RUNTIME, ("orbit-net-e1",), True, True),
+        (NetworkMode.ALLOWLIST, gvisor.NET_RAW, ("orbit-net-e1",), True, True),
+        (NetworkMode.ALLOWLIST, gvisor.RUNTIME, ("orbit-net-e1",), False, False),
+        (NetworkMode.OPEN, gvisor.RUNTIME, ("orbit-net-e1",), True, False),
     ],
 )
 @pytest.mark.parametrize("asked", ["same", "open"])
@@ -1538,14 +1538,14 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     whichever of its runtimes it runs under. Its own network mode, which it was started
     with, decides how it is confined, whatever the reattaching run asks."""
     record = {
-        "Name": "/ale-e1",
+        "Name": "/orbit-e1",
         "Image": DIGEST,
         "Config": {
             "Labels": {
-                "ale.managed": "true",
-                "ale.role": "solver",
-                "ale.network": mode.value,
-                "ale.bridge-mac": BRIDGE_MAC,
+                "orbit.managed": "true",
+                "orbit.role": "solver",
+                "orbit.network": mode.value,
+                "orbit.bridge-mac": BRIDGE_MAC,
             }
         },
         "State": {"Running": True},
@@ -1568,7 +1568,7 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
         if (
             argv[0] == "run"
             and "--network" in argv
-            and argv[argv.index("--network") + 1] != ("container:ale-e1")
+            and argv[argv.index("--network") + 1] != ("container:orbit-e1")
         ):
             raise AssertionError(f"a helper joined the running sandbox's network: {argv}")
         if argv[-1].startswith("tc filter show"):
@@ -1589,7 +1589,7 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
         return "127.0.0.1:41999" if proxy else None
 
     async def connect(_provider: DockerProvider, _container: str, *_: object) -> _Session:
-        session = _Session([], "ale-e1", 1024)
+        session = _Session([], "orbit-e1", 1024)
         session.client = SimpleNamespace(exec=guest_exec, close=close, egress_relay=egress_relay)  # type: ignore[assignment]
         return session
 
@@ -1599,10 +1599,10 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     async def no_watcher(*_: object) -> None:
         """Kata's memory watcher, which runs in the guest."""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr(DockerProvider, "_connect", connect)
     monkeypatch.setattr(DockerProvider, "_guest_contract", contract)
-    monkeypatch.setattr("ale.run.providers.docker.provider._watcher", no_watcher)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._watcher", no_watcher)
     network = (
         NetworkPolicy(mode=mode, allowed_hosts=("a.b",))
         if mode is NetworkMode.ALLOWLIST
@@ -1622,7 +1622,7 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     image = ResolvedImage(
         kind="container", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=DIGEST
     )
-    sandbox = await DockerProvider().reattach("docker:ale-e1", wanted, allocation, image)
+    sandbox = await DockerProvider().reattach("docker:orbit-e1", wanted, allocation, image)
     await sandbox.exec(["true"], identity=Identity.AGENT)
     assert (seen[-1] is not None) is sealed
     # The guestd that relayed the run which sealed it is gone; this run relays from its own.
@@ -1637,7 +1637,7 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     if runtime in (gvisor.RUNTIME, gvisor.NET_RAW):
         # Its netstack chains are written again, sealed as the veth's filters say.
         (written,) = [json.loads(call[-1]) for call in calls if call[0] == "exec"]
-        assert bool(written["tables"]["filter"].get("chains", {}).get("ALE_SEAL")) is sealed
+        assert bool(written["tables"]["filter"].get("chains", {}).get("ORBIT_SEAL")) is sealed
 
 
 @pytest.mark.asyncio
@@ -1645,9 +1645,9 @@ async def test_a_container_that_records_no_network_mode_is_not_reattached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     record = {
-        "Name": "/ale-e1",
+        "Name": "/orbit-e1",
         "Image": DIGEST,
-        "Config": {"Labels": {"ale.managed": "true", "ale.role": "solver"}},
+        "Config": {"Labels": {"orbit.managed": "true", "orbit.role": "solver"}},
         "State": {"Running": True},
         "HostConfig": {"Runtime": "runc"},
         "NetworkSettings": {"Networks": {"bridge": {}}},
@@ -1656,7 +1656,7 @@ async def test_a_container_that_records_no_network_mode_is_not_reattached(
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         return 0, json.dumps([record]), ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     allocation = ResourceAllocation(
         cpus=1, memory_mb=1024, sudo=False, network_mode=NetworkMode.BLOCK,
         provider="docker:runc", leaf="docker:runc",
@@ -1665,7 +1665,7 @@ async def test_a_container_that_records_no_network_mode_is_not_reattached(
         kind="container", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=DIGEST
     )
     with pytest.raises(ProviderCapabilityError, match="records no network mode"):
-        await DockerProvider().reattach("docker:ale-e1", request(), allocation, image)
+        await DockerProvider().reattach("docker:orbit-e1", request(), allocation, image)
 
 
 @pytest.mark.asyncio
@@ -1807,9 +1807,9 @@ async def test_every_leaf_holds_a_sandbox_to_storage_mb_but_on_an_engines_volume
     async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
         return found
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr(
-        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+        "orbit.run.providers.docker.provider.resolve_prepared_container_image", resolved
     )
     provider = DockerProvider()
     monkeypatch.setattr(provider, "check_image", no_problems)
@@ -1870,7 +1870,7 @@ async def test_a_sandbox_booted_from_a_snapshot_counts_what_the_snapshot_holds(
     await _until(lambda: ("kill", sandbox.container) in calls)
     ended = await sandbox._sessions[0].explain(GuestUnreachableError("guest session closed"))
     assert str(ended) == (
-        "ALE stopped the sandbox: it and the snapshot it booted from wrote 1100 MiB over its "
+        "Orbit stopped the sandbox: it and the snapshot it booted from wrote 1100 MiB over its "
         "image, past the 1024 MiB its Task declares"
     )
     await sandbox._release()
@@ -1893,7 +1893,7 @@ async def test_a_sandbox_that_writes_past_its_storage_is_stopped_and_says_so(
         logged_at_kill.append(len(sink.events))
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     asked = _measured(
         monkeypatch,
         (0, f"{500 << 20}\n", ""),
@@ -1914,7 +1914,7 @@ async def test_a_sandbox_that_writes_past_its_storage_is_stopped_and_says_so(
     )
     assert calls == [("kill", sandbox.container)]
     stopped = (
-        "ALE stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
+        "Orbit stopped the sandbox: it wrote 1025 MiB over its image, past the 1024 MiB its "
         "Task declares"
     )
     for session in sandbox._sessions:
@@ -1927,7 +1927,7 @@ async def test_a_sandbox_that_writes_past_its_storage_is_stopped_and_says_so(
     (logged,) = sink.events
     assert (logged.level, logged.phase) == ("warning", "agent")
     assert logged.message == (
-        "ALE's storage watch stopped the Sandbox: it wrote 1025 MiB over its image, past the "
+        "Orbit's storage watch stopped the Sandbox: it wrote 1025 MiB over its image, past the "
         "1024 MiB its Task declares"
     )
     assert logged.data == {"written_mb": 1025, "storage_mb": 1024}
@@ -1937,7 +1937,7 @@ async def test_a_sandbox_that_writes_past_its_storage_is_stopped_and_says_so(
 async def test_the_storage_watch_measures_only_while_a_sandbox_is_driven(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A Sandbox that names no storage_mb is not measured; one that does is until ALE lets
+    """A Sandbox that names no storage_mb is not measured; one that does is until Orbit lets
     go of it or it is gone, and a measurement that fails is warned of once and tried again."""
     calls = _scripted(monkeypatch)
     asked = _measured(monkeypatch, (0, "0\n", ""))
@@ -1960,7 +1960,7 @@ async def test_the_storage_watch_measures_only_while_a_sandbox_is_driven(
         (1, "", "Error response from daemon: No such container: " + "f" * 64),
     )
     sandbox = _sized_sandbox()
-    with caplog.at_level("WARNING", logger="ale.run.providers.docker.storage"):
+    with caplog.at_level("WARNING", logger="orbit.run.providers.docker.storage"):
         sandbox.watch()
         await _until(lambda: sandbox._storage is not None and sandbox._storage._task.done())
     assert len(asked) == 4
@@ -1975,7 +1975,7 @@ async def test_the_storage_watch_measures_only_while_a_sandbox_is_driven(
 async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ALE's Linux images and the Tasks built on them are x86-64, which Docker runs
+    """Orbit's Linux images and the Tasks built on them are x86-64, which Docker runs
     natively."""
     monkeypatch.setattr("platform.machine", lambda: "arm64")
     assert await DockerProvider().unserved(
@@ -1983,9 +1983,9 @@ async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     ) == ("runs arm64, not x86_64",)
 
 
-_RUNSC = "/usr/local/lib/ale-gvisor/0.1.4/runsc"
+_RUNSC = "/usr/local/lib/orbit-gvisor/0.1.4/runsc"
 _REGISTERED = dict(gvisor.ARGUMENTS)
-#: Part of what ``runsc flags`` of ALE's build lists.
+#: Part of what ``runsc flags`` of Orbit's build lists.
 _FLAGS = (
     "  -nvproxy-driver-version string\n"
     "  -nvproxy-gpu-memory-limit uint\n"
@@ -2007,7 +2007,7 @@ def _preflight_host(
     *,
     shims: tuple[str, ...] = (),
     devices: tuple[str, ...] = (),
-    version: str = "runsc version release-20261109.0+ale.0.1.4\nspec: 1.2.1\n",
+    version: str = "runsc version release-20261109.0+orbit.0.1.4\nspec: 1.2.1\n",
     drivers: str = "570.124.06\n580.95.05\n",
     flags: str = _FLAGS,
     flags_code: int = 0,
@@ -2032,15 +2032,15 @@ def _preflight_host(
         h100 = GpuDevice(id="GPU-0", model="NVIDIA H100 80GB HBM3", driver_version="570.124.06")
         return {0: h100}
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    monkeypatch.setattr("ale.run.providers.docker.provider.run", run)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider.run", run)
     monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
     monkeypatch.setattr(
-        "ale.run.providers.docker.provider.shutil.which",
+        "orbit.run.providers.docker.provider.shutil.which",
         lambda name: f"/usr/bin/{name}" if name == "docker" or name in shims else None,
     )
     monkeypatch.setattr(
-        "ale.run.providers.docker.provider.Path.exists", lambda path: str(path) in devices
+        "orbit.run.providers.docker.provider.Path.exists", lambda path: str(path) in devices
     )
     return ran
 
@@ -2140,24 +2140,24 @@ async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
 @pytest.mark.parametrize(
     ("version", "drivers", "needs_gpus", "refused"),
     [
-        ("runsc version release-20261109.0\nspec: 1.2.1\n", "", 0, "needs ALE's build"),
-        ("runsc version release-20261109.0+ale.0.1.41\n", "", 0, "ale.0.1.4 of"),
-        ("runsc version release-20261109.0+ale.0.1.1\n", "", 0, "ale.0.1.4 of"),
-        ("runsc version release-20261109.0+ale.0.1.4\n", "580.95.05\n", 0, None),
-        ("runsc version release-20261109.0+ale.0.1.4\n", "580.95.05\n", 1, "driver 570.124.06"),
-        ("runsc version release-20261109.0+ale.0.1.4\n", "570.124.06\n", 1, None),
+        ("runsc version release-20261109.0\nspec: 1.2.1\n", "", 0, "needs Orbit's build"),
+        ("runsc version release-20261109.0+orbit.0.1.41\n", "", 0, "orbit.0.1.4 of"),
+        ("runsc version release-20261109.0+orbit.0.1.1\n", "", 0, "orbit.0.1.4 of"),
+        ("runsc version release-20261109.0+orbit.0.1.4\n", "580.95.05\n", 0, None),
+        ("runsc version release-20261109.0+orbit.0.1.4\n", "580.95.05\n", 1, "driver 570.124.06"),
+        ("runsc version release-20261109.0+orbit.0.1.4\n", "570.124.06\n", 1, None),
         # With no needs, as a Node lends it, its profile offers the Host's GPUs.
-        ("runsc version release-20261109.0+ale.0.1.4\n", "580.95.05\n", None, "570.124.06"),
+        ("runsc version release-20261109.0+orbit.0.1.4\n", "580.95.05\n", None, "570.124.06"),
     ],
 )
-async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_driver_here(
+async def test_a_gvisor_leaf_runs_the_build_of_orbit_which_must_support_the_gpu_driver_here(
     monkeypatch: pytest.MonkeyPatch,
     version: str,
     drivers: str,
     needs_gpus: int | None,
     refused: str | None,
 ) -> None:
-    """A stock runsc lacks ALE's patches, and another build of ALE's is not the one this
+    """A stock runsc lacks Orbit's patches, and another build of Orbit's is not the one this
     engine was tested with; the GPU driver is checked whenever GPUs may be attached."""
     ran = _preflight_host(
         monkeypatch, _known("runc", arguments=_REGISTERED), version=version, drivers=drivers
@@ -2169,7 +2169,7 @@ async def test_a_gvisor_leaf_runs_the_build_of_ale_which_must_support_the_gpu_dr
             await preflight
     else:
         await preflight
-    if needs_gpus != 0 and "+ale.0.1.4\n" in version:
+    if needs_gpus != 0 and "+orbit.0.1.4\n" in version:
         assert ran[-1] == (_RUNSC, "nvproxy", "list-supported-drivers")
     else:
         assert all(argv[1] == "--version" for argv in ran)
@@ -2234,7 +2234,7 @@ async def test_a_gvisor_sandbox_shows_it_runs_on_gvisor_and_writes_where_docker_
     written: dict[str, bytes] = {}
 
     async def guest_exec(argv: list[str], **_: object) -> tuple[int, str, str, bool]:
-        assert argv[:3] == ["/opt/ale/python/bin/python3", "-I", "-c"]
+        assert argv[:3] == ["/opt/orbit/python/bin/python3", "-I", "-c"]
         return 0, log, "", False
 
     async def write_file(path: str, data: bytes, **_: object) -> None:
@@ -2243,14 +2243,14 @@ async def test_a_gvisor_sandbox_shows_it_runs_on_gvisor_and_writes_where_docker_
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         assert argv[0] == "cp" and argv[-1] == "-"
         container, _, path = argv[1].partition(":")
-        assert container == "ale-e1-abcdef" and path.startswith("/opt/ale/preflight-")
+        assert container == "orbit-e1-abcdef" and path.startswith("/opt/orbit/preflight-")
         archive = path.rpartition("/")[2] + "\0" * 100
         return 0, archive + (written[path].decode() if copied == "contents" else ""), ""
 
     _preflight_host(monkeypatch, _known("runc", arguments=_REGISTERED), gpus=False)
     check = await DockerProvider(runtime="gvisor").preflight()
     assert check is not None
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     sandbox = _sandbox()
     sandbox.allocation = sandbox.allocation.model_copy(update={"runtime": gvisor.NET_RAW})
     sandbox._client = SimpleNamespace(exec=guest_exec, write_file=write_file)  # type: ignore[assignment]
@@ -2280,7 +2280,7 @@ async def test_a_feature_its_runtime_does_not_give_is_refused_before_anything_st
     # A commit would keep none of a container engine's storage.
     engine = request(
         resources=Resources(container_features=(ContainerFeature.NESTED_CONTAINERS,))
-    ).model_copy(update={"snapshot": "ale-snapshot:x"})
+    ).model_copy(update={"snapshot": "orbit-snapshot:x"})
     with pytest.raises(ProviderCapabilityError):
         await DockerProvider(runtime="gvisor").create(engine)
     assert calls == []
@@ -2364,9 +2364,9 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
         return found
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr(
-        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+        "orbit.run.providers.docker.provider.resolve_prepared_container_image", resolved
     )
     provider = DockerProvider(runtime=runtime)
     monkeypatch.setattr(provider, "check_image", no_problems)
@@ -2401,9 +2401,9 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     else:
         (network,) = [run[index + 1] for index, flag in enumerate(run) if flag == "--network"]
         ((name, _, host_ip, internal),) = created
-        assert network.startswith("ale-net-e1-") and (name, internal) == (network, False)
+        assert network.startswith("orbit-net-e1-") and (name, internal) == (network, False)
         assert calls[-1] == ("network", "rm", network)
-    assert "ale.network=open" in run
+    assert "orbit.network=open" in run
     # The Host's address, the default bridge's read once or set on the sandbox's own
     # network, serves its confinement and its Gateway alias.
     gateway = [call for call in calls if call[:2] == ("network", "inspect") and "IPAM" in call[-1]]
@@ -2450,9 +2450,9 @@ async def test_a_gvisor_sandbox_gets_its_gpus_as_a_runc_one_does(
     async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
         return found
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr(
-        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+        "orbit.run.providers.docker.provider.resolve_prepared_container_image", resolved
     )
     monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
     provider = DockerProvider(runtime="gvisor", gpu_lock_dir=tmp_path)
@@ -2478,7 +2478,7 @@ async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
     async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
         calls.append(argv)
         if argv[0] == "ps":
-            return 0, "c0 ale-other GPU-0,GPU-1/\n", ""  # both held whole by another sandbox
+            return 0, "c0 orbit-other GPU-0,GPU-1/\n", ""  # both held whole by another sandbox
         if argv[:3] == ("info", "--format", "{{.ID}}"):
             return 0, "DAEMON-1\n", ""
         return _scripted_reply(argv)
@@ -2503,9 +2503,9 @@ async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
     async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
         return found
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr(
-        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+        "orbit.run.providers.docker.provider.resolve_prepared_container_image", resolved
     )
     monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
     provider = DockerProvider(runtime=runtime, gpu_lock_dir=tmp_path)
@@ -2532,11 +2532,11 @@ async def test_a_network_whose_bridges_mac_cannot_be_read_is_removed_again(
             return 1, "", "the daemon went away"
         return _scripted_reply(argv)
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     with pytest.raises(ProviderStartError, match="the daemon went away"):
         await kind.start("e1-abcdef", request(), _Networks())
-    assert [name for name, *_ in _created(calls)] == ["ale-net-e1-abcdef"]
-    assert calls[-1] == ("network", "rm", "ale-net-e1-abcdef")
+    assert [name for name, *_ in _created(calls)] == ["orbit-net-e1-abcdef"]
+    assert calls[-1] == ("network", "rm", "orbit-net-e1-abcdef")
 
 
 @pytest.mark.asyncio
@@ -2570,9 +2570,9 @@ async def test_a_sandbox_started_under_another_runtime_is_refused_and_removed(
     async def framed(found: ResolvedImage, _request: SandboxRequest) -> ResolvedImage:
         return found
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     monkeypatch.setattr(
-        "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+        "orbit.run.providers.docker.provider.resolve_prepared_container_image", resolved
     )
     provider = DockerProvider()
     monkeypatch.setattr(provider, "check_image", no_problems)
@@ -2599,16 +2599,16 @@ async def test_a_kata_sandbox_that_stopped_ends_its_sessions(
     async def docker(*argv: str, timeout: float = 120) -> tuple[int, str, str]:
         if argv[0] == "wait":
             return 0, "255\n", ""
-        assert argv == ("inspect", "--format", "{{json .State}}", "ale-e1")
+        assert argv == ("inspect", "--format", "{{json .State}}", "orbit-e1")
         return 0, json.dumps({"Running": False, "ExitCode": 255}), ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    session = _Session(["sh", "-c", "echo {}; exec sleep 60"], "ale-e1", 1024)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
+    session = _Session(["sh", "-c", "echo {}; exec sleep 60"], "orbit-e1", 1024)
     await session.start()
     assert await session.recv() == "{}"
     pending = asyncio.ensure_future(session.recv())
     sandbox = DockerSandbox.__new__(DockerSandbox)
-    sandbox.container = "ale-e1"
+    sandbox.container = "orbit-e1"
     sandbox._sessions = (session, session)
     await asyncio.wait_for(sandbox._end_sessions(), timeout=10)
     with pytest.raises(GuestUnreachableError) as ended:
@@ -2642,7 +2642,7 @@ async def test_a_sandbox_that_would_save_past_the_layer_stores_limit_is_refused_
             return 0, layers, ""
         raise AssertionError(argv)
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     provider = DockerProvider()
     if refused:
         with pytest.raises(ProviderCapabilityError, match="more than the 125"):

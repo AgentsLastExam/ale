@@ -15,7 +15,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ale.core.taskspec import (
+from orbit.core.taskspec import (
     ContainerFeature,
     ImageKind,
     NetworkMode,
@@ -47,7 +47,7 @@ class Arch(StrEnum):
 
     @classmethod
     def of(cls, operating_system: OperatingSystem) -> Arch:
-        """What a Task's Sandbox runs. A Task names no architecture: ALE's images and the
+        """What a Task's Sandbox runs. A Task names no architecture: Orbit's images and the
         Tasks built on them are x86-64, apart from macOS, which only Apple silicon runs."""
         return cls.ARM64 if operating_system is OperatingSystem.MACOS else cls.X86_64
 

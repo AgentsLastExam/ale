@@ -1,4 +1,4 @@
-"""Verified Orchard REST and WebSocket boundary, and the local Orchard ALE runs on.
+"""Verified Orchard REST and WebSocket boundary, and the local Orchard Orbit runs on.
 
 Closing an exec channel does not prove the guest command stopped. The owning
 Provider must tear down its VM on cancellation or uncertain execution failure.
@@ -23,25 +23,25 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
-from ale.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
-from ale.run.framework import MACOS_FRAMER
-from ale.run.process import run
+from orbit.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
+from orbit.run.framework import MACOS_FRAMER
+from orbit.run.process import run
 
 _CHUNK_BYTES = 16 * 1024
 _FRAME_BYTES = 1024 * 1024
 _LINE_BYTES = 16 * 1024 * 1024
 #: Where ``scripts/setup_macos.py`` keeps the local controller, worker and their secrets.
-STATE_DIR = Path.home() / ".local/share/ale/macos"
+STATE_DIR = Path.home() / ".local/share/orbit/macos"
 #: Covers scheduling, an image pull and boot.
 PROVISION_TIMEOUT_SEC = 1800
 #: The account Orchard logs in to every VM as, with its default password ``admin``.
 CONTROL_ACCOUNT = "admin"
 #: Where ``scripts/setup_macos.py`` installs ``framework_macos.sh``, owned by root, with a
 #: sudoers rule that lets the Orchard user run this program alone as root.
-FRAMER = Path("/usr/local/libexec/ale/framework-macos")
+FRAMER = Path("/usr/local/libexec/orbit/framework-macos")
 #: Where ``scripts/setup_macos.py`` installs Softnet, root-owned and set-user-ID, as the
-#: worker's ``softnet``: Tart runs it for a VM whose network ALE restricts.
-SOFTNET = Path("/usr/local/libexec/ale/softnet")
+#: worker's ``softnet``: Tart runs it for a VM whose network Orbit restricts.
+SOFTNET = Path("/usr/local/libexec/orbit/softnet")
 #: The oldest Orchard whose worker changes a running VM's Softnet policy in place, and the
 #: oldest Tart it does that with.
 LIVE_POLICY_ORCHARD = (0, 57, 0)
@@ -549,7 +549,7 @@ class LocalOrchard:
 
         Orchard stops a VM with ``tart stop --timeout 5``, which powers macOS off when its
         signed-in desktop does not shut down at once, losing what is still in memory, so a
-        disk ALE keeps is shut down by its guest. Orchard then reports the VM failed, its
+        disk Orbit keeps is shut down by its guest. Orchard then reports the VM failed, its
         record of a VM that exited by itself.
         """
         try:
@@ -574,14 +574,14 @@ class LocalOrchard:
 
 
 def check_framer() -> None:
-    """Refuse to frame with an installed framer other than this ALE's own."""
+    """Refuse to frame with an installed framer other than this Orbit's own."""
     try:
         current = FRAMER.read_bytes() == MACOS_FRAMER.read_bytes()
     except OSError:
         current = False
     if not current:
         raise ProviderStartError(
-            f"{FRAMER} is missing or differs from this ALE's; run "
+            f"{FRAMER} is missing or differs from this Orbit's; run "
             "`uv run scripts/setup_macos.py` to install it"
         )
 

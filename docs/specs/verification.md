@@ -1,6 +1,6 @@
 # Verification
 
-Verification is an ordinary Task-owned program. ALE supplies optional Judge and check
+Verification is an ordinary Task-owned program. Orbit supplies optional Judge and check
 tools, then reads one JSON result after the program exits successfully. There is no
 scoring registry, automatic aggregation, callback, or required order of tool calls.
 
@@ -8,21 +8,21 @@ scoring registry, automatic aggregation, callback, or required order of tool cal
 
 The verifier writes Harbor's reward file, `/logs/verifier/reward.json`
 (`C:\logs\verifier\reward.json` on Windows; on macOS, whose root volume is read-only,
-`/opt/ale/logs/verifier/reward.json`): a flat JSON object whose values are numbers.
+`/opt/orbit/logs/verifier/reward.json`): a flat JSON object whose values are numbers.
 Its `reward` must be a finite number from 0 through 1; booleans and numeric strings are not
-numbers. ALE scores only `reward` and never averages or treats other values as rewards.
+numbers. Orbit scores only `reward` and never averages or treats other values as rewards.
 Beside it, `verification.json` may hold the complete result: any JSON object, nested values
 included, whose `reward` equals `reward.json`'s. NaN, infinity and duplicate object keys
 make either file invalid.
 
-After checking the range, ALE rounds `reward` to two decimal places using decimal
+After checking the range, Orbit rounds `reward` to two decimal places using decimal
 round-half-up: `0.994` becomes `0.99`, `0.995` and `0.999` become `1.0`, and `0.004`
 becomes `0.0`. This same value is saved and used by `run`, `reverify`, and `calibrate`.
 Other fields and Judge responses keep their original precision; rounding never makes an
 out-of-range score valid.
 
 ```python
-from ale_verify import checks, write
+from orbit_verify import checks, write
 
 check = checks.text_equals("/home/user/output/answer.txt", "42")
 write({"reward": check["score"], "answer": check})
@@ -39,7 +39,7 @@ result was written.
 ### Feedback
 
 Beside the result, a verifier may write a feedback text for the agent, `feedback.md` in the
-verifier directory: UTF-8, at most 64 KiB (`ale_verify.MAX_FEEDBACK_BYTES`). `write(result,
+verifier directory: UTF-8, at most 64 KiB (`orbit_verify.MAX_FEEDBACK_BYTES`). `write(result,
 feedback=text)` writes it beside the result, each file atomically, and refuses a longer text
 before it writes anything; `write(result)` removes one an earlier call wrote. Only a
 [validation round](task-authoring.md#validation)'s feedback is read, `validation/`'s or
@@ -57,7 +57,7 @@ On the host, `verification.json` contains the complete result, which is `reward.
 object when the verifier wrote no `verification.json`; a
 [validation round](episode-protocol.md#validation-rounds)'s, with its feedback text, is in
 its own directory. Episode rewards contain only `reward`; the episode status and failure
-remain in `result.json`. `ale calibrate` reads the
+remain in `result.json`. `orbit calibrate` reads the
 result's other top-level numbers only to check a
 [calibration case](task-authoring.md#calibration)'s expectation, never to score.
 
@@ -66,7 +66,7 @@ result's other top-level numbers only to check a
 ```python
 from pathlib import Path
 
-from ale_verify import judge, write
+from orbit_verify import judge, write
 
 
 def verify():
@@ -103,7 +103,7 @@ external schema downloads are unsupported. Task Python handles all subsequent sc
 
 Both Judge kinds use the model provider, model and reasoning effort configured by the run.
 A Judge names its provider rather than a key or URL, and its key and endpoint resolve as the
-Gateway's do, from `ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL` (see
+Gateway's do, from `ORBIT_<PROVIDER>_API_KEY` and `ORBIT_<PROVIDER>_BASE_URL` (see
 [Security](security.md#3-provider-credentials-stay-on-the-host)). An LLM Judge also names the
 dialect it speaks; an Agent Judge speaks its CLI's (Responses for Codex, Messages for Claude
 Code).
@@ -160,7 +160,7 @@ its model. A sealed verifier still reaches the Gateway, so Judges work under eve
 network](task-authoring.md#resources-and-network), `no-network` included, and need no host of
 their own in an allowlist. Each episode opens one Gateway session per configured Judge that
 holds the Judge's endpoint, protocol and key; the verifier receives only the Gateway's address
-and that session's token (`ALE_LLM_JUDGE_TOKEN`, `ALE_AGENT_JUDGE_TOKEN`), so code the solver
+and that session's token (`ORBIT_LLM_JUDGE_TOKEN`, `ORBIT_AGENT_JUDGE_TOKEN`), so code the solver
 wrote cannot read a credential it could spend elsewhere. Judge sessions have no limits and
 never replay a cached response, so a retried verdict samples again; their calls appear in the
 transport trace with `purpose: judge` and are left out of the agent's trajectory and usage. A
@@ -168,7 +168,7 @@ Judge whose key is not set on the Host gets no session. The RunLock records the 
 Judge's provider resolved to, with an LLM Judge's request path, not the Gateway address the
 verifier saw.
 
-A Judge supplies evidence for task scoring, so ALE sets no ceiling of its own on how long it thinks or how
+A Judge supplies evidence for task scoring, so Orbit sets no ceiling of its own on how long it thinks or how
 much it writes, and offers no setting for one. An LLM Judge streams its response and sends
 no output-token limit; Anthropic's protocol requires `max_tokens`, so it receives the
 model's own maximum as reported by the endpoint's Models API (128000 when the endpoint has
@@ -179,7 +179,7 @@ Transient provider failures (connection loss, timeouts, truncated streams, and H
 409, 425, 429, 5xx and 529) are retried with the same request and exponential backoff that
 honours `Retry-After`, without an attempt count. The only bound is verification's own
 budget: the engine passes the seconds left in the verify phase as
-`ALE_VERIFY_DEADLINE_SECONDS`, and a Judge stops retrying 30 seconds before it so that the
+`ORBIT_VERIFY_DEADLINE_SECONDS`, and a Judge stops retrying 30 seconds before it so that the
 failure is recorded rather than killed. Without that budget, as when an author runs
 `verify.py` directly, a transient failure gets three further attempts instead. Any other
 provider rejection fails at once. An
@@ -192,15 +192,15 @@ identity mismatches stop immediately. Unhandled Judge failures fail verification
 
 ### Preflight
 
-Before agent work, ALE scans Task Python for `judge(...)`, imported aliases and
-`ale_verify.judge(...)`, and probes the required configured Judge kinds. Dynamic kinds
+Before agent work, Orbit scans Task Python for `judge(...)`, imported aliases and
+`orbit_verify.judge(...)`, and probes the required configured Judge kinds. Dynamic kinds
 require both. This catches common configuration mistakes; runtime checks remain necessary
 for dynamically loaded code and imports the static scan cannot discover.
 
 ## Runtime
 
-The framework stages `ale_verify` and its pinned pure-Python JSON Schema dependency in
+The framework stages `orbit_verify` and its pinned pure-Python JSON Schema dependency in
 the verifier's Python environment. Both are included in runtime provenance. The selected
-interpreter is supplied as `ALE_VERIFY_PYTHON`; see [Task authoring](task-authoring.md#tests).
+interpreter is supplied as `ORBIT_VERIFY_PYTHON`; see [Task authoring](task-authoring.md#tests).
 Built-in checks return ordinary dictionaries with `score`, `diagnostic`, `raw_value` and
 `evidence`. Authors may use them, ordinary Python, or their existing scoring functions.

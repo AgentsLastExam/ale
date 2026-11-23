@@ -16,7 +16,7 @@ from typing import Literal
 
 import typer
 
-from ale.core.calibration import (
+from orbit.core.calibration import (
     CalibrationAttempt,
     CalibrationCheck,
     CalibrationEngine,
@@ -25,15 +25,15 @@ from ale.core.calibration import (
     CaseCalibrationObservation,
     TaskCalibrationObservation,
 )
-from ale.core.capability import round_verifier_resources
-from ale.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
-from ale.core.errors import AleError, ConfigError, ProviderCapabilityError, TaskDefinitionError
-from ale.core.fleet import RunPlan
-from ale.core.harness import EffectiveAgentResources, Harness
-from ale.core.ids import content_hash, task_component
-from ale.core.lock import AssetProvenance, ResumedFrom, RunLock
-from ale.core.result import ResultRecord, SandboxOutcome
-from ale.core.sandbox import (
+from orbit.core.capability import round_verifier_resources
+from orbit.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
+from orbit.core.errors import ConfigError, OrbitError, ProviderCapabilityError, TaskDefinitionError
+from orbit.core.fleet import RunPlan
+from orbit.core.harness import EffectiveAgentResources, Harness
+from orbit.core.ids import content_hash, task_component
+from orbit.core.lock import AssetProvenance, ResumedFrom, RunLock
+from orbit.core.result import ResultRecord, SandboxOutcome
+from orbit.core.sandbox import (
     ImageKind,
     PreparedTaskImage,
     ResolvedImage,
@@ -41,40 +41,40 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.task import Stage, TaskAssetObservation
-from ale.core.taskspec import CalibrationCase, Expectation, VerificationMode
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status, Verdict
-from ale.run.agent_resources import resolve_agent_resources
-from ale.run.assets import observe_task_assets
-from ale.run.episode import (
+from orbit.core.task import Stage, TaskAssetObservation
+from orbit.core.taskspec import CalibrationCase, Expectation, VerificationMode
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status, Verdict
+from orbit.run.agent_resources import resolve_agent_resources
+from orbit.run.assets import observe_task_assets
+from orbit.run.episode import (
     EpisodeResult,
     check_retention,
     run_episode,
     run_episode_with_retries,
 )
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import Limits, SessionRegistry
-from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
-from ale.run.harnesses.builtin import NopHarness, OracleHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.droid import DroidHarness
-from ale.run.harnesses.forgecode import ForgecodeHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.hermes import HermesHarness
-from ale.run.harnesses.kimi_code import KimiCodeHarness
-from ale.run.harnesses.muse_code import MuseCodeHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
-from ale.run.harnesses.pi_cli import PiCliHarness
-from ale.run.harnesses.qwen_code import QwenCodeHarness
-from ale.run.harnesses.zcode import ZCodeHarness
-from ale.run.ledger import Ledger, episode_identity
-from ale.run.lint import lint_repository
-from ale.run.protocol.episode_protocol import (
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import Limits, SessionRegistry
+from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.droid import DroidHarness
+from orbit.run.harnesses.forgecode import ForgecodeHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.hermes import HermesHarness
+from orbit.run.harnesses.kimi_code import KimiCodeHarness
+from orbit.run.harnesses.muse_code import MuseCodeHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
+from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.harnesses.qwen_code import QwenCodeHarness
+from orbit.run.harnesses.zcode import ZCodeHarness
+from orbit.run.ledger import Ledger, episode_identity
+from orbit.run.lint import lint_repository
+from orbit.run.protocol.episode_protocol import (
     EpisodeProtocol,
     KeptSolver,
     Resume,
@@ -82,19 +82,19 @@ from ale.run.protocol.episode_protocol import (
     SolverSnapshot,
     validation_rounds,
 )
-from ale.run.provenance import (
+from orbit.run.provenance import (
     ProvenanceInputs,
     agent_provenance,
     framework_provenance,
     gateway_provenance,
 )
-from ale.run.providers import ProviderRegistry
-from ale.run.providers.fleet import FleetClient, FleetProvider
-from ale.run.recording import atomic_write_json
-from ale.run.secrets import host_credentials, provider_credentials, resolve_task_variables
-from ale.run.sources import resolve
-from ale.run.subscription import SubscriptionCredential, resolve_authentication
-from ale.run.task_images import (
+from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.fleet import FleetClient, FleetProvider
+from orbit.run.recording import atomic_write_json
+from orbit.run.secrets import host_credentials, provider_credentials, resolve_task_variables
+from orbit.run.sources import resolve
+from orbit.run.subscription import SubscriptionCredential, resolve_authentication
+from orbit.run.task_images import (
     ImagePreparationResult,
     ImagePreparationStep,
     ImageRole,
@@ -104,8 +104,8 @@ from ale.run.task_images import (
     shares_verifier_image,
     validates_separately,
 )
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
-from ale.run.verification import preflight_judges
+from orbit.run.tasksets.manifest import ManifestTask, load_tasks
+from orbit.run.verification import preflight_judges
 
 EXIT_SOME_FAILED = 2
 EXIT_BAD_REFERENCE = 3
@@ -121,7 +121,7 @@ def _config(
     agent: str | None,
     model: str | None,
 ) -> RunConfig:
-    if config is None and (default_config := os.environ.get("ALE_RUN_CONFIG")):
+    if config is None and (default_config := os.environ.get("ORBIT_RUN_CONFIG")):
         config = Path(default_config).expanduser()
     flags = [*(overrides or [])]
     if agent is not None:
@@ -134,7 +134,7 @@ def _config(
         if not preset.is_file():
             preset = None
         return load_run_config(preset_path=preset, run_path=config, overrides=flags)
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(f"configuration error: {error}", err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
 
@@ -146,7 +146,7 @@ def _harness(settings: RunConfig) -> Harness:
         case "nop":
             return NopHarness()
         case "computer-use":
-            from ale.run.harnesses.computer_use import ComputerUseHarness
+            from orbit.run.harnesses.computer_use import ComputerUseHarness
 
             return ComputerUseHarness(model=settings.agent.model, **settings.agent.settings)
         case "claude-code":
@@ -241,7 +241,7 @@ def _harness(settings: RunConfig) -> Harness:
                 settings=settings.agent.settings,
             )
         case unknown:
-            raise AleError(
+            raise OrbitError(
                 f"unknown agent {unknown!r}; try antigravity-cli, claude-code, codex-cli, "
                 "computer-use, droid, forgecode, grok-build, hermes, kimi-code, muse-code, "
                 "openclaw-cli, opencode, openhands-cli, pi-cli, qwen-code, zcode, oracle or nop"
@@ -275,7 +275,7 @@ async def _run_one(
                 dialect=settings.gateway.dialect,
             )
             await subscription.preflight()
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
     providers = ProviderRegistry(settings)
@@ -301,7 +301,7 @@ async def _run_one(
             else None
         )
         await providers.preflight(tasks)
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(f"{error}", err=True)
         await providers.close()
         return EXIT_BAD_REFERENCE
@@ -324,7 +324,7 @@ async def _run_one(
                     base_url=settings.gateway.base_url,
                     key_var=settings.gateway.api_key_env,
                 )
-            except AleError as error:
+            except OrbitError as error:
                 typer.echo(f"{error}", err=True)
                 await providers.close()
                 return EXIT_BAD_REFERENCE
@@ -560,7 +560,7 @@ async def _reverify(
         )
         unclassified: dict[str, BaseException] = {}
         for task, outcome in zip(unique, outcomes, strict=True):
-            if isinstance(outcome, (AleError, OSError, ValueError)):
+            if isinstance(outcome, (OrbitError, OSError, ValueError)):
                 unclassified[str(task.spec.name)] = outcome
             elif isinstance(outcome, BaseException):
                 raise outcome
@@ -577,7 +577,7 @@ async def _reverify(
                 solvers=False,
             )
         )
-    except (AleError, OSError, ValueError) as error:
+    except (OrbitError, OSError, ValueError) as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
 
@@ -638,7 +638,7 @@ async def _reverify(
                 continue
             try:
                 observed_assets = observe_task_assets(task)
-            except AleError as error:
+            except OrbitError as error:
                 typer.echo(f"{task.spec.name}: {error}", err=True)
                 failures += 1
                 continue
@@ -699,7 +699,7 @@ async def _reverify(
                     task, providers.get(task.verifier_provider or task.provider)
                 )
                 task.prepared_verifier_image = prepared.image if prepared is not None else None
-            except AleError as error:
+            except OrbitError as error:
                 typer.echo(str(error), err=True)
                 failures += 1
                 continue
@@ -782,7 +782,7 @@ async def _reverify(
             planned.append((task, execute))
         try:
             await providers.preflight([task for task, _ in planned], solvers=False)
-        except AleError as error:
+        except OrbitError as error:
             typer.echo(str(error), err=True)
             return EXIT_BAD_REFERENCE
         for task, execute in planned:
@@ -797,7 +797,7 @@ async def _reverify(
                 result = await run_episode_with_retries(
                     execute, retries=retries, on_retry=_report_retry
                 )
-            except AleError as error:
+            except OrbitError as error:
                 typer.echo(f"{task.spec.name}: {error}", err=True)
                 failures += 1
                 continue
@@ -1093,7 +1093,7 @@ async def _calibrate(reference: str, settings: RunConfig, runs_dir: Path) -> int
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         await _prepare_images(tasks, providers)
         await providers.preflight(tasks)
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(f"{error}", err=True)
         return EXIT_BAD_REFERENCE
 
@@ -1257,7 +1257,7 @@ async def _prepare_only(reference: str, settings: RunConfig) -> int:
             # The images its own rounds need too, the validation verifier's among them.
             task.validations = task.spec.validation_rounds
         results = await _prepare_images(tasks, ProviderRegistry(settings))
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         return EXIT_BAD_REFERENCE
 
@@ -1345,7 +1345,7 @@ def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:
 
 
 def _load(path: Path) -> list[ManifestTask]:
-    """The Tasks at ``path``, saying once where each departs from ALE's form."""
+    """The Tasks at ``path``, saying once where each departs from Orbit's form."""
     tasks = load_tasks(path)
     for task in tasks:
         for warning in task.warnings:
@@ -1636,7 +1636,7 @@ async def _plan_on_fleet(
         plan = RunPlan(label=label, concurrency=settings.concurrency, items=tuple(items))
         try:
             reply = await fleet.plan(plan)
-        except AleError as error:
+        except OrbitError as error:
             typer.echo(f"fleet: the plan was not accepted: {error}", err=True)
         else:
             for assignment in reply.assignments:

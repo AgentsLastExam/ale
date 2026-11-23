@@ -2,7 +2,7 @@
 
 A Task identifier is ``[task].name`` in ``task.toml``: Harbor's ``org/name``, unique and
 readable, and never parsed into a folder path. A Task that names none is identified by where
-it lives instead (``ale.run.tasksets.manifest``).
+it lives instead (``orbit.run.tasksets.manifest``).
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from typing import Any, Self
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
-__all__ = ["TaskId", "canonical_json", "content_hash", "in_ale_form", "task_component"]
+__all__ = ["TaskId", "canonical_json", "content_hash", "in_orbit_form", "task_component"]
 
-#: ALE's form: each part a lowercase slug.
-_ALE_TASK_ID = re.compile(r"[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9_-]*")
-#: Harbor's form, which ALE also reads: each part letters of either case, digits, ``.``, ``-``
+#: Orbit's form: each part a lowercase slug.
+_ORBIT_TASK_ID = re.compile(r"[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9_-]*")
+#: Harbor's form, which Orbit also reads: each part letters of either case, digits, ``.``, ``-``
 #: and ``_``, starting with a letter or digit, and no ``..`` anywhere.
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -57,17 +57,17 @@ class TaskId(str):
         )
 
 
-def in_ale_form(task_id: str) -> bool:
-    """Whether a Task id is in ALE's form, each part a lowercase slug, rather than only in
+def in_orbit_form(task_id: str) -> bool:
+    """Whether a Task id is in Orbit's form, each part a lowercase slug, rather than only in
     Harbor's."""
-    return _ALE_TASK_ID.fullmatch(task_id) is not None
+    return _ORBIT_TASK_ID.fullmatch(task_id) is not None
 
 
 def task_component(task_id: TaskId) -> str:
     """The Task id as the start of one file name, container name or image tag component:
     ``org.name``, in lowercase.
 
-    Every name ALE derives from a Task id goes through here. Ids differing only in case, or
+    Every name Orbit derives from a Task id goes through here. Ids differing only in case, or
     in where a ``.`` stands for the ``/``, share one, so each name adds a unique part of its
     own.
     """
@@ -77,7 +77,7 @@ def task_component(task_id: TaskId) -> str:
 def canonical_json(value: Any) -> str:
     """Serialise ``value`` deterministically.
 
-    Sorted keys, no insignificant whitespace, UTF-8 preserved. Every hash in ALE is
+    Sorted keys, no insignificant whitespace, UTF-8 preserved. Every hash in Orbit is
     computed over this form, so two processes always agree on what a value *is*.
     """
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

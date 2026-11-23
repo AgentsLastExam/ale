@@ -16,7 +16,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from ale.core.capability import (
+from orbit.core.capability import (
     Arch,
     GpuHold,
     SandboxNeeds,
@@ -24,9 +24,9 @@ from ale.core.capability import (
     solver_saves,
     unmet,
 )
-from ale.core.config import DockerProviderConfig, RunConfig, RunTimeouts, SlurmProviderConfig
-from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import (
+from orbit.core.config import DockerProviderConfig, RunConfig, RunTimeouts, SlurmProviderConfig
+from orbit.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
+from orbit.core.sandbox import (
     Provider,
     Sandbox,
     SandboxCheck,
@@ -34,18 +34,18 @@ from ale.core.sandbox import (
     SandboxRole,
     verifiers_needs,
 )
-from ale.core.task import Task
-from ale.core.taskspec import (
+from orbit.core.task import Task
+from orbit.core.taskspec import (
     ContainerFeature,
     NetworkMode,
     NetworkPolicy,
     VerificationMode,
     VerifySpec,
 )
-from ale.run import capprobe, guestd
+from orbit.run import capprobe, guestd
 
 if TYPE_CHECKING:
-    from ale.run.providers.fleet import FleetClient
+    from orbit.run.providers.fleet import FleetClient
 
 __all__ = [
     "RETAINING_PROVIDERS",
@@ -87,11 +87,11 @@ def leaf(
     holds, ``qemu``, ``firecracker``, ``slurm`` or ``orchard``. ``docker`` holds a Docker leaf's
     settings: the Host GPUs it may lease and the margin it admits a shared one with."""
     if provider_id == "slurm":
-        from ale.run.providers.slurm import SlurmProvider
+        from orbit.run.providers.slurm import SlurmProvider
 
         return SlurmProvider(slurm or SlurmProviderConfig())
     if provider_id.startswith("docker:"):
-        from ale.run.providers.docker import RUNTIMES, DockerProvider
+        from orbit.run.providers.docker import RUNTIMES, DockerProvider
 
         runtime = provider_id.removeprefix("docker:")
         if runtime in RUNTIMES:
@@ -101,15 +101,15 @@ def leaf(
                 runtime=runtime,
             )
     elif provider_id == "qemu":
-        from ale.run.providers.qemu import QemuProvider
+        from orbit.run.providers.qemu import QemuProvider
 
         return QemuProvider()
     elif provider_id == "firecracker":
-        from ale.run.providers.firecracker import FirecrackerProvider
+        from orbit.run.providers.firecracker import FirecrackerProvider
 
         return FirecrackerProvider()
     elif provider_id == "orchard":
-        from ale.run.providers.orchard import OrchardProvider
+        from orbit.run.providers.orchard import OrchardProvider
 
         return OrchardProvider()
     raise ProviderCapabilityError(f"{provider_id!r} names no leaf")
@@ -156,7 +156,7 @@ def _sandboxes(
     verifier that boots from a snapshot its solver saves, a snapshot verifier or a
     validation round's, runs on the leaf that saved it, so the solver needs what that
     verifier needs too, and as many saves in a row as
-    :func:`~ale.core.capability.solver_saves` counts. Each verifier needs to be held for its
+    :func:`~orbit.core.capability.solver_saves` counts. Each verifier needs to be held for its
     limit, on the leaf that saved the snapshot it boots from, or in the solver it runs in."""
     spec = task.spec
     mode = spec.verify.environment_mode
@@ -276,14 +276,14 @@ class ProviderRegistry:
     def _build(self, provider_id: str) -> Provider:
         settings = self.settings.sandbox
         if provider_id == "fleet":
-            from ale.run.providers.fleet.provider import FleetProvider, fleet_client
+            from orbit.run.providers.fleet.provider import FleetProvider, fleet_client
 
             if not settings.fleet.url:
                 raise ConfigError("the fleet Provider needs sandbox.fleet.url, its control plane")
             self._fleet = fleet_client(settings.fleet.url, settings.fleet.token_env)
             return FleetProvider(self._fleet)
         if provider_id == "daytona":
-            from ale.run.providers.daytona import DaytonaProvider
+            from orbit.run.providers.daytona import DaytonaProvider
 
             return DaytonaProvider(settings.daytona)
         return leaf(provider_id, docker=settings.docker, slurm=settings.slurm)
@@ -522,7 +522,7 @@ def provider_named(name: str) -> Provider:
 
     Retained handles name the Provider that made a sandbox; that name, not the current run
     configuration, decides who can list or destroy it. The Fleet is the one whose control
-    plane ``$ALE_FLEET_URL`` names.
+    plane ``$ORBIT_FLEET_URL`` names.
     """
     if name == "docker":
         return leaf("docker:runc")
@@ -532,14 +532,14 @@ def provider_named(name: str) -> Provider:
         # Its snapshots are listed from the cache below the home, whatever the partitions.
         return leaf("slurm")
     if name == "daytona":
-        from ale.run.providers.daytona import DaytonaProvider
+        from orbit.run.providers.daytona import DaytonaProvider
 
         return DaytonaProvider()
     if name == "fleet":
-        from ale.run.providers.fleet.provider import FleetProvider, fleet_client
+        from orbit.run.providers.fleet.provider import FleetProvider, fleet_client
 
-        url = os.environ.get("ALE_FLEET_URL", "")
+        url = os.environ.get("ORBIT_FLEET_URL", "")
         if not url:
-            raise ProviderCapabilityError("set ALE_FLEET_URL to the Fleet's control plane")
-        return FleetProvider(fleet_client(url, "ALE_FLEET_TOKEN"))
+            raise ProviderCapabilityError("set ORBIT_FLEET_URL to the Fleet's control plane")
+        return FleetProvider(fleet_client(url, "ORBIT_FLEET_TOKEN"))
     raise ProviderCapabilityError(f"unknown provider {name!r}")

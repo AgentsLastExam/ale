@@ -18,64 +18,64 @@ from typing import ClassVar
 
 import pytest
 
-from ale.core.config import load_run_config
-from ale.core.errors import (
+from orbit.core.config import load_run_config
+from orbit.core.errors import (
     AgentError,
     AgentUnsupportedError,
     ConfigError,
     NativeContinuationError,
     PhaseTimeoutError,
 )
-from ale.core.harness import (
+from orbit.core.harness import (
     EffectiveAgentResources,
     HarnessSession,
     ResolvedMcpServer,
     ResolvedSkill,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import ExecResult, SandboxFile
-from ale.core.taskspec import (
+from orbit.core.sandbox import ExecResult, SandboxFile
+from orbit.core.taskspec import (
     OperatingSystem,
     SseMcpServer,
     StdioMcpServer,
     StreamableHttpMcpServer,
 )
-from ale.core.trajectory import AtifTrajectory
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses import _release
-from ale.run.harnesses._npm import reported_version
-from ale.run.harnesses._release import (
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses import _release
+from orbit.run.harnesses._npm import reported_version
+from orbit.run.harnesses._release import (
     ReleaseAsset,
     ReleaseAssets,
     ensure_release_binary,
     release_identity,
 )
-from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
+from orbit.run.harnesses.base import (
     CONTINUE_PROMPT,
     INVOCATIONS_PATH,
     LOG_ROOT,
     STDOUT_PATH,
     json_lines,
 )
-from ale.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.computer_use import ComputerUseHarness
-from ale.run.harnesses.droid import DroidHarness
-from ale.run.harnesses.forgecode import ForgecodeHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.hermes import HermesHarness
-from ale.run.harnesses.kimi_code import KimiCodeHarness
-from ale.run.harnesses.muse_code import MuseCodeHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.harnesses.openclaw_cli.adapter import _supported_node
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
-from ale.run.harnesses.pi_cli import PiCliHarness
-from ale.run.harnesses.qwen_code import QwenCodeHarness
-from ale.run.harnesses.zcode import ZCodeHarness
-from ale.run.recording import BlobStore
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.computer_use import ComputerUseHarness
+from orbit.run.harnesses.droid import DroidHarness
+from orbit.run.harnesses.forgecode import ForgecodeHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.hermes import HermesHarness
+from orbit.run.harnesses.kimi_code import KimiCodeHarness
+from orbit.run.harnesses.muse_code import MuseCodeHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.harnesses.openclaw_cli.adapter import _supported_node
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
+from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.harnesses.qwen_code import QwenCodeHarness
+from orbit.run.harnesses.zcode import ZCodeHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
@@ -115,7 +115,7 @@ class FakeSandbox:
         if list(argv) == ["sh", "-c", 'printf %s "$PATH"']:
             return ExecResult(exit_code=0, stdout="/usr/local/bin:/usr/bin:/bin")
         if "2>> " in command:
-            root = kwargs["cwd"] + "/.ale-harness/"
+            root = kwargs["cwd"] + "/.orbit-harness/"
             self.files[root + "stdout.log"] += self.native_stdout
             self.files[root + "stderr.log"] += self.native_stderr
             return self.result.model_copy(update={"stdout": "", "stderr": ""})
@@ -163,7 +163,7 @@ def session(**updates: object) -> HarnessSession:
     ("harness", "path", "native"),
     [
         (CodexCliHarness(), "transcript.jsonl", {"type": "turn.failed", "error": "proof"}),
-        (GrokBuildHarness(), ".grok-ale/segment.jsonl", {"type": "error", "message": "proof"}),
+        (GrokBuildHarness(), ".grok-orbit/segment.jsonl", {"type": "error", "message": "proof"}),
         (
             ClaudeCodeHarness(),
             "transcript.jsonl",
@@ -206,7 +206,7 @@ async def test_windows_harness_uses_git_bash_native_paths_and_retains_failure(
         ),
         (
             GrokBuildHarness(),
-            ".grok-ale/segment.jsonl",
+            ".grok-orbit/segment.jsonl",
             {"type": "error", "message": "capacity limit reached token"},
         ),
         (
@@ -248,7 +248,7 @@ async def test_openclaw_declares_native_conversation_without_post_exit_copy() ->
     sandbox.native_stdout = b'{"payloads": [{"isError": true, "text": "x"}]}'
     with pytest.raises(AgentError):
         await OpenClawCliHarness().launch("work", sandbox, session(), timeout_sec=60)
-    assert OpenClawCliHarness().logs == (LOG_ROOT, ".openclaw-ale/agents/main/sessions")
+    assert OpenClawCliHarness().logs == (LOG_ROOT, ".openclaw-orbit/agents/main/sessions")
     assert not any("cp --" in " ".join(argv) for argv in sandbox.commands)
 
 
@@ -443,9 +443,9 @@ async def test_resource_translation_uses_episode_local_native_config(
     effective = resources(tmp_path)
     current = session(os=operating_system, home=home)
     cases = [
-        (GrokBuildHarness(), f"{home}/.grok-ale/config.toml"),
-        (CodexCliHarness(), f"{home}/.codex-ale/config.toml"),
-        (OpenClawCliHarness(), f"{home}/.openclaw-ale/openclaw.json"),
+        (GrokBuildHarness(), f"{home}/.grok-orbit/config.toml"),
+        (CodexCliHarness(), f"{home}/.codex-orbit/config.toml"),
+        (OpenClawCliHarness(), f"{home}/.openclaw-orbit/openclaw.json"),
     ]
     for harness, config_path in cases:
         sandbox = FakeSandbox()
@@ -587,15 +587,15 @@ async def test_grok_chat_gateway_selects_native_chat_backend(tmp_path: Path) -> 
 
     await harness.install_resources(sandbox, session(), resources(tmp_path))  # type: ignore[arg-type]
 
-    rendered = sandbox.files["/home/agent/.grok-ale/config.toml"].decode()
+    rendered = sandbox.files["/home/agent/.grok-orbit/config.toml"].decode()
     assert 'api_backend = "chat_completions"' in rendered
 
 
 @pytest.mark.parametrize(
     ("harness", "config_path"),
     [
-        (CodexCliHarness(), "/home/agent/.codex-ale/config.toml"),
-        (GrokBuildHarness(), "/home/agent/.grok-ale/config.toml"),
+        (CodexCliHarness(), "/home/agent/.codex-orbit/config.toml"),
+        (GrokBuildHarness(), "/home/agent/.grok-orbit/config.toml"),
     ],
 )
 async def test_subscription_config_uses_the_same_gateway_provider(
@@ -608,11 +608,11 @@ async def test_subscription_config_uses_the_same_gateway_provider(
 
     rendered = sandbox.files[config_path].decode()
     assert "http://gateway/v1" in rendered
-    assert "ALE_GATEWAY_TOKEN" in rendered
+    assert "ORBIT_GATEWAY_TOKEN" in rendered
     assert "task-proof" in rendered
     if isinstance(harness, CodexCliHarness):
         assert 'model = "test-model"' in rendered
-        assert 'model_provider = "ale"' in rendered
+        assert 'model_provider = "orbit"' in rendered
     else:
         assert '[model."test-model"]' in rendered
 
@@ -628,7 +628,7 @@ async def test_codex_subscription_launch_drops_api_credentials() -> None:
         timeout_sec=60,
     )
 
-    assert sandbox.environments[-1]["ALE_GATEWAY_TOKEN"] == "token"
+    assert sandbox.environments[-1]["ORBIT_GATEWAY_TOKEN"] == "token"
     assert "unset OPENAI_API_KEY OPENAI_BASE_URL CODEX_ACCESS_TOKEN" in sandbox.commands[-1][2]
 
 
@@ -637,7 +637,7 @@ async def test_grok_subscription_launch_uses_gateway_and_requested_model() -> No
     sandbox.native_stdout = b'{"type":"end","sessionId":"session-1"}\n'
 
     prepared = await GrokBuildHarness().prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         sandbox,
         session(authentication="subscription"),
         native_session_id="session-1",
@@ -646,7 +646,7 @@ async def test_grok_subscription_launch_uses_gateway_and_requested_model() -> No
     command = prepared.script
     assert "--model test-model" in command
     assert "unset XAI_API_KEY GROK_CLI_CHAT_PROXY_BASE_URL" in command
-    assert prepared.env["ALE_GATEWAY_TOKEN"] == "token"
+    assert prepared.env["ORBIT_GATEWAY_TOKEN"] == "token"
     assert prepared.env["GROK_WORKSPACE_DATA_COLLECTION_DISABLED"] == "1"
 
 
@@ -664,22 +664,23 @@ async def test_provider_web_tools_follow_the_task_network(
         expected = mode if open_network else "disabled"
         assert (
             f'web_search = "{expected}"'
-            in codex.files["/home/agent/.codex-ale/config.toml"].decode()
+            in codex.files["/home/agent/.codex-orbit/config.toml"].decode()
         )
 
     grok = await GrokBuildHarness().prepare_command(
-        "/home/agent/.ale-harness/prompt.md", FakeSandbox(), current, native_session_id=None
+        "/home/agent/.orbit-harness/prompt.md", FakeSandbox(), current, native_session_id=None
     )
     assert ("--disable-web-search" in grok.script) is not open_network
     grok_home = FakeSandbox()
     await GrokBuildHarness().install_resources(grok_home, current, effective)  # type: ignore[arg-type]
     # Search asks the run's model, which the Gateway serves, not Grok's built-in default.
     assert (
-        'web_search = "test-model"' in grok_home.files["/home/agent/.grok-ale/config.toml"].decode()
+        'web_search = "test-model"'
+        in grok_home.files["/home/agent/.grok-orbit/config.toml"].decode()
     )
 
     muse = await MuseCodeHarness().prepare_command(
-        "/home/agent/.ale-harness/prompt.md", FakeSandbox(), current, native_session_id=None
+        "/home/agent/.orbit-harness/prompt.md", FakeSandbox(), current, native_session_id=None
     )
     assert ("--disable-web-tools" in muse.script) is not open_network
     assert (muse.env.get("MUSE_WEB_SEARCH_MODE") == "hosted") is open_network
@@ -691,7 +692,7 @@ async def test_openclaw_declares_explicit_reasoning_support(tmp_path: Path) -> N
 
     await harness.install_resources(sandbox, session(), resources(tmp_path))  # type: ignore[arg-type]
 
-    rendered = json.loads(sandbox.files["/home/agent/.openclaw-ale/openclaw.json"])
+    rendered = json.loads(sandbox.files["/home/agent/.openclaw-orbit/openclaw.json"])
     assert rendered["models"]["providers"]["openai"]["models"][0]["reasoning"] is True
 
 
@@ -705,7 +706,7 @@ async def test_openclaw_leaves_the_models_input_to_openclaw_unless_set() -> None
     )
 
     def model(sandbox: FakeSandbox) -> dict[str, object]:
-        rendered = json.loads(sandbox.files["/home/agent/.openclaw-ale/openclaw.json"])
+        rendered = json.loads(sandbox.files["/home/agent/.openclaw-orbit/openclaw.json"])
         return rendered["models"]["providers"]["openai"]["models"][0]
 
     assert "input" not in model(unset)
@@ -714,7 +715,7 @@ async def test_openclaw_leaves_the_models_input_to_openclaw_unless_set() -> None
 
 async def test_openclaw_runs_without_its_respawning_launcher() -> None:
     prepared = await OpenClawCliHarness().prepare_command(
-        "/home/agent/.ale-harness/prompt.md", FakeSandbox(), session(), native_session_id=None
+        "/home/agent/.orbit-harness/prompt.md", FakeSandbox(), session(), native_session_id=None
     )
 
     assert prepared.env["OPENCLAW_NO_RESPAWN"] == "1"
@@ -740,7 +741,7 @@ def context(tmp_path: Path, harness: str) -> TrajectoryParseContext:
 
 
 def test_grok_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
-    native_path(tmp_path, ".grok-ale/sessions/session/chat_history.jsonl").write_text(
+    native_path(tmp_path, ".grok-orbit/sessions/session/chat_history.jsonl").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -787,7 +788,7 @@ def test_grok_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     call = trajectory.steps[1].tool_calls[0]
 
     assert trajectory.steps[0].message == "Use the task MCP."
-    assert call.extra["ale"]["mcp"] == {
+    assert call.extra["orbit"]["mcp"] == {
         "server": "task-proof",
         "tool": "derive_fragment",
     }
@@ -796,7 +797,7 @@ def test_grok_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
 
 def test_grok_parser_names_only_sessions_it_did_not_convert(tmp_path: Path) -> None:
     """Grok's search index, prompt history and command logs are not sessions."""
-    sessions = ".grok-ale/sessions/%2Fhome%2Fuser"
+    sessions = ".grok-orbit/sessions/%2Fhome%2Fuser"
     prompt = {
         "type": "user",
         "content": [{"type": "text", "text": "<user_query>\nUse the task MCP.\n</user_query>"}],
@@ -808,11 +809,11 @@ def test_grok_parser_names_only_sessions_it_did_not_convert(tmp_path: Path) -> N
         )
     for name in ("session/terminal/call-1.log", "session/events.jsonl", "prompt_history.jsonl"):
         native_path(tmp_path, f"{sessions}/{name}").write_text("{}\n")
-    native_path(tmp_path, ".grok-ale/sessions/session_search.sqlite").write_bytes(b"SQLite")
+    native_path(tmp_path, ".grok-orbit/sessions/session_search.sqlite").write_bytes(b"SQLite")
 
     trajectory = GrokBuildHarness().parse_trajectory(context(tmp_path, "grok"))
 
-    assert trajectory.extra["ale"]["parse_issues"] == [
+    assert trajectory.extra["orbit"]["parse_issues"] == [
         {
             "reason": "unconverted_native_sessions",
             "count": 1,
@@ -850,7 +851,7 @@ def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     )
     trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
 
-    assert trajectory.steps[1].tool_calls[0].extra["ale"]["mcp"]["server"] == "task-proof"
+    assert trajectory.steps[1].tool_calls[0].extra["orbit"]["mcp"]["server"] == "task-proof"
     assert trajectory.steps[1].observation.results[0].content[0].text == "xyz"
     assert trajectory.final_metrics.total_prompt_tokens == 10
 
@@ -858,11 +859,11 @@ def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
 async def test_codex_traces_its_run_where_its_evidence_is_mirrored() -> None:
     harness = CodexCliHarness()
     prepared = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md", FakeSandbox(), session(), native_session_id=None
+        "/home/agent/.orbit-harness/prompt.md", FakeSandbox(), session(), native_session_id=None
     )
 
-    assert harness.logs == (LOG_ROOT, ".codex-ale/sessions", ".codex-ale/rollout-traces")
-    assert prepared.env["CODEX_ROLLOUT_TRACE_ROOT"] == "/home/agent/.codex-ale/rollout-traces"
+    assert harness.logs == (LOG_ROOT, ".codex-orbit/sessions", ".codex-orbit/rollout-traces")
+    assert prepared.env["CODEX_ROLLOUT_TRACE_ROOT"] == "/home/agent/.codex-orbit/rollout-traces"
 
 
 async def test_codex_does_not_export_a_post_exit_session_copy() -> None:
@@ -918,7 +919,7 @@ def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path
             ]
         )
     )
-    native_path(tmp_path, ".codex-ale/sessions/rollout-session.jsonl").write_text(
+    native_path(tmp_path, ".codex-orbit/sessions/rollout-session.jsonl").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -1106,7 +1107,7 @@ def test_codex_parser_uses_complete_native_function_call_evidence(tmp_path: Path
         "tool_search_tool",
         "apply_patch",
     ]
-    assert calls[1].extra["ale"]["mcp"] == {
+    assert calls[1].extra["orbit"]["mcp"] == {
         "server": "task-proof",
         "tool": "derive_fragment",
     }
@@ -1155,7 +1156,7 @@ def test_codex_function_output_images_become_atif_images(tmp_path: Path) -> None
             },
         },
     ]
-    native_path(tmp_path, ".codex-ale/sessions/rollout-x-session.jsonl").write_text(
+    native_path(tmp_path, ".codex-orbit/sessions/rollout-x-session.jsonl").write_text(
         "".join(json.dumps(event) + "\n" for event in rollout)
     )
     trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
@@ -1186,7 +1187,7 @@ def test_codex_children_are_unconverted_without_the_root_rollout(tmp_path: Path)
             ]
         )
     )
-    native_path(tmp_path, ".codex-ale/sessions/rollout-child.jsonl").write_text(
+    native_path(tmp_path, ".codex-orbit/sessions/rollout-child.jsonl").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -1213,19 +1214,19 @@ def test_codex_children_are_unconverted_without_the_root_rollout(tmp_path: Path)
     calls = [call for step in trajectory.steps for call in step.tool_calls or ()]
 
     assert [call.tool_call_id for call in calls] == ["root-shell"]
-    assert trajectory.extra["ale"]["parse_issues"] == [
+    assert trajectory.extra["orbit"]["parse_issues"] == [
         {"reason": "native_session_unavailable", "session_id": "session"},
         {
             "reason": "unconverted_native_sessions",
             "count": 1,
-            "sources": [".codex-ale/sessions/rollout-child.jsonl"],
+            "sources": [".codex-orbit/sessions/rollout-child.jsonl"],
         },
     ]
 
 
 #: Where Codex keeps one day's rollouts, each named `rollout-<timestamp>-<thread id>.jsonl`.
-CODEX_DAY = ".codex-ale/sessions/2026/10/26"
-OPENCLAW_SESSIONS = ".openclaw-ale/agents/main/sessions"
+CODEX_DAY = ".codex-orbit/sessions/2026/10/26"
+OPENCLAW_SESSIONS = ".openclaw-orbit/agents/main/sessions"
 
 
 def subagent_refs(trajectory: AtifTrajectory) -> dict[str, list[str]]:
@@ -1405,7 +1406,7 @@ def test_subagents_are_embedded_and_referenced_from_their_spawn(
     assert subagent_refs(trajectory) == {"spawn": [subagent.trajectory_id]}
     assert subagent.agent == trajectory.agent
     # Converted, the child is no longer unused evidence.
-    issues = (trajectory.extra or {}).get("ale", {}).get("parse_issues", [])
+    issues = (trajectory.extra or {}).get("orbit", {}).get("parse_issues", [])
     assert issues == untraced
 
 
@@ -1433,7 +1434,7 @@ def test_openclaw_subagent_keeps_its_delegated_task_and_tool_calls(tmp_path: Pat
     assert result.content[0].text == "Wrote 6 bytes."
     assert final.message == "Wrote the marker."
     assert subagent.final_metrics.total_prompt_tokens == 30
-    # A native usage record carries a price; ALE reports tokens only.
+    # A native usage record carries a price; Orbit reports tokens only.
     assert "cost" not in trajectory.model_dump_json()
 
 
@@ -1471,7 +1472,7 @@ def test_a_child_no_spawn_result_names_stays_reported(
     trajectory = harness.parse_trajectory(parse)
 
     assert [item.session_id for item in trajectory.subagent_trajectories] == ["child"]
-    assert trajectory.extra["ale"]["parse_issues"] == [
+    assert trajectory.extra["orbit"]["parse_issues"] == [
         {"reason": "unlinked_subagent", "source": orphan},
         {"reason": "unconverted_native_sessions", "count": 1, "sources": [orphan]},
         *untraced,
@@ -1501,13 +1502,13 @@ def test_a_child_claimed_twice_is_converted_once(
     trajectory = harness.parse_trajectory(parse)
 
     assert [item.session_id for item in trajectory.subagent_trajectories] == ["child"]
-    issues = (trajectory.extra or {}).get("ale", {}).get("parse_issues", [])
+    issues = (trajectory.extra or {}).get("orbit", {}).get("parse_issues", [])
     assert issues == expected + untraced
 
 
 def test_codex_nested_spawn_agent_calls_nest_their_trajectories(tmp_path: Path) -> None:
     """A thread's own children embed in its trajectory, whichever call form spawned them."""
-    sessions = tmp_path / ".codex-ale/sessions"
+    sessions = tmp_path / ".codex-orbit/sessions"
 
     def thread(name: str, parent: str | None, first: str, spawns: str | None) -> None:
         records: list[dict[str, object]] = [
@@ -1559,11 +1560,11 @@ def test_codex_nested_spawn_agent_calls_nest_their_trajectories(tmp_path: Path) 
     }
     assert child.steps[1].tool_calls[0].function_name == "multi_agent.spawn_agent"
     assert [step.message for step in grandchild.steps] == ["Help child"]
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
 
 
 #: Thread ``session``'s rollout trace bundle, named `trace-<trace id>-<thread id>`.
-CODEX_TRACE = ".codex-ale/rollout-traces/trace-1-session"
+CODEX_TRACE = ".codex-orbit/rollout-traces/trace-1-session"
 
 
 def codex_code_mode_run(tmp_path: Path) -> TrajectoryParseContext:
@@ -1674,7 +1675,7 @@ def script_steps(trajectory: AtifTrajectory) -> list[tuple[str, str, str]]:
         (
             steps[index - 1].tool_calls[0].tool_call_id,
             call.function_name,
-            call.extra["ale"].get("caller"),
+            call.extra["orbit"].get("caller"),
         )
         for index, step in enumerate(steps)
         if step.llm_call_count == 0
@@ -1703,7 +1704,7 @@ def test_codex_code_mode_script_calls_are_steps_no_inference_chose(tmp_path: Pat
     mcp, result = calls["script-2"]
     assert mcp.arguments == {"nonce": "N1"}
     # The trace's namespace sanitizes the server name; Codex's record of the call keeps it.
-    assert mcp.extra["ale"]["mcp"] == {"server": "task-proof", "tool": "derive_fragment"}
+    assert mcp.extra["orbit"]["mcp"] == {"server": "task-proof", "tool": "derive_fragment"}
     assert result.content[0].text == "F1"
     assert result.extra is None
     patch, result = calls["script-3"]
@@ -1717,7 +1718,7 @@ def test_codex_code_mode_script_calls_are_steps_no_inference_chose(tmp_path: Pat
         if step.llm_call_count is None
         for call in step.tool_calls or ()
     } == {"exec"}
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
 
 
 def test_codex_script_call_after_a_later_model_call_follows_that_call(tmp_path: Path) -> None:
@@ -1737,7 +1738,7 @@ def test_codex_script_call_after_a_later_model_call_follows_that_call(tmp_path: 
     trajectory = CodexCliHarness().parse_trajectory(parse)
 
     assert script_steps(trajectory)[0] == ("exec-2", "exec_command", "exec-1")
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
 
 
 def test_codex_code_mode_failed_script_calls_are_errors(tmp_path: Path) -> None:
@@ -1757,9 +1758,9 @@ def test_codex_code_mode_failed_script_calls_are_errors(tmp_path: Path) -> None:
     }
 
     mcp = results["script-2"]
-    assert (mcp.content[0].text, mcp.extra) == ("unknown nonce", {"ale": {"is_error": True}})
+    assert (mcp.content[0].text, mcp.extra) == ("unknown nonce", {"orbit": {"is_error": True}})
     patch = results["script-3"]
-    assert (patch.content, patch.extra) == ("patch rejected", {"ale": {"is_error": True}})
+    assert (patch.content, patch.extra) == ("patch rejected", {"orbit": {"is_error": True}})
 
 
 def test_codex_code_mode_without_its_trace_says_so(tmp_path: Path) -> None:
@@ -1769,7 +1770,7 @@ def test_codex_code_mode_without_its_trace_says_so(tmp_path: Path) -> None:
     trajectory = CodexCliHarness().parse_trajectory(parse)
 
     assert script_steps(trajectory) == []
-    assert trajectory.extra["ale"]["parse_issues"] == [UNTRACED]
+    assert trajectory.extra["orbit"]["parse_issues"] == [UNTRACED]
 
 
 def test_codex_trace_reads_only_its_own_payload_files(tmp_path: Path) -> None:
@@ -1796,7 +1797,7 @@ def test_codex_trace_reads_only_its_own_payload_files(tmp_path: Path) -> None:
     # Neither the arguments nor the result were read.
     source = f"{CODEX_TRACE}/../../../outside.json"
     unavailable = {"reason": "trace_payload_unavailable", "source": source}
-    assert trajectory.extra["ale"]["parse_issues"] == [unavailable, unavailable]
+    assert trajectory.extra["orbit"]["parse_issues"] == [unavailable, unavailable]
 
 
 def test_openclaw_nested_spawns_nest_their_trajectories(tmp_path: Path) -> None:
@@ -1852,7 +1853,7 @@ def test_openclaw_nested_spawns_nest_their_trajectories(tmp_path: Path) -> None:
         "spawn-grandchild": ["openclaw-trajectory-subagent-child-subagent-grandchild"]
     }
     assert [step.message for step in grandchild.steps] == ["Help child"]
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
 
 
 @pytest.mark.parametrize("name", ["grok", "openclaw"])
@@ -1862,7 +1863,7 @@ def test_turns_missing_from_the_native_session_come_from_stdout_with_their_failu
     """A resume that failed before writing to the session still appears, with its error."""
     if name == "grok":
         harness = GrokBuildHarness()
-        session = native_path(tmp_path, ".grok-ale/sessions/session/chat_history.jsonl")
+        session = native_path(tmp_path, ".grok-orbit/sessions/session/chat_history.jsonl")
         native = [
             {
                 "type": "user",
@@ -1877,7 +1878,7 @@ def test_turns_missing_from_the_native_session_come_from_stdout_with_their_failu
         ]
     else:
         harness = OpenClawCliHarness()
-        session = native_path(tmp_path, ".openclaw-ale/agents/main/sessions/session.jsonl")
+        session = native_path(tmp_path, ".openclaw-orbit/agents/main/sessions/session.jsonl")
         native = [
             {"type": "message", "message": {"role": "user", "content": "first"}},
             {
@@ -1913,13 +1914,13 @@ def test_turns_missing_from_the_native_session_come_from_stdout_with_their_failu
         ("user", "second"),
         ("system", "could not resume"),
     ]
-    assert {"reason": "prompt_not_in_native_session", "invocation": 2} in trajectory.extra["ale"][
+    assert {"reason": "prompt_not_in_native_session", "invocation": 2} in trajectory.extra["orbit"][
         "parse_issues"
     ]
 
 
 def test_openclaw_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
-    native_path(tmp_path, ".openclaw-ale/agents/main/sessions/session.jsonl").write_text(
+    native_path(tmp_path, ".openclaw-orbit/agents/main/sessions/session.jsonl").write_text(
         "\n".join(
             [
                 json.dumps(
@@ -1970,7 +1971,7 @@ def test_openclaw_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     trajectory = OpenClawCliHarness().parse_trajectory(context(tmp_path, "openclaw"))
 
     assert trajectory.steps[0].message == "Use the task MCP."
-    assert trajectory.steps[1].tool_calls[0].extra["ale"]["mcp"]["tool"] == "derive_fragment"
+    assert trajectory.steps[1].tool_calls[0].extra["orbit"]["mcp"]["tool"] == "derive_fragment"
     assert trajectory.steps[1].observation.results[0].content[0].text == "xyz"
     # Native input excludes the cache; ATIF prompt tokens include reads and writes.
     metrics = trajectory.steps[1].metrics
@@ -1983,7 +1984,7 @@ def test_openclaw_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
 def test_openclaw_reports_other_transcripts_but_not_what_it_keeps_beside_them(
     tmp_path: Path,
 ) -> None:
-    sessions = ".openclaw-ale/agents/main/sessions"
+    sessions = ".openclaw-orbit/agents/main/sessions"
     native_path(tmp_path, f"{sessions}/session.jsonl").write_text(
         json.dumps(
             {
@@ -2008,7 +2009,7 @@ def test_openclaw_reports_other_transcripts_but_not_what_it_keeps_beside_them(
 
     unconverted = [
         issue
-        for issue in trajectory.extra["ale"]["parse_issues"]
+        for issue in trajectory.extra["orbit"]["parse_issues"]
         if issue["reason"] == "unconverted_native_sessions"
     ]
     assert unconverted == [
@@ -2064,7 +2065,7 @@ async def test_instruction_file_carries_full_utf8_prompt(harness) -> None:
     class CompletingSandbox(FakeSandbox):
         async def exec(self, argv, **kwargs):
             if "2>> " in " ".join(str(part) for part in argv):
-                root = kwargs["cwd"] + "/.ale-harness/"
+                root = kwargs["cwd"] + "/.orbit-harness/"
                 requested = json.loads(self.files[root + "invocations.jsonl"].splitlines()[-1])[
                     "session_id"
                 ]
@@ -2086,14 +2087,14 @@ async def test_instruction_file_carries_full_utf8_prompt(harness) -> None:
     instruction = "多行任务\nPreserve 'quotes', $HOME, `substitution` and \u2603 exactly."
     sandbox = CompletingSandbox()
     await harness.launch(instruction, sandbox, session(), timeout_sec=60)
-    prompt = "/home/agent/.ale-harness/prompt.md"
+    prompt = "/home/agent/.orbit-harness/prompt.md"
     assert sandbox.files[prompt] == instruction.encode("utf-8")
-    record = json.loads(sandbox.files["/home/agent/.ale-harness/invocations.jsonl"])
+    record = json.loads(sandbox.files["/home/agent/.orbit-harness/invocations.jsonl"])
     assert record["prompt"] == instruction
     assert all(instruction not in " ".join(argv) for argv in sandbox.commands)
     assert all(instruction not in env.values() for env in sandbox.environments)
-    assert sandbox.files["/home/agent/.ale-harness/stderr.log"] == b"a separate warning\n"
-    assert b"warning" not in sandbox.files["/home/agent/.ale-harness/stdout.log"]
+    assert sandbox.files["/home/agent/.orbit-harness/stderr.log"] == b"a separate warning\n"
+    assert b"warning" not in sandbox.files["/home/agent/.orbit-harness/stdout.log"]
     command = sandbox.commands[-1]
     # A non-login shell on Linux, like Git Bash on Windows.
     assert command[:2] == ["sh", "-c"]
@@ -2112,19 +2113,19 @@ async def test_empty_resume_cannot_reuse_previous_success() -> None:
     first = await harness.launch("first", sandbox, session(), timeout_sec=60)
     assert first.continuation is not None
     sandbox.native_stdout = b""
-    sandbox.files["/home/agent/.codex-ale/sessions/rollout-x-thread-1.jsonl"] = b""
+    sandbox.files["/home/agent/.codex-orbit/sessions/rollout-x-thread-1.jsonl"] = b""
     with pytest.raises(NativeContinuationError, match="session ID"):
         await harness.resume("second", first.continuation, sandbox, session(), timeout_sec=60)
-    assert sandbox.files["/home/agent/.ale-harness/prompt.md"] == b"second"
+    assert sandbox.files["/home/agent/.orbit-harness/prompt.md"] == b"second"
     records = [
         json.loads(line)
-        for line in sandbox.files["/home/agent/.ale-harness/invocations.jsonl"].splitlines()
+        for line in sandbox.files["/home/agent/.orbit-harness/invocations.jsonl"].splitlines()
     ]
     assert records[1]["stdout_offset"] > 0
 
 
 def test_invocation_boundaries_preserve_resumed_events_after_partial_json(tmp_path: Path) -> None:
-    from ale.run.harnesses.base import invocations, stdout_events
+    from orbit.run.harnesses.base import invocations, stdout_events
 
     partial = b'{"type":"unfinished"'
     resumed = b'{"type":"thread.started","thread_id":"resumed"}\n'
@@ -2152,9 +2153,9 @@ def test_json_lines_reports_non_objects_and_partial_lines() -> None:
 NATIVE_ID = "0b7c5f1e-6f39-4f0a-9d47-6a0f0c8f3a11"
 SESSION_FILES = {
     "claude-code": f".claude-config/projects/project/{NATIVE_ID}.jsonl",
-    "codex-cli": f".codex-ale/sessions/2026/rollout-2026-{NATIVE_ID}.jsonl",
-    "grok-build": f".grok-ale/sessions/{NATIVE_ID}/updates.jsonl",
-    "openclaw-cli": f".openclaw-ale/agents/main/sessions/{NATIVE_ID}.jsonl",
+    "codex-cli": f".codex-orbit/sessions/2026/rollout-2026-{NATIVE_ID}.jsonl",
+    "grok-build": f".grok-orbit/sessions/{NATIVE_ID}/updates.jsonl",
+    "openclaw-cli": f".openclaw-orbit/agents/main/sessions/{NATIVE_ID}.jsonl",
 }
 
 
@@ -2174,7 +2175,7 @@ async def test_resume_sends_new_input_or_an_explicit_continue_and_records_each_p
     sandbox = FakeSandbox()
     sandbox.native_stdout = json.dumps(stdout).encode() + b"\n"
     if harness.name != "codex-cli":
-        # The CLI would confirm the ID ALE generated; the fake reports a fixed one.
+        # The CLI would confirm the ID Orbit generated; the fake reports a fixed one.
         monkeypatch.setattr("uuid.uuid4", lambda: NATIVE_ID)
     first = await harness.launch("first", sandbox, session(), timeout_sec=60)
     assert first.continuation is not None
@@ -2183,11 +2184,11 @@ async def test_resume_sends_new_input_or_an_explicit_continue_and_records_each_p
     await harness.resume(None, first.continuation, sandbox, session(), timeout_sec=60)
     records = [
         json.loads(line)
-        for line in sandbox.files["/home/agent/.ale-harness/invocations.jsonl"].splitlines()
+        for line in sandbox.files["/home/agent/.orbit-harness/invocations.jsonl"].splitlines()
     ]
     assert [record["prompt"] for record in records] == ["first", "second", CONTINUE_PROMPT]
     assert [record["session_id"] for record in records[1:]] == [NATIVE_ID, NATIVE_ID]
-    assert sandbox.files["/home/agent/.ale-harness/prompt.md"] == CONTINUE_PROMPT.encode()
+    assert sandbox.files["/home/agent/.orbit-harness/prompt.md"] == CONTINUE_PROMPT.encode()
 
 
 @pytest.mark.parametrize(
@@ -2210,7 +2211,7 @@ async def test_resume_requires_the_exact_native_session_in_the_sandbox() -> None
     sandbox.native_stdout = json.dumps({"type": "thread.started", "thread_id": NATIVE_ID}).encode()
     first = await harness.launch("first", sandbox, session(), timeout_sec=60)
     assert first.continuation is not None
-    sandbox.files[f"/home/agent/.codex-ale/sessions/rollout-{NATIVE_ID}.jsonl.bak"] = b""
+    sandbox.files[f"/home/agent/.codex-orbit/sessions/rollout-{NATIVE_ID}.jsonl.bak"] = b""
     with pytest.raises(NativeContinuationError, match="absent"):
         await harness.resume("second", first.continuation, sandbox, session(), timeout_sec=60)
 
@@ -2294,7 +2295,7 @@ async def test_release_install_picks_the_asset_for_the_sandbox_platform(
         assets=assets,
     )
     assert version == "2.0.0"
-    installer = "/home/user/.local/share/ale/install-release.py"
+    installer = "/home/user/.local/share/orbit/install-release.py"
     (install,) = [command for command in sandbox.commands if command[:2] == ["python3", installer]]
     # The script runs from a file: a Windows desktop agent's command line may not exceed
     # 1,024 characters.
@@ -2464,7 +2465,7 @@ def test_an_archive_member_is_pinned_with_its_own_digest() -> None:
 
 @pytest.mark.asyncio
 async def test_a_run_its_limit_cuts_reports_the_session_it_left() -> None:
-    """A session ALE named, or one the CLI's stream named before the cut, so the turn can
+    """A session Orbit named, or one the CLI's stream named before the cut, so the turn can
     resume in it."""
     sandbox = FakeSandbox()
     sandbox.result = ExecResult(exit_code=None, timed_out=True)
@@ -2476,5 +2477,5 @@ async def test_a_run_its_limit_cuts_reports_the_session_it_left() -> None:
     named.result = ExecResult(exit_code=None, timed_out=True)
     with pytest.raises(PhaseTimeoutError) as cut:
         await ClaudeCodeHarness().launch("work", named, session(), timeout_sec=60)
-    record = json.loads(named.files["/home/agent/.ale-harness/invocations.jsonl"].splitlines()[0])
+    record = json.loads(named.files["/home/agent/.orbit-harness/invocations.jsonl"].splitlines()[0])
     assert cut.value.native_session_id == record["session_id"] is not None

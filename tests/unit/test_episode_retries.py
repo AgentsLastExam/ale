@@ -16,18 +16,18 @@ from test_runtime_contracts import make_lock
 from tests.support import edit_task_config
 from typer.testing import CliRunner
 
-from ale.core.config import RunConfig, SandboxRetentionConfig
-from ale.core.result import FailureInfo, ResultRecord, SandboxOutcome
-from ale.core.sandbox import PreparedTaskImage, RetainedSandbox, SandboxRequest
-from ale.core.verdict import Status, Verdict
-from ale.run.cli.tasks import _retained_source_episodes
-from ale.run.episode import EpisodeResult, _Lease, run_episode, run_episode_with_retries
-from ale.run.ledger import Ledger
-from ale.run.protocol.episode_protocol import SolverSnapshot
-from ale.run.providers import ProviderRegistry
-from ale.run.recording import atomic_write_json
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import RunConfig, SandboxRetentionConfig
+from orbit.core.result import FailureInfo, ResultRecord, SandboxOutcome
+from orbit.core.sandbox import PreparedTaskImage, RetainedSandbox, SandboxRequest
+from orbit.core.verdict import Status, Verdict
+from orbit.run.cli.tasks import _retained_source_episodes
+from orbit.run.episode import EpisodeResult, _Lease, run_episode, run_episode_with_retries
+from orbit.run.ledger import Ledger
+from orbit.run.protocol.episode_protocol import SolverSnapshot
+from orbit.run.providers import ProviderRegistry
+from orbit.run.recording import atomic_write_json
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 
@@ -245,7 +245,7 @@ async def test_failed_retry_destroys_even_sanitized_keep_sandboxes() -> None:
 async def test_runtime_cleans_sandboxes_for_late_failure_and_cancellation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    runtime = import_module("ale.run.episode")
+    runtime = import_module("orbit.run.episode")
     task = load_tasks(scaffold_task(tmp_path / "task"))[0]
     digest = "sha256:" + "a" * 64
     image = PreparedTaskImage(
@@ -323,7 +323,7 @@ async def test_runtime_cleans_sandboxes_for_late_failure_and_cancellation(
 def test_sigterm_cancels_a_command_as_ctrl_c_does(
     monkeypatch: pytest.MonkeyPatch, signum: signal.Signals
 ) -> None:
-    cli = import_module("ale.run.cli.main")
+    cli = import_module("orbit.run.cli.main")
     torn_down: list[signal.Signals] = []
 
     async def workflow(*_args: object) -> int:
@@ -374,7 +374,7 @@ def test_reverification_source_discovery_accepts_three_levels_without_archived_r
 async def test_reverification_retries_only_with_fresh_verifiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_checks: AsyncMock, mode: str
 ) -> None:
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     selections: list[dict[str, object]] = []
     select = ProviderRegistry.select
 
@@ -486,7 +486,7 @@ async def test_reverification_retries_only_with_fresh_verifiers(
 async def test_calibration_projects_only_final_episode_attempts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
     edit_task_config(task_path, {"calibration": [{"name": "start-state", "expect": {"reward": 0}}]})
     (task_path / "calibration/start-state").mkdir(parents=True)
@@ -542,7 +542,7 @@ async def test_calibration_projects_only_final_episode_attempts(
 async def test_run_retries_each_episode_independently_and_resumes_only_final_successes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
     calls: Counter[str] = Counter()
     digest = "sha256:" + "a" * 64
@@ -593,7 +593,7 @@ async def test_run_retries_each_episode_independently_and_resumes_only_final_suc
 async def test_resume_with_new_scheduling_runs_only_missing_episodes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
     digest = "sha256:" + "a" * 64
     executed: list[str] = []
@@ -641,7 +641,7 @@ def test_reuse_hash_ignores_only_scheduling_settings() -> None:
 def test_retry_configuration_and_cli_precedence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
-    cli = import_module("ale.run.cli.main")
+    cli = import_module("orbit.run.cli.main")
     config = tmp_path / "run.toml"
     config.write_text("episode_retries=2\n[agent]\nname='nop'\n")
     seen: list[int] = []

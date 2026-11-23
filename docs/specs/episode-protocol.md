@@ -19,7 +19,7 @@ Before the protocol starts, the engine has already:
 - resolved the Harness authentication path, created its episode capabilities and
   evidence sinks, and prepared the Provider registry, run policy, and RunLock inputs.
 
-Image acquisition and building are preparation, not a protocol phase. `ale prepare`
+Image acquisition and building are preparation, not a protocol phase. `orbit prepare`
 stops at that boundary and creates no sandbox.
 
 ## Phase order
@@ -43,7 +43,7 @@ deadline starts at Harness launch (or policy rollout), after installation, resou
 and network policy. Evidence capture, verification, and cleanup do not consume it. An Agent
 timeout terminates execution, is not retried, and destroys its Sandbox even if retention was
 requested, after verification. Teardown is cancellation-shielded on every exit path, and
-SIGTERM cancels a command as Ctrl-C does, so a supervisor or timeout that stops `ale` still
+SIGTERM cancels a command as Ctrl-C does, so a supervisor or timeout that stops `orbit` still
 lets it destroy every Sandbox it created.
 
 ### Provision
@@ -61,13 +61,13 @@ leaf that saved it, and a separate one of its own image mounts views of the
 [volumes](task-authoring.md#volumes) the snapshot keeps, on that leaf, when it serves the
 verifier. A Sandbox mounts its volumes from its start.
 
-The image declares the agent account and home. ALE does not add a Task path prefix or
-pre-create declared artifacts. Framework staging uses `/opt/ale` on Linux and macOS
-and `C:\ProgramData\ALE` on Windows.
+The image declares the agent account and home. Orbit does not add a Task path prefix or
+pre-create declared artifacts. Framework staging uses `/opt/orbit` on Linux and macOS
+and `C:\ProgramData\Orbit` on Windows.
 
 ### Setup
 
-If `environment/setup/` exists, ALE uploads the complete directory to `setup` under the
+If `environment/setup/` exists, Orbit uploads the complete directory to `setup` under the
 staging root, opens egress, and executes `setup.sh` on Linux and macOS or `setup.ps1` on
 Windows with that directory as cwd, so its files are available by ordinary relative paths.
 Setup is optional and runs once. Where `[verifier.validation].visibility` is true, the agent
@@ -76,11 +76,11 @@ and the oracle read the stage that validates, `validation/` or else `tests/`, at
 ([Security](security.md#5-answers-are-absent-not-hidden)): a leaf that mounts Host
 directories mounts the Task folder's read-only there as the solver starts, which spares a
 copy of large assets, and setup ends by copying it there as the framework on every other
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#shown-stage)).
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#shown-stage)).
 
 ### Agent or oracle
 
-ALE rejects unsupported Harness/OS combinations before provisioning. It installs the
+Orbit rejects unsupported Harness/OS combinations before provisioning. It installs the
 selected Harness and its declared resources, checks staged stdio MCP
 commands, then applies the agent's network policy. Autonomous Harnesses launch inside the
 sandbox, in `[agent].workdir` or else the agent's home; Policy Harnesses drive the
@@ -89,7 +89,7 @@ the oracle, which runs a calibration case, both run as the image's agent account
 autonomous CLI Harnesses use the base's native Node.js and Git Bash.
 
 Only the directory of the calibration case the oracle runs is uploaded, the reference
-solution's under `ale run --agent oracle`, and only for an oracle episode; none is present
+solution's under `orbit run --agent oracle`, and only for an oracle episode; none is present
 for an evaluated solver. `tests/` and `validation/` are also absent throughout this phase,
 in every turn, but for that copy. Answers are withheld by when they are staged and by the root-only staging
 directory, not by a conventional path or a flag a Task must remember.
@@ -108,7 +108,7 @@ what stopped the agent before stands as above: lost after an OOM kill in it, at 
 since it started (`MemoryExhaustedError`), or after it wrote past its `storage_mb` where its
 Provider holds it to that by ending it (`StorageExhaustedError`). Of memory, that holds
 whether the memory its Task declares ran out or the memory around it, such as the Host's: an
-operator reads every failure, and one who finds the Host at fault fixes it and reruns, so ALE
+operator reads every failure, and one who finds the Host at fault fixes it and reruns, so Orbit
 need not tell the two apart. In the Sandbox the agent ran in, in its phase and in shared
 verification, the status is `memory_exhausted` or `storage_exhausted`, the agent's own
 [final](trace.md#result-and-run-status) result: what the agent leaves in its Sandbox,
@@ -123,7 +123,7 @@ the Episode goes on. Which evidence counts, and where a Provider has none, is in
 
 ### Evidence capture
 
-While the agent runs, ALE copies the files and directories the Harness declares in
+While the agent runs, Orbit copies the files and directories the Harness declares in
 `Harness.logs` into `logs/<harness>/` every 60 seconds, so the evidence outlives a
 Sandbox lost before the agent finishes. Each copy treats the logs as append-only: it
 transfers the bytes beyond the Host copy, and a file that shrank is copied again from its
@@ -135,7 +135,7 @@ snapshot holds the same files.
 
 The guest enforces the agent deadline itself and stops the agent's process tree before
 it replies, so the solver has stopped when evidence capture begins; the Host's own
-deadline, 60 s later, only bounds a guest that no longer replies. ALE then stops copying
+deadline, 60 s later, only bounds a guest that no longer replies. Orbit then stops copying
 and makes a final copy with its own 300 s budget. Session files are appended to, but a
 CLI may rewrite a small index or repair a session in place, so the final copy compares
 each file's guest digest with its Host copy once and copies a rewritten file again.
@@ -153,11 +153,11 @@ copying](task-authoring.md#artifact-copying). The verifier owns scoring.
 
 A separate verifier receives solver output through the Host, but for the volumes it mounts
 views of. With the default
-`artifacts.collect = "none"`, ALE discards that copy with the episode, and with shared or
+`artifacts.collect = "none"`, Orbit discards that copy with the episode, and with shared or
 snapshot verification it inspects no artifact path and copies nothing.
 
 Under snapshot verification, and under separate verification where the verifier mounts views
-of the solver's volumes, ALE then saves the solver, still the agent's: it sanitizes it as
+of the solver's volumes, Orbit then saves the solver, still the agent's: it sanitizes it as
 for retention and saves its disk, its volumes included, as a snapshot, which stops it,
 within a framework bound of 1800 s, as setup's, so that the verifier's budget covers only
 booting the verifier, any wait for room on the leaf that keeps the snapshot included, and
@@ -170,12 +170,12 @@ Shared verification uploads `tests/` into the completed solver sandbox. Separate
 verification first releases or retains the solver according to run policy, provisions a
 fresh verifier sandbox, restores captured artifacts to their original absolute paths,
 and uploads the same `tests/`. It never reruns setup or copies the solver filesystem. Before
-it captures them, ALE asks the solver's leaf whether it serves a verifier that mounts views
+it captures them, Orbit asks the solver's leaf whether it serves a verifier that mounts views
 of the solver's volumes and saves the solver once more, which a solver kept running is
-not: if so, the verifier mounts a view of each volume from the solver's snapshot, which ALE
+not: if so, the verifier mounts a view of each volume from the solver's snapshot, which Orbit
 rids of what copying would have skipped, links, special files and `exclude` matches, and
 those are not copied. Where the leaf then refuses that verifier after all, as a Fleet Node
-too small for it does, ALE copies the volumes from a Sandbox booted from the snapshot with
+too small for it does, Orbit copies the volumes from a Sandbox booted from the snapshot with
 the solver's resources, which fit there, and starts a verifier that mounts none, wherever
 one can start: views spare a copy, and their absence never fails the episode.
 
@@ -188,19 +188,19 @@ released per its retention, it is destroyed, unless the solver's retention keeps
 
 Verification runs as framework-controlled Task code with elevated privileges (root on Linux
 and macOS, Administrator on Windows), in every mode, and with the verifier's network
-([Task authoring](task-authoring.md#resources-and-network)), which ALE applies just before
+([Task authoring](task-authoring.md#resources-and-network)), which Orbit applies just before
 `tests/` or `validation/` runs and records in the trace, a validation round's from
 `[verifier.validation]` when that names one: in a shared solver it replaces the
 agent's, which is why a solver that serves a shared verifier is created able to apply both
 ([Security](security.md#1-a-sandbox-has-only-declared-ways-out)). Task code may explicitly
-drop privileges when executing a submitted program. ALE stages `ale_verify`, the
+drop privileges when executing a submitted program. Orbit stages `orbit_verify`, the
 instruction, optional solver trajectory, and run-level Judge configuration, then executes
 the OS entry from the verification staging directory. Linux and macOS use
-`/opt/ale/tests/test.sh`; Windows uses `C:\ProgramData\ALE\tests\test.ps1`. ALE selects
+`/opt/orbit/tests/test.sh`; Windows uses `C:\ProgramData\Orbit\tests\test.ps1`. Orbit selects
 Python 3.12+ (`python3`, then `python3.12` on Linux and macOS; `python.exe` on Windows; then
-the framework's own) and provides its command as `ALE_VERIFY_PYTHON`. Every placement
+the framework's own) and provides its command as `ORBIT_VERIFY_PYTHON`. Every placement
 leaves the same [result](verification.md#result) in `/logs/verifier`
-(`C:\logs\verifier`, macOS `/opt/ale/logs/verifier`), which ALE empties and gives to the
+(`C:\logs\verifier`, macOS `/opt/orbit/logs/verifier`), which Orbit empties and gives to the
 framework alone before every attempt. The solver interpreter is unchanged.
 
 ### Teardown and retention
@@ -213,7 +213,7 @@ holds no processes, memory or desktop session, so follow-ups that need them keep
 Sandbox; it holds every file they left, such as a daemon's pid file in `/run`, as a
 restarted container does. A solver to be snapshotted needs a Provider that saves
 snapshots, so selection gives it none that cannot, before anything is provisioned.
-Before either, ALE removes every stage of the Task (setup, tests with their Judge state,
+Before either, Orbit removes every stage of the Task (setup, tests with their Judge state,
 the oracle's calibration case), the verifier directory and known credentials, so a kept
 solver or a snapshot holds only the agent's own state.
 Under snapshot verification the solver is saved whatever its retention, on a leaf that
@@ -229,7 +229,7 @@ whose effective policy would keep such a solver running, `keep` for the solver, 
 verifier under shared verification, where the verifier is the solver, is refused before
 anything is prepared, and so is a calibration with one. Every round's verifier and snapshot
 are destroyed. A round's snapshot that cannot be is recorded `not-destroyed`, with its
-handle, the reason and its cleanup command, and stays listed by `ale sandbox list`; it
+handle, the reason and its cleanup command, and stays listed by `orbit sandbox list`; it
 holds the agent's state between turns, so it is never a continuation or reverification
 source.
 Subscription credentials never enter the Sandbox, so retention does not add a provider
@@ -312,7 +312,7 @@ prepared; either can set `validation_rounds = 0`.
 A Provider that holds a Sandbox only until a set time, as a scheduler holds an allocation
 for its wall time, gives the Sandbox a deadline: the latest time to begin saving it, which
 leaves what the save and writing it where another Sandbox can boot from it take
-([Providers](../../packages/ale-run/src/ale/run/providers/README.md#slurm)), and declares
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#slurm)), and declares
 how long it holds one at most. A run of the agent is bounded, as it launches, by that
 deadline less 120 s for stopping the agent, copying its logs and sanitizing the solver, as
 by the agent's time. Where the deadline ends a run first, the turn is not over: the solver
@@ -353,12 +353,12 @@ was lost; episode retries start the episode again.
 
 The result records each solver Sandbox the agent worked in as a
 [segment](trace.md#result-and-run-status), the agent's phase that a move cut as `moved`, and
-the trajectory marks the prompt that resumed it with `extra.ale.moved`, the segment it
+the trajectory marks the prompt that resumed it with `extra.orbit.moved`, the segment it
 resumed in.
 
 ## Reverification
 
-`ale reverify TASK SOURCE_RUN` is an internal authoring optimization. Each source episode
+`orbit reverify TASK SOURCE_RUN` is an internal authoring optimization. Each source episode
 must have a complete RunLock, the same prepared solver-image identity as the current Task,
 and its solver kept as the current verification needs: running, for shared verification,
 as a snapshot, for snapshot verification, and either for separate verification. A source of
@@ -366,15 +366,15 @@ another kind is refused, and so is a kept shared Sandbox for separate or snapsho
 verification, since its disk holds what its shared verifier changed. An episode with
 validation rounds keeps no solver running, so it can be reverified only from a snapshot.
 
-For shared verification, ALE reconnects to the retained shared Sandbox and runs the current
-`tests/` there. For separate verification, ALE captures the declared artifacts from the
+For shared verification, Orbit reconnects to the retained shared Sandbox and runs the current
+`tests/` there. For separate verification, Orbit captures the declared artifacts from the
 retained solver, detaches without destroying it, provisions a fresh verifier Sandbox,
 restores the artifacts, and runs the current `tests/` there; from a snapshot, it boots a
 Sandbox from the snapshot to capture them instead, but for the volumes the verifier mounts
-views of, as a separate verifier does in an episode. For snapshot verification, ALE boots a
+views of, as a separate verifier does in an episode. For snapshot verification, Orbit boots a
 fresh verifier Sandbox from the source's snapshot, on the Provider that keeps it, captures
 the declared artifacts there when run policy collects them, and runs the current `tests/`,
-leaving the snapshot as it was. Before any path uploads `tests/`, ALE removes the previously
+leaving the snapshot as it was. Before any path uploads `tests/`, Orbit removes the previously
 staged verifier files so deleted files cannot survive a revision.
 
 The Harness, setup, and agent phases do not run again. The new episode copies the source trajectory,
@@ -383,7 +383,7 @@ execution trace, and RunLock.
 
 ## Continuation
 
-`ale run TASK --continue-from EPISODE_DIR` gives the Task's instruction to the agent of an
+`orbit run TASK --continue-from EPISODE_DIR` gives the Task's instruction to the agent of an
 earlier episode whose solver was kept or snapshotted, in that Sandbox or one booted from the
 snapshot, and in that native session, for follow-up turns on one workspace. The earlier
 episode must have retained its solver and recorded a `continuation`. The run uses the same
@@ -409,16 +409,16 @@ episode. With shared verification the next agent starts from the state verificat
 separate and snapshot verification leave the solver first, so it holds only the agent's
 work.
 
-`ale reverify --episode-retries N` (or `--set episode_retries=N`) retries incomplete
+`orbit reverify --episode-retries N` (or `--set episode_retries=N`) retries incomplete
 separate or snapshot verification with a new verifier Sandbox each time, preserving the
 source solver or snapshot.
 Shared reverification remains a single attempt because verification may modify that same
-source Sandbox; a clean retry requires a new full `ale run`. The original shared attempt
+source Sandbox; a clean retry requires a new full `orbit run`. The original shared attempt
 is still allowed when the retry configuration is nonzero.
 
 ## Calibration
 
-`ale calibrate` runs every [calibration case](task-authoring.md#calibration) of a Task
+`orbit calibrate` runs every [calibration case](task-authoring.md#calibration) of a Task
 through this same protocol as the oracle, each a complete episode in fresh Sandboxes:
 `solution` first, then the other cases in the order `task.toml` lists them. When the Task
 has `validation/`, or `[agent].validation_rounds` above 0 without it, each case also runs a

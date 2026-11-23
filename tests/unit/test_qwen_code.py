@@ -7,22 +7,22 @@ from pathlib import Path, PurePosixPath
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, ConfigError, HarnessLimitError
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
-from ale.core.taskspec import StreamableHttpMcpServer
-from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.qwen_code import QwenCodeHarness
-from ale.run.recording import BlobStore
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, ConfigError, HarnessLimitError
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
+from orbit.core.taskspec import StreamableHttpMcpServer
+from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.qwen_code import QwenCodeHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
 SESSION_ID = "session-1"
-PROJECT = ".qwen-ale/projects/project-1"
+PROJECT = ".qwen-orbit/projects/project-1"
 CHAT = f"{PROJECT}/chats/{SESSION_ID}.jsonl"
 CHILD = f"{PROJECT}/subagents/{SESSION_ID}/agent-child-1"
-SETTINGS = "/home/agent/.qwen-ale/system-settings.json"
+SETTINGS = "/home/agent/.qwen-orbit/system-settings.json"
 PROMPTS = ("delegate", "second")
 
 
@@ -85,7 +85,7 @@ async def test_system_settings_route_the_model_through_the_gateway(
     rendered = sandbox.files[SETTINGS].decode()
     settings = json.loads(rendered)
     assert settings["security"]["auth"] == {"selectedType": protocol, "enforcedType": protocol}
-    route = {"id": "test-model", "envKey": "ALE_GATEWAY_TOKEN", "baseUrl": base_url}
+    route = {"id": "test-model", "envKey": "ORBIT_GATEWAY_TOKEN", "baseUrl": base_url}
     if wire_api:
         route["wireApi"] = wire_api
     assert settings["modelProviders"] == {provider: [route]}
@@ -100,9 +100,9 @@ async def test_system_settings_route_the_model_through_the_gateway(
     assert settings["privacy"] == {"usageStatisticsEnabled": False}
     assert settings["telemetry"] == {"enabled": False}
     assert "token" not in rendered.replace("TOKEN", "")
-    assert sandbox.files["/home/agent/.qwen-ale/system-defaults.json"] == b"{}\n"
+    assert sandbox.files["/home/agent/.qwen-orbit/system-defaults.json"] == b"{}\n"
     assert sandbox.uploads == [
-        (str(effective.skills[0].path), "/home/agent/.qwen-ale/skills/resource-proof")
+        (str(effective.skills[0].path), "/home/agent/.qwen-orbit/skills/resource-proof")
     ]
 
 
@@ -163,25 +163,25 @@ async def test_http_mcp_servers_use_the_streamable_http_field() -> None:
 async def test_command_reads_the_prompt_from_stdin_and_names_its_session() -> None:
     harness = QwenCodeHarness()
     launch = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=None,
     )
     assert launch.session_id is not None
     assert f"--session-id {launch.session_id}" in launch.script
-    assert launch.script.endswith(" < /home/agent/.ale-harness/prompt.md")
+    assert launch.script.endswith(" < /home/agent/.orbit-harness/prompt.md")
     assert launch.script.startswith("unset OPENAI_API_KEY OPENAI_BASE_URL ")
     assert "--approval-mode yolo" in launch.script
-    assert launch.env["QWEN_HOME"] == "/home/agent/.qwen-ale"
-    assert launch.env["QWEN_RUNTIME_DIR"] == "/home/agent/.qwen-ale"
+    assert launch.env["QWEN_HOME"] == "/home/agent/.qwen-orbit"
+    assert launch.env["QWEN_RUNTIME_DIR"] == "/home/agent/.qwen-orbit"
     assert launch.env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] == SETTINGS
     assert launch.env["QWEN_CODE_MODELS_DEV_REFRESH"] == "off"
     assert launch.env["QWEN_CODE_NO_RELAUNCH"] == "1"
-    assert launch.env["ALE_GATEWAY_TOKEN"] == "token"
+    assert launch.env["ORBIT_GATEWAY_TOKEN"] == "token"
 
     resume = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=SESSION_ID,
@@ -193,14 +193,14 @@ async def test_command_reads_the_prompt_from_stdin_and_names_its_session() -> No
 
 async def test_windows_command_uses_native_paths() -> None:
     command = await QwenCodeHarness().prepare_command(
-        "C:/Users/Agent/.ale-harness/prompt.md",
+        "C:/Users/Agent/.orbit-harness/prompt.md",
         FakeSandbox(stdout=r"C:\Windows\System32"),  # type: ignore[arg-type]
         session(home=r"C:\Users\Agent"),
         native_session_id=None,
     )
-    assert command.env["QWEN_HOME"] == "C:/Users/Agent/.qwen-ale"
+    assert command.env["QWEN_HOME"] == "C:/Users/Agent/.qwen-orbit"
     assert command.env["HOME"] == "C:/Users/Agent"
-    assert command.script.endswith(" < C:/Users/Agent/.ale-harness/prompt.md")
+    assert command.script.endswith(" < C:/Users/Agent/.orbit-harness/prompt.md")
 
 
 def stdout(reply: str) -> str:
@@ -289,12 +289,12 @@ def write_run(logs: Path, *outputs: str) -> None:
     for prompt, output in zip(PROMPTS, outputs, strict=True):
         records.append({"prompt": prompt, "stdout_offset": offset})
         offset += len(output.encode())
-    write_jsonl(logs / ".ale-harness/invocations.jsonl", records)
-    (logs / ".ale-harness/stdout.log").write_text("".join(outputs))
+    write_jsonl(logs / ".orbit-harness/invocations.jsonl", records)
+    (logs / ".orbit-harness/stdout.log").write_text("".join(outputs))
 
 
 def prompt(text: str) -> dict[str, object]:
-    """A prompt ALE sent, with the blank line Qwen appends to one read from stdin."""
+    """A prompt Orbit sent, with the blank line Qwen appends to one read from stdin."""
     return {
         "type": "user",
         "provenance": "real_user",
@@ -389,7 +389,7 @@ def test_parser_follows_the_session_and_embeds_its_subagent(tmp_path: Path) -> N
     spawn = trajectory.steps[1]
     (call,) = spawn.tool_calls or ()
     assert call.function_name == "agent"
-    assert call.extra == {"ale": {"native_tool": "tool_call"}}
+    assert call.extra == {"orbit": {"native_tool": "tool_call"}}
     assert call.arguments == {"prompt": "run child"}
     (result,) = spawn.observation.results  # type: ignore[union-attr]
     assert result.content == "CHILD-DONE"
@@ -455,11 +455,11 @@ def test_mcp_calls_through_the_deferred_tool_wrapper_keep_server_and_tool(
     assert call.function_name == "mcp__proof__echo"
     assert call.arguments == {"text": "hi"}
     assert call.extra == {
-        "ale": {"native_tool": "tool_call", "mcp": {"server": "proof", "tool": "echo"}}
+        "orbit": {"native_tool": "tool_call", "mcp": {"server": "proof", "tool": "echo"}}
     }
     (result,) = trajectory.steps[1].observation.results  # type: ignore[union-attr]
     assert result.content == "server unavailable"
-    assert result.extra == {"ale": {"is_error": True}}
+    assert result.extra == {"orbit": {"is_error": True}}
 
 
 def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> None:
@@ -471,7 +471,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
 
     trajectory = QwenCodeHarness().parse_trajectory(context(logs, tmp_path, incomplete=True))
 
-    assert "parse_issues" not in trajectory.extra["ale"]  # type: ignore[index]
+    assert "parse_issues" not in trajectory.extra["orbit"]  # type: ignore[index]
     (helper,) = trajectory.subagent_trajectories or ()
     (inner,) = helper.subagent_trajectories or ()
     assert inner.trajectory_id == "trajectory-subagent-child-1-subagent-child-2"
@@ -485,7 +485,7 @@ def test_a_subagent_spawned_by_a_subagent_is_embedded_in_it(tmp_path: Path) -> N
     assert result.subagent_trajectory_ref[0].trajectory_id == inner.trajectory_id
     # An interrupted run leaves every agent in it incomplete.
     for subagent in (helper, inner):
-        assert subagent.extra == {"ale": {"incomplete": True, "incomplete_reason": "interrupted"}}
+        assert subagent.extra == {"orbit": {"incomplete": True, "incomplete_reason": "interrupted"}}
 
 
 def test_unlinked_subagents_are_reported(tmp_path: Path) -> None:
@@ -495,7 +495,7 @@ def test_unlinked_subagents_are_reported(tmp_path: Path) -> None:
     trajectory = QwenCodeHarness().parse_trajectory(context(logs, tmp_path))
 
     assert trajectory.subagent_trajectories is None
-    issues = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
+    issues = trajectory.extra["orbit"]["parse_issues"]  # type: ignore[index]
     assert {"reason": "unlinked_subagent", "source": f"{CHILD}.jsonl"} in issues
     assert any(
         issue["reason"] == "unconverted_native_sessions" and f"{CHILD}.jsonl" in issue["sources"]
@@ -533,5 +533,7 @@ def test_without_the_session_each_turn_comes_from_its_prompt_and_stdout(tmp_path
         ("user", "second"),
         ("agent", "SECOND-DONE"),
     ]
-    ale = trajectory.extra["ale"]  # type: ignore[index]
-    assert {"reason": "native_session_unavailable", "session_id": SESSION_ID} in ale["parse_issues"]
+    orbit = trajectory.extra["orbit"]  # type: ignore[index]
+    assert {"reason": "native_session_unavailable", "session_id": SESSION_ID} in orbit[
+        "parse_issues"
+    ]

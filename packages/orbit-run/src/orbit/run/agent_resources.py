@@ -10,11 +10,11 @@ from urllib.parse import urlparse
 
 from pydantic import TypeAdapter, ValidationError
 
-from ale.core.errors import AgentResourceConflictError, AgentResourceError
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, ResolvedSkill
-from ale.core.ids import content_hash
-from ale.core.lock import TaskSource
-from ale.core.taskspec import (
+from orbit.core.errors import AgentResourceConflictError, AgentResourceError
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, ResolvedSkill
+from orbit.core.ids import content_hash
+from orbit.core.lock import TaskSource
+from orbit.core.taskspec import (
     McpServer,
     McpSource,
     NetworkMode,
@@ -224,7 +224,7 @@ def _resolve_mcp_source(
     if source.builtin:
         if source.builtin != "cua-desktop":
             raise AgentResourceError(f"unknown built-in MCP server: {source.builtin}")
-        from ale.run.tools import resolved_cua_desktop
+        from orbit.run.tools import resolved_cua_desktop
 
         resolved = resolved_cua_desktop(
             operating_system, screenshot_max_dimension=source.screenshot_max_dimension

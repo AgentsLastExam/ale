@@ -15,11 +15,11 @@ import pytest
 import pytest_asyncio
 from aiohttp import ClientSession, web
 
-from ale.core.trace import read_jsonl
-from ale.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
-from ale.run.gateway.server import REQUEST_PATHS, Gateway
-from ale.run.gateway.session import GatewaySession
-from ale.run.recording import EpisodeRecording
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
+from orbit.run.gateway.server import REQUEST_PATHS, Gateway
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
 

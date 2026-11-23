@@ -8,11 +8,11 @@ import pytest
 from tests.unit.test_fleet_control import linux as linux_node
 from tests.unit.test_fleet_control import mac as mac_node
 
-from ale.core.capability import Arch, CapabilityProfile, GpuModel, SandboxNeeds, unmet
-from ale.core.errors import ProviderCapabilityError
-from ale.core.fleet import NodeDeclaration, SandboxDemand
-from ale.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
-from ale.core.taskspec import (
+from orbit.core.capability import Arch, CapabilityProfile, GpuModel, SandboxNeeds, unmet
+from orbit.core.errors import ProviderCapabilityError
+from orbit.core.fleet import NodeDeclaration, SandboxDemand
+from orbit.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
+from orbit.core.taskspec import (
     ContainerFeature,
     ImageKind,
     NetworkMode,
@@ -20,11 +20,11 @@ from ale.core.taskspec import (
     OperatingSystem,
     Resources,
 )
-from ale.run.framework import fleet_framework_identity
-from ale.run.providers.daytona import DaytonaProvider
-from ale.run.providers.fleet import FleetProvider
-from ale.run.providers.orchard import OrchardProvider
-from ale.run.providers.orchard.client import CONTROL_ACCOUNT
+from orbit.run.framework import fleet_framework_identity
+from orbit.run.providers.daytona import DaytonaProvider
+from orbit.run.providers.fleet import FleetProvider
+from orbit.run.providers.orchard import OrchardProvider
+from orbit.run.providers.orchard.client import CONTROL_ACCOUNT
 
 pytestmark = pytest.mark.unit
 
@@ -274,7 +274,7 @@ class TestProviders:
         def missing() -> None:
             raise ProviderCapabilityError("restricted macOS networking needs Softnet")
 
-        monkeypatch.setattr("ale.run.providers.orchard.provider.check_softnet", missing)
+        monkeypatch.setattr("orbit.run.providers.orchard.provider.check_softnet", missing)
         orchard = OrchardProvider()
         mac = needs(kind=ImageKind.VM, os=OperatingSystem.MACOS, arch=Arch.ARM64)
         assert await orchard.unserved(mac, user="user", role=SandboxRole.SOLVER) == (
@@ -355,7 +355,7 @@ class TestProviders:
 def test_a_solver_saves_one_snapshot_for_each_round_to_come_and_one_at_its_end_at_most() -> None:
     """Its end's save serves a snapshot verifier and retention alike; a shared solver, which
     its verifier runs in, is saved at its end only to keep it."""
-    from ale.core.capability import solver_saves
+    from orbit.core.capability import solver_saves
 
     assert solver_saves(2, snapshot_verified=False, kept_as_snapshot=False) == 2
     assert solver_saves(2, snapshot_verified=True, kept_as_snapshot=False) == 3

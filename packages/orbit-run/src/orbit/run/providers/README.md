@@ -1,6 +1,6 @@
 # Providers
 
-Providers turn prepared Task images into Sandboxes. ALE ships the following backends:
+Providers turn prepared Task images into Sandboxes. Orbit ships the following backends:
 
 | Package | Backend | Prepared input |
 |---|---|---|
@@ -23,7 +23,7 @@ Docker;
 `daytona/api.py` is Daytona's REST client and `daytona/image.py` adapts and publishes
 images; `orchard/client.py` drives Orchard and Tart, `orchard/framing.py` frames images
 and `orchard/desktop.py` waits for the desktop; `fleet/tunnel.py` carries a Run's Gateway
-to its Sandboxes on a Node, both ends of it, and the node agent itself is the `ale-fleet`
+to its Sandboxes on a Node, both ends of it, and the node agent itself is the `orbit-fleet`
 package. Two files run elsewhere and import nothing from the engine:
 `firecracker/guest_init.py` is the init every microVM boots, and `qemu/ntfs_discard.py`
 runs in the VM builder. `desktop.py` and `privileges.py` serve several Providers, and
@@ -33,7 +33,7 @@ console that shows its OOM kills, and the check for a desktop that has drawn not
 `memory.py` counts the OOM kills in a gVisor, Kata or Daytona sandbox from inside it
 ([Memory](#memory)).
 
-They implement the `ale.core.sandbox.Provider` and `Sandbox` contracts: capability
+They implement the `orbit.core.sandbox.Provider` and `Sandbox` contracts: capability
 profiles, preflight, image verification, lifecycle, command/file transport, egress changes,
 observed identity, resource allocation and optional retention. Harness and episode
 protocol code must use those contracts rather than backend-specific methods.
@@ -50,7 +50,7 @@ Run gives each Sandbox the first one listed that serves it
 In `__init__.py`, `leaf()` builds a leaf from its id, `SCHEDULERS` names the schedulers,
 and `ProviderRegistry` builds each Provider of the Run's list when first needed, chooses
 among them (`select`) and checks the chosen leaves on the Host (`preflight`). Each Provider
-states its capability profiles in `profiles()`, compared by `ale.core.capability.unmet`,
+states its capability profiles in `profiles()`, compared by `orbit.core.capability.unmet`,
 and a leaf the rules no profile can state in `refusals()`, which a scheduler asks of the
 leaves its profiles name:
 
@@ -94,9 +94,9 @@ serves it on.
 
 | Provider | Where the fixed port leads |
 |---|---|
-| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a second Slurm step to the Host, the login node ALE runs on, carrying only the Gateway and, under `allowlist` or `blocklist`, the episode's egress proxy |
-| Docker | `ale-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ALE_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)). Under rootless Docker, whose bridges are in a network namespace of rootlesskit's, the Provider listens at the Gateway's port there and relays each connection to the Host ([Docker runtimes](#docker-runtimes)) |
-| QEMU | The runner's `ALE_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
+| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a second Slurm step to the Host, the login node Orbit runs on, carrying only the Gateway and, under `allowlist` or `blocklist`, the episode's egress proxy |
+| Docker | `orbit-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ORBIT_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)). Under rootless Docker, whose bridges are in a network namespace of rootlesskit's, the Provider listens at the Gateway's port there and relays each connection to the Host ([Docker runtimes](#docker-runtimes)) |
+| QEMU | The runner's `ORBIT_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Firecracker | As QEMU, from the guest's tap device in the runner |
 | Daytona | `guestd/tunnel.py` listens at 7412 on the sandbox's loopback |
 | Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted, or until a later episode that continues in a retained VM stops it (through `lsof` on the port) and starts its own |
@@ -128,8 +128,8 @@ settings back: open, its programs go straight out again, and a snapshot outlives
 Only settings that still name the relay go back, so what the agent set itself stays for
 verification. A macOS proxy that had no server is turned off again with the relay's address
 left in it, unused. A failure is logged, not raised: the agent may have broken its own
-desktop. guestd keeps what it changed in `/run/ale/system-proxy.json`,
-`%ProgramData%\ALE\system-proxy.json` on Windows or `/var/db/ale/system-proxy.json` on
+desktop. guestd keeps what it changed in `/run/orbit/system-proxy.json`,
+`%ProgramData%\Orbit\system-proxy.json` on Windows or `/var/db/orbit/system-proxy.json` on
 macOS, because a guestd connected over `docker exec` or Orchard's exec ends with its run,
 sealed or not. A run that reattaches to a sealed Sandbox starts the relay again with its own
 proxy and token, and so does sealing a sealed Sandbox, as a shared verifier sealed after the
@@ -148,12 +148,12 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 
 | Provider | How a snapshot is saved, booted and destroyed |
 |---|---|
-| Docker | `docker stop`, then `docker commit` to `ale-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `ale.retention=snapshot`, `ale.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
-| QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the ALE cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
-| Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the ALE cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
+| Docker | `docker stop`, then `docker commit` to `orbit-snapshot:<sandbox id>`. The image keeps the container's command and labels, with `orbit.retention=snapshot`, `orbit.prepared` naming the prepared image, and no GPU label. A container boots from its image ID; `docker rmi` destroys it and fails while a container still uses it |
+| QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the Orbit cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
+| Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the Orbit cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so its profile saves none |
-| Slurm | `podman stop`, then `podman commit` to `localhost/ale-snapshot:<index>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there, or that the allocation would not last, gets an allocation of its own, which loads the snapshot written out with `podman save` to the shared `~/.cache/ale/slurm/snapshots`; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
-| Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `ale-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
+| Slurm | `podman stop`, then `podman commit` to `localhost/orbit-snapshot:<index>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there, or that the allocation would not last, gets an allocation of its own, which loads the snapshot written out with `podman save` to the shared `~/.cache/orbit/slurm/snapshots`; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
+| Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `orbit-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
 | Fleet | The Node's Provider saves it on that Node, as in its row, and Sandboxes that boot from it are placed there, on the leaf that saved it ([Placement](../../../../../../docs/specs/fleet.md#placement)). The Fleet's handle for it is `fleet:snapshot:<sandbox>`; destroying it has the Node's Provider destroy it at the Node's next heartbeat |
 
 How each counts what a snapshot holds against the `storage_mb` of a Sandbox booted from it
@@ -161,7 +161,7 @@ How each counts what a snapshot holds against the `storage_mb` of a Sandbox boot
 
 | Provider | What the snapshot holds, and how it counts |
 |---|---|
-| Docker | A commit labels the image `ale.written` with the bytes written over the Task's image, the container's `SizeRw` measured once it has stopped plus what the snapshot it booted from held. A container booted from it carries that label, and the [storage watch](#docker-writable-storage) adds it to every measurement. Each commit stacks one more layer: Docker's layer store chains 125 at most under any graph driver, so a Sandbox whose image's layers and planned saves would exceed that is refused before it starts; the containerd image store's snapshotter, which replaces that store, stacks far more |
+| Docker | A commit labels the image `orbit.written` with the bytes written over the Task's image, the container's `SizeRw` measured once it has stopped plus what the snapshot it booted from held. A container booted from it carries that label, and the [storage watch](#docker-writable-storage) adds it to every measurement. Each commit stacks one more layer: Docker's layer store chains 125 at most under any graph driver, so a Sandbox whose image's layers and planned saves would exceed that is refused before it starts; the containerd image store's snapshotter, which replaces that store, stacks far more |
 | QEMU | The overlay is the larger of the snapshot's virtual size and `storage_mb` plus its overhead, and the guest's root filesystem already holds what the solver wrote |
 | Firecracker | `snapshot.json` records `written_mb`, the writable disk's use as the guest's `df /` showed it before shutdown plus what the snapshot it booted from held; a microVM booted from it gets a writable disk of `storage_mb` less that, plus the overhead, and one whose `storage_mb` that already fills is refused before it boots, as the Task's error. Each save stacks one more layer, of eight at most, so the profile saves eight in a row (`max_saves`), and a Sandbox whose snapshot's layers and [planned saves](../../../../../../docs/specs/sandbox-image.md#provider-selection) together would exceed eight is refused before it boots |
 | Orchard | The clone is the snapshot's disk, at least `storage_mb`, with the solver's files on it |
@@ -179,7 +179,7 @@ of every artifact, as of any other.
 | Docker | a named volume of its own, which Docker fills from the image | its top layer, in a stack of layers | an overlay volume of the stack under a layer of its own | counted by a helper that measures the volumes ([below](#docker-volumes)) |
 | Slurm | a Podman volume in the allocation's store, which Podman fills from the image | its top layer, in a stack of layers in the store | an overlay of the stack under a layer of its own, in the solver's allocation ([below](#slurm-volumes)) | not held |
 | Firecracker | an overlay of the image's directory and of each layer's, under a layer on the writable disk | the writable disk, with the root | the snapshot's disks attached read-only, and the same overlay under a layer of its own | counted with the writable disk |
-| QEMU, Linux | an overlay of the disk's own directory under `/opt/ale/volumes/<hash>` on the disk | the disk | the snapshot's disk attached read-only once the guest is up, and an overlay of what it holds there under a layer of its own | counted with the disk |
+| QEMU, Linux | an overlay of the disk's own directory under `/opt/orbit/volumes/<hash>` on the disk | the disk | the snapshot's disk attached read-only once the guest is up, and an overlay of what it holds there under a layer of its own | counted with the disk |
 | QEMU, Windows | the directory on the disk, which stays one | the disk | a junction to it on a copy-on-write overlay of the snapshot's disk, attached once the guest is up | counted with the disk |
 | Fleet | as on the Node's leaf | as on the Node's leaf | on the Node and leaf that keep the snapshot ([Placement](../../../../../../docs/specs/fleet.md#placement)) | as on the Node's leaf |
 
@@ -189,13 +189,13 @@ On Docker ([`docker/volumes.py`](docker/volumes.py)):
 
 | | What the Docker leaf does |
 |---|---|
-| A Sandbox of the image | finds which of its volume candidates are directories in the image, with no link on their way, by the image's own framework Python in a helper container of it, and mounts a named volume of its own at each, `ale-v-<12 hex>`, labelled `ale.volume=<sandbox id>`, which Docker fills with what the image holds there on the first mount |
-| Its snapshot | records each path's stack of layers, topmost first, in the image's `ale.volumes` label with the owner and mode of the volume's root, read before the container stops; the volume that held the Sandbox's writes is the top layer, which destroying the Sandbox leaves |
+| A Sandbox of the image | finds which of its volume candidates are directories in the image, with no link on their way, by the image's own framework Python in a helper container of it, and mounts a named volume of its own at each, `orbit-v-<12 hex>`, labelled `orbit.volume=<sandbox id>`, which Docker fills with what the image holds there on the first mount |
+| Its snapshot | records each path's stack of layers, topmost first, in the image's `orbit.volumes` label with the owner and mode of the volume's root, read before the container stops; the volume that held the Sandbox's writes is the top layer, which destroying the Sandbox leaves |
 | A Sandbox the snapshot serves | mounts, for each path, a view: a `local`-driver overlay volume of the stack under an empty upper and a work volume of its own, created by the daemon, with no copy of the image's content (`volume-nocopy`), so a verifier's own image adds nothing; it gives the view's root the recorded owner and mode, which an overlay takes from its upper layer; saving it puts that upper layer on top of the stack |
 | A stack of 60 layers | is copied into one layer of its own as the 60th save is taken, with `cp -a --reflink=auto` in a helper container, since an overlay's options, the layers' mount points among them, must fit in one page: a solver saved for each of many rounds keeps saving |
 | A container engine's storage | of a Sandbox that asks for `nested_containers`, `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers`, is a volume of its own too, which its snapshot keeps whole; a Sandbox booted from the snapshot that runs an engine gets a copy of it, as above, never a view, and one of another image, a separate verifier's, none |
-| `storage_mb` | counts what the Sandbox writes to its volumes as to its writable layer: a helper container of its own, `ale-meter-<sandbox id>`, mounts the volumes that hold its writes read-only and counts their blocks with `du`, less what they held as it started, at each measurement of the [storage watch](#docker-writable-storage); a snapshot's `ale.written` adds what they held. A measurement took 0.06 s with nothing written and 0.33 s with 100,000 files of 1 KiB, where the daemon's of the layer took 0.04 s and 0.54 s (Docker 29.1.3, NVMe) |
-| Destroying the snapshot | removes the image, then each of its layers that no other snapshot's label and no view's `ale.volume-lowers` label names: a later round's snapshot still stacks an earlier one's layers |
+| `storage_mb` | counts what the Sandbox writes to its volumes as to its writable layer: a helper container of its own, `orbit-meter-<sandbox id>`, mounts the volumes that hold its writes read-only and counts their blocks with `du`, less what they held as it started, at each measurement of the [storage watch](#docker-writable-storage); a snapshot's `orbit.written` adds what they held. A measurement took 0.06 s with nothing written and 0.33 s with 100,000 files of 1 KiB, where the daemon's of the layer took 0.04 s and 0.54 s (Docker 29.1.3, NVMe) |
+| Destroying the snapshot | removes the image, then each of its layers that no other snapshot's label and no view's `orbit.volume-lowers` label names: a later round's snapshot still stacks an earlier one's layers |
 
 Kata shares a view with its microVM through virtio-fs and gVisor through its gofer, as any
 volume. Measured on runc and Kata (Docker 29.1.3, containerd image store) and gVisor 0.1.4
@@ -236,7 +236,7 @@ Where a Task shows its agent the stage that validates
 ([`[verifier.validation].visibility`](../../../../../../docs/specs/task-authoring.md#validation)),
 a solver's request names the Task folder's directory and where it goes. Docker mounts it
 there read-only as the container starts (`--mount type=bind,...,readonly`), labelled
-`ale.shown`, so no copy of its assets is made, a Sandbox booted from a snapshot mounts it
+`orbit.shown`, so no copy of its assets is made, a Sandbox booted from a snapshot mounts it
 again, and not even the agent's sudo writes to it. Every other Provider, and Docker on a Fleet
 Node, which holds none of the Run's files, leaves it to the episode, which copies it as setup
 ends.
@@ -248,8 +248,8 @@ same machine, such as a restarted Fleet node agent, drives it again or destroys 
 
 | Provider | How `reattach` and `discard` find a Sandbox by its handle |
 |---|---|
-| Docker | `docker:<container>`: `docker inspect` finds the container, whose labels must name it ALE's, and it must be running the recorded image. Reattaching confines it by the network mode its `ale.network` label records, which it was started with, whatever the reattaching run asks, re-applies the [Gateway route](#gateway-address) as a reattaching run does and reads the seal back from the container: a runc one is sealed when it is off the default bridge, a Kata one when the seal's drop filter is on `tap0_kata`, a gVisor one when it is on `eth0`'s egress, whose netstack chains are then written again to match. `discard` removes the container and its network; one that is already gone needs nothing |
-| QEMU | `qemu:<runner>`: the same for the runner container, whose labels must name it ALE's and whose overlay must sit on the recorded disk. Reattaching refills the runner's `ALE_GATEWAY` chain and reads the seal back from its `FORWARD` drop rule. `discard` removes the runner and its overlay |
+| Docker | `docker:<container>`: `docker inspect` finds the container, whose labels must name it Orbit's, and it must be running the recorded image. Reattaching confines it by the network mode its `orbit.network` label records, which it was started with, whatever the reattaching run asks, re-applies the [Gateway route](#gateway-address) as a reattaching run does and reads the seal back from the container: a runc one is sealed when it is off the default bridge, a Kata one when the seal's drop filter is on `tap0_kata`, a gVisor one when it is on `eth0`'s egress, whose netstack chains are then written again to match. `discard` removes the container and its network; one that is already gone needs nothing |
+| QEMU | `qemu:<runner>`: the same for the runner container, whose labels must name it Orbit's and whose overlay must sit on the recorded disk. Reattaching refills the runner's `ORBIT_GATEWAY` chain and reads the seal back from its `FORWARD` drop rule. `discard` removes the runner and its overlay |
 | Orchard | `orchard:<name>:<uid>`: the VM by its name, which must still have that UID and run the image that framing, a snapshot, or a kept VM's record names on this Mac. Reattaching opens new guest sessions; the Gateway relay started at boot outlives the old ones. `discard` deletes the VM unless Orchard replaced it |
 | Daytona, Firecracker, Fleet | None: their Sandboxes have no handle, and `reattach` refuses |
 
@@ -257,7 +257,7 @@ same machine, such as a restarted Fleet node agent, drives it again or destroys 
 
 A Task's `gpu_types` decides which GPU models a Sandbox may get
 ([GPUs](../../../../../../docs/specs/task-authoring.md#gpus)). Every Provider checks the
-models it got with `ale.core.capability.accepts_model`, which applies that rule.
+models it got with `orbit.core.capability.accepts_model`, which applies that rule.
 
 | Provider | How it gives only the models the Task accepts |
 |---|---|
@@ -283,18 +283,18 @@ and the default margin), so that a Sandbox that needs more on every model it acc
 the next listed Provider rather than to a leaf that could never admit it.
 
 **Admission.** A Docker leaf admits a Sandbox to the Host's GPUs under one lock for its
-Docker daemon, `/tmp/ale-gpu-<daemon ID>.lock` (`docker info --format {{.ID}}`), which every
-ALE process of every user that admits through that daemon takes, whatever its cache, from
+Docker daemon, `/tmp/orbit-gpu-<daemon ID>.lock` (`docker info --format {{.ID}}`), which every
+Orbit process of every user that admits through that daemon takes, whatever its cache, from
 reading the GPUs until `docker run` returns. It is opened read-only, which `flock` needs no
 more than: `fs.protected_regular` refuses `O_CREAT` on another user's file in the sticky
 `/tmp`, so the first process creates it with `O_EXCL`, readable by all whatever its umask,
-and the others open it as it is. The running containers' labels are the record of what ALE
-holds: every Sandbox carries `ale.gpus`, the GPUs it holds, and `ale.gpu_memory_mb`, what it
+and the others open it as it is. The running containers' labels are the record of what Orbit
+holds: every Sandbox carries `orbit.gpus`, the GPUs it holds, and `orbit.gpu_memory_mb`, what it
 reserved on each when it shares them, both empty when unused, so an image's labels never
 stand in for them. The record is per daemon: Runs on one Host through different daemons,
 such as each user's rootless one, see what each other's Sandboxes use, through nvidia-smi,
 but not what they reserved and do not use yet. Under the lock it reads `nvidia-smi
---query-gpu=...,memory.total,memory.reserved,memory.free`, the labels of the running ALE
+--query-gpu=...,memory.total,memory.reserved,memory.free`, the labels of the running Orbit
 containers (`docker ps`), and, when one shares a GPU, what each process uses (`nvidia-smi
 --query-compute-apps=pid,used_memory,gpu_uuid`), which it assigns to a container by the
 process's cgroup (`docker-<id>.scope` with the systemd driver, rootful or rootless;
@@ -304,17 +304,17 @@ Sandbox, its Sentry, whose memory is nvproxy's count (measured).
 
 | Sandbox | May take a GPU | Of those, takes |
 |---|---|---|
-| without `gpu_memory_mb` | that no ALE Sandbox holds | the one with the most free memory |
-| with `gpu_memory_mb` | that no ALE Sandbox holds whole, and whose headroom is at least `gpu_memory_mb` plus `sandbox.docker.gpu_memory_margin_mb` (4096 by default) | the one with the most headroom |
+| without `gpu_memory_mb` | that no Orbit Sandbox holds | the one with the most free memory |
+| with `gpu_memory_mb` | that no Orbit Sandbox holds whole, and whose headroom is at least `gpu_memory_mb` plus `sandbox.docker.gpu_memory_margin_mb` (4096 by default) | the one with the most headroom |
 
-Headroom is `memory.free` less, for each ALE Sandbox sharing the GPU, what it reserved and
+Headroom is `memory.free` less, for each Orbit Sandbox sharing the GPU, what it reserved and
 does not use yet; what it uses already is not free, so it counts once, and one that uses
 more than it reserved adds nothing. `memory.free` excludes what the driver reserves (470 MiB
 of an H100's 81559 with driver 570). The margin is for other tenants' jobs, which grow after
 they start: one on a shared Host of eight H100s grew by 4.2 GB within 10 s. It cannot cover
 a tenant that starts after admission, as jobs there did, in steps of 19 to 31 GB. Too little
 refuses the Sandbox with `ProviderCapacityError`, naming each GPU and its free memory, what
-ALE reserved there and the headroom left; a Fleet Node answers with it that it has no room
+Orbit reserved there and the headroom left; a Fleet Node answers with it that it has no room
 for now, and the Fleet asks it again later. The allocation records how the Sandbox holds its
 GPUs (`whole`, `limit` or `watched`), what it reserved on each, and each GPU's
 `memory.total`, `memory.reserved` and `memory.free` when it was admitted.
@@ -325,8 +325,8 @@ fails as CUDA out of memory (`cudaErrorMemoryAllocation`, `torch.OutOfMemoryErro
 context that does not fit fails to be created, and the Sandbox goes on
 ([runtime](../../../../../../images/runtimes/gvisor/README.md#gpu-memory-limit)). Its
 preflight, whenever a Sandbox may share GPUs, checks that `runsc flags` lists
-`-nvproxy-gpu-memory-limit`, which only ALE's build has. Under `docker:runc` nothing holds a
-process to a device memory limit, so every selection (`ale run`, `ale calibrate`, a
+`-nvproxy-gpu-memory-limit`, which only Orbit's build has. Under `docker:runc` nothing holds a
+process to a device memory limit, so every selection (`orbit run`, `orbit calibrate`, a
 reverification) says once, for the leaf and how many Sandboxes it serves so: `note
 docker:runc watches the gpu_memory_mb of N Sandboxes rather than enforcing it: a process
 past its share is killed`.
@@ -344,7 +344,7 @@ agent sees its process killed (signal 9, exit code -9 through `exec`). What the 
 the Sandbox's own process pays for; nothing turns it into an environment error that would
 rerun or unscore the episode. The kill runs in a helper container (the runner image under
 `runc`) that joins the Sandbox's PID namespace (`--pid container:<id>`), since under rootful
-Docker ALE's user cannot signal a container's processes and nothing the Sandbox holds, its
+Docker Orbit's user cannot signal a container's processes and nothing the Sandbox holds, its
 Python included, may decide whether the kill happens. The watchdog first checks that the
 PID's cgroup still names the container and its start time (`/proc/<pid>/stat` field 22) is
 the one it read; the helper checks the start time again through that namespace's `/proc` and
@@ -357,14 +357,14 @@ GPU were admitted with.
 
 Under gVisor nvproxy should have refused the memory, so a Sentry's row past its share is a
 failure of nvproxy's accounting for memory the driver attributes to the Sentry, which is
-ALE's failure: `docker kill` stops the whole Sandbox, its episode ends in an environment
-error (`the sandbox itself died: ALE's GPU memory watchdog stopped it: ...`), and it is no
+Orbit's failure: `docker kill` stops the whole Sandbox, its episode ends in an environment
+error (`the sandbox itself died: Orbit's GPU memory watchdog stopped it: ...`), and it is no
 longer watched.
 
 What blinds the watchdog: `nvidia-smi` failing, which it logs once per streak of failed
 looks and once when it looks again; a row whose memory reads `[N/A]`; a Host `/proc` mounted
 with `hidepid`, which hides other users' processes, a rootful Docker's containers among
-them; and ALE running in a PID namespace of its own, as in a container: nvidia-smi gives
+them; and Orbit running in a PID namespace of its own, as in a container: nvidia-smi gives
 each process's PID in the caller's namespace, where the Sandboxes' processes have none.
 
 Not counted by gVisor's limit, nor in nvidia-smi's rows: the memory the driver allocates for
@@ -384,7 +384,7 @@ Sandbox, or guestd in it, lost after an OOM kill in it since it started raises
 ([Episode protocol](../../../../../../docs/specs/episode-protocol.md#agent-or-oracle)),
 whose message gives what showed the kill.
 
-| Provider | Where the limit is | One process past it | What loses the Sandbox | How ALE tells |
+| Provider | Where the limit is | One process past it | What loses the Sandbox | How Orbit tells |
 |---|---|---|---|---|
 | `docker:runc` | its cgroup on the Host | killed alone | many processes: the OOM killer reaches supervisord; `/dev/shm`, half its memory, is too small to | Docker's `OOMKilled`, which it sets at any OOM kill in the container and keeps after it stops ([Docker](docker/AGENTS.md#a-sandbox-that-runs-out-of-its-memory)) |
 | `docker:gvisor` | its cgroup on the Host, the Sentry's memory included, which the Sentry keeps 16 MiB below | killed alone, by the Sentry | a mounted tmpfs written full: the Sentry ends every process it may choose, guestd among them; many processes are killed one by one | `oom_kill` in the Sentry's `memory.oom_control`, which a watcher in the sandbox writes to a `docker exec` session, since Docker records none of the Sentry's kills; and Docker's `OOMKilled` as under runc, for the Host's OOM killer, which still acts on memory the Sentry does not see ([gVisor](../../../../../../images/runtimes/gvisor/README.md#out-of-memory)) |
@@ -478,7 +478,7 @@ Each Provider starts a desktop at the request's `desktop_resolution` and then ch
 | Daytona | The same variable, in the environment the Provider starts the image's command with and runs guestd in |
 | Firecracker | The same variable, in the environment the guest's init starts the image's command with. A microVM has no display device, so its desktop is the image's own X server, as in a container |
 | QEMU | Every guest gets QEMU's standard VGA (`VGA=std`), whose EDID names the size as the display's preferred mode (`-global VGA.xres=… -global VGA.yres=…`). OVMF sets that mode at boot, Linux's `bochs` driver and GNOME start at it, and Windows' Microsoft Basic Display Adapter keeps the mode the firmware set; it ignores the size virtio-vga, the runner's own default, announces. The display has 64 MB of video memory, since Linux's driver keeps two frames of the screen. OVMF sets no mode above 3200x1800 and falls back to 1280x800, which is why `DesktopResolution` stops there |
-| Orchard | Tart keeps a VM's display size in the VM's configuration, which a clone copies and Orchard cannot set, so each resolution boots its own clone of the framed image, `ale-framed-<key>-<WIDTHxHEIGHT>`, made on first use with `tart set --display WIDTHxHEIGHTpt` and deleted when the image is framed again. The size is in points, Tart's default for macOS: a 1024x768 desktop is 2048x1536 pixels, and Cua Driver returns its captures scaled down (1366x1025 for 1024x768). macOS keeps a display narrower than 1024 points at 1024x768, which is why `DesktopResolution` starts there |
+| Orchard | Tart keeps a VM's display size in the VM's configuration, which a clone copies and Orchard cannot set, so each resolution boots its own clone of the framed image, `orbit-framed-<key>-<WIDTHxHEIGHT>`, made on first use with `tart set --display WIDTHxHEIGHTpt` and deleted when the image is framed again. The size is in points, Tart's default for macOS: a 1024x768 desktop is 2048x1536 pixels, and Cua Driver returns its captures scaled down (1366x1025 for 1024x768). macOS keeps a display narrower than 1024 points at 1024x768, which is why `DesktopResolution` starts there |
 
 ## Agent elevation on Linux and macOS
 
@@ -560,23 +560,23 @@ A Docker leaf is Docker under one runtime, `docker:<runtime>`. Each entry of `RU
 container features it gives and what a Sandbox that asks for each gets (capabilities,
 another name the runtime is registered under, or volumes), whether GPUs reach its Sandboxes,
 how they are confined, the Host devices it needs, the memory it adds to a Sandbox's, the
-`docker run` flags every Sandbox gets, and, for a runtime ALE builds itself, the arguments
+`docker run` flags every Sandbox gets, and, for a runtime Orbit builds itself, the arguments
 it must be registered with, what its version reports, the command that lists the GPU drivers
 it supports, what a Sandbox's kernel log shows and its flag that limits a shared Sandbox's
 GPU memory. A Sandbox runs under one registered name, so features that each need another
 come in profiles of their own. A runtime is added there and, as a provider id a Run may
-name, to `ProviderId` in `ale.core.config`; a unit test fails while the two differ. Every
+name, to `ProviderId` in `orbit.core.config`; a unit test fails while the two differ. Every
 Docker leaf keeps the Provider name `docker` in its handles.
 
 Its preflight, given what the Run's Sandboxes of it need (everything its profiles declare,
 for a Node), finds each name they run under among those `docker info` lists, registered
-with exactly the arguments the runtime takes when ALE builds it, or, for a containerd shim's
+with exactly the arguments the runtime takes when Orbit builds it, or, for a containerd shim's
 name such as
 `io.containerd.kata.v2`, the shim `containerd-shim-kata-v2` on the PATH Docker runs it
 from, and checks its devices. It starts every Sandbox with `--runtime` naming the runtime
 its features need, `runc` included, and refuses one for which `docker inspect` reports
 another, so a Host whose daemon defaults to another runtime never runs a Sandbox there
-unnoticed. The allocation records the runtime Docker reports. ALE's own helper
+unnoticed. The allocation records the runtime Docker reports. Orbit's own helper
 containers, the network helper, the QEMU and Firecracker runners and the VM builders,
 always run under `runc`, which Docker always registers.
 
@@ -589,10 +589,10 @@ gone, was lost to memory ([Memory](#memory)). Otherwise a stopped container is r
 the sandbox itself dying: it was killed from outside on exit code 137, and otherwise its
 main process exited with its code; one still running lost only the session, which is
 reported as a lost guest session, with guestd's stderr. A session that never answered failed
-to start, and its stderr is reported at once. ALE ends a session itself before it destroys,
+to start, and its stderr is reported at once. Orbit ends a session itself before it destroys,
 keeps or snapshots the Sandbox, and that end asks nothing of Docker. Nor does the end of a
-Sandbox that ALE stopped, by the GPU watchdog ([GPU memory](#gpu-memory)) or the storage
-watch ([Docker writable storage](#docker-writable-storage)): it is reported as what ALE
+Sandbox that Orbit stopped, by the GPU watchdog ([GPU memory](#gpu-memory)) or the storage
+watch ([Docker writable storage](#docker-writable-storage)): it is reported as what Orbit
 stopped it for, whatever `OOMKilled` or a watcher says.
 
 On every Docker leaf a sandbox runs its image's command before the Provider confines it,
@@ -609,7 +609,7 @@ A rootless daemon's bridges are in a network namespace of rootlesskit's, which i
 for them (`--detach-netns`, `dockerd-rootless.sh`'s default) or which is the daemon's own,
 and which reaches no port on the Host's loopback (`--disable-host-loopback`): nothing the
 Host serves answers at a bridge's address. When `docker info` reports the daemon rootless
-and its bridges are in another network namespace than ALE's, the Provider listens there, on
+and its bridges are in another network namespace than Orbit's, the Provider listens there, on
 every address, at each port of the Gateway and egress proxy its Sandboxes reach, and relays
 each connection to that port on the Host's loopback; a connection the port refuses is
 reset. The seal is unchanged: it still admits only those ports of the Host's address. The
@@ -617,9 +617,9 @@ Provider finds the namespace as `dockerd-rootless.sh` does: the daemon is the pr
 the socket the CLI uses (`SO_PEERCRED`), and the namespace is
 `$ROOTLESSKIT_STATE_DIR/netns` in the daemon's mount namespace when rootlesskit detached
 it, and the daemon's own otherwise. A Python of its own joins the daemon's user and network
-namespaces, makes the listener and hands it back, so the listener is ALE's process's: it
+namespaces, makes the listener and hands it back, so the listener is Orbit's process's: it
 closes when the last Sandbox that reaches its port ends here, or with the process. Where
-ALE runs inside that namespace itself, nothing is relayed.
+Orbit runs inside that namespace itself, nothing is relayed.
 
 What a relayed connection costs, on a 384-core Host under a load of about 185 (Docker
 29.9.3 with rootlesskit 3.3.0 and slirp4netns, three runs each), against a server listening
@@ -664,7 +664,7 @@ names `storage_mb` to it as Kubernetes holds a Pod to its `ephemeral-storage`
 leaf reads what the Sandbox has written over its image, `SizeRw` of
 `docker container inspect --size`, which the daemon counts on the Host, outside the
 Sandbox's reach. Once that passes `storage_mb` MiB the leaf kills the container and logs, in
-the phase of the command that ran last, `ALE's storage watch stopped the Sandbox: it wrote
+the phase of the command that ran last, `Orbit's storage watch stopped the Sandbox: it wrote
 4102 MiB over its image, past the 4096 MiB its Task declares`; the Sandbox's next call,
 and one that waits on it then, raises `StorageExhaustedError` with the same sizes, which
 ends the Episode as `storage_exhausted`
@@ -683,7 +683,7 @@ containerd image store on ext4, counted alike, and so did every runtime:
 | `/dev/shm` or another tmpfs | nothing: it is memory, which `memory_mb` holds |
 | A [volume](#volumes), a volume artifact's or a container engine's storage | its blocks, at the same measurement, by a helper container that mounts the volume read-only, less what it held as the Sandbox started: Docker sizes a volume only in `docker system df -v`, which sizes every volume and layer of the daemon, in 4 to 6 s with 80 volumes, and fails when a container goes meanwhile |
 
-What ALE writes counts as the Sandbox's own, as on a disk of that size: a ready Sandbox of
+What Orbit writes counts as the Sandbox's own, as on a disk of that size: a ready Sandbox of
 the container base has written 3.4 MiB, and 16 MiB 30 s later, the framework's Python
 caches and the desktop's start, before setup and the Harness's installation add theirs.
 
@@ -704,7 +704,7 @@ So a Sandbox may write about 5 GiB past its limit on a fast disk before it ends,
 a Host's Sandboxes together no more than its disk takes in 5 s, which the Host keeps free.
 What measuring leaves to the agent, such as `df` in the Sandbox showing the Host's disk and
 a write past the limit succeeding rather than failing as on a full disk, is
-[issue #152](https://github.com/AgentsLastExam/ale/issues/152).
+[issue #152](https://github.com/AgentsLastExam/orbit/issues/152).
 
 ## Docker on Kata Containers
 
@@ -725,7 +725,7 @@ configuration is used as it ships.
 | Kata | What the Provider does |
 |---|---|
 | Moves every frame between the VM's tap (`tap0_kata`) and the container's veth with tc filters, at preference 49152, so netfilter in the sandbox's namespace never sees the guest's traffic: the runc helper's rules would neither route the Gateway nor confine the Host | The same helper puts tc filters ahead of Kata's, in that namespace, outside the VM. Port 7412 to the Host's address is rewritten to the Gateway's port, and replies back (`pedit` and `csum`; 64 MiB each way came through intact). A sandbox that is not `open` reaches no other port of that address, and its proxy port only under `allowlist`. Root in the VM writes any frame, so these filters pass only a frame from the sandbox's own MAC and address to the bridge's MAC: one with another source, one to another MAC and an ARP reply claiming another address are dropped (measured). Toward the VM they pass only a frame from the bridge's MAC and the Host's address to the sandbox's MAC, which the guest takes from the veth (measured), and the Host's own ARP. A reattaching run replaces only the Gateway and proxy filters |
-| Hands the VM its networks at boot: `docker network connect` succeeds and the VM never sees the network | The sandbox boots on a bridge network of its own, `ale-net-<sandbox id>`, which no other container joins, so frames another container writes as the Host never reach it (measured). The network is not internal, an `open` Task's included: egress opens by removing the seal and leaves through the network's NAT. Sealing adds filters that drop every frame but those to and from the Host's address, ARP included, so it reaches neither the Internet nor another container; while it is open, the Host's other addresses are reached as any other host is. A sandbox that is not `open` starts sealed: the filters are in place before guestd connects, though the image's own command starts before them. Sealing again replaces each filter in place, so a drop is never missing; opening egress removes them and checks that no drop filter is left. Destroying the sandbox removes its network |
+| Hands the VM its networks at boot: `docker network connect` succeeds and the VM never sees the network | The sandbox boots on a bridge network of its own, `orbit-net-<sandbox id>`, which no other container joins, so frames another container writes as the Host never reach it (measured). The network is not internal, an `open` Task's included: egress opens by removing the seal and leaves through the network's NAT. Sealing adds filters that drop every frame but those to and from the Host's address, ARP included, so it reaches neither the Internet nor another container; while it is open, the Host's other addresses are reached as any other host is. A sandbox that is not `open` starts sealed: the filters are in place before guestd connects, though the image's own command starts before them. Sealing again replaces each filter in place, so a drop is never missing; opening egress removes them and checks that no drop filter is left. Destroying the sandbox removes its network |
 | Docker's embedded DNS server, `127.0.0.11` on any network but the default bridge, is served through netfilter in the namespace and out of the guest's reach: a lookup failed | As the sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives a container on the default bridge, which names the Host's upstream servers, read once by a helper there, so the daemon needs its default bridge; the file stays the container's own and writable |
 | Makes the VM exactly the container's memory limit; the guest kernel and agent take about 96 MiB plus 2.5 % of it (512 MiB declared left 395 MiB usable, against 504 MiB on runc) | Starts the VM with `memory_mb + 96 + memory_mb / 40` MiB, which leaves the Task's processes at least what runc gives them; the allocation records `memory_mb`. With the base image's desktop running in 512 MiB, one process then held 312–320 MiB against 240–288 MiB on runc: in a VM the kernel's own work for the desktop is not charged to the container |
 | Gives the VM one vCPU more than `--cpus` and applies the quota in the guest's cgroup | Nothing: the quota holds, and `nproc` reports `cpus + 1` rather than the Host's count |
@@ -759,17 +759,17 @@ pay for it most.
 
 ## Docker on gVisor
 
-The `docker:gvisor` leaf starts each of its sandboxes under ALE's build of gVisor's `runsc`
+The `docker:gvisor` leaf starts each of its sandboxes under Orbit's build of gVisor's `runsc`
 ([gVisor runtime](../../../../../../images/runtimes/gvisor/README.md)): the container's
 system calls go to the Sentry, a kernel in user space, so an exploit in the sandbox must
 escape the Sentry and then its seccomp filter to reach the Host's kernel. The image, guestd
 over `docker exec`, files, uploads, the desktop, GPUs and snapshots work as on runc, and the
-allocation records the runtime Docker reports. Each row below was measured with ALE's build
+allocation records the runtime Docker reports. Each row below was measured with Orbit's build
 of runsc release-20261109.0, with patches 0001 to 0005 and, for the rows on container
 engines, 0006 to 0008, which change only nf_tables and its connection tracking, under
 Docker 29.1.3 (containerd snapshotter) on Linux 7.0.
 
-Every Host registers ALE's `runsc` in Docker three times, the same on every Host, GPUs or
+Every Host registers Orbit's `runsc` in Docker three times, the same on every Host, GPUs or
 not: as `runsc`, as `runsc-net-raw`, which adds `--net-raw`, and as `runsc-nested`, which
 adds `--TESTONLY-nftables`, each with exactly the arguments the [runtime's
 README](../../../../../../images/runtimes/gvisor/README.md#install-on-a-host) shows. A
@@ -777,7 +777,7 @@ Sandbox runs under `runsc` unless it asks for `raw_sockets` or `nested_container
 entirely under `runsc-net-raw` or `runsc-nested`; no profile gives both, so a Sandbox that
 asks for both is refused before anything starts. Besides finding each name the Run's
 Sandboxes run under, registered with exactly those arguments, the preflight checks that
-`runsc --version` reports the build this engine runs (`+ale.0.1.4`, `VERSION` in its
+`runsc --version` reports the build this engine runs (`+orbit.0.1.4`, `VERSION` in its
 `build.sh`; a stock `runsc` lacks the rootless and out-of-memory fixes) and, whenever GPUs
 may be attached, a Sandbox needing them or a Node whose profiles offer the Host's, that
 `runsc nvproxy list-supported-drivers` lists the Host's NVIDIA driver, and, whenever a
@@ -789,20 +789,20 @@ kernel log must say `Starting gVisor`, and `docker cp` must see what the Sandbox
 
 | gVisor | What the Provider does |
 |---|---|
-| netstack, gVisor's network stack, takes the container's address and routes at boot and sends and receives every frame through a packet socket on `eth0`, below the namespace's netfilter; it never sees a network attached later, and one detached is lost for good; Docker's embedded DNS server, `127.0.0.11` on any network but the default bridge, answers nothing in netstack | The sandbox boots on a bridge network of its own, `ale-net-<sandbox id>`, which no other container joins and which is not internal, an `open` Task's included, so egress opens by removing the seal; destroying the sandbox removes it. As the sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives a container on the default bridge, which names the Host's upstream servers, so the daemon needs its default bridge |
+| netstack, gVisor's network stack, takes the container's address and routes at boot and sends and receives every frame through a packet socket on `eth0`, below the namespace's netfilter; it never sees a network attached later, and one detached is lost for good; Docker's embedded DNS server, `127.0.0.11` on any network but the default bridge, answers nothing in netstack | The sandbox boots on a bridge network of its own, `orbit-net-<sandbox id>`, which no other container joins and which is not internal, an `open` Task's included, so egress opens by removing the seal; destroying the sandbox removes it. As the sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives a container on the default bridge, which names the Host's upstream servers, so the daemon needs its default bridge |
 | tc's ingress hook runs after the packet socket has read a frame, so a filter there drops nothing; the egress hook on `eth0` sees every frame the Sentry sends, from any kind of socket | The network helper puts tc filters on `eth0`'s egress (a `clsact` qdisc), in the sandbox's namespace, outside it. A sandbox that is not `open` passes only frames from its own MAC and address to the bridge's MAC and the Host's address, on the Gateway's own port (the wire carries it, since netstack rewrites 7412) and, under `allowlist`, the proxy's, and starts sealed: its own ARP for that address passes and everything else is dropped, IPv6 included. A packet with a forged source, from a sandbox with raw sockets, is dropped (measured). While sealed it reaches nothing but those two ports; while open, the Host's address on its network still answers only on them, and the Host's other addresses are reached as any other host is. Sealing again replaces each filter in place, so the drop is never missing; opening removes the seal and checks that its drop filter is gone |
-| Dropped frames only time out: a sealed DNS lookup took 56 s | ALE's chains in netstack refuse at once what the seal drops (a TCP reset or an ICMP port unreachable; a lookup fails in 0.01 s): `ALE_GATEWAY` sends 7412 to the Gateway's port; `ALE_HOST` refuses every other port of the Host's address, as runc's rules do, the replies to connections the Host opens included; while sealed `ALE_SEAL` refuses everything else the sandbox sends and `ALE_INPUT` drops what it did not ask for. `OUTPUT`, `FORWARD` (for what a sandbox forwards between network namespaces of its own) and `INPUT` jump to them first. Sealing changes the filters and then the chains; opening, the chains and then the filters. An `open` sandbox with no Gateway on this Host gets no chain, and no privileged exec |
-| A privileged `docker exec` holds every capability in the Sentry, `CAP_NET_RAW` only under `runsc-net-raw`, so under `runsc` the image's iptables, if it has one, cannot open its raw socket; the sandbox's own processes hold `CAP_NET_ADMIN` only under `runsc-nested` | [`iptables.py`](../iptables.py), run as root on the framework's Python through `docker exec --privileged`, replaces each table in one `IPT_SO_SET_REPLACE` on a UDP socket, which needs only `CAP_NET_ADMIN`, holding `/run/xtables.lock` as iptables does, and keeps every rule the Task made. That Python is the sandbox's own file: root in the sandbox, an agent granted `sudo`, can replace it and so run with every capability at ALE's next change of egress, mount file systems whether its Task named `mount` or not, and rewrite ALE's chains. Only the filters outside bind the sandbox, and they hold: with its chains flushed, a sealed sandbox reaches neither the Internet nor anything with a raw ICMP echo (measured) |
-| tc cannot drop frames on their way into the sandbox | No other container is on its network, so only the Host's frames arrive: a container with raw sockets on the default bridge that wrote as the Host got none to its veth (measured). `ALE_INPUT` drops what the sandbox did not ask for while it is sealed |
+| Dropped frames only time out: a sealed DNS lookup took 56 s | Orbit's chains in netstack refuse at once what the seal drops (a TCP reset or an ICMP port unreachable; a lookup fails in 0.01 s): `ORBIT_GATEWAY` sends 7412 to the Gateway's port; `ORBIT_HOST` refuses every other port of the Host's address, as runc's rules do, the replies to connections the Host opens included; while sealed `ORBIT_SEAL` refuses everything else the sandbox sends and `ORBIT_INPUT` drops what it did not ask for. `OUTPUT`, `FORWARD` (for what a sandbox forwards between network namespaces of its own) and `INPUT` jump to them first. Sealing changes the filters and then the chains; opening, the chains and then the filters. An `open` sandbox with no Gateway on this Host gets no chain, and no privileged exec |
+| A privileged `docker exec` holds every capability in the Sentry, `CAP_NET_RAW` only under `runsc-net-raw`, so under `runsc` the image's iptables, if it has one, cannot open its raw socket; the sandbox's own processes hold `CAP_NET_ADMIN` only under `runsc-nested` | [`iptables.py`](../iptables.py), run as root on the framework's Python through `docker exec --privileged`, replaces each table in one `IPT_SO_SET_REPLACE` on a UDP socket, which needs only `CAP_NET_ADMIN`, holding `/run/xtables.lock` as iptables does, and keeps every rule the Task made. That Python is the sandbox's own file: root in the sandbox, an agent granted `sudo`, can replace it and so run with every capability at Orbit's next change of egress, mount file systems whether its Task named `mount` or not, and rewrite Orbit's chains. Only the filters outside bind the sandbox, and they hold: with its chains flushed, a sealed sandbox reaches neither the Internet nor anything with a raw ICMP echo (measured) |
+| tc cannot drop frames on their way into the sandbox | No other container is on its network, so only the Host's frames arrive: a container with raw sockets on the default bridge that wrote as the Host got none to its veth (measured). `ORBIT_INPUT` drops what the sandbox did not ask for while it is sealed |
 | `runsc` gives raw sockets only to a whole sandbox, from its registration's `--net-raw`; `--allow-packet-socket-write` would let a packet socket write any frame | A Sandbox that asks for `raw_sockets` runs under `runsc-net-raw`: ping works and a packet socket captures, but its write fails (`ENOTSUP`), and the seal drops what a raw socket forges |
 | The Sentry, the gofer and the stubs are charged to the container, the Sentry keeps 16 MiB of it free, and the memory watcher (below) runs beside guestd: beside the framework's processes alone, the desktop ended, one process got 24 to 72 MiB less than under runc for the same Task with 60 MiB and 1 MiB per GiB added, at 512 MiB, 2, 4 and 8 GiB alike (28 runs, rootless Docker 29.9.3 on Linux 6.12); the Sentry's own memory when it kills varies that much from run to run | Starts it with `memory_mb + 108 + memory_mb / 1024` MiB, which puts runc's share in the middle of that spread; the allocation records `memory_mb` |
-| The application's memory is the Sentry's memory file, charged to the container: a stub the Host's OOM killer takes at the container's limit frees nothing until the Sentry has torn it down, so the next charge takes another process, at times the Sentry, which ends the whole sandbox; under rootless Docker, Docker's default `oom_score_adj` ties the stubs with the Sentry ([Out of memory](../../../../../../images/runtimes/gvisor/README.md#out-of-memory) has the measurements) | ALE's runtime keeps a sandbox whose cgroup cannot swap, as no Sandbox's can, 16 MiB below its limit and kills there in the Sentry, one process at a time, sparing init and any process at `oom_score_adj` -1000 (patch 0009). `--oom-score-adj 500` ranks every stub above the Sentry and the gofer for the Host's OOM killer, which still acts on memory the Sentry does not see, under rootful and rootless Docker alike |
+| The application's memory is the Sentry's memory file, charged to the container: a stub the Host's OOM killer takes at the container's limit frees nothing until the Sentry has torn it down, so the next charge takes another process, at times the Sentry, which ends the whole sandbox; under rootless Docker, Docker's default `oom_score_adj` ties the stubs with the Sentry ([Out of memory](../../../../../../images/runtimes/gvisor/README.md#out-of-memory) has the measurements) | Orbit's runtime keeps a sandbox whose cgroup cannot swap, as no Sandbox's can, 16 MiB below its limit and kills there in the Sentry, one process at a time, sparing init and any process at `oom_score_adj` -1000 (patch 0009). `--oom-score-adj 500` ranks every stub above the Sentry and the gofer for the Host's OOM killer, which still acts on memory the Sentry does not see, under rootful and rootless Docker alike |
 | The Sentry counts the processes it kills in `oom_kill` of cgroup v1's `memory.oom_control`, which the Host's cgroup and Docker never learn of; what a sandbox writes into a tmpfs, such as `/dev/shm`, is the Sentry's memory, which no kill frees, so filling its limit that way ends every process the Sentry may choose, guestd among them | A watcher on the framework's Python, at `oom_score_adj` -1000, writes the Sentry's `memory.oom_control` to a `docker exec` session, and a lost session after it counted a kill, or after Docker recorded one, reports a loss to memory ([Memory](#memory)) |
 | `docker stop` ends a command without a `SIGTERM` handler at once (exit 143), where runc waits out the timeout; `docker cp` into a running sandbox is not reliably seen inside | Snapshots stop and commit as on runc; files go through guestd, never `docker cp` |
 | `docker run --gpus` turns nvproxy, gVisor's proxy of the NVIDIA driver, on for that container alone; `--nvproxy` would turn it on, and probe the driver, for every container; `nvidia-smi` in the sandbox reports no PCI address (`[Unknown Error]`) | GPUs are attached as on runc (`--gpus "device=<uuid>,..."`, `NVIDIA_DRIVER_CAPABILITIES=all`, which `--nvproxy-allowed-driver-capabilities=all` allows), and recorded as the Host sees them; a sandbox sees the whole GPU and what its other tenants use, as under runc. A Sandbox that shares its GPUs is limited to its `gpu_memory_mb` on each ([GPU memory](#gpu-memory)) |
 | `runsc` ignores the setuid bit of a program, `sudo` among them, unless it runs with `--allow-suid` | Every registration passes `--allow-suid`, so the agent elevates through `sudo` as under runc |
 | `perf_event_open`, `bpf` and `io_uring_setup` fail whatever is granted (`ENODEV`, `EPERM` or `EINVAL`, `ENOSYS`) | Its profiles give none of them |
-| netstack implements nf_tables only under `--TESTONLY-nftables`, without which the `iptables` of Debian, Ubuntu and Alpine, Docker and Podman fail (`Failed to initialize nft: Protocol not supported`); with it, the Sentry's netlink takes nf_tables messages from any process holding `CAP_NET_ADMIN` in a network namespace, as every process does in one it creates | A Sandbox that asks for `nested_containers` runs under `runsc-nested`, with `--cap-add NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE`, which stay in the Sentry: the engine's bridges and rules, its mounts and namespaces, and an init script's limits, such as Debian's raising open files. No other sandbox reaches nf_tables. netstack runs ALE's chains, which stay in its iptables tables, before the engine's nf_tables rules, as Linux runs both; unlike Linux, which tracks and NATs a connection once for both, each tracks and NATs it on its own (patch 0008) |
+| netstack implements nf_tables only under `--TESTONLY-nftables`, without which the `iptables` of Debian, Ubuntu and Alpine, Docker and Podman fail (`Failed to initialize nft: Protocol not supported`); with it, the Sentry's netlink takes nf_tables messages from any process holding `CAP_NET_ADMIN` in a network namespace, as every process does in one it creates | A Sandbox that asks for `nested_containers` runs under `runsc-nested`, with `--cap-add NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE`, which stay in the Sentry: the engine's bridges and rules, its mounts and namespaces, and an init script's limits, such as Debian's raising open files. No other sandbox reaches nf_tables. netstack runs Orbit's chains, which stay in its iptables tables, before the engine's nf_tables rules, as Linux runs both; unlike Linux, which tracks and NATs a connection once for both, each tracks and NATs it on its own (patch 0008) |
 | The sandbox's root is the Host's overlayfs, which refuses to create the whiteouts (a 0:0 character device) by which an engine's overlay layers mark what they delete: an engine that keeps its images there fails to start a container (`symlink /proc/mounts …/etc/mtab: file exists`) or to delete a file of its image | `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` each get a Docker volume of their own, which starts with what the image holds there and goes with the sandbox. Its snapshot keeps each whole, and a Sandbox booted from it gets a copy, as an overlay view would hide the engine's whiteouts; the storage watch counts what is written there ([Volumes](#volumes)) |
 | A dockerd that can open a packet socket but not write one, as under `--net-raw`, fails to start a container (`failed to advertise addresses: operation not supported`, the `docker.io` 29.1.3 of Ubuntu 22.04 and 24.04); one that cannot open one only warns | `runsc-nested` passes no `--net-raw`, so a nested container has no raw socket, and a Sandbox has `raw_sockets` or `nested_containers`, in a profile each |
 
@@ -820,7 +820,7 @@ not supported`) and netavark 1.4 makes a netlink request that fails with `EINVAL
 
 The filters and chains confine IPv4. The Provider creates a sandbox's network without IPv6;
 on a daemon that enables IPv6 on every new network, the Host's IPv6 address is outside the
-Host's drop and `ALE_HOST` while egress is open, though the seal drops IPv6 like everything
+Host's drop and `ORBIT_HOST` while egress is open, though the seal drops IPv6 like everything
 else.
 
 What it costs, on a 112-core Host under a load of about 40: starting a bare container until
@@ -834,7 +834,7 @@ the preflight's check: about 15 s with that image.
 
 ## Slurm
 
-ALE runs on a login node of the cluster, where Slurm's commands work and whose home every
+Orbit runs on a login node of the cluster, where Slurm's commands work and whose home every
 compute node shares, and a Run drives that one cluster. A Sandbox not booted from a
 snapshot, a separate verifier that copies included, gets a single-node batch job of its own,
 its allocation, sized for it and for the verifiers its request names, which boot from its
@@ -852,12 +852,12 @@ with Podman, whose Buildah 1.33 refuses what only BuildKit reads, such as a here
 `RUN`. A private registry's credentials are those `~/.docker/config.json` on the shared home
 saves, which both the pin and Podman read. The job adds the framework layer for the account
 the Task's image declares, or `user` for an image a caller names by reference alone, as the
-conformance suite does, and saves the result, compressed, to `~/.cache/ale/slurm/images`,
+conformance suite does, and saves the result, compressed, to `~/.cache/orbit/slurm/images`,
 from which each allocation loads it into its own Podman store on its node; only the Task's
 own build failing there is the Task's error. Compute nodes need Python 3, rootless Podman
 with slirp4netns, iproute2, and cgroup v2 with enforced CPU affinity, a memory limit and
 zero swap for each step. GPU partitions need NVIDIA CDI and a driver supported by the pinned
-ALE gVisor runtime. The compute node pulls the build `docker:gvisor` runs from GHCR into a
+Orbit gVisor runtime. The compute node pulls the build `docker:gvisor` runs from GHCR into a
 private, versioned cache below the shared home. Tasks run without the login home, agent
 socket or Slurm credentials.
 
@@ -895,7 +895,7 @@ waits for as long as Slurm keeps it pending, and says why every ten minutes. `sa
 the job ID and the Sandbox's index in the job; the allocation records the compute node and
 runtime.
 
-Running jobs have a Slurm wall time even when ALE is lost: `walltime_minutes`, within the
+Running jobs have a Slurm wall time even when Orbit is lost: `walltime_minutes`, within the
 QoS's limit, is each allocation's, and the solver of an episode longer than one
 [moves](../../../../../../docs/specs/episode-protocol.md#moves) as each allocation's
 deadline comes. That deadline is what Slurm reports the allocation has left once it runs
@@ -926,7 +926,7 @@ snapshot that does not fit beside what runs in its allocation, or that it would 
 gets an allocation of its own, which loads the snapshot written out with `podman save`; a
 snapshot the Run keeps (`sandbox_retention.solver = "snapshot"`) is written out as it is
 saved, as its allocation ends with the episode, and costs that copy.
-`ale sandbox destroy slurm:<job name>/<index>` removes one; `ale sandbox list` lists those
+`orbit sandbox destroy slurm:<job name>/<index>` removes one; `orbit sandbox list` lists those
 written out below the cache. A chain of 200 commits, each booted from the one before, over a
 one-layer image was measured, so each profile saves 200 in a row; a container engine's
 storage is volumes, which a snapshot keeps as layers beside its commit. Slurm keeps no
@@ -949,18 +949,18 @@ profile's memory limit is the largest Sandbox that fits its partition with both.
 reads the limit and usage of the nearest cgroup above the step that has a `memory.max`,
 which is where Slurm limits it, so memory pressure ends a process inside the sandbox.
 Confirm a site from its login node with
-`ALE_TEST_SLURM_CONFIG=run.toml uv run pytest -m needs_slurm tests`.
+`ORBIT_TEST_SLURM_CONFIG=run.toml uv run pytest -m needs_slurm tests`.
 
 ## Daytona
 
-Daytona's sandboxes are built for a different trust model than ALE's, so `daytona/`
+Daytona's sandboxes are built for a different trust model than Orbit's, so `daytona/`
 works around several of its defaults to hold the same contract. Each row was measured on a
 live organization (daemon 0.225.2). Operating it is in
 [`docs/guides/daytona.md`](../../../../../../docs/guides/daytona.md).
 
 | Daytona | What the Provider does |
 |---|---|
-| Builds sandboxes only from registries registered with the organization; push credentials expire hourly | `daytona/image.py` adds one layer (`USER root`, and `iptables` if absent), pushes it by digest to Daytona's own registry, and keeps one organization registry entry, `ale-transient`, holding the current credentials. The sandbox is built `FROM` that digest, so nothing is rebuilt remotely |
+| Builds sandboxes only from registries registered with the organization; push credentials expire hourly | `daytona/image.py` adds one layer (`USER root`, and `iptables` if absent), pushes it by digest to Daytona's own registry, and keeps one organization registry entry, `orbit-transient`, holding the current credentials. The sandbox is built `FROM` that digest, so nothing is rebuilt remotely |
 | Runs its daemon, and every command sent through it, as the image's final `USER` | That layer's `USER root`, so guestd is root |
 | Replaces the image's entrypoint and command with its own daemon | Starts them itself, detached, as the image's `USER` with its `ENV` and working directory, then waits for the desktop as Docker does |
 | Its daemon listens inside the sandbox (2280, 22220, 22222, 33333, and any other port PID 1 opens) and runs commands for anyone, as root | `iptables` owner rules reject every non-root user, IPv4 and IPv6; a probe as an agent that may not elevate must fail on every local address, or the sandbox is destroyed. An agent that may elevate, root among them, is not probed: the daemon gives root nothing it lacks ([`daytona/AGENTS.md`](daytona/AGENTS.md#a-root-agent-and-the-daemon)) |
@@ -972,7 +972,7 @@ live organization (daemon 0.225.2). Operating it is in
 | Rate-limits creates | A create answered 429 made nothing and is retried, honoring `Retry-After`, for up to five minutes. No other failed create is repeated, since it may have made a sandbox |
 | Creates a sandbox even when the caller is cancelled mid-request | Every way out of a start deletes what Daytona made; a create whose reply was lost is found by its unique name |
 | Gives every sandbox a 64 MiB `/dev/shm`, which the create request takes no size for and root cannot remount ([`daytona/AGENTS.md`](daytona/AGENTS.md#devshm-is-64-mib)) | Mounts a tmpfs of half the sandbox's memory over it as root, before anything else in the sandbox runs ([Memory](#memory)) |
-| Organizations are shared between tools | Labels live under `ale.run.*`, and listing and destroying act only on those. Every sandbox has a lifetime (`ttlMinutes`), so one a crashed run leaves behind is deleted by Daytona |
+| Organizations are shared between tools | Labels live under `orbit.run.*`, and listing and destroying act only on those. Every sandbox has a lifetime (`ttlMinutes`), so one a crashed run leaves behind is deleted by Daytona |
 
 Under `networkBlockAll` every runner accepts TCP connections to ports 80 and 443 of any
 address, a GPU runner also to port 53, and passes nothing on them: a TLS handshake ends at
@@ -991,14 +991,14 @@ variables.
 function Task preparation uses for a qcow2 `ref`, so both share one cache in `vm-builds`.
 Measured on a KVM host:
 
-- A disk that already carries this framework, such as one ALE prepared, boots as it is.
-  Reading its marker (`/opt/ale/framework`, or `C:\ProgramData\ALE\framework` on Windows)
+- A disk that already carries this framework, such as one Orbit prepared, boots as it is.
+  Reading its marker (`/opt/orbit/framework`, or `C:\ProgramData\Orbit\framework` on Windows)
   with the VM builder's `virt-cat` takes about 3 s, and the answer is recorded next to the
   cache, so each disk pays it once per Host.
 - Any other disk is framed offline into a [layer](#disk-layers) on its base
   (`images.base_layer`), once per disk, framework identity and builder image. A disk
   pulled from a registry is that base as it is ([registry disks](#registry-disks)). A local
-  disk, which may be compressed and is not ALE's to keep, gets an uncompressed copy once
+  disk, which may be compressed and is not Orbit's to keep, gets an uncompressed copy once
   per disk and Host: 17.7 GB for the 10.2 GB Windows base 0.1.2, which took about 30 s.
   A compressed disk is decompressed on every read: with the zstd-compressed Windows base
   under a Task layer a guest booted 15% slower and read the base's files 4–5 times slower.
@@ -1006,9 +1006,9 @@ Measured on a KVM host:
   boots, which the RunLock records.
 
 A VM boots from a qcow2 overlay on that disk, in `qemu/<sandbox id>/`; the disks, overlays
-and snapshots all live in the ALE cache (`ALE_CACHE_DIR`, `~/.cache/ale` by default). The
+and snapshots all live in the Orbit cache (`ORBIT_CACHE_DIR`, `~/.cache/orbit` by default). The
 runner opens them with `cache=none,aio=native`, which bypasses the page cache, and ZFS then
-bypasses its own cache as well, so the ALE cache belongs on local SSD. From a ZFS pool of
+bypasses its own cache as well, so the Orbit cache belongs on local SSD. From a ZFS pool of
 5400 rpm disks a Linux guest took 115–133 s to come up with its desktop rather than 20 s,
 and a Windows guest 250–310 s rather than 52 s.
 
@@ -1019,7 +1019,7 @@ disk below it, never flattened. Beside each, `<name>.json` records the identity 
 parent and the SHA-256 of its own file, taken once when it is made (`images.record_layer`);
 the base a chain starts from, a pulled disk or the copy of a local one, records the
 identity the disk was resolved under. A layer names its parent by a path relative to
-itself, so the chain stays whole when the ALE cache moves. `images.layer_identity` follows
+itself, so the chain stays whole when the Orbit cache moves. `images.layer_identity` follows
 a chain with `qemu-img info --backing-chain` and refuses one in which a layer sits on
 another parent than its record names; every prepared disk with a backing file is checked
 that way before it boots.
@@ -1030,7 +1030,7 @@ the relative names resolve there as they do on the Host. A Sandbox's overlay nam
 layer by its Host path, since the runner keeps the overlay at `/storage`.
 
 A cached disk is made again when it is damaged or its record no longer matches its chain.
-`images.remove_disk` first reads the backing file of every qcow2 in the ALE cache and
+`images.remove_disk` first reads the backing file of every qcow2 in the Orbit cache and
 refuses while one sits on the disk, then deletes the disk with its record, so a disk made
 at that path later is never taken for the old one.
 
@@ -1042,20 +1042,20 @@ the disk executed; the install into an empty overlay takes 14–21 s on base 0.1
 framed disk boots to a ready sandbox in about 25 s. Windows cannot register a logon task
 offline, so the framework is a Windows service instead. It is a registry key under the
 control set the disk boots from, written into the SYSTEM hive with hivex, plus files copied
-into `C:\ProgramData\ALE`:
+into `C:\ProgramData\Orbit`:
 
 - Checks first, from the hives alone (SAM for the account, SOFTWARE for automatic sign-in
   and UAC): each failure names the one thing the disk lacks. A disk left hibernated by
   Fast Startup cannot be written, and says so.
-- The service `ALEGuestd` runs `guestd/service.py` as LocalSystem on the framework's own
-  Python, copied to `C:\ProgramData\ALE\python`, as is guestd. At boot it limits
-  `C:\ProgramData\ALE` to the system and Administrators, because files written offline
+- The service `OrbitGuestd` runs `guestd/service.py` as LocalSystem on the framework's own
+  Python, copied to `C:\ProgramData\Orbit\python`, as is guestd. At boot it limits
+  `C:\ProgramData\Orbit` to the system and Administrators, because files written offline
   carry no access list and otherwise come out writable by everyone, then gives Users read
   and execute access to `cua-driver`. It opens guestd's port to the runner's address only,
   waits for the agent's sign-in, and starts guestd and Cua Driver on the agent's desktop
   with the account's elevated token (the one UAC keeps beside the limited one), each in its
   own hidden console, restarting either that exits.
-- The service reads the Host's `ale-sudo` SMBIOS serial and passes it to guestd, which
+- The service reads the Host's `orbit-sudo` SMBIOS serial and passes it to guestd, which
   runs agent commands with the desktop's limited token unless it is set.
 - A Task image build (`QemuProvider.create_builder`) frames its own overlay on the base
   before the VM boots, so its `build.ps1` runs beside the same guestd as every sandbox, and
@@ -1068,7 +1068,7 @@ into `C:\ProgramData\ALE`:
   zero-filled instead, which would write every free cluster into the overlay.
 
 A Linux Task image is built the same way: the build VM's overlay is framed by
-`virt-customize` before it boots, `build.sh` runs as root in `/opt/ale/environment`, and
+`virt-customize` before it boots, `build.sh` runs as root in `/opt/orbit/environment`, and
 `save_image` keeps the overlay as the Task's layer. Before it is kept, the VM builder's
 `virt-sparsify --in-place` mounts each filesystem on the disk and trims it; the overlay
 turns every trimmed cluster it holds into one that reads as zeros. A build that installs
@@ -1077,22 +1077,22 @@ without the file, and the discard took 3 s.
 
 ### Registry disks
 
-`ale vm-image push` publishes a qcow2, and `resolve_vm_image` in `images.py` or
-`ale vm-image pull` acquires one, through the OCI distribution API directly, without the
+`orbit vm-image push` publishes a qcow2, and `resolve_vm_image` in `images.py` or
+`orbit vm-image pull` acquires one, through the OCI distribution API directly, without the
 Docker CLI or daemon:
 
-- A published disk is a standalone, uncompressed qcow2; `ale vm-image push` refuses
+- A published disk is a standalone, uncompressed qcow2; `orbit vm-image push` refuses
   compressed clusters (`qemu-img check` counts them). The chunks are compressed on the
   wire, and a Host keeps the one copy it pulled, which reads at full speed under layers.
 - The manifest is an OCI image manifest with `artifactType`
-  `application/vnd.ale.vm-disk.v1` and the empty config. Its layers are the qcow2 file in
+  `application/vnd.orbit.vm-disk.v1` and the empty config. Its layers are the qcow2 file in
   512 MiB chunks, in order, each compressed alone at zstd level 3 as
-  `application/vnd.ale.vm-disk.chunk.v1+zstd`, with the SHA-256 of the uncompressed chunk
-  in its `ale.vm-disk.chunk.digest` annotation. The manifest's `ale.vm-disk.size` and
-  `ale.vm-disk.chunk-size` annotations give the file and chunk sizes.
+  `application/vnd.orbit.vm-disk.chunk.v1+zstd`, with the SHA-256 of the uncompressed chunk
+  in its `orbit.vm-disk.chunk.digest` annotation. The manifest's `orbit.vm-disk.size` and
+  `orbit.vm-disk.chunk-size` annotations give the file and chunk sizes.
 - A pull fetches eight chunks at once and writes each at its offset into
-  `vm-images/<manifest digest hex>/disk.qcow2.partial` in the ALE cache, or into
-  `<destination>.partial` for `ale vm-image pull`, leaving 64 KiB-aligned runs of zeros as
+  `vm-images/<manifest digest hex>/disk.qcow2.partial` in the Orbit cache, or into
+  `<destination>.partial` for `orbit vm-image pull`, leaving 64 KiB-aligned runs of zeros as
   holes. It checks the compressed bytes against the layer digest and the decompressed
   bytes against the annotation, and renames the file once `qemu-img` finds a standalone
   qcow2. A read that breaks continues with an HTTP range, and a pull run again keeps every
@@ -1122,31 +1122,31 @@ Docker CLI or daemon:
 - Uncompressed, base 0.1.2 is a 17.7 GB file in 33 chunks: 9.52 GB on the wire, against
   9.96 GB for its qcow2-compressed form, and pulled in 28 s against 25 s on the same host.
   After pulling it and building two Windows Tasks, one that installs nothing and one with
-  LibreOffice, the ALE cache held 19.6 GiB; with the compressed base and an uncompressed
+  LibreOffice, the Orbit cache held 19.6 GiB; with the compressed base and an uncompressed
   copy of it beside the pull, it held 29.1 GiB, and the first build took 101 s, not 68 s.
 
 ### Volumes in a VM
 
-A Linux disk's framework includes `ale-volumes.service`, which runs
+A Linux disk's framework includes `orbit-volumes.service`, which runs
 [`qemu/guest_volumes.py`](qemu/guest_volumes.py) as the guest boots, before guestd, the
 display manager and any login. The runner hands it, as QEMU firmware configuration
-(`-fw_cfg name=opt/ale/volumes`), the Sandbox's volume candidates, or a snapshot's volumes
+(`-fw_cfg name=opt/orbit/volumes`), the Sandbox's volume candidates, or a snapshot's volumes
 for a VM booted from it. It mounts an overlay at each that is a directory on the disk, with
-no link on its way, of that directory under `/opt/ale/volumes/<hash>/upper` on the same
+no link on its way, of that directory under `/opt/orbit/volumes/<hash>/upper` on the same
 disk, giving the layer the directory's owner and mode, and records what it mounted in
-`/run/ale/volumes.json`, which the Provider reads once guestd answers. A Windows guest
+`/run/orbit/volumes.json`, which the Provider reads once guestd answers. A Windows guest
 mounts no overlay: a volume stays a directory of its disk.
 
 A separate verifier that views a snapshot's volumes boots with an empty SCSI controller of
 its own. Once guestd answers, the Provider attaches the snapshot's disk to it through the
-runner's QEMU monitor (`serial=ale-view`): attached at boot, that copy of a bootable disk,
+runner's QEMU monitor (`serial=orbit-view`): attached at boot, that copy of a bootable disk,
 often of the very image the verifier boots, has the same partition identifiers, and Windows'
 boot manager booted the verifier from it. A Linux guest gets the snapshot's disk read-only;
-`volumes.py views` mounts its file system that holds `/opt/ale/volumes` read-only, without
+`volumes.py views` mounts its file system that holds `/opt/orbit/volumes` read-only, without
 replaying its journal, an overlay of each volume's layer and directory under a layer of its
 own, and unmounts the rest of the disk. A Windows guest gets a copy-on-write overlay of
 it, which it brings online, giving it a signature of its own, mounts its largest
-partition, the solver's system drive, under `C:\ProgramData\ALE\viewed`, and makes each
+partition, the solver's system drive, under `C:\ProgramData\Orbit\viewed`, and makes each
 viewed path a junction there in place of its own.
 
 ## Firecracker
@@ -1155,7 +1155,7 @@ viewed path a junction there in place of its own.
 Firecracker microVM with its own kernel, for a Run whose `sandbox.providers` names
 `firecracker`. The Host needs Docker, `/dev/kvm` and `/dev/net/tun`; macOS and Windows
 Hosts have no KVM, so they cannot run it. Measured on a 112-core Linux Host with
-Firecracker 1.17.0, the guest kernel 6.1.155 its CI publishes, and the ALE container base:
+Firecracker 1.17.0, the guest kernel 6.1.155 its CI publishes, and the Orbit container base:
 
 - **The disk.** The image gets the framework layer Docker adds, is exported with `docker
   export`, and `firecracker/guest_init.py` and the image's `ENV`, `USER`, `WORKDIR`,
@@ -1163,7 +1163,7 @@ Firecracker 1.17.0, the guest kernel 6.1.155 its CI publishes, and the ALE conta
   ext4 with neither journal nor metadata checksums, as the Host's user, so nothing is
   extracted on the Host; checksums doubled `mke2fs`'s time. The container base took 72 s
   (export 37 s, `mke2fs` 31 s) and fills 2.3 GB. The disk is kept in `firecracker-disks/`
-  in the ALE cache under the image, runner and init, and every Sandbox of the image mounts
+  in the Orbit cache under the image, runner and init, and every Sandbox of the image mounts
   it read-only. It is one flat filesystem, so Tasks on one base share none of it.
 - **The writable disk** is a sparse ext4 the runner makes at start, the Task's
   `storage_mb` plus 512 MB or 32 GB, seeded with the Sandbox's settings and the runner's
@@ -1203,14 +1203,14 @@ A Tart disk is APFS, which only macOS reads, so `orchard/framing.py` frames an i
 the Mac, once per image, framework and account, the way the QEMU Provider frames a qcow2:
 it clones the image with Tart and has `framework_macos.sh` change the clone's disk offline.
 `scripts/setup_macos.py` installs that script root-owned as
-`/usr/local/libexec/ale/framework-macos` with a sudoers rule for it alone, and the Provider
+`/usr/local/libexec/orbit/framework-macos` with a sudoers rule for it alone, and the Provider
 refuses to frame when the installed copy differs from its own. The framer attaches the disk
 without mounting it, mounts only its Data volume, hidden from the Finder and without device
 files or set-uid programs, follows no link on it and runs none of its programs. It checks
 that the account it frames for, the Task's or `admin` for a `build.sh` VM, exists with a
 home and is signed in automatically (`autoLoginUser` and `/etc/kcpassword`), then installs:
 
-- guestd and a standalone Python under `/opt/ale` (the Python readable by every account,
+- guestd and a standalone Python under `/opt/orbit` (the Python readable by every account,
   for the agent's desktop tool and the Harnesses' helper scripts);
 - Cua Driver in `/Applications`, with Accessibility and Screen Recording rows in the
   system TCC database carrying the app's designated requirement, as System Settings
@@ -1230,7 +1230,7 @@ identity, whatever size Tart gives it, so every Sandbox would keep the first log
 [resolution](#desktop-resolution). The guest then shuts itself down, as a `build.sh` VM's
 does before its disk is kept: Orchard stops a VM with `tart stop --timeout 5`, which powers
 macOS off when its signed-in desktop does not shut down at once and loses what is still in
-memory. The stopped VM becomes the local Tart image `ale-framed-<key>`; every Sandbox boots
+memory. The stopped VM becomes the local Tart image `orbit-framed-<key>`; every Sandbox boots
 a clone of it, which on APFS copies no data.
 
 In each Sandbox the agent works in, the Provider starts the Driver in the account's login
@@ -1239,7 +1239,7 @@ grants name) and waits until it captures. guestd sends desktop pointer actions w
 `delivery_mode: foreground`, because the Driver otherwise refuses to move the real pointer
 over a background app's window. Elevation for `[agent].sudo` is set at every boot, as on
 Linux ([Agent elevation](#agent-elevation-on-linux-and-macos)). `admin` keeps passwordless
-sudo for ALE, which runs as root through it, so a Task running as `admin` must declare
+sudo for Orbit, which runs as root through it, so a Task running as `admin` must declare
 `sudo = true`. A verifier VM runs no agent, so it gets neither the desktop nor the elevation
 and its checks, and a `build.sh` VM is kept exactly as the build left it.
 
@@ -1268,9 +1268,9 @@ selected image are trusted infrastructure.
 
 A kept VM stays running and holds its VM slot. Orchard keeps no labels on a VM, so each
 kept VM and each snapshot has a record under the local Orchard's state
-(`~/.local/share/ale/macos/retained`): its handle, the episode that first kept it, role,
+(`~/.local/share/orbit/macos/retained`): its handle, the episode that first kept it, role,
 Task image, account, and the image it boots with the account framing found.
-`ale sandbox list` drops a record whose VM or image is gone.
+`orbit sandbox list` drops a record whose VM or image is gone.
 
 Cleanup checks the VM name and UID, waits for worker stop acknowledgement, then deletes
 it. Ambiguous creation requires operator reconciliation rather than adopting a same-name
@@ -1286,7 +1286,7 @@ An `open` Task's VM has Tart's own NAT network throughout. A `block`, `allowlist
 the Mac's network, outside the guest, where the agent cannot lift it even as root. It needs:
 
 - Softnet 0.25.0 or later, for its protocol and port rules. `scripts/setup_macos.py`
-  installs it on macOS 26 or later, which it requires, as `/usr/local/libexec/ale/softnet`,
+  installs it on macOS 26 or later, which it requires, as `/usr/local/libexec/orbit/softnet`,
   root-owned and set-user-ID because it sets the VM's network up as root, and links it
   into the worker's PATH;
 - Orchard 0.57.0 or later, whose worker changes a running VM's Softnet rules in place, and

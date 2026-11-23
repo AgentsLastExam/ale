@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 

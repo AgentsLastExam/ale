@@ -19,26 +19,26 @@ from typing import Any
 import pytest
 from aiohttp import web
 
-from ale.core.harness import (
+from orbit.core.harness import (
     EffectiveAgentResources,
     HarnessSession,
     ResolvedMcpServer,
     ResolvedSkill,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import ExecResult, Identity, Sandbox
-from ale.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
-from ale.core.trace import read_jsonl
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession
-from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
-from ale.run.harnesses.kimi_code import KimiCodeHarness
-from ale.run.harnesses.muse_code import MuseCodeHarness
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.harnesses.qwen_code import QwenCodeHarness
-from ale.run.harnesses.zcode import ZCodeHarness
-from ale.run.protocol.log_mirror import LogMirror
-from ale.run.recording import EpisodeRecording
+from orbit.core.sandbox import ExecResult, Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.harnesses.base import CONTINUE_PROMPT, CliHarness
+from orbit.run.harnesses.kimi_code import KimiCodeHarness
+from orbit.run.harnesses.muse_code import MuseCodeHarness
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.harnesses.qwen_code import QwenCodeHarness
+from orbit.run.harnesses.zcode import ZCodeHarness
+from orbit.run.protocol.log_mirror import LogMirror
+from orbit.run.recording import EpisodeRecording
 from tests.support import cli_os, cli_sandbox
 
 pytestmark = [
@@ -363,7 +363,7 @@ async def _kimi_doctor(sandbox: Sandbox, session: HarnessSession) -> None:
         ["sh", "-c", "kimi doctor config"],
         env={
             "PATH": f"{session.home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
-            "KIMI_CODE_HOME": f"{session.home}/.kimi-ale",
+            "KIMI_CODE_HOME": f"{session.home}/.kimi-orbit",
         },
         identity=Identity.AGENT,
         timeout_sec=120,
@@ -373,7 +373,7 @@ async def _kimi_doctor(sandbox: Sandbox, session: HarnessSession) -> None:
 
 
 async def _qwen_mcp_list(sandbox: Sandbox, session: HarnessSession) -> None:
-    home = f"{session.home}/.qwen-ale"
+    home = f"{session.home}/.qwen-orbit"
     result = await sandbox.exec(
         ["sh", "-c", "qwen mcp list"],
         env={
@@ -422,8 +422,8 @@ class _Written:
 
 
 async def _opencode_reads(sandbox: Sandbox, session: HarnessSession, document: str) -> list[Any]:
-    """The configuration documents OpenCode reads in order, ``document`` as ALE passes it."""
-    state = f"{session.home}/.opencode-ale"
+    """The configuration documents OpenCode reads in order, ``document`` as Orbit passes it."""
+    state = f"{session.home}/.opencode-orbit"
     result = await sandbox.exec(
         [
             "sh",
@@ -463,12 +463,12 @@ def _as_read(written: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _opencode_config(sandbox: Sandbox, session: HarnessSession) -> None:
-    """OpenCode drops a field it cannot decode without a word, so every field ALE writes must
+    """OpenCode drops a field it cannot decode without a word, so every field Orbit writes must
     come back from its own reading of the configuration: the run's document, and one with
     every setting set and a stdio server with a working directory. The agent's own
-    `~/.config/opencode` is not read, and a workspace's `opencode.json` loads below ALE's."""
-    state = f"{session.home}/.opencode-ale"
-    written = json.loads(await sandbox.read_file(f"{state}/ale.json"))
+    `~/.config/opencode` is not read, and a workspace's `opencode.json` loads below Orbit's."""
+    state = f"{session.home}/.opencode-orbit"
+    written = json.loads(await sandbox.read_file(f"{state}/orbit.json"))
     sentinels = (
         f"{session.home}/.config/opencode/opencode.json",
         f"{session.start_dir}/opencode.json",
@@ -477,7 +477,7 @@ async def _opencode_config(sandbox: Sandbox, session: HarnessSession) -> None:
     for path in sentinels:
         await sandbox.write_file(path, b'{"share": "auto"}\n', identity=Identity.AGENT)
     try:
-        read = await _opencode_reads(sandbox, session, f"{state}/ale.json")
+        read = await _opencode_reads(sandbox, session, f"{state}/orbit.json")
     finally:
         await sandbox.exec(["rm", "-rf", "--", *sentinels], identity=Identity.AGENT)
     documents = [entry for entry in read if entry.get("type") == "document"]
@@ -529,7 +529,7 @@ async def _opencode_config(sandbox: Sandbox, session: HarnessSession) -> None:
         session,
         EffectiveAgentResources(mcp_servers=servers, digest="sha256:" + "d" * 64),
     )
-    complete = staged.files[f"{state}/ale.json"]
+    complete = staged.files[f"{state}/orbit.json"]
     await sandbox.write_file(f"{state}/complete.json", complete, identity=Identity.AGENT)
     read = await _opencode_reads(sandbox, session, f"{state}/complete.json")
     await sandbox.exec(["rm", "-f", "--", f"{state}/complete.json"], identity=Identity.AGENT)
@@ -551,7 +551,7 @@ async def _zcode_skills(sandbox: Sandbox, session: HarnessSession) -> None:
             "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": (
                 f"{session.home}/.local/lib/zcode/zcode-builtin.json"
             ),
-            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": f"{session.home}/.zcode-ale/provider.json",
+            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": f"{session.home}/.zcode-orbit/provider.json",
         },
         identity=Identity.AGENT,
         timeout_sec=120,
@@ -771,7 +771,7 @@ async def test_cli_runs_through_the_gateway_with_resources_and_resumes(
         )
         == trajectory
     )
-    assert "parse_issues" not in (trajectory.extra or {}).get("ale", {})
+    assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
     assert [step.message for step in trajectory.steps if step.source == "user"] == [
         first_prompt,
         "second",
@@ -786,7 +786,7 @@ async def test_cli_runs_through_the_gateway_with_resources_and_resumes(
     }
     assert "shell-proof" in json.dumps(calls[case.shell[0]][1].content)
     mcp_call, mcp_result = calls[case.mcp_tool]
-    assert (mcp_call.extra or {})["ale"]["mcp"] == {"server": "proof", "tool": "echo"}
+    assert (mcp_call.extra or {})["orbit"]["mcp"] == {"server": "proof", "tool": "echo"}
     assert "echo:mcp-proof" in json.dumps(mcp_result.content)
     assert [step.message for step in trajectory.steps if step.source == "agent"][-3:] == [
         "FIRST-DONE",

@@ -7,10 +7,10 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ale.core.errors import AgentError, AgentUnsupportedError
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem
-from ale.run.harnesses._npm import (
+from orbit.core.errors import AgentError, AgentUnsupportedError
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem
+from orbit.run.harnesses._npm import (
     agent_home,
     agent_path,
     agent_python,
@@ -151,7 +151,7 @@ async def ensure_release_binary(
     )
     # Run from a file: a Windows desktop agent's command line may not exceed 1,024
     # characters, which the script alone would.
-    installer = f"{agent_path(home)}/.local/share/ale/install-release.py"
+    installer = f"{agent_path(home)}/.local/share/orbit/install-release.py"
     await sandbox.write_file(installer, _INSTALL.encode(), identity=Identity.AGENT)
     result = await sandbox.exec(
         [

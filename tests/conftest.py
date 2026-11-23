@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from ale.core.errors import ProviderCapabilityError
+from orbit.core.errors import ProviderCapabilityError
 from tests.support import CONTAINER_BASE, write_task
 
 # Typer forces Rich terminal styling whenever GITHUB_ACTIONS is set, which splits option
@@ -27,9 +27,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 
 @pytest.fixture(autouse=True)
-def default_ale_repo_path(monkeypatch: pytest.MonkeyPatch) -> None:
+def default_orbit_repo_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
-        "ALE_REPO_PATH",
+        "ORBIT_REPO_PATH",
         str(Path(__file__).resolve().parents[1]),
     )
 
@@ -44,7 +44,7 @@ def isolated_git_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def x86_host_without_gpus(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A unit test runs as on an x86-64 Host with no GPU, which ALE's Tasks and leaves
+    """A unit test runs as on an x86-64 Host with no GPU, which Orbit's Tasks and leaves
     assume, whatever machine runs it; a test of another Host says so itself."""
     if request.node.get_closest_marker("unit") is None:
         return
@@ -53,15 +53,15 @@ def x86_host_without_gpus(request: pytest.FixtureRequest, monkeypatch: pytest.Mo
         raise ProviderCapabilityError("nvidia-smi is not installed on the Docker host")
 
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr("ale.run.providers.docker.provider.DockerProvider._host_gpus", no_gpus)
+    monkeypatch.setattr("orbit.run.providers.docker.provider.DockerProvider._host_gpus", no_gpus)
 
 
 @pytest.fixture
-def ale_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "ale"
-    (root / "packages" / "ale-run").mkdir(parents=True)
-    (root / "pyproject.toml").write_text('[project]\nname = "test-ale"\n')
-    monkeypatch.setenv("ALE_REPO_PATH", str(root))
+def orbit_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "orbit"
+    (root / "packages" / "orbit-run").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[project]\nname = "test-orbit"\n')
+    monkeypatch.setenv("ORBIT_REPO_PATH", str(root))
     return root
 
 

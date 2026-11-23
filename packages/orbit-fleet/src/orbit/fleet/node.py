@@ -43,15 +43,15 @@ from typing import Literal
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from ale.core.capability import CapabilityProfile
-from ale.core.config import DockerProviderConfig
-from ale.core.errors import (
-    AleError,
+from orbit.core.capability import CapabilityProfile
+from orbit.core.config import DockerProviderConfig
+from orbit.core.errors import (
+    OrbitError,
     ProviderCapabilityError,
     ProviderCapacityError,
     ProviderStartError,
 )
-from ale.core.fleet import (
+from orbit.core.fleet import (
     PROTOCOL_VERSION,
     STDERR,
     STDOUT,
@@ -79,7 +79,7 @@ from ale.core.fleet import (
     SnapshotHolding,
     verify_grant,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     Identity,
     ImageRef,
     Provider,
@@ -88,14 +88,14 @@ from ale.core.sandbox import (
     SandboxCheck,
     SandboxRequest,
 )
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.fleet.images import NodeImages
-from ale.fleet.placement import Holds, NodeView, choose
-from ale.run import __version__, ale_image
-from ale.run.framework import fleet_framework_identity
-from ale.run.provenance import framework_provenance
-from ale.run.providers import leaf, machine_arch
-from ale.run.providers.fleet.tunnel import NodeListeners, with_port
+from orbit.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from orbit.fleet.images import NodeImages
+from orbit.fleet.placement import Holds, NodeView, choose
+from orbit.run import __version__, orbit_image
+from orbit.run.framework import fleet_framework_identity
+from orbit.run.provenance import framework_provenance
+from orbit.run.providers import leaf, machine_arch
+from orbit.run.providers.fleet.tunnel import NodeListeners, with_port
 
 __all__ = ["NodeAgent", "NodeSettings", "probe"]
 
@@ -112,7 +112,7 @@ RECOVER_SEC = 60.0
 DEFAULT_LEAVES = ("docker:runc", "qemu", "orchard")
 #: The image of the one Sandbox a node agent starts of a container leaf whose preflight
 #: leaves a check, the container base the Node's Tasks build on.
-CHECK_IMAGE = ale_image("container-ubuntu22-base")
+CHECK_IMAGE = orbit_image("container-ubuntu22-base")
 
 
 def _provider(leaf_id: str, docker: DockerProviderConfig) -> Provider:
@@ -244,7 +244,7 @@ async def probe(
         try:
             if check := await provider.preflight():
                 await _show(provider, profiles, check)
-        except AleError as error:
+        except OrbitError as error:
             if settings.providers:
                 raise
             _log.info("not lending %s: %s", name, error)
@@ -322,7 +322,7 @@ class _Held:
 #: The Sandbox and the Run's number of the command a leaf logs in, while the command runs and
 #: in the context it keeps of it.
 _COMMAND: contextvars.ContextVar[tuple[_Held, int] | None] = contextvars.ContextVar(
-    "ale_fleet_command", default=None
+    "orbit_fleet_command", default=None
 )
 
 
@@ -339,13 +339,13 @@ class _NoticeHandler(logging.Handler):
                 call=call,
                 level=record.levelno,
                 message=record.getMessage(),
-                data=getattr(record, "ale_data", {}),
+                data=getattr(record, "orbit_data", {}),
             )
         )
 
 
 def _keep_notices() -> None:
-    logger = logging.getLogger("ale.execution")
+    logger = logging.getLogger("orbit.execution")
     if not any(isinstance(handler, _NoticeHandler) for handler in logger.handlers):
         logger.addHandler(_NoticeHandler())
 
@@ -933,7 +933,7 @@ class NodeAgent:
         if held.state != "ready" or self.held.get(sandbox_id) is not held:
             try:
                 await held.provider.destroy_retained(retained.handle)
-            except AleError as error:
+            except OrbitError as error:
                 _log.warning(
                     "could not delete %s, saved after its lease ended: %s", retained.handle, error
                 )
@@ -960,7 +960,7 @@ class NodeAgent:
         self._deleting.add(snapshot_id)
         try:
             await (self._providers.get(name) or _provider(name)).destroy_retained(snapshot.handle)
-        except AleError as error:
+        except OrbitError as error:
             # Tried again at the next heartbeat, as when a Sandbox still boots from it.
             _log.warning("could not delete snapshot %s yet: %s", snapshot_id, error)
             return
@@ -1138,7 +1138,7 @@ class _Api:
             return _json(_error(error), status=409)
         except _Full as error:
             return _json(_error(error), status=503)
-        except AleError as error:
+        except OrbitError as error:
             return _json(_error(error), status=422)
         except Exception as error:
             _log.exception("%s %s failed", request.method, request.path)

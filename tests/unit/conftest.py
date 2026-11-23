@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from tests.support import MemorySandbox, Verifiers
 
-from ale.core.sandbox import ExecResult
+from orbit.core.sandbox import ExecResult
 
 
 @pytest.fixture

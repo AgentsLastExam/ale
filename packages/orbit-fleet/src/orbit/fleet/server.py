@@ -22,7 +22,7 @@ import aiohttp
 from aiohttp import web
 from pydantic import BaseModel, ValidationError
 
-from ale.core.fleet import (
+from orbit.core.fleet import (
     PROTOCOL_VERSION,
     AcquireRequest,
     EpisodeReport,
@@ -34,9 +34,9 @@ from ale.core.fleet import (
     SandboxStatus,
     StartReport,
 )
-from ale.fleet.control import ControlPlane, FleetError, UnknownSandboxError
-from ale.fleet.page import render
-from ale.run import __version__
+from orbit.fleet.control import ControlPlane, FleetError, UnknownSandboxError
+from orbit.fleet.page import render
+from orbit.run import __version__
 
 __all__ = ["control_app", "serve"]
 
@@ -48,7 +48,7 @@ TICK_SEC = 2.0
 #: How long the control plane waits for a joining node agent to answer at its address.
 JOIN_CHECK_SEC = 10.0
 #: The browser cookie that carries the Fleet token for the page.
-COOKIE = "ale_fleet_token"
+COOKIE = "orbit_fleet_token"
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 

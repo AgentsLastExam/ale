@@ -24,11 +24,11 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from ale.core.capability import GpuModel
-from ale.core.errors import ConfigError
-from ale.core.ids import content_hash
-from ale.core.sandbox import DesktopResolution
-from ale.core.taskspec import McpSource, SkillSource, TaskSpec
+from orbit.core.capability import GpuModel
+from orbit.core.errors import ConfigError
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import DesktopResolution
+from orbit.core.taskspec import McpSource, SkillSource, TaskSpec
 
 __all__ = [
     "GPU_MEMORY_MARGIN_MB",
@@ -51,9 +51,9 @@ __all__ = [
     "SlurmPartition",
     "SlurmProviderConfig",
     "VerificationConfig",
-    "ale_repo_path",
     "load_run_config",
     "merge_layers",
+    "orbit_repo_path",
     "parse_override",
     "resolve_asset_collection",
     "select_agent_name",
@@ -67,33 +67,33 @@ class AssetCollectionConfig(BaseModel):
     source: Literal["cli", "environment"]
 
 
-def ale_repo_path() -> Path:
-    raw = os.environ.get("ALE_REPO_PATH", "")
+def orbit_repo_path() -> Path:
+    raw = os.environ.get("ORBIT_REPO_PATH", "")
     if not raw:
-        raise ConfigError("ALE_REPO_PATH is required")
+        raise ConfigError("ORBIT_REPO_PATH is required")
     path = Path(raw).expanduser()
     if not path.is_absolute():
-        raise ConfigError("ALE_REPO_PATH must be absolute")
+        raise ConfigError("ORBIT_REPO_PATH must be absolute")
     resolved = path.resolve()
     if (
         not (resolved / "pyproject.toml").is_file()
-        or not (resolved / "packages" / "ale-run").is_dir()
+        or not (resolved / "packages" / "orbit-run").is_dir()
     ):
-        raise ConfigError(f"ALE_REPO_PATH is not an ALE engine checkout: {resolved}")
+        raise ConfigError(f"ORBIT_REPO_PATH is not an Orbit engine checkout: {resolved}")
     return resolved
 
 
 def resolve_asset_collection(cli_value: str | None = None) -> AssetCollectionConfig:
     if cli_value and cli_value.strip():
         return AssetCollectionConfig(collection_slug=cli_value.strip(), source="cli")
-    environment = os.environ.get("ALE_ASSETS_COLLECTION", "").strip()
+    environment = os.environ.get("ORBIT_ASSETS_COLLECTION", "").strip()
     if environment:
         return AssetCollectionConfig(
             collection_slug=environment,
             source="environment",
         )
     raise ConfigError(
-        "asset collection is required; pass --collection or set ALE_ASSETS_COLLECTION"
+        "asset collection is required; pass --collection or set ORBIT_ASSETS_COLLECTION"
     )
 
 
@@ -175,8 +175,8 @@ class GatewayConfig(BaseModel):
     provider: ModelProvider = Field(
         default="anthropic",
         description=(
-            "Whose API the Gateway calls. Its key is ALE_<PROVIDER>_API_KEY and its "
-            "endpoint ALE_<PROVIDER>_BASE_URL, or the provider's own API when that is unset."
+            "Whose API the Gateway calls. Its key is ORBIT_<PROVIDER>_API_KEY and its "
+            "endpoint ORBIT_<PROVIDER>_BASE_URL, or the provider's own API when that is unset."
         ),
     )
     dialect: Dialect = "anthropic"
@@ -289,7 +289,7 @@ class DockerProviderConfig(BaseModel):
 
 
 class SlurmPartition(BaseModel):
-    """One single-node allocation the cluster ALE runs on offers."""
+    """One single-node allocation the cluster Orbit runs on offers."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -340,7 +340,7 @@ class DaytonaProviderConfig(BaseModel):
 
     target: str = Field(default="us", min_length=1)
     """The Daytona region sandboxes are created in."""
-    api_key_env: str = Field(default="ALE_DAYTONA_API_KEY", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    api_key_env: str = Field(default="ORBIT_DAYTONA_API_KEY", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     """Names the variable holding the key, so the key itself is never a setting."""
     lifetime_hours: int = Field(default=24, ge=1, le=720, strict=True)
     """Daytona deletes a sandbox this long after creation, so a crashed run cannot leak one."""
@@ -355,7 +355,7 @@ class FleetConfig(BaseModel):
 
     url: str = Field(default="", pattern=r"^(https?://.+)?$")
     """The control plane, such as ``http://superserver:7470``."""
-    token_env: str = Field(default="ALE_FLEET_TOKEN", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    token_env: str = Field(default="ORBIT_FLEET_TOKEN", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SandboxConfig(BaseModel):

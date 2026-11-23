@@ -19,18 +19,18 @@ from tests.support import (
 )
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
-from ale.core.capability import CapabilityProfile, round_verifier_resources
-from ale.core.config import RunTimeouts
-from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources, VerificationMode
-from ale.core.verdict import Status
-from ale.run import artifact_files
-from ale.run.episode import run_episode
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs
-from ale.run.providers import _sandboxes
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.capability import CapabilityProfile, round_verifier_resources
+from orbit.core.config import RunTimeouts
+from orbit.core.errors import ProviderCapabilityError
+from orbit.core.sandbox import PreparedTaskImage, SandboxRequest, SandboxRole
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources, VerificationMode
+from orbit.core.verdict import Status
+from orbit.run import artifact_files
+from orbit.run.episode import run_episode
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs
+from orbit.run.providers import _sandboxes
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 

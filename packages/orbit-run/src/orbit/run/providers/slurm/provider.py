@@ -1,5 +1,5 @@
 """Rootless gVisor Sandboxes in single-node Slurm allocations, driven from a login node of
-the cluster, where ALE runs.
+the cluster, where Orbit runs.
 
 A solver gets an allocation of its own, sized for it and for the verifiers its request
 names, and every Sandbox booted from one of its snapshots, or mounting views of its volumes,
@@ -21,16 +21,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model, unmet
-from ale.core.config import SlurmPartition, SlurmProviderConfig
-from ale.core.errors import (
+from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model, unmet
+from orbit.core.config import SlurmPartition, SlurmProviderConfig
+from orbit.core.errors import (
     AllocationEndedError,
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     GpuAllocation,
     ImageKind,
     ImageRef,
@@ -43,15 +43,15 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem, Resources
-from ale.run import guestd
-from ale.run.providers import memory, relay
-from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import gvisor
-from ale.run.providers.privileges import set_and_prove_elevation
-from ale.run.providers.slurm import images, worker
-from ale.run.providers.slurm.images import Recipe
-from ale.run.providers.slurm.job import (
+from orbit.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem, Resources
+from orbit.run import guestd
+from orbit.run.providers import memory, relay
+from orbit.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
+from orbit.run.providers.docker import gvisor
+from orbit.run.providers.privileges import set_and_prove_elevation
+from orbit.run.providers.slurm import images, worker
+from orbit.run.providers.slurm.images import Recipe
+from orbit.run.providers.slurm.job import (
     SNAPSHOTS,
     Job,
     JobReady,
@@ -62,8 +62,8 @@ from ale.run.providers.slurm.job import (
     slurm,
     write,
 )
-from ale.run.providers.tunnel import PROXY_PORT, GatewayTunnel, TunneledSandbox, tunnel_plan
-from ale.run.transport import GuestClient
+from orbit.run.providers.tunnel import PROXY_PORT, GatewayTunnel, TunneledSandbox, tunnel_plan
+from orbit.run.transport import GuestClient
 
 #: The batch step, Podman's namespace and the control steps of every Sandbox in the job.
 JOB_OVERHEAD_MB = 512
@@ -188,7 +188,7 @@ def _handle(job: Job, index: str) -> str:
 
 def _parse(handle: str) -> tuple[str, str]:
     name, _, index = handle.removeprefix(PREFIX).partition("/")
-    if not handle.startswith(PREFIX) or not (name.startswith("ale-") and index.isdigit()):
+    if not handle.startswith(PREFIX) or not (name.startswith("orbit-") and index.isdigit()):
         raise ProviderCapabilityError(f"{handle!r} is no Slurm snapshot handle")
     return name, index
 
@@ -254,7 +254,7 @@ class _Chain:
     viewing: dict[str, set[str]] = field(default_factory=dict)
     """The layers each running Sandbox's views stack, which stay while it runs."""
     deadline: datetime | None = None
-    """When ALE must begin to save what runs here, before Slurm ends the allocation at its
+    """When Orbit must begin to save what runs here, before Slurm ends the allocation at its
     wall time, which leaves the drain to save it and write it out."""
     count: int = 0
     closed: bool = False
@@ -300,10 +300,10 @@ async def _guest(
         steps.step(
             "exec",
             "env",
-            f"ALE_AGENT_USER={user}",
+            f"ORBIT_AGENT_USER={user}",
             guestd.PYTHON["linux"],
             "-I",
-            "/opt/ale/guestd/main.py",
+            "/opt/orbit/guestd/main.py",
             "--stdio",
         ),
         steps,
@@ -438,7 +438,7 @@ class SlurmSandbox(TunneledSandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
         )
 
     async def destroy(self) -> None:
@@ -497,7 +497,7 @@ class SlurmProvider(Provider):
         for command in ("sbatch", "srun", "squeue", "scancel", "sacct", "scontrol"):
             if shutil.which(command) is None:
                 raise ProviderStartError(
-                    f"Slurm's {command} is not installed here: ALE runs on a login node of "
+                    f"Slurm's {command} is not installed here: Orbit runs on a login node of "
                     "the cluster, whose home its compute nodes share"
                 )
         for part in dict.fromkeys(partitions):
@@ -509,7 +509,7 @@ class SlurmProvider(Provider):
         if isinstance(image, ImageRef):
             if image.kind is not ImageKind.CONTAINER:
                 raise ProviderCapabilityError("Slurm requires a Linux container image")
-            # For the account ALE's images run their agent as.
+            # For the account Orbit's images run their agent as.
             pinned = await images.pin(image.reference)
             prepared, _ = await self.prepare_recipe(
                 Recipe(
@@ -751,7 +751,7 @@ class SlurmProvider(Provider):
         env = dict(request.env)
         env[CONTAINER_VARIABLE] = str(request.desktop_resolution)
         if gateway:
-            env["ALE_GATEWAY_URL"] = gateway
+            env["ORBIT_GATEWAY_URL"] = gateway
         runtime, args = _runtime(resources.container_features)
         sealed = request.network.mode is not NetworkMode.OPEN
         steps = SandboxSteps(chain.job, index)
@@ -884,9 +884,9 @@ class SlurmProvider(Provider):
         try:
             await self._close_if_idle(chain)
         except ProviderStartError as error:
-            logging.getLogger("ale.execution").warning(
+            logging.getLogger("orbit.execution").warning(
                 "a Slurm allocation nothing needs did not end; it ends at its wall time",
-                extra={"ale_data": {"job": chain.job.id, "error": str(error)}},
+                extra={"orbit_data": {"job": chain.job.id, "error": str(error)}},
             )
 
     async def write_out(self, chain: _Chain, snapshot: _Snapshot) -> str:
@@ -966,5 +966,5 @@ def _record(handle: str, episode: str, roles: Sequence[str], image: str) -> dict
         "image": image,
         "gpus": (),
         "running": False,
-        "cleanup_command": f"ale sandbox destroy {handle}",
+        "cleanup_command": f"orbit sandbox destroy {handle}",
     }

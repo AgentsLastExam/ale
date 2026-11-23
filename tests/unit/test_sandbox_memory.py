@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import GuestUnreachableError, ProviderStartError
-from ale.run.providers import memory
-from ale.run.transport import StdioTransport
+from orbit.core.errors import GuestUnreachableError, ProviderStartError
+from orbit.run.providers import memory
+from orbit.run.transport import StdioTransport
 
 pytestmark = pytest.mark.unit
 

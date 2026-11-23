@@ -28,8 +28,8 @@ import contextlib
 import ipaddress
 import socket
 
-from ale.core.taskspec import NetworkMode, NetworkPolicy
-from ale.run.gateway.session import GatewaySession, SessionRegistry
+from orbit.core.taskspec import NetworkMode, NetworkPolicy
+from orbit.run.gateway.session import GatewaySession, SessionRegistry
 
 __all__ = ["EgressProxy"]
 

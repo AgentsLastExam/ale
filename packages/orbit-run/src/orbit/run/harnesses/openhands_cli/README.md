@@ -15,14 +15,14 @@ the SDK would not use for the run's model. Over Chat Completions a tool's image,
 images in user messages only. Whether the model takes images comes from LiteLLM's
 bundled model map, 1.83.14's, which lists neither `claude-sonnet-5` nor `claude-opus-4-8`:
 for a model it does not list, the SDK drops every image without a note. Only the agent
-definition, which ALE does not replace, can declare vision, and only to turn it off.
-`OPENHANDS_PERSISTENCE_DIR` is `.openhands-ale`,
+definition, which Orbit does not replace, can declare vision, and only to turn it off.
+`OPENHANDS_PERSISTENCE_DIR` is `.openhands-orbit`,
 holding `mcp.json` and the conversations; Skills go to `~/.openhands/skills`, where the CLI
 looks. The SDK clones OpenHands' public skills from a moving branch at every start, so an
 empty local repository stands in its cache and none load.
 
-`--resume` continues a conversation or starts one under ALE's ID. A conversation is
-`.openhands-ale/conversations/<id>/events/event-<n>-<uuid>.json`, one file per event, each
+`--resume` continues a conversation or starts one under Orbit's ID. A conversation is
+`.openhands-orbit/conversations/<id>/events/event-<n>-<uuid>.json`, one file per event, each
 written once. The parser follows the events and unwraps the frame `--file` puts around
 the prompt; the JSON events on stdout supply any turn the conversation lacks. The CLI
 exits 0 when the conversation fails, so a `ConversationErrorEvent` fails the invocation.
@@ -33,4 +33,4 @@ among them, with events during the call, is the one the call spawned. Task IDs r
 every process, so the time window keeps a later task's metrics from claiming an earlier
 child. A child without that link, such as one stopped before its metrics were written,
 is left unconverted. With one MCP server its tools keep their
-names; with several, each is `<server>_<tool>`, resolved from `.openhands-ale/mcp.json`.
+names; with several, each is `<server>_<tool>`, resolved from `.openhands-orbit/mcp.json`.

@@ -1,4 +1,4 @@
-"""One episode longer than its Slurm allocation, completed across several, as ALE runs on the
+"""One episode longer than its Slurm allocation, completed across several, as Orbit runs on the
 cluster's login node: each allocation's deadline cuts the agent's turn, the solver moves to
 the next, and the agent goes on in the same session with the time it has left."""
 
@@ -12,15 +12,15 @@ from typing import Any
 
 import pytest
 
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.protocol.episode_protocol import MOVED_PROMPT, EpisodeProtocol
-from ale.run.providers.slurm import SlurmProvider
-from ale.run.providers.slurm.job import Job, cache
-from ale.run.scaffold import scaffold_task
-from ale.run.secrets import resolve_task_variables
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.protocol.episode_protocol import MOVED_PROMPT, EpisodeProtocol
+from orbit.run.providers.slurm import SlurmProvider
+from orbit.run.providers.slurm.job import Job, cache
+from orbit.run.scaffold import scaffold_task
+from orbit.run.secrets import resolve_task_variables
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import WorkingCliHarness, edit_task_config, provider_registry, slurm_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_slurm]
@@ -32,9 +32,9 @@ LINES, EVERY = 72, 10
 VERIFY = f"""\
 import os
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 
-home = Path(os.environ["ALE_HOME"])
+home = Path(os.environ["ORBIT_HOME"])
 def lines(name):
     path = home / name
     return path.read_text().splitlines() if path.is_file() else []
@@ -62,7 +62,7 @@ def _task(root: Path) -> Path:
         },
     )
     (root / "tests" / "test.sh").write_text(
-        '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ALE_VERIFY_PYTHON" verify.py\n'
+        '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ORBIT_VERIFY_PYTHON" verify.py\n'
     )
     (root / "tests" / "verify.py").write_text(VERIFY)
     (root / "instruction.md").write_text(INSTRUCTION)
@@ -129,7 +129,7 @@ async def test_an_episode_longer_than_its_allocation_completes_across_allocation
         (result.run_dir / "trajectory.json").read_text()
     )
     users = [step for step in trajectory.steps if step.source == "user"]
-    marks = [((step.extra or {}).get("ale") or {}).get("moved") for step in users]
+    marks = [((step.extra or {}).get("orbit") or {}).get("moved") for step in users]
     assert marks == [None, *(item.index for item in moved)]
     agent = [timing.outcome for timing in result.record.phases if timing.phase == "agent"]
     assert agent == ["moved"] * len(moved) + ["succeeded"]

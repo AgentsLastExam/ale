@@ -9,14 +9,14 @@ import uuid
 from pathlib import PurePosixPath
 from typing import Any, ClassVar
 
-from ale.core.errors import HarnessLimitError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, is_windows, npm_env
-from ale.run.harnesses._release import ReleaseAsset, ReleaseAssets
-from ale.run.harnesses.base import (
+from orbit.core.errors import HarnessLimitError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, is_windows, npm_env
+from orbit.run.harnesses._release import ReleaseAsset, ReleaseAssets
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -24,7 +24,7 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import MuseCodeSettings
@@ -141,7 +141,7 @@ class MuseCodeHarness(CliHarness):
             prompt_path,
             "--model",
             session.model,
-            # Approval and Muse's own sandbox off: the ALE Sandbox is the boundary.
+            # Approval and Muse's own sandbox off: the Orbit Sandbox is the boundary.
             "--yolo",
             "--no-foreign-personal-context",
             # A new ID starts the session; the same ID continues it.

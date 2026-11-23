@@ -10,13 +10,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import PurePath, PurePosixPath, PureWindowsPath
 
-from ale.core.env import Observation, StepResult
-from ale.core.errors import PhaseTimeoutError
-from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, StepwisePolicy
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.task import case_entry
-from ale.core.taskspec import SOLUTION_CASE, OperatingSystem
-from ale.core.trace import DesktopAction
+from orbit.core.env import Observation, StepResult
+from orbit.core.errors import PhaseTimeoutError
+from orbit.core.harness import AgentRun, AutonomousHarness, HarnessSession, StepwisePolicy
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.task import case_entry
+from orbit.core.taskspec import SOLUTION_CASE, OperatingSystem
+from orbit.core.trace import DesktopAction
 
 from ._diagnostics import failure_detail
 
@@ -34,7 +34,7 @@ def solution_dir(home: str, operating_system: OperatingSystem = OperatingSystem.
     all — it is staged only by the harness that exists to run it.
     """
     path_type = PureWindowsPath if operating_system is OperatingSystem.WINDOWS else PurePosixPath
-    return path_type(home) / ".ale-solution"
+    return path_type(home) / ".orbit-solution"
 
 
 class NopHarness(AutonomousHarness):
@@ -138,7 +138,7 @@ class OracleHarness(AutonomousHarness):
             # The oracle stands in for an agent, but it is task code and gets the same
             # environment contract a stage does — otherwise a solution that works during
             # authoring fails during calibration for reasons that have nothing to do with it.
-            env={"ALE_HOME": session.home, "ALE_STAGE_DIR": str(root)},
+            env={"ORBIT_HOME": session.home, "ORBIT_STAGE_DIR": str(root)},
             timeout_sec=timeout_sec,
             # The oracle stands in for the agent, so it meets the agent's limits. An
             # oracle with more privilege would pass exactly the tasks a real agent then

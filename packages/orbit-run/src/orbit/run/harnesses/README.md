@@ -1,8 +1,8 @@
 # Harnesses
 
-A Harness adapts one agent program to ALE. Autonomous Harnesses launch the program
+A Harness adapts one agent program to Orbit. Autonomous Harnesses launch the program
 inside the Task Sandbox and convert its native evidence into ATIF. Policy Harnesses run
-an agent-owned rollout against ALE's stepwise Sandbox environment.
+an agent-owned rollout against Orbit's stepwise Sandbox environment.
 
 | Harness | Family | Gateway dialect | Native resume | Subscription |
 |---|---|---|---|---|
@@ -31,7 +31,7 @@ same lifecycle:
 2. translate declared Skills and MCP servers;
 3. send model calls through the episode Gateway token;
 4. launch as the image-declared agent user;
-5. declare its own logs, which ALE mirrors while it runs, and convert them to ATIF
+5. declare its own logs, which Orbit mirrors while it runs, and convert them to ATIF
    deterministically;
 6. bind native continuation to the original Sandbox and effective configuration.
 

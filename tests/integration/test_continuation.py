@@ -22,24 +22,24 @@ from typing import Literal
 
 import pytest
 
-from ale.core.config import RunConfig, SandboxRetentionConfig
-from ale.core.harness import Harness
-from ale.core.lock import RunLock, TaskSource
-from ale.core.sandbox import SandboxRequest, SandboxRole
-from ale.core.taskspec import OperatingSystem
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.cli.tasks import _attach_retained, _continuation, _continued
-from ale.run.episode import EpisodeResult, run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.harnesses.pi_cli import PiCliHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol, Resume
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers import ProviderRegistry
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from orbit.core.config import RunConfig, SandboxRetentionConfig
+from orbit.core.harness import Harness
+from orbit.core.lock import RunLock, TaskSource
+from orbit.core.sandbox import SandboxRequest, SandboxRole
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.cli.tasks import _attach_retained, _continuation, _continued
+from orbit.run.episode import EpisodeResult, run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol, Resume
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import ManifestTask, load_tasks
 from tests.integration.scripted_model import ScriptedModel
 from tests.support import VM_BASE, edit_task_config, provider_registry, write_task
 
@@ -100,11 +100,11 @@ def _task(tmp_path: Path, kind: str) -> ManifestTask:
         edit_task_config(root, {"environment": {"cpus": 2, "image": VM_BASE}})
         (root / "environment/Dockerfile").unlink()
         (root / "environment/build.sh").write_text(
-            'mkdir -p "$ALE_HOME/output" && chown -R user:user "$ALE_HOME/output"\n'
+            'mkdir -p "$ORBIT_HOME/output" && chown -R user:user "$ORBIT_HOME/output"\n'
         )
     (root / "tests/verify.py").write_text(
         "from pathlib import Path\n"
-        "from ale_verify import write\n"
+        "from orbit_verify import write\n"
         f"path = Path({OUTPUT[kind] + '/turns.txt'!r})\n"
         "turns = len(path.read_text().splitlines()) if path.is_file() else 0\n"
         "write({'reward': turns / 4})\n"
@@ -135,13 +135,13 @@ async def _kept_stages(
                 "powershell.exe",
                 "-NoProfile",
                 "-Command",
-                "@('setup', 'tests') | ForEach-Object { $stage = \"C:\\ProgramData\\ALE\\$_\"; "
+                "@('setup', 'tests') | ForEach-Object { $stage = \"C:\\ProgramData\\Orbit\\$_\"; "
                 "if (Test-Path -LiteralPath $stage) { "
                 "Get-ChildItem -LiteralPath $stage -Force | ForEach-Object FullName "
                 '} else { "missing $stage" } }',
             ]
         else:
-            argv = ["sh", "-c", "find /opt/ale/setup /opt/ale/tests 2>/dev/null; true"]
+            argv = ["sh", "-c", "find /opt/orbit/setup /opt/orbit/tests 2>/dev/null; true"]
         listing = await sandbox.exec(argv)
     finally:
         await sandbox.retain(roles=("solver",), reason="inspected")
@@ -210,10 +210,10 @@ async def _chain(
         provider = QemuProvider(overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots")
         registry = provider_registry(provider)
     if kind == "windows":
-        image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+        image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
         if not image.is_file():
-            pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
-        monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
+            pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+        monkeypatch.setattr("orbit.run.task_images.cache_root", lambda: tmp_path / "cache")
         provider = QemuProvider(
             image=image, overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots"
         )
@@ -285,7 +285,7 @@ async def test_kept_episodes_continue_and_a_superseded_one_is_refused(
     for segment in segments:
         assert segment.steps[0].source == "user"
         assert sum(step.source == "user" for step in segment.steps) == 1
-    links = [((segment.extra or {}).get("ale") or {}).get("resumed_from") for segment in segments]
+    links = [((segment.extra or {}).get("orbit") or {}).get("resumed_from") for segment in segments]
     assert links[0] is None
     assert links[1] == {
         "episode_id": first.record.episode_id,

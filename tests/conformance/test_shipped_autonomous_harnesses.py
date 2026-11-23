@@ -11,14 +11,14 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-import ale.run.cli.tasks  # noqa: F401  (imports every shipped adapter)
-from ale.core.harness import HarnessSession, ResumeSupport, TrajectoryParseContext
-from ale.core.sandbox import ExecResult
-from ale.core.taskspec import OperatingSystem
-from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.harnesses._release import release_identity
-from ale.run.harnesses.base import LOG_ROOT, PROMPT_PATH, STDOUT_PATH, CliHarness, NativeResult
-from ale.run.recording import BlobStore
+import orbit.run.cli.tasks  # noqa: F401  (imports every shipped adapter)
+from orbit.core.harness import HarnessSession, ResumeSupport, TrajectoryParseContext
+from orbit.core.sandbox import ExecResult
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run.harnesses._release import release_identity
+from orbit.run.harnesses.base import LOG_ROOT, PROMPT_PATH, STDOUT_PATH, CliHarness, NativeResult
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.conformance
 
@@ -26,14 +26,14 @@ pytestmark = pytest.mark.conformance
 def _adapters(base: type[CliHarness]) -> list[type[CliHarness]]:
     found = []
     for child in base.__subclasses__():
-        if child.__module__.startswith("ale.run.harnesses."):
+        if child.__module__.startswith("orbit.run.harnesses."):
             found.append(child)
         found.extend(_adapters(child))
     return found
 
 
 HARNESSES = [adapter() for adapter in _adapters(CliHarness)]
-#: What a CLI requires before the UUID of a session ALE names: OpenCode's IDs start "ses".
+#: What a CLI requires before the UUID of a session Orbit names: OpenCode's IDs start "ses".
 SESSION_PREFIXES = {"opencode": "ses_"}
 PROMPT = "Unique prompt: 多行\n'quoted' $HOME `cmd`"
 
@@ -164,4 +164,4 @@ def test_parser_is_pure_and_starts_with_the_prompt_it_was_sent(
     assert trajectory.steps[0].source == "user"
     assert trajectory.steps[0].message == "Do the task."
     if reason is not None:
-        assert trajectory.extra["ale"]["incomplete_reason"] == reason
+        assert trajectory.extra["orbit"]["incomplete_reason"] == reason

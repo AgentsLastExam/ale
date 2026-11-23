@@ -5,8 +5,8 @@ a sandbox is added here, when the image is prepared. A Linux container image get
 image layer:
 
 - guestd, the guest service every sandbox operation goes through, under root-only
-  ``/opt/ale`` so the agent cannot read the protocol driving its sandbox;
-- the framework's own Python at a pinned version under ``/opt/ale/python``, which guestd
+  ``/opt/orbit`` so the agent cannot read the protocol driving its sandbox;
+- the framework's own Python at a pinned version under ``/opt/orbit/python``, which guestd
   runs on whatever Python the image has, and verification falls back to;
 - Cua Driver at a pinned version, which guestd starts inside the desktop session when the
   image has one;
@@ -61,12 +61,12 @@ import zipfile
 from collections.abc import Callable, Iterator
 from pathlib import Path, PureWindowsPath
 
-from ale.core.errors import ProviderStartError, TaskDefinitionError
-from ale.core.ids import content_hash
-from ale.core.sandbox import PreparedTaskImage
-from ale.core.taskspec import OperatingSystem
-from ale.run import HELPER_RUNTIME, ale_image, guestd
-from ale.run.images import (
+from orbit.core.errors import ProviderStartError, TaskDefinitionError
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import PreparedTaskImage
+from orbit.core.taskspec import OperatingSystem
+from orbit.run import HELPER_RUNTIME, guestd, orbit_image
+from orbit.run.images import (
     acquire_lock,
     base_layer,
     chain_mounts,
@@ -75,8 +75,8 @@ from ale.run.images import (
     remove_disk,
     valid_qcow2,
 )
-from ale.run.process import run
-from ale.run.sources import cache_root
+from orbit.run.process import run
+from orbit.run.sources import cache_root
 
 __all__ = [
     "CUA_DRIVER_VERSION",
@@ -102,18 +102,18 @@ __all__ = [
     "with_framework",
 ]
 
-LABEL = "ale.framework"
+LABEL = "orbit.framework"
 #: What Harbor runs in every Task container in place of its image's command; the image's
 #: entrypoint, if any, still runs it.
 KEEP_ALIVE = ("sh", "-c", "sleep infinity")
 #: Where a prepared Linux image, or a framed macOS disk, records the framework identity it
 #: carries.
-MARKER = "/opt/ale/framework"
-#: The same for a Windows disk, as libguestfs names ``C:\ProgramData\ALE\framework``.
-WINDOWS_MARKER = "/ProgramData/ALE/framework"
+MARKER = "/opt/orbit/framework"
+#: The same for a Windows disk, as libguestfs names ``C:\ProgramData\Orbit\framework``.
+WINDOWS_MARKER = "/ProgramData/Orbit/framework"
 #: The VM builder: its libguestfs installs the framework into a Linux or Windows qcow2 and
-#: discards a build layer's free space. ALE's Linux base disk is made with it as well.
-MATERIALIZER_IMAGE = os.environ.get("ALE_VM_MATERIALIZER", ale_image("ale-vm-materializer"))
+#: discards a build layer's free space. Orbit's Linux base disk is made with it as well.
+MATERIALIZER_IMAGE = os.environ.get("ORBIT_VM_MATERIALIZER", orbit_image("orbit-vm-materializer"))
 CUA_DRIVER_VERSION = "0.38.0"
 #: python-build-standalone release of the framework's own Python, and its build per guest
 #: platform with the release's published SHA-256. The Linux build needs glibc.
@@ -155,7 +155,7 @@ _WINDOWS_INSTALLER = Path(__file__).with_name("framework_windows.py")
 MACOS_PYTHON = guestd.PYTHON["macos"]
 MACOS_DRIVER_APP = "/Applications/CuaDriver.app"
 MACOS_DRIVER = f"{MACOS_DRIVER_APP}/Contents/MacOS/cua-driver"
-MACOS_DRIVER_SOCKET = "/tmp/ale-cua-driver.sock"
+MACOS_DRIVER_SOCKET = "/tmp/orbit-cua-driver.sock"
 #: Run as root on the Mac to install the macOS framework into a stopped VM's disk.
 MACOS_FRAMER = Path(__file__).with_name("framework_macos.sh")
 
@@ -164,13 +164,13 @@ MACOS_FRAMER = Path(__file__).with_name("framework_macos.sh")
 #: ``OOMPolicy=stop`` would stop the unit, guestd and every other command with it.
 _GUEST_UNIT = f"""\
 [Unit]
-Description=ALE guest service
+Description=Orbit guest service
 After=network.target
 
 [Service]
-Environment=ALE_AGENT_USER={{user}}
+Environment=ORBIT_AGENT_USER={{user}}
 WorkingDirectory=/
-ExecStart={guestd.PYTHON["linux"]} -I /opt/ale/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
+ExecStart={guestd.PYTHON["linux"]} -I /opt/orbit/guestd/main.py --tcp 0.0.0.0:{guestd.PORT}
 OOMPolicy=continue
 Restart=always
 RestartSec=1
@@ -182,15 +182,15 @@ WantedBy=multi-user.target
 #: login starts, from what the Provider hands it in QEMU's firmware configuration.
 _VOLUMES_UNIT = f"""\
 [Unit]
-Description=ALE volumes
+Description=Orbit volumes
 DefaultDependencies=no
 After=local-fs.target systemd-udevd.service
-Before=ale-guestd.service display-manager.service systemd-user-sessions.service
+Before=orbit-guestd.service display-manager.service systemd-user-sessions.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart={guestd.PYTHON["linux"]} -I /opt/ale/volumes.py
+ExecStart={guestd.PYTHON["linux"]} -I /opt/orbit/volumes.py
 
 [Install]
 WantedBy=multi-user.target
@@ -203,22 +203,22 @@ user="$1"
 identity="$2"
 python="$3"
 if ! id -u "$user" >/dev/null 2>&1; then
-    echo "ALE: the agent account '$user' does not exist in this image; create it in the" \
+    echo "Orbit: the agent account '$user' does not exist in this image; create it in the" \
         "image or name an existing account with [agent].user in task.toml" >&2
     exit 1
 fi
-rm -rf /opt/ale/python
-cp -RP "$python" /opt/ale/python
-if ! /opt/ale/python/bin/python3 -c "" >/dev/null 2>&1; then
-    echo "ALE: the framework's Python does not run in this image; ALE needs an x86-64" \
+rm -rf /opt/orbit/python
+cp -RP "$python" /opt/orbit/python
+if ! /opt/orbit/python/bin/python3 -c "" >/dev/null 2>&1; then
+    echo "Orbit: the framework's Python does not run in this image; Orbit needs an x86-64" \
         "image with glibc" >&2
     exit 1
 fi
-chown -R 0:0 /opt/ale
-chmod -R go-rwx /opt/ale
+chown -R 0:0 /opt/orbit
+chmod -R go-rwx /opt/orbit
 chown 0:0 /usr/local/bin/cua-driver
 chmod 0755 /usr/local/bin/cua-driver
-for unit in ale-guestd ale-volumes; do
+for unit in orbit-guestd orbit-volumes; do
     if [ -f "/etc/systemd/system/$unit.service" ]; then
         chown 0:0 "/etc/systemd/system/$unit.service"
         chmod 0644 "/etc/systemd/system/$unit.service"
@@ -240,7 +240,7 @@ if ! command -v sudo >/dev/null 2>&1; then
     elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install sudo
     fi
 fi
-printf '%s\n' "$identity" > /opt/ale/framework
+printf '%s\n' "$identity" > /opt/orbit/framework
 """
 
 
@@ -351,7 +351,7 @@ async def with_framework(image: str, *, user: str, keep_alive: bool = False) -> 
         return config["Id"]
     built_from = f"{config['Id']}\n{identity}" + ("\nkeep-alive" if keep_alive else "")
     digest = hashlib.sha256(built_from.encode()).hexdigest()[:32]
-    tag = f"ale-framework:{digest}"
+    tag = f"orbit-framework:{digest}"
     root = cache_root() / "framework"
     root.mkdir(parents=True, exist_ok=True)
     with (root / f"{digest}.lock").open("a") as lock:
@@ -371,10 +371,10 @@ async def framed_disk(
 ) -> tuple[PreparedTaskImage, bool]:
     """A VM disk with the framework installed, and whether it was already there.
 
-    A disk that already carries this exact framework, such as one ALE prepared, is used as
+    A disk that already carries this exact framework, such as one Orbit prepared, is used as
     it is; that is read from the disk once and then recorded. Any other disk is framed once
     per disk, framework and builder into an overlay on its base (``images.base_layer``: a
-    disk ALE pulled as it is, an uncompressed copy of any other), so framing writes only
+    disk Orbit pulled as it is, an uncompressed copy of any other), so framing writes only
     what it installs; the framed disk is that overlay, recorded as a layer on the disk.
     """
     identity = (
@@ -491,7 +491,7 @@ async def _frame_windows_disk(disk: Path, *, user: str, builder: str) -> None:
     identity = windows_framework_identity(user=user)
     driver = await asyncio.to_thread(_cua_driver, "windows")
     python = await asyncio.to_thread(_python, "windows")
-    with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="orbit-framework-") as temporary:
         context = Path(temporary)
         shutil.copytree(guestd.SOURCE, context / "guestd", ignore=_only(guestd.FILES))
         shutil.copytree(driver, context / "cua-driver")
@@ -508,7 +508,7 @@ async def _frame_windows_disk(disk: Path, *, user: str, builder: str) -> None:
         )  # fmt: skip
     if code != 0:
         raise TaskDefinitionError(
-            f"could not add the ALE framework to the Windows disk: {_explained(stderr, output)}"
+            f"could not add the Orbit framework to the Windows disk: {_explained(stderr, output)}"
         )
 
 
@@ -517,10 +517,10 @@ async def _frame_linux_disk(disk: Path, *, user: str, builder: str) -> None:
     identity = framework_identity(user=user, vm=True)
     driver = await asyncio.to_thread(_cua_driver, "linux")
     python = await asyncio.to_thread(_python, "linux")
-    with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="orbit-framework-") as temporary:
         context = Path(temporary)
         _stage(context, driver, user=user, vm=True)
-        setup = shlex.join(["/bin/sh", "/opt/ale/setup.sh", user, identity, "/tmp/python"])
+        setup = shlex.join(["/bin/sh", "/opt/orbit/setup.sh", user, identity, "/tmp/python"])
         code, output, stderr = await _in_container(
             "--device=/dev/kvm",
             *await chain_mounts(disk, writable=True),
@@ -528,14 +528,14 @@ async def _frame_linux_disk(disk: Path, *, user: str, builder: str) -> None:
             "--mount", f"type=bind,src={python},dst=/python,readonly",
             "--entrypoint", "virt-customize", builder,
             "--format", "qcow2", "--add", str(disk.resolve()), "--no-logfile",
-            "--delete", "/opt/ale/guestd",
-            "--mkdir", "/opt/ale",
-            "--copy-in", "/framework/guestd:/opt/ale",
-            "--upload", "/framework/setup.sh:/opt/ale/setup.sh",
+            "--delete", "/opt/orbit/guestd",
+            "--mkdir", "/opt/orbit",
+            "--copy-in", "/framework/guestd:/opt/orbit",
+            "--upload", "/framework/setup.sh:/opt/orbit/setup.sh",
             "--upload", "/framework/cua-driver:/usr/local/bin/cua-driver",
-            "--upload", "/framework/ale-guestd.service:/etc/systemd/system/ale-guestd.service",
-            "--upload", "/framework/ale-volumes.service:/etc/systemd/system/ale-volumes.service",
-            "--upload", "/framework/volumes.py:/opt/ale/volumes.py",
+            "--upload", "/framework/orbit-guestd.service:/etc/systemd/system/orbit-guestd.service",
+            "--upload", "/framework/orbit-volumes.service:/etc/systemd/system/orbit-volumes.service",
+            "--upload", "/framework/volumes.py:/opt/orbit/volumes.py",
             "--copy-in", "/python:/tmp",
             "--run-command", setup,
             "--delete", "/tmp/python",
@@ -543,7 +543,7 @@ async def _frame_linux_disk(disk: Path, *, user: str, builder: str) -> None:
         )  # fmt: skip
     if code != 0:
         raise TaskDefinitionError(
-            f"could not add the ALE framework to the VM disk: {_explained(stderr, output)}"
+            f"could not add the Orbit framework to the VM disk: {_explained(stderr, output)}"
         )
 
 
@@ -553,7 +553,9 @@ def _explained(stderr: str, stdout: str = "") -> str:
     Once each: buildx repeats a failed step's output in its summary.
     """
     said = dict.fromkeys(
-        line.split("ALE: ", 1)[1] for line in f"{stderr}\n{stdout}".splitlines() if "ALE: " in line
+        line.split("Orbit: ", 1)[1]
+        for line in f"{stderr}\n{stdout}".splitlines()
+        if "Orbit: " in line
     )
     return " ".join(said) if said else stderr.strip()[-2000:]
 
@@ -565,13 +567,13 @@ def container_framework(*, user: str, keep_alive: bool) -> tuple[list[str], list
     identity = framework_identity(user=user, vm=False)
     body = [
         "USER root",
-        "COPY guestd/ /opt/ale/guestd/",
+        "COPY guestd/ /opt/orbit/guestd/",
         "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver",
-        "COPY setup.sh /opt/ale/setup.sh",
+        "COPY setup.sh /opt/orbit/setup.sh",
         # Mounted, not copied: a copy would land in the layer once more when setup takes it
-        # into /opt/ale/python.
+        # into /opt/orbit/python.
         "RUN --mount=type=bind,from=python,target=/tmp/python "
-        + json.dumps(["/bin/sh", "/opt/ale/setup.sh", user, identity, "/tmp/python"]),
+        + json.dumps(["/bin/sh", "/opt/orbit/setup.sh", user, identity, "/tmp/python"]),
     ]
     tail = [f"CMD {json.dumps(list(KEEP_ALIVE))}"] if keep_alive else []
     return body, [*tail, f"LABEL {LABEL}={json.dumps(identity)}"]
@@ -585,11 +587,11 @@ def stage_container_framework(context: Path) -> Path:
 
 
 async def _build(base: dict, tag: str, *, user: str, keep_alive: bool) -> None:
-    base_tag = f"ale-framework-base:{base['Id'].removeprefix('sha256:')}"
+    base_tag = f"orbit-framework-base:{base['Id'].removeprefix('sha256:')}"
     code, _, stderr = await _run("docker", "tag", base["Id"], base_tag)
     if code != 0:
         raise ProviderStartError(f"could not reference the Task image: {stderr.strip()}")
-    with tempfile.TemporaryDirectory(prefix="ale-framework-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="orbit-framework-") as temporary:
         context = Path(temporary)
         python = await asyncio.to_thread(stage_container_framework, context)
         body, tail = container_framework(user=user, keep_alive=keep_alive)
@@ -604,7 +606,7 @@ async def _build(base: dict, tag: str, *, user: str, keep_alive: bool) -> None:
     if code != 0:
         # The setup script explains what the image lacks; buildx's own summary does not.
         raise TaskDefinitionError(
-            f"could not add the ALE framework layer to the Task image: {_explained(stderr)}"
+            f"could not add the Orbit framework layer to the Task image: {_explained(stderr)}"
         )
 
 
@@ -614,8 +616,8 @@ def _stage(context: Path, driver: Path, *, user: str, vm: bool) -> None:
     shutil.copy2(driver / "cua-driver", context / "cua-driver")
     (context / "setup.sh").write_text(_SETUP)
     if vm:
-        (context / "ale-guestd.service").write_text(_GUEST_UNIT.format(user=user))
-        (context / "ale-volumes.service").write_text(_VOLUMES_UNIT)
+        (context / "orbit-guestd.service").write_text(_GUEST_UNIT.format(user=user))
+        (context / "orbit-volumes.service").write_text(_VOLUMES_UNIT)
         shutil.copy2(_VOLUMES_SCRIPT, context / "volumes.py")
 
 
@@ -762,7 +764,7 @@ async def _builder_identity() -> str:
 async def _in_container(*argv: str, timeout: float) -> tuple[int, str, str]:
     """``docker run --rm`` that ends with this call: killing the client alone would leave
     the container running, still writing into files this process has given up."""
-    name = f"ale-framework-{uuid.uuid4().hex[:12]}"
+    name = f"orbit-framework-{uuid.uuid4().hex[:12]}"
     try:
         return await _run(
             "docker", "run", "--rm", *HELPER_RUNTIME, "--name", name, *argv, timeout=timeout

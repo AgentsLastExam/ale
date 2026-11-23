@@ -20,9 +20,9 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.run import HELPER_RUNTIME
-from ale.run.process import run
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError
+from orbit.run import HELPER_RUNTIME
+from orbit.run.process import run
 
 __all__ = [
     "MAX_LAYERS",
@@ -39,13 +39,13 @@ __all__ = [
 ]
 
 #: On every volume made for a Sandbox: the Sandbox it was made for.
-VOLUME_LABEL = "ale.volume"
+VOLUME_LABEL = "orbit.volume"
 #: On a view: the layers it stacks, which stay while it does.
-LOWERS_LABEL = "ale.volume-lowers"
+LOWERS_LABEL = "orbit.volume-lowers"
 #: On a snapshot: each path's stack, topmost layer first, and its root's owner and mode.
-LAYERS_LABEL = "ale.volumes"
+LAYERS_LABEL = "orbit.volumes"
 #: On a container: its mounts, by which its volumes go with it.
-MOUNTS_LABEL = "ale.volume-mounts"
+MOUNTS_LABEL = "orbit.volume-mounts"
 #: The most layers a view stacks: the overlay's options, which name the mount point of each,
 #: must fit in one page.
 MAX_LAYERS = 60
@@ -188,9 +188,9 @@ async def directories(image: str, python: str, paths: Sequence[str]) -> tuple[st
 
 
 async def _create(owner: str, created: list[str], *options: str) -> str:
-    name = f"ale-v-{uuid.uuid4().hex[:12]}"
+    name = f"orbit-v-{uuid.uuid4().hex[:12]}"
     await _docker(
-        "volume", "create", "--label", "ale.managed=true", "--label", f"{VOLUME_LABEL}={owner}",
+        "volume", "create", "--label", "orbit.managed=true", "--label", f"{VOLUME_LABEL}={owner}",
         *options, name,
     )  # fmt: skip
     created.append(name)
@@ -345,7 +345,7 @@ class Meter:
     a run that drives the Sandbox again measures alike."""
 
     def __init__(self, owner: str) -> None:
-        self.name = f"ale-meter-{owner}"
+        self.name = f"orbit-meter-{owner}"
 
     @classmethod
     async def start(cls, owner: str, mounts: Sequence[Mount], helper: str) -> Meter:
@@ -353,7 +353,7 @@ class Meter:
         binds = [f"-v={m.top}:/m/{index}:ro" for index, m in enumerate(mounts)]
         await _docker(
             "run", "-d", "--rm", "--name", meter.name, *HELPER_RUNTIME, "--network", "none",
-            "--label", "ale.managed=true", "--label", f"{VOLUME_LABEL}={owner}",
+            "--label", "orbit.managed=true", "--label", f"{VOLUME_LABEL}={owner}",
             *binds, "--entrypoint", "sh", helper, "-c",
             "du -sB1 /m | cut -f1 > /baseline.tmp && mv /baseline.tmp /baseline "
             "&& exec sleep infinity",

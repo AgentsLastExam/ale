@@ -12,42 +12,42 @@ import pytest
 from tests.support import MemoryProvider, MemorySandbox, edit_task_config, provider_registry
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
-from ale.core.capability import CapabilityProfile
-from ale.core.config import SandboxRetentionConfig
-from ale.core.errors import (
+from orbit.core.capability import CapabilityProfile
+from orbit.core.config import SandboxRetentionConfig
+from orbit.core.errors import (
     ConfigError,
     ProviderCapabilityError,
     ProviderStartError,
     RetentionFinalizationError,
 )
-from ale.core.harness import NativeContinuation
-from ale.core.lock import ResumedFrom
-from ale.core.sandbox import (
+from orbit.core.harness import NativeContinuation
+from orbit.core.lock import ResumedFrom
+from orbit.core.sandbox import (
     ExecResult,
     PreparedTaskImage,
     ResolvedImage,
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.taskspec import (
+from orbit.core.taskspec import (
     ContainerFeature,
     NetworkMode,
     NetworkPolicy,
     Resources,
     VerificationMode,
 )
-from ale.core.verdict import Status
-from ale.run.episode import _Artifacts, _Lease, check_retention, run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import (
+from orbit.core.verdict import Status
+from orbit.run.episode import _Artifacts, _Lease, check_retention, run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import (
     EpisodeProtocol,
     Resume,
     ReverificationProtocol,
     SolverSnapshot,
 )
-from ale.run.provenance import ProvenanceInputs
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from orbit.run.provenance import ProvenanceInputs
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import ManifestTask, load_tasks
 
 pytestmark = pytest.mark.unit
 
@@ -154,7 +154,7 @@ async def test_the_verifier_boots_from_the_solvers_snapshot_with_its_own_resourc
     assert verifier.network.mode is NetworkMode.OPEN
     # Sanitized first: the snapshot names the agent's episode and holds no result.
     booted = provider.sandboxes[1]
-    assert booted.files["/opt/ale/agent-episode"] == result.episode_id.encode()
+    assert booted.files["/opt/orbit/agent-episode"] == result.episode_id.encode()
     # Nothing it did reached the solver, which was gone before it started.
     assert REWARD not in solver_sandbox.files
     assert solver_sandbox.destroyed and booted.destroyed
@@ -249,7 +249,7 @@ async def test_a_solver_that_cannot_be_sanitized_is_never_saved(
     exec_ = MemorySandbox.exec
 
     async def exec(self: MemorySandbox, argv: Any, **options: Any) -> ExecResult:
-        if argv[:3] == ["rm", "-rf", "--"] and "/opt/ale/setup" in argv:
+        if argv[:3] == ["rm", "-rf", "--"] and "/opt/orbit/setup" in argv:
             return ExecResult(exit_code=1, stderr="read-only file system")
         return await exec_(self, argv, **options)
 
@@ -323,7 +323,7 @@ async def test_reverification_boots_a_new_verifier_and_leaves_the_snapshot(
 ) -> None:
     provider = Provider()
     handle = "memory:snapshot:source"
-    provider.snapshots[handle] = {CHECKPOINT: b"weights", "/opt/ale/agent-episode": b"source"}
+    provider.snapshots[handle] = {CHECKPOINT: b"weights", "/opt/orbit/agent-episode": b"source"}
     task = _task(tmp_path)
     task.provider = task.verifier_provider = provider.id
     task.prepared_verifier_image = IMAGE
@@ -361,14 +361,14 @@ async def test_reverification_boots_a_new_verifier_and_leaves_the_snapshot(
     )
     assert provider.snapshots[handle] == {
         CHECKPOINT: b"weights",
-        "/opt/ale/agent-episode": b"source",
+        "/opt/orbit/agent-episode": b"source",
     }
     assert [(item.roles, item.outcome) for item in result.record.sandboxes] == [
         (("verifier",), "destroyed")
     ]
 
     # A snapshot that holds another episode's state is refused, and its verifier goes.
-    provider.snapshots[handle]["/opt/ale/agent-episode"] = b"later"
+    provider.snapshots[handle]["/opt/orbit/agent-episode"] = b"later"
     result = await reverify(snapshot)
     assert result.verdict.status is Status.ENV_ERROR
     assert "holds episode later's agent state" in (result.verdict.failure.message or "")
@@ -416,7 +416,7 @@ async def test_only_the_save_s_own_bound_is_reported_as_such(
         await asyncio.sleep(60)
 
     monkeypatch.setattr(MemorySandbox, "snapshot", snapshot)
-    monkeypatch.setattr("ale.run.protocol.episode_protocol.SNAPSHOT_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr("orbit.run.protocol.episode_protocol.SNAPSHOT_TIMEOUT_SEC", 0.05)
     provider = Provider()
     result = await _run(tmp_path, provider, _task(tmp_path))
     assert result.verdict.status is Status.ENV_ERROR
@@ -597,7 +597,7 @@ async def test_a_continued_snapshot_is_verified_from_a_snapshot_of_its_own(
     verifier, which boots from that new snapshot; the earlier one is left as it was."""
     provider = Provider()
     earlier = "memory:snapshot:earlier"
-    provider.snapshots[earlier] = {CHECKPOINT: b"weights", "/opt/ale/agent-episode": b"earlier"}
+    provider.snapshots[earlier] = {CHECKPOINT: b"weights", "/opt/orbit/agent-episode": b"earlier"}
     source = ResumedFrom(
         episode_id="earlier",
         retention="snapshot",
@@ -648,7 +648,7 @@ async def test_reverification_from_a_snapshot_keeps_the_agent_s_output_when_aske
     monkeypatch.setattr(MemorySandbox, "upload_dir", uploading)
     provider = Provider()
     handle = "memory:snapshot:source"
-    provider.snapshots[handle] = {CHECKPOINT: b"weights", "/opt/ale/agent-episode": b"source"}
+    provider.snapshots[handle] = {CHECKPOINT: b"weights", "/opt/orbit/agent-episode": b"source"}
     task = _task(tmp_path)
     task.provider = task.verifier_provider = provider.id
     task.prepared_verifier_image = IMAGE
@@ -675,7 +675,7 @@ async def test_reverification_from_a_snapshot_keeps_the_agent_s_output_when_aske
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert order[0] == "collect /home/user/output"
-    assert order.index("collect /home/user/output") < order.index("upload /opt/ale/tests")
+    assert order.index("collect /home/user/output") < order.index("upload /opt/orbit/tests")
 
 
 @pytest.mark.asyncio
@@ -702,9 +702,9 @@ async def test_the_solver_of_a_snapshot_verifier_asks_for_a_leaf_that_saves_and_
 async def test_a_run_refuses_a_retention_that_cannot_hold_before_anything_is_prepared(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ale.core.config import RunConfig
-    from ale.run.cli import tasks as task_cli
-    from ale.run.providers import ProviderRegistry
+    from orbit.core.config import RunConfig
+    from orbit.run.cli import tasks as task_cli
+    from orbit.run.providers import ProviderRegistry
 
     for name in ("resolve_image_kinds", "prepare_task_image_result"):
         monkeypatch.setattr(task_cli, name, AsyncMock(side_effect=AssertionError(name)))

@@ -11,12 +11,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ale.core.errors import AgentError, ConfigError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import (
+from orbit.core.errors import AgentError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import (
     agent_home,
     agent_path,
     bash_command,
@@ -24,14 +24,14 @@ from ale.run.harnesses._npm import (
     npm_command,
     npm_env,
 )
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
     NativeResult,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import GrokBuildSettings
@@ -54,9 +54,9 @@ class GrokBuildHarness(CliHarness):
     default_version = DEFAULT_CLI_VERSION
     settings_type = GrokBuildSettings
     settings: GrokBuildSettings
-    logs = (LOG_ROOT, ".grok-ale/sessions")
+    logs = (LOG_ROOT, ".grok-orbit/sessions")
     # Its GROK_HOME, where a login keeps its credentials.
-    credentials = (".grok-ale/auth.json",)
+    credentials = (".grok-orbit/auth.json",)
 
     def __init__(
         self,
@@ -126,7 +126,7 @@ class GrokBuildHarness(CliHarness):
         session: HarnessSession,
         resources: EffectiveAgentResources,
     ) -> None:
-        grok_home = agent_path(session.home) / ".grok-ale"
+        grok_home = agent_path(session.home) / ".grok-orbit"
         skills_root = grok_home / "skills"
         await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
         await install_skills(sandbox, session, resources, skills_root)
@@ -140,8 +140,8 @@ class GrokBuildHarness(CliHarness):
             f"[model.{_toml(session.model)}]",
             f"model = {_toml(session.model)}",
             f"base_url = {_toml(session.gateway_url + '/v1')}",
-            'name = "ALE Gateway"',
-            'env_key = "ALE_GATEWAY_TOKEN"',
+            'name = "Orbit Gateway"',
+            'env_key = "ORBIT_GATEWAY_TOKEN"',
             f"api_backend = {_toml(_API_BACKENDS[self.gateway_dialect])}",
             "supports_reasoning_effort = true",
             "",
@@ -250,13 +250,13 @@ class GrokBuildHarness(CliHarness):
             argv.extend(["--max-turns", str(self.settings.max_turns)])
         env = {
             **await npm_env(sandbox, session.home),
-            "GROK_HOME": str(home / ".grok-ale"),
+            "GROK_HOME": str(home / ".grok-orbit"),
             "GROK_MANAGED_BY_NPM": "1",
             "GROK_SANDBOX": "off",
             "GROK_DISABLE_AUTOUPDATER": "1",
             "GROK_TELEMETRY_ENABLED": "0",
             "GROK_WORKSPACE_DATA_COLLECTION_DISABLED": "1",
-            "ALE_GATEWAY_TOKEN": session.token,
+            "ORBIT_GATEWAY_TOKEN": session.token,
         }
         for source in ("CURSOR", "CLAUDE"):
             for resource in ("SKILLS", "RULES", "AGENTS", "MCPS", "HOOKS"):

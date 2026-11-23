@@ -16,7 +16,7 @@ from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ale.core.capability import (
+from orbit.core.capability import (
     Arch,
     CapabilityProfile,
     GpuHold,
@@ -24,8 +24,8 @@ from ale.core.capability import (
     closest,
     solver_saves,
 )
-from ale.core.errors import ProviderCapabilityError
-from ale.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from orbit.core.errors import ProviderCapabilityError
+from orbit.core.taskspec import ImageKind, NetworkMode, NetworkPolicy, OperatingSystem, Resources
 
 __all__ = [
     "SANDBOX_GATEWAY_PORT",
@@ -240,14 +240,14 @@ class SandboxRequest(BaseModel):
     solver is saved as a snapshot whatever its retention, on a leaf that serves both."""
     round_verifier: Resources | None = None
     """Under shared verification, the resources of the verifier each validation round boots
-    from this solver's snapshot (:func:`~ale.core.capability.round_verifier_resources`), on
+    from this solver's snapshot (:func:`~orbit.core.capability.round_verifier_resources`), on
     the leaf that saved it, which serves both."""
     verifier_network_mode: NetworkMode = NetworkMode.OPEN
     """The network mode of ``snapshot_verifier``, the Task's verifier network's
-    (:attr:`~ale.core.taskspec.VerifySpec.network`)."""
+    (:attr:`~orbit.core.taskspec.VerifySpec.network`)."""
     round_verifier_network_mode: NetworkMode = NetworkMode.OPEN
     """The network mode of ``round_verifier``, that of the verifier of validation rounds
-    (:attr:`~ale.core.taskspec.TaskSpec.validation_spec`)."""
+    (:attr:`~orbit.core.taskspec.TaskSpec.validation_spec`)."""
     planned_saves: int = Field(default=0, ge=0)
     """How many validations still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
@@ -256,7 +256,7 @@ class SandboxRequest(BaseModel):
     limit does. A Provider that holds a Sandbox only until a deadline starts it where that
     leaves it this long."""
     volumes: tuple[str, ...] = ()
-    """The Task's volume candidates (:attr:`~ale.core.taskspec.TaskSpec.volume_candidates`).
+    """The Task's volume candidates (:attr:`~orbit.core.taskspec.TaskSpec.volume_candidates`).
     A leaf that mounts volumes makes each that is a directory in the image a volume of its
     own from the start, which holds what the image has there; booting from ``snapshot``, or
     with ``volumes_from``, a view of what the snapshot holds there instead, whose writes stay
@@ -300,7 +300,7 @@ class SandboxRequest(BaseModel):
     @property
     def saves(self) -> int:
         """How many snapshots in a row its episode may save, as
-        :func:`~ale.core.capability.solver_saves` counts them."""
+        :func:`~orbit.core.capability.solver_saves` counts them."""
         return solver_saves(
             self.planned_saves,
             snapshot_verified=self.snapshot_verifier is not None,
@@ -654,7 +654,7 @@ class Provider(ABC):
     A leaf starts and drives them directly; a scheduler places them on machines it
     manages, which start them with the leaves there. Both declare what they can start as
     capability profiles, which every check of a request compares through
-    :func:`~ale.core.capability.unmet`.
+    :func:`~orbit.core.capability.unmet`.
     """
 
     name: str

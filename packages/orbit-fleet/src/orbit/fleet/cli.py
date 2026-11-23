@@ -1,4 +1,4 @@
-"""``ale-fleet``: serve the control plane, lend this machine to it as a Node, or operate it."""
+"""``orbit-fleet``: serve the control plane, lend this machine to it as a Node, or operate it."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from typing import Annotated
 
 import typer
 
-from ale.core.config import GPU_MEMORY_MARGIN_MB
-from ale.run.secrets import load_env
+from orbit.core.config import GPU_MEMORY_MARGIN_MB
+from orbit.run.secrets import load_env
 
 app = typer.Typer(
-    name="ale-fleet",
+    name="orbit-fleet",
     help="Pool Sandbox capacity across machines.",
     no_args_is_help=True,
     add_completion=False,
@@ -23,14 +23,14 @@ app = typer.Typer(
 @app.callback()
 def root() -> None:
     """Pool Sandbox capacity across machines."""
-    # As for `ale`: credentials come from the checkout's .env, which a Node needs to prepare
+    # As for `orbit`: credentials come from the checkout's .env, which a Node needs to prepare
     # images as a local Run would. A variable already set in the environment wins.
     load_env()
 
 
 #: Where the control plane listens unless told otherwise.
 CONTROL_PORT = 7470
-TOKEN_VARIABLE = "ALE_FLEET_TOKEN"
+TOKEN_VARIABLE = "ORBIT_FLEET_TOKEN"
 
 
 def fleet_token() -> str:
@@ -44,7 +44,7 @@ def fleet_token() -> str:
 
 def _state_dir() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
-    return Path(base) / "ale" / "fleet"
+    return Path(base) / "orbit" / "fleet"
 
 
 @app.command("serve")
@@ -53,14 +53,14 @@ def serve(
     port: Annotated[int, typer.Option(help="Port to listen on.")] = CONTROL_PORT,
     db: Annotated[
         Path | None,
-        typer.Option(help="The ledger's SQLite file. Default: ~/.local/state/ale/fleet/fleet.db"),
+        typer.Option(help="The ledger's SQLite file. Default: ~/.local/state/orbit/fleet/fleet.db"),
     ] = None,
 ) -> None:
     """Run the control plane: the ledger, placement and the API Nodes and Runs call."""
-    from ale.fleet.control import ControlPlane
-    from ale.fleet.server import serve as serve_control
-    from ale.fleet.store import Store
-    from ale.run.cli.main import run_async
+    from orbit.fleet.control import ControlPlane
+    from orbit.fleet.server import serve as serve_control
+    from orbit.fleet.store import Store
+    from orbit.run.cli.main import run_async
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     token = fleet_token()
@@ -125,11 +125,11 @@ def node(
     import socket
     from urllib.parse import urlsplit
 
-    from ale.core.config import DockerProviderConfig
-    from ale.core.errors import AleError
-    from ale.fleet.node import NodeAgent, NodeSettings, probe
-    from ale.run.cli.main import run_async
-    from ale.run.sources import cache_root
+    from orbit.core.config import DockerProviderConfig
+    from orbit.core.errors import OrbitError
+    from orbit.fleet.node import NodeAgent, NodeSettings, probe
+    from orbit.run.cli.main import run_async
+    from orbit.run.sources import cache_root
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     token = fleet_token()
@@ -176,7 +176,7 @@ def node(
 
     try:
         run_async(main())
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(4) from error
 
@@ -185,7 +185,7 @@ ControlPlane = Annotated[
     str | None,
     typer.Option(
         "--control-plane",
-        help="The control plane's URL. Default: $ALE_FLEET_URL.",
+        help="The control plane's URL. Default: $ORBIT_FLEET_URL.",
         show_default=False,
     ),
 ]
@@ -197,9 +197,9 @@ def _call(control_plane: str | None, method: str, path: str, body: dict | None =
     import urllib.error
     import urllib.request
 
-    url = (control_plane or os.environ.get("ALE_FLEET_URL", "")).rstrip("/")
+    url = (control_plane or os.environ.get("ORBIT_FLEET_URL", "")).rstrip("/")
     if not url:
-        typer.echo("name the control plane with --control-plane or ALE_FLEET_URL", err=True)
+        typer.echo("name the control plane with --control-plane or ORBIT_FLEET_URL", err=True)
         raise typer.Exit(2)
     request = urllib.request.Request(
         f"{url}{path}",
@@ -224,7 +224,7 @@ def status(
     as_json: Annotated[bool, typer.Option("--json", help="Print the status document.")] = False,
 ) -> None:
     """What the Fleet holds: Nodes, the queue, Runs and Sandboxes, as the page shows them."""
-    from ale.fleet.status import FleetStatus
+    from orbit.fleet.status import FleetStatus
 
     body = _call(control_plane, "GET", "/v1/status")
     if as_json:

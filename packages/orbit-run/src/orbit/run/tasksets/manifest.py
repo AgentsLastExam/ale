@@ -11,10 +11,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ale.core.episode import EpisodeContext
-from ale.core.errors import TaskDefinitionError
-from ale.core.ids import TaskId, content_hash, in_ale_form
-from ale.core.task import (
+from orbit.core.episode import EpisodeContext
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.ids import TaskId, content_hash, in_orbit_form
+from orbit.core.task import (
     CALIBRATION_DIR,
     SOLUTION_DIR,
     Stage,
@@ -23,7 +23,7 @@ from ale.core.task import (
     case_entry,
     case_path,
 )
-from ale.core.taskspec import (
+from orbit.core.taskspec import (
     HARBOR_ACCOUNT,
     SCHEMA_VERSION,
     SOLUTION_CASE,
@@ -39,9 +39,9 @@ from ale.core.taskspec import (
     VerifierTable,
     VerifySpec,
 )
-from ale.core.verdict import Rewards
-from ale.run.assets import asset_roots
-from ale.run.content import tree_digest
+from orbit.core.verdict import Rewards
+from orbit.run.assets import asset_roots
+from orbit.run.content import tree_digest
 
 __all__ = [
     "INSTRUCTION",
@@ -73,7 +73,7 @@ _OS_LABELS = {
     OperatingSystem.MACOS: "macOS",
 }
 #: Generated state, never Task source.
-_CACHE_DIR = ".ale-cache"
+_CACHE_DIR = ".orbit-cache"
 #: A Dockerfile stage's base and its alias.
 _FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.I | re.M)
 _USER = re.compile(r"^\s*USER\s+(\S+)", re.I | re.M)
@@ -363,8 +363,8 @@ def _folder_name(folder: TaskFolder) -> TaskId:
 
 
 def _warnings(config: TaskConfig, folder: TaskFolder, name: TaskId) -> tuple[str, ...]:
-    """Where the Task departs from ALE's form, each naming the file it is about: what it
-    leaves to a default ALE then chooses, and what can change under it."""
+    """Where the Task departs from Orbit's form, each naming the file it is about: what it
+    leaves to a default Orbit then chooses, and what can change under it."""
     found: list[str] = []
     version = config.schema_version
     if config.harbor:
@@ -372,18 +372,18 @@ def _warnings(config: TaskConfig, folder: TaskFolder, name: TaskId) -> tuple[str
             "no schema_version" if version is None else f'Harbor\'s schema_version "{version}"'
         )
         found.append(
-            f"{TASK_CONFIG}: {written}, so it is read as a Harbor Task in ALE's format "
+            f"{TASK_CONFIG}: {written}, so it is read as a Harbor Task in Orbit's format "
             f'"{SCHEMA_VERSION}"{_harbor_defaults(config)}'
         )
     if config.task.name is None:
         found.append(f"{TASK_CONFIG}: no [task].name, so this Task is {name}, after where it lives")
-    elif not in_ale_form(name):
+    elif not in_orbit_form(name):
         found.append(
-            f"{TASK_CONFIG}: [task].name {name} is Harbor's form; ALE's is a lowercase org/name "
+            f"{TASK_CONFIG}: [task].name {name} is Harbor's form; Orbit's is a lowercase org/name "
             "of letters, digits, '-' and '_'"
         )
     found.extend(
-        f"{path}: {image} can change under the Task; ALE uses the version it names when the "
+        f"{path}: {image} can change under the Task; Orbit uses the version it names when the "
         "image is prepared and records its digest; name an exact version"
         for path, image in _moving_images(config, folder)
     )
@@ -392,7 +392,7 @@ def _warnings(config: TaskConfig, folder: TaskFolder, name: TaskId) -> tuple[str
     if account is not None and defaulted and config.agent_user == HARBOR_ACCOUNT:
         found.append(
             f"{ENVIRONMENT_DIR}/Dockerfile: its image runs as USER {account}, which Harbor's "
-            f"agent runs as; ALE's runs as {HARBOR_ACCOUNT} unless [agent].user names {account}"
+            f"agent runs as; Orbit's runs as {HARBOR_ACCOUNT} unless [agent].user names {account}"
         )
     return tuple(found)
 

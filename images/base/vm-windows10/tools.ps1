@@ -13,7 +13,7 @@ if (-not $CheckOnly) {
         throw "Run tools.ps1 from an elevated PowerShell session as the agent user."
     }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $work = "$env:ProgramData\ALE\install\tools"
+    $work = "$env:ProgramData\Orbit\install\tools"
     New-Item -ItemType Directory -Path $work -Force | Out-Null
 
     if (-not (Test-Path $choco)) {

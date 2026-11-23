@@ -267,9 +267,9 @@ def _json_parts(path: str) -> list[str]:
 
 
 def _trajectory() -> dict[str, object]:
-    path = os.environ.get("ALE_TRAJECTORY_PATH")
+    path = os.environ.get("ORBIT_TRAJECTORY_PATH")
     if not path:
-        raise RuntimeError("ALE_TRAJECTORY_PATH is not configured")
+        raise RuntimeError("ORBIT_TRAJECTORY_PATH is not configured")
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
     if payload.get("schema_version") != "ATIF-v1.8" or not isinstance(payload.get("steps"), list):
@@ -287,7 +287,7 @@ def _trajectory_tools() -> set[object]:
 
 
 def _trajectory_evidence() -> tuple[EvidenceReference, ...]:
-    path = os.environ.get("ALE_TRAJECTORY_PATH")
+    path = os.environ.get("ORBIT_TRAJECTORY_PATH")
     return _evidence(path, kind="solver_trajectory") if path else ()
 
 

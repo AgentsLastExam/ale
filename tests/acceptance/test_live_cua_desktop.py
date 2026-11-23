@@ -24,7 +24,7 @@ pytestmark = [
 
 def test_real_claude_uses_cua_desktop_to_solve_screen_task(tmp_path) -> None:
     task = task_path(
-        "ALE_LIVE_CUA_TASK",
+        "ORBIT_LIVE_CUA_TASK",
         WORKSPACE_ROOT / "ale-tasks-152/tasks/demo/screen_code",
     )
     assert task.is_dir()
@@ -50,7 +50,7 @@ def test_real_claude_uses_cua_desktop_to_solve_screen_task(tmp_path) -> None:
 
     pairs = native_mcp_pairs(native)
     assert "result" in pairs[screenshot["call"]["tool_call_id"]]
-    normalized = screenshot["call"]["extra"]["ale"]["normalized_action"]
+    normalized = screenshot["call"]["extra"]["orbit"]["normalized_action"]
     assert normalized["type"] == "screenshot"
     init = next(event for event in native if event.get("subtype") == "init")
     assert {"name": "cua-desktop", "status": "connected"} in init["mcp_servers"]

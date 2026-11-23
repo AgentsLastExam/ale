@@ -7,14 +7,14 @@ import shlex
 from pathlib import PurePosixPath
 from typing import Any
 
-from ale.core.errors import AgentUnsupportedError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, agent_python, is_windows, npm_env
-from ale.run.harnesses._release import ReleaseAsset
-from ale.run.harnesses.base import (
+from orbit.core.errors import AgentUnsupportedError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, agent_python, is_windows, npm_env
+from orbit.run.harnesses._release import ReleaseAsset
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -22,7 +22,7 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import AntigravityCliSettings
@@ -162,7 +162,7 @@ class AntigravityCliHarness(CliHarness):
             python = agent_python(session.os)
             hook = {"type": "command", "command": f'{python} -I "{deny}"', "timeout": 10}
             hooks = {
-                "ale-provider-web-tools": {
+                "orbit-provider-web-tools": {
                     "PreToolUse": [{"matcher": "search_web", "hooks": [hook]}]
                 }
             }

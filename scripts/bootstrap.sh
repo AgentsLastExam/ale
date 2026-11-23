@@ -27,4 +27,4 @@ uv run pre-commit install --install-hooks >/dev/null 2>&1 || {
     echo ">> warning: pre-commit hook install failed (non-fatal)" >&2
 }
 
-echo ">> done. next: uv run ale --help   |   just doctor"
+echo ">> done. next: uv run orbit --help   |   just doctor"

@@ -7,18 +7,18 @@ from pathlib import Path, PurePosixPath
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, AgentUnsupportedError, ConfigError
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
-from ale.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
-from ale.run.harnesses.droid import DroidHarness
-from ale.run.recording import BlobStore
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, AgentUnsupportedError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
+from orbit.core.taskspec import StdioMcpServer, StreamableHttpMcpServer
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
+from orbit.run.harnesses.droid import DroidHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-STATE = "/home/agent/.droid-ale/.factory"
+STATE = "/home/agent/.droid-orbit/.factory"
 SESSION_ID = "0b7c5f1e-6f39-4f0a-9d47-6a0f0c8f3a11"
 
 
@@ -97,9 +97,9 @@ async def test_one_custom_model_is_the_gateway_and_holds_only_a_token_reference(
         "cloudSessionSync": False,
         "customModels": [
             {
-                "apiKey": "${ALE_GATEWAY_TOKEN}",
+                "apiKey": "${ORBIT_GATEWAY_TOKEN}",
                 "baseUrl": base_url,
-                "displayName": "ALE Gateway",
+                "displayName": "Orbit Gateway",
                 "maxOutputTokens": 64000,
                 "model": "test-model",
                 "noImageSupport": False,
@@ -169,7 +169,7 @@ async def test_command_selects_the_session_model_and_removes_account_tools(
 ) -> None:
     harness = DroidHarness(settings={"disabled_tools": ["WebSearch", "Task"]})
     command = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=native_session_id,
@@ -180,16 +180,16 @@ async def test_command_selects_the_session_model_and_removes_account_tools(
     assert argv[:2] == ["droid", "exec"]
     options = {flag: argv[argv.index(flag) + 1] for flag in argv if flag.startswith("--")}
     assert options["--output-format"] == "stream-json"
-    assert options["--model"] == "custom:ALE-Gateway-0"
+    assert options["--model"] == "custom:Orbit-Gateway-0"
     assert options["--remove-tools"] == "Task,WebSearch"
-    assert options["--file"] == "/home/agent/.ale-harness/prompt.md"
+    assert options["--file"] == "/home/agent/.orbit-harness/prompt.md"
     assert options["--cwd"] == "/home/agent"
     assert options["--session-id"] == command.session_id
     if native_session_id:
         assert command.session_id == native_session_id
     assert "--skip-permissions-unsafe" in argv
-    assert command.env["FACTORY_HOME_OVERRIDE"] == "/home/agent/.droid-ale"
-    assert command.env["ALE_GATEWAY_TOKEN"] == "token"
+    assert command.env["FACTORY_HOME_OVERRIDE"] == "/home/agent/.droid-orbit"
+    assert command.env["ORBIT_GATEWAY_TOKEN"] == "token"
     assert command.env["FACTORY_DROID_AUTO_UPDATE_ENABLED"] == "false"
 
 
@@ -232,7 +232,7 @@ async def test_failed_exec_keeps_the_native_reason() -> None:
 
 def test_session_files_are_exact_and_one_directory_below_sessions() -> None:
     harness = DroidHarness()
-    sessions = PurePosixPath(".droid-ale/.factory/sessions")
+    sessions = PurePosixPath(".droid-orbit/.factory/sessions")
     assert harness.is_session_file(sessions / "-home-user" / f"{SESSION_ID}.jsonl", SESSION_ID)
     assert not harness.is_session_file(sessions / f"{SESSION_ID}.jsonl", SESSION_ID)
     assert not harness.is_session_file(
@@ -257,7 +257,7 @@ def recorded_context(root: Path, **updates: object) -> TrajectoryParseContext:
 
 
 def write_session(root: Path, session_id: str, *events: dict[str, object]) -> None:
-    path = root / ".droid-ale/.factory/sessions/-home-agent" / f"{session_id}.jsonl"
+    path = root / ".droid-orbit/.factory/sessions/-home-agent" / f"{session_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(stream(*events))
 
@@ -331,7 +331,7 @@ def test_a_launch_and_its_resume_convert_in_native_order(tmp_path: Path) -> None
     trajectory = DroidHarness().parse_trajectory(recorded_context(tmp_path))
 
     assert trajectory.session_id == SESSION_ID
-    assert not (trajectory.extra or {}).get("ale")
+    assert not (trajectory.extra or {}).get("orbit")
     assert [(step.source, step.message) for step in trajectory.steps] == RESUMED_STEPS
     for turn, step in enumerate(trajectory.steps[1::3], 1):
         (call,) = step.tool_calls or ()
@@ -347,10 +347,10 @@ def test_without_the_session_each_turn_comes_from_its_stream(tmp_path: Path) -> 
     import shutil
 
     write_resumed_run(tmp_path)
-    shutil.rmtree(tmp_path / ".droid-ale")
+    shutil.rmtree(tmp_path / ".droid-orbit")
     trajectory = DroidHarness().parse_trajectory(recorded_context(tmp_path))
 
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "native_session_unavailable", "session_id": SESSION_ID}
     ]
     assert [(step.source, step.message) for step in trajectory.steps] == RESUMED_STEPS
@@ -391,11 +391,11 @@ def test_notices_and_failed_turns_become_system_steps_and_mcp_is_named(tmp_path:
     agent = trajectory.steps[1]
     assert agent.reasoning_content == "plan"
     (call,) = agent.tool_calls or ()
-    assert call.extra == {"ale": {"mcp": {"server": "task-proof", "tool": "derive"}}}
+    assert call.extra == {"orbit": {"mcp": {"server": "task-proof", "tool": "derive"}}}
     (result,) = agent.observation.results  # type: ignore[union-attr]
-    assert result.extra == {"ale": {"is_error": True}} and result.content == "boom"
+    assert result.extra == {"orbit": {"is_error": True}} and result.content == "boom"
     assert trajectory.steps[2].message == "Unable to reach the provider."
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unknown_native_event_types", "types": ["compaction_v9"]}
     ]
 
@@ -443,6 +443,6 @@ def test_a_failure_only_the_stream_reports_ends_its_turn(tmp_path: Path) -> None
         ("agent", "Working"),
         ("system", "terminated"),
     ]
-    (issue,) = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
+    (issue,) = trajectory.extra["orbit"]["parse_issues"]  # type: ignore[index]
     assert issue["reason"] == "unconverted_native_sessions"
-    assert issue["sources"] == [f".droid-ale/.factory/sessions/-home-agent/{other}.jsonl"]
+    assert issue["sources"] == [f".droid-orbit/.factory/sessions/-home-agent/{other}.jsonl"]

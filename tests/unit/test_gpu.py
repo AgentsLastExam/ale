@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.capability import accepts_model
-from ale.core.errors import ProviderCapabilityError
-from ale.run.gpu import GpuLease, normalize_nvidia_uuid, normalize_pci_bdf
+from orbit.core.capability import accepts_model
+from orbit.core.errors import ProviderCapabilityError
+from orbit.run.gpu import GpuLease, normalize_nvidia_uuid, normalize_pci_bdf
 
 pytestmark = pytest.mark.unit
 

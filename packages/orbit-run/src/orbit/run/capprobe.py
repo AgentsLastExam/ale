@@ -115,7 +115,7 @@ def user_namespace() -> str:
 
 
 def _mount_tmpfs() -> str:
-    target = b"/tmp/ale-capprobe"
+    target = b"/tmp/orbit-capprobe"
     os.makedirs(target, exist_ok=True)
     if _libc.mount(b"none", target, b"tmpfs", 0, None) != 0:
         return _failed(ctypes.get_errno())

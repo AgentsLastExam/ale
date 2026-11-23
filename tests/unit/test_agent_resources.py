@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import AgentResourceConflictError, AgentResourceError
-from ale.core.lock import TaskSource
-from ale.core.taskspec import (
+from orbit.core.errors import AgentResourceConflictError, AgentResourceError
+from orbit.core.lock import TaskSource
+from orbit.core.taskspec import (
     McpSource,
     NetworkMode,
     NetworkPolicy,
@@ -20,8 +20,8 @@ from ale.core.taskspec import (
     StreamableHttpMcpServer,
     ToolProvision,
 )
-from ale.run.agent_resources import resolve_agent_resources
-from ale.run.framework import MACOS_PYTHON
+from orbit.run.agent_resources import resolve_agent_resources
+from orbit.run.framework import MACOS_PYTHON
 
 pytestmark = pytest.mark.unit
 
@@ -384,8 +384,8 @@ def test_a_run_caps_cua_desktop_screenshots_through_its_environment() -> None:
         assert isinstance(server, StdioMcpServer)
         return server
 
-    assert "ALE_CUA_SCREENSHOT_MAX_DIMENSION" not in resolved(None).environment
-    assert resolved(768).environment["ALE_CUA_SCREENSHOT_MAX_DIMENSION"] == "768"
+    assert "ORBIT_CUA_SCREENSHOT_MAX_DIMENSION" not in resolved(None).environment
+    assert resolved(768).environment["ORBIT_CUA_SCREENSHOT_MAX_DIMENSION"] == "768"
     # Two layers that ask for different screenshots are two different servers.
     with pytest.raises(AgentResourceConflictError):
         resolved(768, 1024)

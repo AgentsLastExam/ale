@@ -68,7 +68,7 @@ FINAL_STATUSES = frozenset(
 )
 
 Rewards = dict[str, float]
-"""Named scores. ALE preserves the map and does not select an aggregate."""
+"""Named scores. Orbit preserves the map and does not select an aggregate."""
 
 
 class FailureInfo(BaseModel):

@@ -5,10 +5,10 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from ale.core.errors import TaskDefinitionError
-from ale.core.ids import in_ale_form
-from ale.core.taskspec import SCHEMA_VERSION
-from ale.run import ale_image
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.ids import in_orbit_form
+from orbit.core.taskspec import SCHEMA_VERSION
+from orbit.run import orbit_image
 
 __all__ = ["DEFAULT_ORGANIZATION", "scaffold_task"]
 
@@ -40,7 +40,7 @@ Write the word hello into /home/user/output/result.txt
 """
 
 DOCKERFILE = f"""\
-FROM {ale_image("container-ubuntu22-base")}
+FROM {orbit_image("container-ubuntu22-base")}
 
 RUN mkdir -p /home/user/output && chown -R user:user /home/user/output
 """
@@ -48,11 +48,11 @@ RUN mkdir -p /home/user/output && chown -R user:user /home/user/output
 TEST_SH = """\
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$ALE_VERIFY_PYTHON" verify.py
+exec "$ORBIT_VERIFY_PYTHON" verify.py
 """
 
 VERIFY_PY = """\
-from ale_verify import checks, write
+from orbit_verify import checks, write
 
 check = checks.text_equals("/home/user/output/result.txt", "hello\\n")
 write({"reward": check["score"], "content": check})
@@ -69,7 +69,7 @@ printf 'hello\\n' > /home/user/output/result.txt
 def scaffold_task(path: Path, *, force: bool = False) -> Path:
     target = path.resolve()
     name = f"{DEFAULT_ORGANIZATION}/{target.name}"
-    if not in_ale_form(name):
+    if not in_orbit_form(name):
         raise TaskDefinitionError(
             "Task folder name must be a lowercase slug of letters, digits, '-' and '_', or "
             f"task.toml must be written by hand: {target.name!r}"

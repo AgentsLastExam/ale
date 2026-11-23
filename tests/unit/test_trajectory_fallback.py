@@ -8,11 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.config import LoggingPolicy
-from ale.core.harness import AgentRun, AutonomousHarness, TrajectoryParseContext
-from ale.core.trajectory import AtifTrajectory
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.recording import EpisodeRecording
+from orbit.core.config import LoggingPolicy
+from orbit.core.harness import AgentRun, AutonomousHarness, TrajectoryParseContext
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
 
@@ -62,10 +62,10 @@ def test_conversion_failure_keeps_a_minimal_trajectory_and_the_native_logs(
         "Write the report.",
         "Report written.",
     ]
-    ale = trajectory["extra"]["ale"]
-    assert ale["incomplete"] is True
-    assert ale["incomplete_reason"] == "conversion_failed"
-    (issue,) = ale["parse_issues"]
+    orbit = trajectory["extra"]["orbit"]
+    assert orbit["incomplete"] is True
+    assert orbit["incomplete_reason"] == "conversion_failed"
+    (issue,) = orbit["parse_issues"]
     assert issue["reason"] == "conversion_failed"
     assert issue["detail"].startswith("KeyError:")
     assert "secret-episode-token" not in issue["detail"]

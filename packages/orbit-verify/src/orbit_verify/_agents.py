@@ -61,7 +61,7 @@ def run(
             f"{config['api_key_env']} is not set for the Agent Judge",
         )
 
-    workspace = Path(os.environ.get("ALE_HOME", ""))
+    workspace = Path(os.environ.get("ORBIT_HOME", ""))
     if not workspace.is_absolute() or not workspace.is_dir():
         _preflight_failure(
             invocation_id,
@@ -70,9 +70,9 @@ def run(
             endpoint,
             prompt_hash,
             schema_hash,
-            "ALE_HOME must identify the completed solver workspace",
+            "ORBIT_HOME must identify the completed solver workspace",
         )
-    stage = Path(os.environ.get("ALE_STAGE_DIR", "/opt/ale/tests"))
+    stage = Path(os.environ.get("ORBIT_STAGE_DIR", "/opt/orbit/tests"))
     home = stage / "agent" / invocation_id
     shutil.rmtree(home, ignore_errors=True)
     home.mkdir(parents=True, mode=0o700)
@@ -92,7 +92,7 @@ def run(
         )
     environment = _environment(adapter, home, config, secret)
     if not any(reference.kind == "solver_trajectory" for _, reference in evidence):
-        environment.pop("ALE_TRAJECTORY_PATH", None)
+        environment.pop("ORBIT_TRAJECTORY_PATH", None)
     attempts: list[JudgeAttempt] = []
     session_id: str | None = None
     repair_error = ""
@@ -374,17 +374,17 @@ def _command(
             "-c",
             f'model_reasoning_effort="{config["reasoning_effort"]}"',
             "-c",
-            'model_provider="ale_verify"',
+            'model_provider="orbit_verify"',
             "-c",
-            'model_providers.ale_verify.name="ALE Verify"',
+            'model_providers.orbit_verify.name="Orbit Verify"',
             "-c",
-            f'model_providers.ale_verify.base_url="{_responses_base_url(config["base_url"])}"',
+            f'model_providers.orbit_verify.base_url="{_responses_base_url(config["base_url"])}"',
             "-c",
-            'model_providers.ale_verify.env_key="OPENAI_API_KEY"',
+            'model_providers.orbit_verify.env_key="OPENAI_API_KEY"',
             "-c",
-            'model_providers.ale_verify.wire_api="responses"',
+            'model_providers.orbit_verify.wire_api="responses"',
             "-c",
-            "model_providers.ale_verify.supports_websockets=false",
+            "model_providers.orbit_verify.supports_websockets=false",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
         ]
@@ -462,21 +462,21 @@ def _prompt(
     output_schema: dict[str, Any] | None,
     evidence: Sequence[tuple[str | bytes, EvidenceReference]],
 ) -> str:
-    instruction_path = os.environ.get("ALE_TASK_INSTRUCTION_PATH")
+    instruction_path = os.environ.get("ORBIT_TASK_INSTRUCTION_PATH")
     instruction = ""
     if instruction_path:
         instruction, _ = read_text_evidence(instruction_path)
     resources = {
         key: os.environ.get(key)
         for key in (
-            "ALE_HOME",
-            "ALE_TASK_INSTRUCTION_PATH",
-            "ALE_TRAJECTORY_PATH",
+            "ORBIT_HOME",
+            "ORBIT_TASK_INSTRUCTION_PATH",
+            "ORBIT_TRAJECTORY_PATH",
         )
         if os.environ.get(key)
     }
     if not any(reference.kind == "solver_trajectory" for _, reference in evidence):
-        resources.pop("ALE_TRAJECTORY_PATH", None)
+        resources.pop("ORBIT_TRAJECTORY_PATH", None)
     evidence_lines = "\n".join(
         f"- {reference.kind}: {reference.location or 'inline'} ({reference.sha256})"
         + (f"\n{content}" if reference.location is None else "")

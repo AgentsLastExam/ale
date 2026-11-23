@@ -10,17 +10,17 @@ from typing import Any
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, AgentUnsupportedError, ConfigError
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
-from ale.core.taskspec import OperatingSystem, StreamableHttpMcpServer
-from ale.core.testkit import AutonomousHarnessConformance
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.framework import MACOS_PYTHON
-from ale.run.harnesses._release import release_identity
-from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
-from ale.run.harnesses.antigravity_cli import adapter as agy
-from ale.run.recording import BlobStore
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, AgentUnsupportedError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
+from orbit.core.taskspec import OperatingSystem, StreamableHttpMcpServer
+from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.framework import MACOS_PYTHON
+from orbit.run.harnesses._release import release_identity
+from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
+from orbit.run.harnesses.antigravity_cli import adapter as agy
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
@@ -126,7 +126,7 @@ async def test_a_hook_denies_search_web_unless_the_task_network_is_open(
     )
     config = home + "/.gemini/config"
     assert json.loads(sandbox.files[config + "/hooks.json"]) == {
-        "ale-provider-web-tools": {
+        "orbit-provider-web-tools": {
             "PreToolUse": [
                 {
                     "matcher": "search_web",
@@ -200,7 +200,7 @@ async def test_models_and_efforts_outside_the_native_catalog_fail_before_launch(
 async def test_command_feeds_the_prompt_file_on_stdin_and_points_at_the_gateway(
     native_session_id: str | None,
 ) -> None:
-    prompt = "/home/agent/.ale-harness/prompt.md"
+    prompt = "/home/agent/.orbit-harness/prompt.md"
     command = await AntigravityCliHarness().prepare_command(
         prompt,
         FakeSandbox(),  # type: ignore[arg-type]
@@ -210,8 +210,8 @@ async def test_command_feeds_the_prompt_file_on_stdin_and_points_at_the_gateway(
 
     wrapper, launch = command.script.split(" && ")
     assert wrapper.startswith("unset GOOGLE_API_KEY AGY_ADC_AUTH ")
-    assert wrapper.endswith(f"{prompt} /home/agent/.ale-harness/request.jsonl")
-    assert launch.endswith("< /home/agent/.ale-harness/request.jsonl")
+    assert wrapper.endswith(f"{prompt} /home/agent/.orbit-harness/request.jsonl")
+    assert launch.endswith("< /home/agent/.orbit-harness/request.jsonl")
     argv = launch.split(" < ")[0].split()
     assert argv[0] == "/home/agent/.local/bin/agy"
     assert argv[1:9] == [
@@ -236,7 +236,7 @@ async def test_command_feeds_the_prompt_file_on_stdin_and_points_at_the_gateway(
 
 async def test_default_effort_leaves_the_native_choice() -> None:
     command = await AntigravityCliHarness(settings={"effort": "default"}).prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(model=MODEL),
         native_session_id=None,
@@ -247,7 +247,7 @@ async def test_default_effort_leaves_the_native_choice() -> None:
 async def test_windows_command_runs_the_exe_with_the_os_python() -> None:
     sandbox = FakeSandbox(stdout=r"C:\Windows\System32")
     command = await AntigravityCliHarness().prepare_command(
-        "C:/Users/agent/.ale-harness/prompt.md",
+        "C:/Users/agent/.orbit-harness/prompt.md",
         sandbox,  # type: ignore[arg-type]
         session(model=MODEL, home="C:/Users/agent", os=OperatingSystem.WINDOWS),
         native_session_id=None,
@@ -259,7 +259,7 @@ async def test_windows_command_runs_the_exe_with_the_os_python() -> None:
 
 async def test_macos_command_wraps_the_prompt_with_the_framework_python() -> None:
     command = await AntigravityCliHarness().prepare_command(
-        "/Users/agent/.ale-harness/prompt.md",
+        "/Users/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(model=MODEL, home="/Users/agent", os=OperatingSystem.MACOS),
         native_session_id=None,
@@ -355,8 +355,8 @@ def _logs(
     for prompt, events in turns:
         recorded.append({"prompt": prompt, "stdout_offset": len(stdout.encode())})
         stdout += _jsonl(events)
-    _write(logs / ".ale-harness/invocations.jsonl", _jsonl(recorded))
-    _write(logs / ".ale-harness/stdout.log", stdout)
+    _write(logs / ".orbit-harness/invocations.jsonl", _jsonl(recorded))
+    _write(logs / ".orbit-harness/stdout.log", stdout)
     for conversation, records in (conversations or {}).items():
         _write(_generated(logs, conversation) / "logs/transcript_full.jsonl", _jsonl(records))
     return TrajectoryParseContext(
@@ -519,12 +519,12 @@ def test_parser_follows_the_native_session_through_tools_mcp_images_and_resume(
     assert (tools.metrics.prompt_tokens, tools.metrics.cached_tokens) == (10, 4)
     shell, missing = tools.observation.results  # type: ignore[union-attr]
     assert (shell.content, shell.extra) == ("Exit code 2.", None)
-    assert missing.extra == {"ale": {"is_error": True, "error": "no such file"}}
+    assert missing.extra == {"orbit": {"is_error": True, "error": "no such file"}}
 
     echo, screenshot = steps[2].tool_calls or ()
     assert (echo.function_name, echo.arguments) == ("mcp__probe__echo", {"text": "hi"})
     assert echo.extra == {
-        "ale": {"mcp": {"server": "probe", "tool": "echo"}, "native_tool": "call_mcp_tool"}
+        "orbit": {"mcp": {"server": "probe", "tool": "echo"}, "native_tool": "call_mcp_tool"}
     }
     results = {result.source_call_id: result for result in steps[2].observation.results}  # type: ignore[union-attr]
     assert results[echo.tool_call_id].content == "echo:hi"
@@ -616,7 +616,7 @@ def test_parser_embeds_a_subagent_where_it_was_spawned(tmp_path: Path) -> None:
 
 def _subagent_issues(context: TrajectoryParseContext) -> tuple[list[str], list[dict]]:
     trajectory = AntigravityCliHarness().parse_trajectory(context)
-    issues = trajectory.extra["ale"]["parse_issues"]  # type: ignore[index]
+    issues = trajectory.extra["orbit"]["parse_issues"]  # type: ignore[index]
     assert trajectory.subagent_trajectories is None
     assert not any(
         result.subagent_trajectory_ref
@@ -639,7 +639,7 @@ def test_without_the_root_transcript_every_conversation_is_unconverted(tmp_path:
     context = _spawning(tmp_path)
     (_generated(context.logs_dir, ROOT) / "logs/transcript_full.jsonl").unlink()
 
-    issues = AntigravityCliHarness().parse_trajectory(context).extra["ale"]["parse_issues"]  # type: ignore[index]
+    issues = AntigravityCliHarness().parse_trajectory(context).extra["orbit"]["parse_issues"]  # type: ignore[index]
     (unconverted,) = [issue for issue in issues if issue["reason"] == "unconverted_native_sessions"]
     assert unconverted["sources"] == [CHILD_TRANSCRIPT]
 
@@ -695,7 +695,7 @@ def test_a_step_output_its_record_lacks_is_kept_on_the_result(tmp_path: Path) ->
 
     timer = trajectory.steps[1].observation.results[0]  # type: ignore[union-attr]
     assert timer.content == "Timer running in the background."
-    assert timer.extra == {"ale": {"final_output": "Wait cancelled.\n"}}
+    assert timer.extra == {"orbit": {"final_output": "Wait cancelled.\n"}}
     assert trajectory.extra is None
 
 
@@ -743,12 +743,12 @@ def test_without_the_native_session_each_turn_comes_from_stdout(tmp_path: Path) 
         ("user", "Second."),
         ("agent", "Two."),
     ]
-    assert trajectory.extra["ale"]["parse_issues"][0]["reason"] == "native_session_unavailable"  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"][0]["reason"] == "native_session_unavailable"  # type: ignore[index]
 
 
 def test_a_result_the_stdout_attributes_to_another_tool_is_an_issue(tmp_path: Path) -> None:
     context = _session(tmp_path, _tool_event(2, "x"), _tool_event(3, "define_subagent"))
-    issues = AntigravityCliHarness().parse_trajectory(context).extra["ale"]["parse_issues"]  # type: ignore[index]
+    issues = AntigravityCliHarness().parse_trajectory(context).extra["orbit"]["parse_issues"]  # type: ignore[index]
 
     assert issues == [
         {"reason": "tool_result_mismatch", "step_index": 2, "expected": "schedule", "observed": "x"}

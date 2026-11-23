@@ -8,9 +8,9 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ale.core.harness import NativeContinuation
-from ale.core.sandbox import ResourceAllocation
-from ale.core.verdict import Status
+from orbit.core.harness import NativeContinuation
+from orbit.core.sandbox import ResourceAllocation
+from orbit.core.verdict import Status
 
 __all__ = [
     "EpisodeProgress",

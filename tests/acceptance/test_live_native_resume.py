@@ -5,18 +5,18 @@ import secrets
 
 import pytest
 
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
-from ale.core.trace import read_jsonl
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession
-from ale.run.harnesses.base import STDOUT_PATH
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.protocol.log_mirror import LogMirror
-from ale.run.providers.docker import DockerProvider
-from ale.run.recording import EpisodeRecording
-from ale.run.secrets import provider_credentials
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import SandboxRequest
+from orbit.core.taskspec import NetworkPolicy, Resources
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.harnesses.base import STDOUT_PATH
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.protocol.log_mirror import LogMirror
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.recording import EpisodeRecording
+from orbit.run.secrets import provider_credentials
 from tests.support import CONTAINER_BASE, prepare_reference
 
 from .trajectory import LIVE, MODELS, native_session_file

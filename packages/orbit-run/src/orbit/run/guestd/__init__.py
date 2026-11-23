@@ -1,4 +1,4 @@
-"""ale-guestd: the in-sandbox execution service.
+"""orbit-guestd: the in-sandbox execution service.
 
 Images carry no copy of their own: the engine installs these files into every sandbox it
 creates or VM disk it prepares, so the guest always runs this checkout's code. It is
@@ -29,7 +29,7 @@ HOST_ADDRESS = "172.30.0.1"
 #: On macOS every account may, because the agent's desktop tool and Harness helpers run on
 #: it there.
 PYTHON = {
-    "linux": "/opt/ale/python/bin/python3",
-    "windows": r"C:\ProgramData\ALE\python\python.exe",
-    "macos": "/opt/ale/python/bin/python3",
+    "linux": "/opt/orbit/python/bin/python3",
+    "windows": r"C:\ProgramData\Orbit\python\python.exe",
+    "macos": "/opt/orbit/python/bin/python3",
 }

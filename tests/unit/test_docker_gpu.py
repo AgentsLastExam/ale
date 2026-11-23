@@ -20,15 +20,15 @@ from types import SimpleNamespace
 import pytest
 from tests.support import TraceSink
 
-import ale.run.providers.docker.provider as docker_provider
-from ale.core.capability import GpuHold
-from ale.core.errors import (
+import orbit.run.providers.docker.provider as docker_provider
+from orbit.core.capability import GpuHold
+from orbit.core.errors import (
     GuestUnreachableError,
     ProviderCapabilityError,
     ProviderCapacityError,
     ProviderStartError,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     GpuAllocation,
     GpuDevice,
     PreparedTaskImage,
@@ -37,10 +37,10 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxState,
 )
-from ale.core.taskspec import NetworkMode, NetworkPolicy, Resources
-from ale.run.providers.docker import gpu_sharing, subnets
-from ale.run.providers.docker.gpu_sharing import GpuProcess, Holder, Overrun
-from ale.run.providers.docker.provider import (
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from orbit.run.providers.docker import gpu_sharing, subnets
+from orbit.run.providers.docker.gpu_sharing import GpuProcess, Holder, Overrun
+from orbit.run.providers.docker.provider import (
     DockerProvider,
     DockerSandbox,
     _eligible_gpus,
@@ -51,7 +51,7 @@ from ale.run.providers.docker.provider import (
     _Session,
     _verify_docker_gpu,
 )
-from ale.run.recording import execution_logging
+from orbit.run.recording import execution_logging
 
 pytestmark = pytest.mark.unit
 
@@ -133,32 +133,32 @@ def test_container_must_observe_exact_selected_uuids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_what_ale_holds_is_read_from_its_running_containers_labels(
+async def test_what_orbit_holds_is_read_from_its_running_containers_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every Sandbox carries both labels, empty when unused; ALE's helpers, such as a QEMU
+    """Every Sandbox carries both labels, empty when unused; Orbit's helpers, such as a QEMU
     runner, carry neither and hold nothing. A daemon that cannot list them admits nothing."""
     answer = (
         0,
-        f"{'a' * 64} ale-whole {UUID},{OTHER}/\n"
-        f"{'b' * 64} ale-shared {UUID}/8192\n"
-        f"{'d' * 64} ale-cpu-only /\n"
-        f"{'c' * 64} ale-qemu-runner /\n\n",
+        f"{'a' * 64} orbit-whole {UUID},{OTHER}/\n"
+        f"{'b' * 64} orbit-shared {UUID}/8192\n"
+        f"{'d' * 64} orbit-cpu-only /\n"
+        f"{'c' * 64} orbit-qemu-runner /\n\n",
         "",
     )
 
     async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
-        assert "label=ale.managed=true" in args and "--no-trunc" in args
+        assert "label=orbit.managed=true" in args and "--no-trunc" in args
         assert "-a" not in args  # a stopped container holds nothing
         return answer
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     assert await _gpu_holders() == [
-        Holder("a" * 64, "ale-whole", (UUID, OTHER), None),
-        Holder("b" * 64, "ale-shared", (UUID,), 8192),
+        Holder("a" * 64, "orbit-whole", (UUID, OTHER), None),
+        Holder("b" * 64, "orbit-shared", (UUID,), 8192),
     ]
     answer = (1, "", "Cannot connect to the Docker daemon")
-    with pytest.raises(ProviderStartError, match="could not list ALE's Sandboxes: Cannot"):
+    with pytest.raises(ProviderStartError, match="could not list Orbit's Sandboxes: Cannot"):
         await _gpu_holders()
 
 
@@ -177,15 +177,15 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
             json.dumps(
                 [
                     {
-                        "Name": "/ale-episode-solver",
+                        "Name": "/orbit-episode-solver",
                         "Image": "sha256:image",
                         "Config": {
                             "Labels": {
-                                "ale.managed": "true",
-                                "ale.retention": "keep",
-                                "ale.episode": "episode",
-                                "ale.role": "solver",
-                                "ale.gpus": UUID,
+                                "orbit.managed": "true",
+                                "orbit.retention": "keep",
+                                "orbit.episode": "episode",
+                                "orbit.role": "solver",
+                                "orbit.gpus": UUID,
                             }
                         },
                         "State": {"Running": False},
@@ -195,17 +195,17 @@ async def test_retained_listing_includes_stale_state_and_cleanup_command(
             "",
         )
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     assert await DockerProvider().list_retained() == [
         {
             "provider": "docker",
-            "handle": "docker:ale-episode-solver",
+            "handle": "docker:orbit-episode-solver",
             "episode": "episode",
             "role": "solver",
             "image": "sha256:image",
             "gpus": (UUID,),
             "running": False,
-            "cleanup_command": "ale sandbox destroy docker:ale-episode-solver",
+            "cleanup_command": "orbit sandbox destroy docker:orbit-episode-solver",
         }
     ]
 
@@ -215,9 +215,9 @@ async def test_a_sandbox_another_run_destroys_mid_listing_is_left_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kept = {
-        "Name": "/ale-kept",
+        "Name": "/orbit-kept",
         "Image": "sha256:image",
-        "Config": {"Labels": {"ale.managed": "true", "ale.retention": "keep"}},
+        "Config": {"Labels": {"orbit.managed": "true", "orbit.retention": "keep"}},
         "State": {"Running": True},
     }
 
@@ -227,13 +227,13 @@ async def test_a_sandbox_another_run_destroys_mid_listing_is_left_out(
         if args[0] == "images":
             return 0, "removed\n", ""
         if args[:2] == ("image", "inspect"):
-            return 1, "[]", "error: no such image: ale-snapshot:removed"
+            return 1, "[]", "error: no such image: orbit-snapshot:removed"
         assert args == ("inspect", "kept", "gone")
         return 1, json.dumps([kept]), "error: no such object: gone"
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     listed = await DockerProvider().list_retained()
-    assert [record["handle"] for record in listed] == ["docker:ale-kept"]
+    assert [record["handle"] for record in listed] == ["docker:orbit-kept"]
 
 
 @pytest.mark.asyncio
@@ -247,36 +247,36 @@ async def test_an_inspection_that_fails_otherwise_still_fails_the_listing(
             return 0, "", ""
         return 1, "", "Cannot connect to the Docker daemon"
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    with pytest.raises(ProviderStartError, match="could not inspect ALE sandboxes"):
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
+    with pytest.raises(ProviderStartError, match="could not inspect Orbit sandboxes"):
         await DockerProvider().list_retained()
 
 
 @pytest.mark.asyncio
-async def test_discard_destroys_any_ale_container_and_only_those(
+async def test_discard_destroys_any_orbit_container_and_only_those(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A container a crashed node agent created with retention destroy, by its handle."""
-    labels = {"ale.managed": "true", "ale.retention": "destroy", "ale.role": "verifier"}
-    record = {"Config": {"Labels": labels}, "NetworkSettings": {"Networks": {"ale-net-x": {}}}}
+    labels = {"orbit.managed": "true", "orbit.retention": "destroy", "orbit.role": "verifier"}
+    record = {"Config": {"Labels": labels}, "NetworkSettings": {"Networks": {"orbit-net-x": {}}}}
     calls: list[tuple[str, ...]] = []
 
     async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
         calls.append(args)
         if args[0] == "inspect":
-            if ("rm", "-f", "-v", "ale-e1") in calls:
+            if ("rm", "-f", "-v", "orbit-e1") in calls:
                 return 1, "", "No such object"
             return 0, json.dumps([record]), ""
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    await DockerProvider().discard("docker:ale-e1")
-    assert ("rm", "-f", "-v", "ale-e1") in calls and ("network", "rm", "ale-net-x") in calls
-    await DockerProvider().discard("docker:ale-e1")  # gone already
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
+    await DockerProvider().discard("docker:orbit-e1")
+    assert ("rm", "-f", "-v", "orbit-e1") in calls and ("network", "rm", "orbit-net-x") in calls
+    await DockerProvider().discard("docker:orbit-e1")  # gone already
     calls.clear()
-    labels["ale.managed"] = "false"
-    with pytest.raises(ProviderCapabilityError, match="not an ALE Docker sandbox"):
-        await DockerProvider().discard("docker:ale-e1")
+    labels["orbit.managed"] = "false"
+    with pytest.raises(ProviderCapabilityError, match="not an Orbit Docker sandbox"):
+        await DockerProvider().discard("docker:orbit-e1")
 
 
 @pytest.mark.asyncio
@@ -289,19 +289,19 @@ async def test_discard_fails_when_docker_cannot_say_the_container_is_gone(
         calls.append(args)
         return 1, "", "Cannot connect to the Docker daemon"
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     with pytest.raises(ProviderStartError, match="Cannot connect to the Docker daemon"):
-        await DockerProvider().discard("docker:ale-e1")
-    assert calls == [("inspect", "ale-e1")]
+        await DockerProvider().discard("docker:orbit-e1")
+    assert calls == [("inspect", "orbit-e1")]
 
 
 @pytest.mark.asyncio
-async def test_destroy_rejects_non_ale_container(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_destroy_rejects_non_orbit_container(monkeypatch: pytest.MonkeyPatch) -> None:
     async def docker(*args: str, **kwargs: object) -> tuple[int, str, str]:
         return 0, json.dumps([{"Config": {"Labels": {}}}]), ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
-    with pytest.raises(ProviderCapabilityError, match="not an ALE-retained"):
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
+    with pytest.raises(ProviderCapabilityError, match="not an Orbit-retained"):
         await DockerProvider().destroy_retained("docker:someone-elses-container")
 
 
@@ -336,25 +336,25 @@ def _admit(
     return [device.id for device in admitted]
 
 
-def test_a_sandbox_that_takes_its_gpus_whole_takes_none_an_ale_sandbox_holds() -> None:
-    holders = [Holder(A, "ale-shared", (G0,), 20000), Holder(B, "ale-whole", (G2,), None)]
+def test_a_sandbox_that_takes_its_gpus_whole_takes_none_an_orbit_sandbox_holds() -> None:
+    holders = [Holder(A, "orbit-shared", (G0,), 20000), Holder(B, "orbit-whole", (G2,), None)]
     assert _admit(holders, []) == [G1]
     with pytest.raises(ProviderCapacityError) as refused:
         _admit(holders, [], count=2)
     assert str(refused.value) == (
-        "the Sandbox needs 2 GPUs no ALE Sandbox holds; of the GPUs it may take here: "
-        f"GPU 0 ({G0}): ale-shared share it; GPU 1 ({G1}): eligible with 30000 MiB of "
-        f"headroom; GPU 2 ({G2}): ale-whole holds it whole"
+        "the Sandbox needs 2 GPUs no Orbit Sandbox holds; of the GPUs it may take here: "
+        f"GPU 0 ({G0}): orbit-shared share it; GPU 1 ({G1}): eligible with 30000 MiB of "
+        f"headroom; GPU 2 ({G2}): orbit-whole holds it whole"
     )
 
 
-def test_a_shared_sandbox_needs_headroom_beyond_what_ale_reserved_and_a_margin() -> None:
-    """Headroom is the memory free less what ALE's Sandboxes reserved and do not use yet:
+def test_a_shared_sandbox_needs_headroom_beyond_what_orbit_reserved_and_a_margin() -> None:
+    """Headroom is the memory free less what Orbit's Sandboxes reserved and do not use yet:
     what they use is already not free, so it counts once."""
     holders = [
-        Holder(A, "ale-a", (G0,), 20000),  # uses 8000 on G0: 12000 still to come
-        Holder(B, "ale-b", (G0, G1), 4000),  # uses 6000 on G0, more than it reserved
-        Holder(C, "ale-c", (G2,), None),
+        Holder(A, "orbit-a", (G0,), 20000),  # uses 8000 on G0: 12000 still to come
+        Holder(B, "orbit-b", (G0, G1), 4000),  # uses 6000 on G0, more than it reserved
+        Holder(C, "orbit-c", (G2,), None),
     ]
     used = [_process(A, G0, 5000), _process(A, G0, 3000, pid=4243), _process(B, G0, 6000)]
     # 52665 - 12000 = 40665 on G0; 30000 - 4000 on G1; G2 is held whole.
@@ -363,24 +363,24 @@ def test_a_shared_sandbox_needs_headroom_beyond_what_ale_reserved_and_a_margin()
         _admit(holders, used, memory_mb=36570)
     assert str(refused.value) == (
         "the Sandbox needs 36570 MiB on each of 1 GPU, and a margin of 4096 MiB; of the GPUs "
-        f"it may take here: GPU 0 ({G0}): 52665 MiB free, 12000 MiB of it reserved by ALE "
+        f"it may take here: GPU 0 ({G0}): 52665 MiB free, 12000 MiB of it reserved by Orbit "
         "Sandboxes that do not use it yet, so 40665 MiB of headroom; "
-        f"GPU 1 ({G1}): 30000 MiB free, 4000 MiB of it reserved by ALE Sandboxes that do not "
-        f"use it yet, so 26000 MiB of headroom; GPU 2 ({G2}): ale-c holds it whole"
+        f"GPU 1 ({G1}): 30000 MiB free, 4000 MiB of it reserved by Orbit Sandboxes that do not "
+        f"use it yet, so 26000 MiB of headroom; GPU 2 ({G2}): orbit-c holds it whole"
     )
     # The margin is the operator's.
     assert _admit(holders, used, memory_mb=40665, margin_mb=0) == [G0]
-    # With nothing in use yet, all of what ALE's Sandboxes reserved is still to come.
+    # With nothing in use yet, all of what Orbit's Sandboxes reserved is still to come.
     assert _admit(holders, [], memory_mb=24569) == [G0]
     with pytest.raises(ProviderCapacityError, match="24000 MiB of it reserved"):
         _admit(holders, [], memory_mb=24570)
 
 
 def test_a_shared_sandbox_goes_where_the_most_headroom_is_and_shares_with_its_kind() -> None:
-    shared = [Holder(A, "ale-a", (G2,), 30000)]
+    shared = [Holder(A, "orbit-a", (G2,), 30000)]
     # G2 has 40000 left, G0 52665, G1 30000.
     assert _admit(shared, [], memory_mb=1000, count=3) == [G0, G2, G1]
-    # A GPU an ALE Sandbox shares takes no Sandbox that wants it whole.
+    # A GPU an Orbit Sandbox shares takes no Sandbox that wants it whole.
     assert _admit(shared, [], count=2) == [G0, G1]
 
 
@@ -467,9 +467,9 @@ def test_a_sandbox_past_its_share_is_an_overrun_and_one_at_it_is_not(
 def _watched_sandbox(
     hold: GpuHold, watchdog: gpu_sharing.Watchdog | None = None
 ) -> tuple[DockerSandbox, tuple[_Session, _Session]]:
-    sessions = (_Session([], "ale-e1", 1024), _Session([], "ale-e1", 1024))
+    sessions = (_Session([], "orbit-e1", 1024), _Session([], "orbit-e1", 1024))
     sandbox = DockerSandbox.__new__(DockerSandbox)
-    sandbox.container = "ale-e1"
+    sandbox.container = "orbit-e1"
     sandbox.container_id = A
     sandbox._sessions = sessions
     sandbox._watcher = None
@@ -504,7 +504,7 @@ def _docker_calls(monkeypatch: pytest.MonkeyPatch, code: int = 0) -> list[tuple[
         calls.append(argv)
         return code, "", "process 77 is no longer the one that used the GPU" if code else ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     return calls
 
 
@@ -548,7 +548,7 @@ async def test_under_runc_the_watchdog_kills_the_largest_process_and_the_episode
             sandbox._context = contextvars.copy_context()
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", docker)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     await sandbox.overran(OVERRUN)
     assert rechecked == [4242]
     assert calls == [KILL]
@@ -556,7 +556,7 @@ async def test_under_runc_the_watchdog_kills_the_largest_process_and_the_episode
     (logged,) = sink.events
     assert (logged.level, logged.phase) == ("warning", "agent")
     assert logged.message == (
-        "ALE's GPU memory watchdog killed process 77 (python3), which held 8400 MiB: the "
+        "Orbit's GPU memory watchdog killed process 77 (python3), which held 8400 MiB: the "
         f"Sandbox used 9000 MiB of GPU {G0}, more than its gpu_memory_mb of 8192 MiB, which "
         "docker:runc does not enforce"
     )
@@ -603,18 +603,18 @@ async def test_a_failed_kill_is_reported_unless_the_episode_removed_the_sandbox_
 async def test_under_gvisor_the_watchdog_stops_the_whole_sandbox_and_its_episode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """nvproxy should have refused the memory, so its accounting failed, which is ALE's
+    """nvproxy should have refused the memory, so its accounting failed, which is Orbit's
     failure: the Sandbox stops, and the end of its sessions says why."""
     calls = _docker_calls(monkeypatch)
     watchdog = gpu_sharing.Watchdog()
     sandbox, sessions = _watched_sandbox(GpuHold.LIMIT, watchdog)
     watchdog._watched[A] = gpu_sharing.Watched(A, 8192, sandbox.overran)
     await sandbox.overran(Overrun(G0, 9000, (_process(A, G0, 9000),)))
-    assert calls == [("kill", "ale-e1")]
+    assert calls == [("kill", "orbit-e1")]
     assert A not in watchdog._watched
     ended = await sessions[0].explain(GuestUnreachableError("guest session closed"))
     assert str(ended) == (
-        "the sandbox itself died: ALE's GPU memory watchdog stopped it: the Sandbox used 9000 "
+        "the sandbox itself died: Orbit's GPU memory watchdog stopped it: the Sandbox used 9000 "
         f"MiB of GPU {G0}, more than its gpu_memory_mb of 8192 MiB, past docker:gvisor's limit"
     )
 
@@ -765,7 +765,7 @@ def _request(resources: Resources, episode: str = "e1") -> SandboxRequest:
 
 class Daemon:
     """A Docker daemon on a Host with ``HOST``'s GPUs, as ``create`` sees it: it lists the
-    ALE containers running, ``holders`` and those it started, by their labels, and starts a
+    Orbit containers running, ``holders`` and those it started, by their labels, and starts a
     Sandbox after ``starting`` returns, or, unless ``starts``, refuses it once the flags were
     read."""
 
@@ -811,15 +811,15 @@ class Daemon:
         async def bridge_mac(_network: str, _host_ip: str) -> str:
             return "02:42:aa:bb:cc:01"
 
-        monkeypatch.setattr("ale.run.providers.docker.provider._docker", self.docker)
+        monkeypatch.setattr("orbit.run.providers.docker.provider._docker", self.docker)
         monkeypatch.setattr(
-            "ale.run.providers.docker.provider.resolve_prepared_container_image", resolved
+            "orbit.run.providers.docker.provider.resolve_prepared_container_image", resolved
         )
         monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
         monkeypatch.setattr(DockerProvider, "check_image", no_problems)
         monkeypatch.setattr(DockerProvider, "_framed", framed)
         monkeypatch.setattr(gpu_sharing, "read_processes", read_processes)
-        monkeypatch.setattr("ale.run.providers.docker.provider._bridge_mac", bridge_mac)
+        monkeypatch.setattr("orbit.run.providers.docker.provider._bridge_mac", bridge_mac)
 
     async def docker(self, *argv: str, **_: object) -> tuple[int, str, str]:
         self.calls.append(argv)
@@ -842,7 +842,9 @@ class Daemon:
             name = argv[argv.index("--name") + 1]
             self.runtimes[name] = argv[argv.index("--runtime") + 1]
             container = hashlib.sha256(name.encode()).hexdigest()
-            self.holders += f"{container} {name} {label['ale.gpus']}/{label['ale.gpu_memory_mb']}\n"
+            self.holders += (
+                f"{container} {name} {label['orbit.gpus']}/{label['orbit.gpu_memory_mb']}\n"
+            )
             return 0, container + "\n", ""
         if argv[0] == "inspect":
             return 0, f"{DIGEST} {self.runtimes.get(argv[-1], 'runc')}\n", ""
@@ -881,9 +883,9 @@ def _starts(monkeypatch: pytest.MonkeyPatch, runtime: str) -> None:
     monkeypatch.setattr(DockerProvider, "_connect", connect)
     monkeypatch.setattr(DockerProvider, "_guest_contract", contract)
     monkeypatch.setattr(DockerProvider, "_container_gpus", container_gpus)
-    monkeypatch.setattr("ale.run.providers.docker.provider.set_and_prove_elevation", nothing)
-    monkeypatch.setattr("ale.run.providers.docker.provider._GvisorConfinement.wire", nothing)
-    monkeypatch.setattr("ale.run.providers.docker.provider._watcher", no_watcher)
+    monkeypatch.setattr("orbit.run.providers.docker.provider.set_and_prove_elevation", nothing)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._GvisorConfinement.wire", nothing)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._watcher", no_watcher)
     # Inspected as Docker records the runtime the Sandbox was started under.
     _ = RUNTIME_NAMES[runtime]
 
@@ -924,9 +926,9 @@ async def test_every_sandbox_is_labelled_with_what_it_holds_and_limited_where_it
     limit: list[str],
 ) -> None:
     """Both labels on every Sandbox, empty where it holds nothing, so that an image's labels
-    never stand in for ALE's record; the lock is held while Docker starts it."""
+    never stand in for Orbit's record; the lock is held while Docker starts it."""
     provider = DockerProvider(runtime=runtime, gpu_lock_dir=tmp_path)
-    lock = tmp_path / "ale-gpu-DAEMON-1.lock"
+    lock = tmp_path / "orbit-gpu-DAEMON-1.lock"
     held: list[bool] = []
 
     async def starting() -> None:
@@ -939,9 +941,9 @@ async def test_every_sandbox_is_labelled_with_what_it_holds_and_limited_where_it
         await provider.create(_request(Resources(gpus=gpus, gpu_memory_mb=memory)))
     (run,) = daemon.runs()
     labels = [run[index + 1] for index, flag in enumerate(run) if flag == "--label"]
-    # The most free memory: G2, whose 70000 MiB no ALE Sandbox reserved.
-    assert f"ale.gpus={G2 if gpus else ''}" in labels
-    assert f"ale.gpu_memory_mb={memory or ''}" in labels
+    # The most free memory: G2, whose 70000 MiB no Orbit Sandbox reserved.
+    assert f"orbit.gpus={G2 if gpus else ''}" in labels
+    assert f"orbit.gpu_memory_mb={memory or ''}" in labels
     annotations = [
         run[index : index + 2] for index, flag in enumerate(run) if flag == "--annotation"
     ]
@@ -959,17 +961,17 @@ async def test_a_refused_sandbox_starts_nothing_and_says_why_for_each_gpu(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     provider = DockerProvider(runtime="gvisor", gpu_lock_dir=tmp_path)
-    holders = f"{A} ale-a {G0}/40000\n{B} ale-b {G1},{G2}/\n"
+    holders = f"{A} orbit-a {G0}/40000\n{B} orbit-b {G1},{G2}/\n"
     daemon = Daemon(monkeypatch, holders=holders, processes=[_process(A, G0, 600)])
     with pytest.raises(ProviderCapacityError) as refused:
         await provider.create(_request(Resources(gpus=1, gpu_memory_mb=10000)))
     assert f"GPU 0 ({G0}): 52665 MiB free, 39400 MiB of it reserved" in str(refused.value)
-    assert f"GPU 1 ({G1}): ale-b holds it whole" in str(refused.value)
+    assert f"GPU 1 ({G1}): orbit-b holds it whole" in str(refused.value)
     assert "a margin of 4096 MiB" in str(refused.value)
     assert not daemon.runs()
     # The Sandbox's own network goes with it, and the lock is free again.
     assert daemon.calls[-1][:2] == ("network", "rm")
-    assert _free(tmp_path / "ale-gpu-DAEMON-1.lock")
+    assert _free(tmp_path / "orbit-gpu-DAEMON-1.lock")
 
 
 @pytest.mark.asyncio
@@ -989,7 +991,7 @@ async def test_two_creates_through_one_daemon_take_turns_and_the_second_sees_the
     first, second = (DockerProvider(gpus=(2,), gpu_lock_dir=tmp_path) for _ in range(2))
     taking = asyncio.ensure_future(first.create(_request(Resources(gpus=1), "first")))
     await asyncio.sleep(0.05)
-    with pytest.raises(ProviderCapacityError, match=r"ale-first-[0-9a-f]+ holds it whole"):
+    with pytest.raises(ProviderCapacityError, match=r"orbit-first-[0-9a-f]+ holds it whole"):
         await second.create(_request(Resources(gpus=1), "second"))
     sandbox = await taking
     assert len(daemon.runs()) == 1 and order == ["run"]
@@ -1001,7 +1003,7 @@ async def test_two_creates_through_one_daemon_take_turns_and_the_second_sees_the
 async def test_a_docker_run_that_never_returns_leaves_the_lock_free(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
 ) -> None:
-    lock = tmp_path / "ale-gpu-DAEMON-1.lock"
+    lock = tmp_path / "orbit-gpu-DAEMON-1.lock"
 
     async def starting() -> None:
         if how == "timed out":
@@ -1029,7 +1031,7 @@ def test_the_lock_file_is_one_every_user_can_lock_and_is_created_once(
     """Created readable by all whatever the umask, opened read-only when it exists, since
     fs.protected_regular refuses O_CREAT on another user's file in a sticky /tmp, and opened
     as another's when that process created it between the two opens."""
-    path = tmp_path / "ale-gpu-DAEMON-1.lock"
+    path = tmp_path / "orbit-gpu-DAEMON-1.lock"
     previous = os.umask(0o077)
     try:
         descriptor = gpu_sharing._open_lock(path)
@@ -1095,7 +1097,7 @@ async def test_a_shared_sandbox_records_its_reservation_and_is_watched_while_a_r
     async def written(container: str) -> int:
         return 0
 
-    monkeypatch.setattr("ale.run.providers.docker.provider.storage.written", written)
+    monkeypatch.setattr("orbit.run.providers.docker.provider.storage.written", written)
     await snapshotted.snapshot(roles=("solver",), reason="kept")
     await destroyed.destroy()
     assert provider._watchdog._watched == {}
@@ -1107,15 +1109,15 @@ async def test_a_shared_sandbox_records_its_reservation_and_is_watched_while_a_r
         "Image": DIGEST,
         "Config": {
             "Labels": {
-                "ale.managed": "true",
-                "ale.role": "solver",
-                "ale.network": "open",
-                "ale.bridge-mac": "02:42:aa:bb:cc:01",
+                "orbit.managed": "true",
+                "orbit.role": "solver",
+                "orbit.network": "open",
+                "orbit.bridge-mac": "02:42:aa:bb:cc:01",
             }
         },
         "State": {"Running": True},
         "HostConfig": {"Runtime": RUNTIME_NAMES[runtime]},
-        "NetworkSettings": {"Networks": {"ale-net-x": {}} if runtime == "gvisor" else {}},
+        "NetworkSettings": {"Networks": {"orbit-net-x": {}} if runtime == "gvisor" else {}},
     }
     docker = daemon.docker
 
@@ -1124,7 +1126,7 @@ async def test_a_shared_sandbox_records_its_reservation_and_is_watched_while_a_r
             return 0, json.dumps([record]), ""
         return await docker(*argv, **kwargs)
 
-    monkeypatch.setattr("ale.run.providers.docker.provider._docker", inspecting)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", inspecting)
     again = await provider.reattach(kept.handle, kept.request, kept.allocation, kept.resolved_image)
     assert provider._watchdog._watched[again.container_id].memory_mb == 8192
     await again.destroy()

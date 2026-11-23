@@ -1,8 +1,8 @@
 # ForgeCode
 
 Runs `forge --conversation-id <id>` with the prompt on stdin. ForgeCode ships as single-file
-release binaries; its npm package stopped at 2.13.21. ALE pins the official v2.14.0 assets
-for Linux (static musl), Windows and macOS. `FORGE_CONFIG` is `.forge-ale`, where ALE writes
+release binaries; its npm package stopped at 2.13.21. Orbit pins the official v2.14.0 assets
+for Linux (static musl), Windows and macOS. `FORGE_CONFIG` is `.forge-orbit`, where Orbit writes
 `.forge.toml`, `.credentials.json` with the episode token, `.mcp.json` and the declared
 Skills. The provider is forge's own compatible provider for the Gateway dialect, with the
 model listed in the configuration so forge never asks for `/v1/models`.
@@ -20,16 +20,16 @@ unaffected, but the conversation stays untitled, so every invocation records one
 Gateway call. Forge has no setting that turns titling off: it skips only a conversation
 that already has a title, and the Gateway does not rewrite requests.
 
-`--conversation-id` continues a conversation or starts one under ALE's ID. Forge keeps
+`--conversation-id` continues a conversation or starts one under Orbit's ID. Forge keeps
 conversations only in SQLite, so after every invocation `forge conversation dump` exports
-the whole conversation to `.forge-ale/dumps/<id>/<time>.json`; the parser reads the newest
+the whole conversation to `.forge-orbit/dumps/<id>/<time>.json`; the parser reads the newest
 export and the matching invocation's stdout. Forge exits 0 on most failures: a turn
 succeeded only when stdout ends it with `Finished <id>`, and its request limit fails the
 invocation. Delegated `task` conversations become subagent trajectories, linked by the
 conversation ID in the task's result. MCP tools are `mcp_<server>_tool_<tool>`, both
-sanitized; the parser restores the server's declared name from `.forge-ale/.mcp.json`,
+sanitized; the parser restores the server's declared name from `.forge-orbit/.mcp.json`,
 while the tool keeps forge's sanitized name. Forge cannot set a stdio MCP server's working
-directory, so ALE rejects a server that declares one. On Windows, forge's shell tool runs
+directory, so Orbit rejects a server that declares one. On Windows, forge's shell tool runs
 `cmd.exe`. The settings are `reasoning_effort`, `max_output_tokens`,
 `max_requests_per_turn` and `input_modalities`, the listed model's. Unset, forge takes the
 model to be text-only, which only keeps its `read` tool from reading images and PDFs: MCP

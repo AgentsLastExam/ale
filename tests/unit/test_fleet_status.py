@@ -1,4 +1,4 @@
-"""A Run's plan, the status document, the page and ``ale-fleet status``."""
+"""A Run's plan, the status document, the page and ``orbit-fleet status``."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ from tests.unit.test_fleet_control import (
 )
 from typer.testing import CliRunner
 
-from ale.core.capability import Arch
-from ale.core.fleet import (
+from orbit.core.capability import Arch
+from orbit.core.fleet import (
     AcquireRequest,
     EpisodeReport,
     GpuPool,
@@ -34,12 +34,12 @@ from ale.core.fleet import (
     SandboxStatus,
     StartReport,
 )
-from ale.core.taskspec import ImageKind, OperatingSystem, Resources
-from ale.fleet import cli as fleet_cli
-from ale.fleet.control import ControlPlane
-from ale.fleet.placement import NodeView, assign
-from ale.fleet.server import COOKIE, control_app
-from ale.fleet.store import Store
+from orbit.core.taskspec import ImageKind, OperatingSystem, Resources
+from orbit.fleet import cli as fleet_cli
+from orbit.fleet.control import ControlPlane
+from orbit.fleet.placement import NodeView, assign
+from orbit.fleet.server import COOKIE, control_app
+from orbit.fleet.store import Store
 
 pytestmark = pytest.mark.unit
 
@@ -218,7 +218,7 @@ class TestPage:
             assert (await client.get("/", params={"token": "nope"})).status == 401
             response = await client.get("/", params={"token": TOKEN})
             assert response.status == 200
-            assert "ALE Fleet" in await response.text()
+            assert "Orbit Fleet" in await response.text()
             assert client.session.cookie_jar.filter_cookies(client.make_url("/"))[COOKIE]
 
     async def test_the_page_embeds_the_status_and_acts_through_the_api(
@@ -255,7 +255,7 @@ class TestCommand:
         )
         ask(control, 1, demand())
         ask(control, 2, demand())
-        monkeypatch.setenv("ALE_FLEET_TOKEN", TOKEN)
+        monkeypatch.setenv("ORBIT_FLEET_TOKEN", TOKEN)
         monkeypatch.setattr(
             fleet_cli, "_call", lambda *_args, **_kw: control.status().model_dump_json().encode()
         )

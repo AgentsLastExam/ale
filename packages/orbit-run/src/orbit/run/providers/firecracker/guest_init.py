@@ -1,4 +1,4 @@
-"""PID 1 of an ALE Firecracker microVM.
+"""PID 1 of an Orbit Firecracker microVM.
 
 The Provider writes this file into every microVM disk it converts, and the kernel starts
 it on the framework's Python. It is shipped as source and runs in the guest, so like
@@ -37,7 +37,7 @@ import struct
 import sys
 import time
 
-HERE = "/opt/ale/firecracker"
+HERE = "/opt/orbit/firecracker"
 #: The sandbox's writable disk, then the overlay's pieces on it.
 RW = f"{HERE}/rw"
 UPPER = f"{RW}/upper"
@@ -52,8 +52,8 @@ VIEWS = f"{RW}/views"
 VIEWED = f"{RW}/viewed"
 #: A private tmpfs for guestd's claimed token, which must not outlive a boot.
 RUN = f"{HERE}/run"
-COMMAND_LOG = f"{RW}/ale/command.log"
-GUESTD = ("/opt/ale/python/bin/python3", "-I", "/opt/ale/guestd/main.py")
+COMMAND_LOG = f"{RW}/orbit/command.log"
+GUESTD = ("/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/main.py")
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 MS_RDONLY = 1
@@ -97,7 +97,7 @@ def mount(source: str, target: str, fstype: str | None, flags: int = 0, data: st
 
 def _log(message: str) -> None:
     with open("/dev/kmsg", "w") as kmsg:
-        kmsg.write(f"ale-init: {message}\n")
+        kmsg.write(f"orbit-init: {message}\n")
 
 
 def volume_name(path: str) -> str:
@@ -162,7 +162,7 @@ def assemble_root() -> dict:
     mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC)
     mount("none", "/", None, MS_REC | MS_PRIVATE)
     mount("/dev/vdb", RW, "ext4", MS_NOSUID | MS_NODEV, "noinit_itable")
-    with open(f"{RW}/ale/sandbox.json") as handle:
+    with open(f"{RW}/orbit/sandbox.json") as handle:
         config = json.load(handle)
     lowers = []
     for index, device in enumerate(config.get("layers", ())):
@@ -233,7 +233,7 @@ def configure_network(config: dict) -> None:
         "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n"
         f"{config['address']}\t{hostname}\n",
     )
-    with open(f"{RW}/ale/resolv.conf") as handle:
+    with open(f"{RW}/orbit/resolv.conf") as handle:
         _replace("/etc/resolv.conf", handle.read())
 
 
@@ -289,7 +289,7 @@ def _spawn(argv: list[str], env: dict, *, cwd: str, account=None, log: int | Non
         os.chdir(cwd)
         os.execve(program, argv, env)
     except BaseException as exc:  # the child must never return into the init loop
-        os.write(2, f"ale-init: cannot start {argv[0]}: {exc}\n".encode())
+        os.write(2, f"orbit-init: cannot start {argv[0]}: {exc}\n".encode())
     os._exit(127)
 
 
@@ -299,7 +299,7 @@ def supervise(config: dict, image: dict) -> None:
     extra = config.get("env", {})
     image_env = image.get("Env") or []
     root_env = _environment(image_env, extra, hostname, "/root")
-    root_env["ALE_AGENT_USER"] = config["agent_user"]
+    root_env["ORBIT_AGENT_USER"] = config["agent_user"]
     guestd_argv = [
         *GUESTD,
         "--tcp",
@@ -363,7 +363,7 @@ def power_off() -> None:
         try:
             mount("none", target, None, MS_REMOUNT | MS_RDONLY)
         except OSError as exc:
-            print(f"ale-init: {exc}", file=sys.stderr, flush=True)
+            print(f"orbit-init: {exc}", file=sys.stderr, flush=True)
     os.sync()
     _libc.reboot(RB_AUTOBOOT)
 
@@ -395,6 +395,6 @@ if __name__ == "__main__":
     try:
         main()
     except BaseException as exc:
-        print(f"ale-init: {exc!r}", file=sys.stderr, flush=True)
+        print(f"orbit-init: {exc!r}", file=sys.stderr, flush=True)
         os.sync()
         _libc.reboot(RB_AUTOBOOT)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ALE does not create declared artifacts, and setup runs as the framework, so the output
+# Orbit does not create declared artifacts, and setup runs as the framework, so the output
 # directory is made here and handed to the agent account.
 set -euo pipefail
 

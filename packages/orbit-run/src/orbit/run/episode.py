@@ -26,10 +26,10 @@ from functools import partial
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
-from ale.core.capability import unmet
-from ale.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
-from ale.core.episode import ArtifactSink, Budget, EpisodeContext, Phase
-from ale.core.errors import (
+from orbit.core.capability import unmet
+from orbit.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
+from orbit.core.episode import ArtifactSink, Budget, EpisodeContext, Phase
+from orbit.core.errors import (
     AgentError,
     AgentRefusalError,
     BudgetExceededError,
@@ -44,12 +44,12 @@ from ale.core.errors import (
     TaskDefinitionError,
     TaskError,
 )
-from ale.core.harness import EffectiveAgentResources, HarnessSession
-from ale.core.ids import task_component
-from ale.core.lock import AssetProvenance, LimitTermination, RunLock
-from ale.core.result import FailureInfo as ResultFailureInfo
-from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome
-from ale.core.sandbox import (
+from orbit.core.harness import EffectiveAgentResources, HarnessSession
+from orbit.core.ids import task_component
+from orbit.core.lock import AssetProvenance, LimitTermination, RunLock
+from orbit.core.result import FailureInfo as ResultFailureInfo
+from orbit.core.result import PhaseTiming, ResultRecord, SandboxOutcome
+from orbit.core.sandbox import (
     DesktopResolution,
     Identity,
     Provider,
@@ -58,8 +58,8 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.task import ResolvedVariables, Stage, Task
-from ale.core.taskspec import (
+from orbit.core.task import ResolvedVariables, Stage, Task
+from orbit.core.taskspec import (
     NetworkMode,
     NetworkPolicy,
     OperatingSystem,
@@ -67,25 +67,25 @@ from ale.core.taskspec import (
     TaskSpec,
     VerificationMode,
 )
-from ale.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
-from ale.core.verdict import FINAL_STATUSES, Status, Verdict
-from ale.run import artifact_files
-from ale.run.assets import observe_task_assets
-from ale.run.framework import MACOS_PYTHON
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, Limits, SessionRegistry
-from ale.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, build_lock, judge_provenance
-from ale.run.providers import ProviderRegistry
-from ale.run.recording import EpisodeRecording, Redactor
-from ale.run.task_images import (
+from orbit.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
+from orbit.core.verdict import FINAL_STATUSES, Status, Verdict
+from orbit.run import artifact_files
+from orbit.run.assets import observe_task_assets
+from orbit.run.framework import MACOS_PYTHON
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession, Limits, SessionRegistry
+from orbit.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, build_lock, judge_provenance
+from orbit.run.providers import ProviderRegistry
+from orbit.run.recording import EpisodeRecording, Redactor
+from orbit.run.task_images import (
     prepare_task_image,
     prepare_validation_image,
     prepare_verifier_image,
     resolve_image_kinds,
 )
-from ale.run.verification import judge_endpoints, open_judge_sessions
-from ale_verify import JudgeInvocation
+from orbit.run.verification import judge_endpoints, open_judge_sessions
+from orbit_verify import JudgeInvocation
 
 __all__ = ["EpisodeResult", "check_retention", "run_episode", "run_episode_with_retries"]
 
@@ -363,9 +363,9 @@ class _Lease:
             # The Run's retention concerns the final solver: this one's snapshot goes once
             # nothing runs on it.
             entry.requested, entry.carried = "destroy", True
-        logging.getLogger("ale.execution").info(
+        logging.getLogger("orbit.execution").info(
             f"the solver was saved as the snapshot {purpose}",
-            extra={"ale_data": {"handle": entry.saved.handle}},
+            extra={"orbit_data": {"handle": entry.saved.handle}},
         )
         # The snapshot stopped the Sandbox; only the snapshot is left. A Sandbox that
         # cannot be destroyed now is destroyed again as the episode ends, whether its
@@ -531,8 +531,8 @@ class _Lease:
                 provider=entry.provider.name,
             )
         )
-        logging.getLogger("ale.execution").info(
-            "the solver's snapshot was destroyed", extra={"ale_data": {"handle": saved.handle}}
+        logging.getLogger("orbit.execution").info(
+            "the solver's snapshot was destroyed", extra={"orbit_data": {"handle": saved.handle}}
         )
 
     def _booted_from(self, entry: _LeaseEntry) -> bool:
@@ -678,7 +678,7 @@ class _Artifacts(ArtifactSink):
     ) -> None:
         if not self.enabled:
             return
-        logger = logging.getLogger("ale.execution")
+        logger = logging.getLogger("orbit.execution")
         python = _artifact_python(sandbox.request.os)
         script = Path(artifact_files.__file__).read_text()
         path_type = (
@@ -827,7 +827,7 @@ class _Artifacts(ArtifactSink):
                     if not mode.ok:
                         raise OSError(mode.stderr or "cannot restore artifact mode")
             except Exception as exc:
-                logging.getLogger("ale.execution").warning(
+                logging.getLogger("orbit.execution").warning(
                     "artifact restore skipped: %s: %s", source, exc
                 )
 
@@ -1308,7 +1308,7 @@ def _write_lock(
         validation_resolved_image=ctx.validation_resolved_image,
         validation_allocation=ctx.validation_resource_allocation,
         prepared_validation_image=ctx.prepared_validation_image,
-        ale_verify=ctx.ale_verify_provenance,
+        orbit_verify=ctx.orbit_verify_provenance,
         termination=ctx.limit_termination,
         sandbox_outcomes=ctx.sandbox_outcomes,
         resumed_from=ctx.resumed_from,

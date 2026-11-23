@@ -11,14 +11,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ale.core.errors import AgentError, AgentUnsupportedError, ConfigError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_home, agent_path, agent_python, bash_command, npm_env
-from ale.run.harnesses._release import ReleaseAsset, ReleaseAssets, ensure_release_binary
-from ale.run.harnesses.base import (
+from orbit.core.errors import AgentError, AgentUnsupportedError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_home, agent_path, agent_python, bash_command, npm_env
+from orbit.run.harnesses._release import ReleaseAsset, ReleaseAssets, ensure_release_binary
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -26,14 +26,14 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import OpenCodeSettings
 
 DEFAULT_CLI_VERSION = "2.3.2"
 #: ``OPENCODE_CONFIG_DIR``, in place of the agent's ``~/.config/opencode``: Skills, and
-#: ALE's configuration document beside it.
+#: Orbit's configuration document beside it.
 STATE = trajectory.STATE
 #: The custom provider every model call goes through.
 PROVIDER = trajectory.PROVIDER
@@ -309,10 +309,10 @@ class OpenCodeHarness(CliHarness):
             "share": "disabled",
             "providers": {
                 PROVIDER: {
-                    "name": "ALE Gateway",
+                    "name": "Orbit Gateway",
                     "package": package,
                     # The provider's credential, read from the environment.
-                    "env": ["ALE_GATEWAY_TOKEN"],
+                    "env": ["ORBIT_GATEWAY_TOKEN"],
                     "settings": {"baseURL": session.gateway_url + suffix},
                     "models": {session.model: model},
                 }
@@ -375,7 +375,7 @@ class OpenCodeHarness(CliHarness):
             # In place of `~/.config/opencode`.
             "OPENCODE_CONFIG_DIR": str(home / STATE),
             **_OFFLINE,
-            "ALE_GATEWAY_TOKEN": session.token,
+            "ORBIT_GATEWAY_TOKEN": session.token,
             "NO_COLOR": "1",
         }
         return CliCommand(script, env, requested)

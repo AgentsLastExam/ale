@@ -9,13 +9,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ale.core.errors import ConfigError, HarnessLimitError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, is_windows, npm_env
-from ale.run.harnesses.base import (
+from orbit.core.errors import ConfigError, HarnessLimitError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, is_windows, npm_env
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     PROMPT_ARGUMENT_WINDOWS_ENV,
     CliCommand,
@@ -25,7 +25,7 @@ from ale.run.harnesses.base import (
     install_skills,
     prompt_argument,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import KimiCodeSettings
@@ -88,13 +88,13 @@ class KimiCodeHarness(CliHarness):
             f"default_model = {model}",
             "telemetry = false",
             "",
-            "[providers.ale]",
+            "[providers.orbit]",
             f"type = {_toml(provider_type)}",
             f"base_url = {_toml(session.gateway_url + suffix)}",
-            'api_key_env = "ALE_GATEWAY_TOKEN"',
+            'api_key_env = "ORBIT_GATEWAY_TOKEN"',
             "",
             f"[models.{model}]",
-            'provider = "ale"',
+            'provider = "orbit"',
             f"model = {model}",
             f"max_context_size = {self.settings.max_context_size}",
         ]
@@ -182,7 +182,7 @@ class KimiCodeHarness(CliHarness):
             "KIMI_CODE_HOME": str(kimi_home),
             "KIMI_CODE_NO_AUTO_UPDATE": "1",
             "NO_COLOR": "1",
-            "ALE_GATEWAY_TOKEN": session.token,
+            "ORBIT_GATEWAY_TOKEN": session.token,
         }
         if is_windows(session.home):
             env.update(PROMPT_ARGUMENT_WINDOWS_ENV)

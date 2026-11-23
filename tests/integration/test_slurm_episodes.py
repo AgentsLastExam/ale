@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.run.providers.slurm import SlurmProvider
-from ale.run.providers.slurm.job import Job
+from orbit.run.providers.slurm import SlurmProvider
+from orbit.run.providers.slurm.job import Job
 from tests.integration.test_validation_rounds import _check as check_rounds
 from tests.integration.test_validation_rounds import _episode as rounds_episode
 from tests.integration.test_validation_rounds import _task as rounds_task

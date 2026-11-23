@@ -10,14 +10,14 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from ale.core.errors import ConfigError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem, StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses._release import ReleaseAsset, ReleaseAssets
-from ale.run.harnesses.base import (
+from orbit.core.errors import ConfigError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses._release import ReleaseAsset, ReleaseAssets
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -25,7 +25,7 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import OpenHandsCliSettings
@@ -102,8 +102,8 @@ class OpenHandsCliHarness(CliHarness):
                 "sh",
                 "-c",
                 f"mkdir -p {shlex.quote(str(skills_root))} {shlex.quote(str(home / STATE))} "
-                f"{public} && git -C {public} init -q && git -C {public} -c user.name=ale "
-                "-c user.email=ale@localhost commit -q --allow-empty -m empty",
+                f"{public} && git -C {public} init -q && git -C {public} -c user.name=orbit "
+                "-c user.email=orbit@localhost commit -q --allow-empty -m empty",
             ],
             identity=Identity.AGENT,
         )

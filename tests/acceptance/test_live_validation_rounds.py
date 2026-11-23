@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.trajectory import AtifTrajectory
-from ale.run.scaffold import scaffold_task
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.scaffold import scaffold_task
 from tests.support import edit_task_config
 
 from .trajectory import LIVE, run_task
@@ -30,7 +30,7 @@ INSTRUCTION = (
 )
 CHECK = """\
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 
 answer = Path("/home/user/answer.txt")
 text = answer.read_text().strip() if answer.is_file() else ""
@@ -42,7 +42,7 @@ else:
     reward = round(max(0.0, 1 - abs(guess - 5) / 4), 2)
     write({"reward": reward, "guess": guess}, feedback=f"{guess} is {side}.")
 """
-TEST = '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ALE_VERIFY_PYTHON" verify.py\n'
+TEST = '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ORBIT_VERIFY_PYTHON" verify.py\n'
 
 
 @pytest.mark.parametrize("agent", sorted(AGENTS))
@@ -66,7 +66,7 @@ def test_an_agent_uses_its_validation_rounds(tmp_path: Path, agent: str) -> None
     assert lock["validation_rounds"] == 2
     trajectory = AtifTrajectory.model_validate_json((episode / "trajectory.json").read_text())
     marked = {
-        (step.extra or {}).get("ale", {}).get("validation_round"): step
+        (step.extra or {}).get("orbit", {}).get("validation_round"): step
         for step in trajectory.steps
         if step.source == "user"
     }

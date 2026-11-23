@@ -9,8 +9,8 @@ from pathlib import PurePosixPath
 from typing import Protocol
 from urllib.parse import SplitResult, urlsplit
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import (
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     ExecOutputSink,
     ExecResult,
@@ -19,10 +19,10 @@ from ale.core.sandbox import (
     SandboxFile,
     SandboxRequest,
 )
-from ale.run import guestd
-from ale.run.guestd.tunnel import Mux
-from ale.run.providers import relay
-from ale.run.transport import GuestClient
+from orbit.run import guestd
+from orbit.run.guestd.tunnel import Mux
+from orbit.run.providers import relay
+from orbit.run.transport import GuestClient
 
 PROXY_PORT = SANDBOX_GATEWAY_PORT + 1
 
@@ -45,7 +45,7 @@ class GatewayTunnel:
         self._targets = targets
         self._command = "cd / && exec {} -I {} {}".format(
             guestd.PYTHON["linux"],
-            "/opt/ale/guestd/tunnel.py",
+            "/opt/orbit/guestd/tunnel.py",
             " ".join(f"--listen {port}:{target}" for port, target in listeners),
         )
         self._closing = False

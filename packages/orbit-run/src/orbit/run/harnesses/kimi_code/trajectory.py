@@ -11,8 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifFinalMetrics,
@@ -25,8 +25,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
@@ -37,7 +37,7 @@ from ale.run.harnesses.base import (
     unconverted,
 )
 
-HOME = ".kimi-ale"
+HOME = ".kimi-orbit"
 SESSIONS = f"{HOME}/sessions"
 MAIN = "main"
 WIRE = "wire.jsonl"
@@ -228,7 +228,7 @@ class _Conversation:
                         source_call_id=call_id,
                         content=content,
                         subagent_trajectory_ref=refs.get(call_id),
-                        extra={"ale": {"is_error": True}} if result.get("isError") else None,
+                        extra={"orbit": {"is_error": True}} if result.get("isError") else None,
                     )
                 elif loop_kind == "step.end" and current is not None:
                     current.metrics = _metrics(loop.get("usage"), totals)
@@ -320,7 +320,7 @@ class _Conversation:
         return list(embedded.values()), refs
 
     def _content(self, agent_id: str, value: Any) -> str | list[AtifContentPart]:
-        """Native output or input parts, with media copied into ALE's blob store."""
+        """Native output or input parts, with media copied into Orbit's blob store."""
         if isinstance(value, str):
             return value
         if not isinstance(value, list):
@@ -461,7 +461,7 @@ def _mcp_extra(name: str) -> dict[str, Any] | None:
     server, separator, tool = name.removeprefix("mcp__").partition("__")
     if not separator or not server or not tool:
         return None
-    return {"ale": {"mcp": {"server": server, "tool": tool}}}
+    return {"orbit": {"mcp": {"server": server, "tool": tool}}}
 
 
 def _session_id(events: list[dict[str, Any]]) -> str | None:
@@ -502,4 +502,4 @@ def _extra(
         data["limitations"] = [
             "Native tool and conversation records are unavailable; stdout text only."
         ]
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

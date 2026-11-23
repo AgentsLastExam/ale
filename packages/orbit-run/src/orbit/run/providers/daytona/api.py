@@ -14,7 +14,7 @@ from typing import Any
 
 import aiohttp
 
-from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
+from orbit.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
 
 __all__ = ["DEFAULT_API_URL", "DaytonaApi", "DaytonaError"]
 
@@ -43,12 +43,12 @@ class DaytonaApi:
 
     def __init__(self, api_key: str, *, base_url: str | None = None) -> None:
         self._key = api_key
-        self._base = (base_url or os.environ.get("ALE_DAYTONA_API_URL") or DEFAULT_API_URL).rstrip(
-            "/"
-        )
+        self._base = (
+            base_url or os.environ.get("ORBIT_DAYTONA_API_URL") or DEFAULT_API_URL
+        ).rstrip("/")
 
     @classmethod
-    def from_environment(cls, variable: str = "ALE_DAYTONA_API_KEY") -> DaytonaApi:
+    def from_environment(cls, variable: str = "ORBIT_DAYTONA_API_KEY") -> DaytonaApi:
         key = os.environ.get(variable, "").strip()
         if not key:
             raise ConfigError(

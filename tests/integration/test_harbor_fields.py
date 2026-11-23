@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.lock import TaskSource
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
-from ale.run.providers.docker import DockerProvider
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import RunConfig
+from orbit.core.lock import TaskSource
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs, agent_provenance, gateway_provenance
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import CONTAINER_BASE, provider_registry, write_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -83,8 +83,8 @@ async def test_a_harbor_task_runs_with_its_workdir_user_healthcheck_and_reward_t
 
 
 #: A Task as Harbor writes it: no format and no name, an image of no exact version without the
-#: account ALE's own Tasks use, a working directory only root can write, and debian's command,
-#: ``bash``, which exits at once without a terminal: Harbor replaces it, and so does ALE.
+#: account Orbit's own Tasks use, a working directory only root can write, and debian's command,
+#: ``bash``, which exits at once without a terminal: Harbor replaces it, and so does Orbit.
 HARBOR_DOCKERFILE = "FROM debian\nWORKDIR /app\n"
 HARBOR_SOLVE = """#!/usr/bin/env bash
 set -eu

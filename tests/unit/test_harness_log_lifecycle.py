@@ -9,22 +9,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.config import LoggingPolicy
-from ale.core.harness import AgentRun, AutonomousHarness, HarnessSession, TrajectoryParseContext
-from ale.core.trajectory import AtifAgent, AtifStep, AtifTrajectory
-from ale.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.protocol import episode_protocol
-from ale.run.protocol.episode_protocol import (
+from orbit.core.config import LoggingPolicy
+from orbit.core.harness import AgentRun, AutonomousHarness, HarnessSession, TrajectoryParseContext
+from orbit.core.trajectory import AtifAgent, AtifStep, AtifTrajectory
+from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.protocol import episode_protocol
+from orbit.run.protocol.episode_protocol import (
     EpisodeProtocol,
     ReverificationProtocol,
     _AgentTime,
     _Solver,
 )
-from ale.run.recording import EpisodeRecording
+from orbit.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
 
@@ -91,7 +91,7 @@ def test_complete_conversion_drops_native_logs_under_minimal_retention(tmp_path)
     ctx.logging_policy = LoggingPolicy(native_logs="minimal")
     EpisodeProtocol(EvidenceHarness())._parse_harness_trajectory(ctx)
     assert ctx.trajectory_written
-    assert "incomplete" not in _read(ctx).get("extra", {}).get("ale", {})
+    assert "incomplete" not in _read(ctx).get("extra", {}).get("orbit", {})
     assert not (tmp_path / "logs/evidence-test").exists()
 
 
@@ -99,7 +99,7 @@ def test_parser_failure_after_an_interrupted_agent_is_still_conversion_failed(tm
     ctx = _context(tmp_path)
     (tmp_path / "logs/evidence-test/evidence.log").write_text("broken")
     trajectory = EpisodeProtocol(EvidenceHarness())._convert_harness_trajectory(ctx)
-    assert trajectory.extra["ale"]["incomplete_reason"] == "conversion_failed"
+    assert trajectory.extra["orbit"]["incomplete_reason"] == "conversion_failed"
 
 
 @pytest.mark.asyncio
@@ -169,7 +169,7 @@ async def test_polling_only_copies_logs_and_retries_after_a_timeout(tmp_path, mo
         ),
         (
             CodexCliHarness(),
-            ".codex-ale/sessions/rollout-x-session.jsonl",
+            ".codex-orbit/sessions/rollout-x-session.jsonl",
             {
                 "type": "response_item",
                 "payload": {
@@ -181,12 +181,12 @@ async def test_polling_only_copies_logs_and_retries_after_a_timeout(tmp_path, mo
         ),
         (
             GrokBuildHarness(),
-            ".grok-ale/sessions/session/chat_history.jsonl",
+            ".grok-orbit/sessions/session/chat_history.jsonl",
             {"type": "assistant", "content": "done"},
         ),
         (
             OpenClawCliHarness(),
-            ".openclaw-ale/agents/main/sessions/session.jsonl",
+            ".openclaw-orbit/agents/main/sessions/session.jsonl",
             {
                 "type": "message",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
@@ -219,7 +219,7 @@ def test_minimal_retention_names_an_unconverted_session_and_drops_the_logs(
     trajectory = _read(ctx)
     assert ctx.trajectory_written
     assert "unconverted child evidence" not in json.dumps(trajectory)
-    assert trajectory["extra"]["ale"]["parse_issues"] == [
+    assert trajectory["extra"]["orbit"]["parse_issues"] == [
         {
             "reason": "unconverted_native_sessions",
             "count": 1,

@@ -1,4 +1,4 @@
-"""Loss-aware exports from ALE's canonical episode records."""
+"""Loss-aware exports from Orbit's canonical episode records."""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from ale.core.errors import IncompleteTrainingDataError
-from ale.core.result import ResultRecord
-from ale.core.trajectory import (
+from orbit.core.errors import IncompleteTrainingDataError
+from orbit.core.result import ResultRecord
+from orbit.core.trajectory import (
     AtifContentPart,
     AtifStep,
     AtifTrajectory,
 )
-from ale.core.verdict import FINAL_STATUSES
+from orbit.core.verdict import FINAL_STATUSES
 
 __all__ = [
     "PrimeRlSample",
@@ -29,7 +29,7 @@ __all__ = [
 
 
 class PrimeRlSample(BaseModel):
-    """The Prime-RL TrainingSample fields ALE can export without importing Prime."""
+    """The Prime-RL TrainingSample fields Orbit can export without importing Prime."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -117,7 +117,7 @@ def prime_verifiers_record(
     return {
         "id": trajectory.trajectory_id or result.episode_id,
         "task": {
-            "type": "AleTask",
+            "type": "OrbitTask",
             "data": {"name": result.episode_id, "prompt": prompt},
         },
         "agent": {
@@ -129,7 +129,7 @@ def prime_verifiers_record(
         "rewards": dict(result.rewards or {}),
         "metrics": dict(result.metrics),
         "info": {
-            "ale": {
+            "orbit": {
                 "trajectory_id": trajectory.trajectory_id,
                 "phases": [
                     phase.model_dump(mode="json", exclude_none=True) for phase in result.phases
@@ -168,11 +168,13 @@ def prime_rl_samples(
         prompt = metrics.prompt_token_ids
         completion = metrics.completion_token_ids
         logprobs = metrics.logprobs
-        ale = (metrics.extra or {}).get("ale") or {}
-        mask = ale.get("sampled_mask")
-        temperatures = ale.get("temperatures")
-        if temperatures is None and isinstance(ale.get("temperature"), int | float):
-            temperatures = [float(ale["temperature"])] * (len(prompt or ()) + len(completion or ()))
+        orbit = (metrics.extra or {}).get("orbit") or {}
+        mask = orbit.get("sampled_mask")
+        temperatures = orbit.get("temperatures")
+        if temperatures is None and isinstance(orbit.get("temperature"), int | float):
+            temperatures = [float(orbit["temperature"])] * (
+                len(prompt or ()) + len(completion or ())
+            )
         missing = [
             name
             for name, value in (
@@ -206,8 +208,8 @@ def prime_rl_samples(
             raise IncompleteTrainingDataError(
                 f"step {step.step_id} temperatures do not align with token IDs"
             )
-        mm_kwargs = ale.get("mm_kwargs")
-        mm_token_type_ids = ale.get("mm_token_type_ids")
+        mm_kwargs = orbit.get("mm_kwargs")
+        mm_token_type_ids = orbit.get("mm_token_type_ids")
         if context_has_media and (mm_kwargs is None or mm_token_type_ids is None):
             raise IncompleteTrainingDataError(
                 f"step {step.step_id} lacks exact multimodal processor data"

@@ -1,4 +1,4 @@
-"""A small client for the OCI distribution API, for the registry artifacts ALE moves itself.
+"""A small client for the OCI distribution API, for the registry artifacts Orbit moves itself.
 
 Credentials are Docker's own for the registry: a credential helper or an ``auths`` entry in
 ``$DOCKER_CONFIG/config.json`` (default ``~/.docker``), so ``docker login`` is the only
@@ -23,8 +23,8 @@ from pathlib import Path
 import aiohttp
 from yarl import URL
 
-from ale.core.errors import ProviderStartError
-from ale.run.process import run
+from orbit.core.errors import ProviderStartError
+from orbit.run.process import run
 
 __all__ = ["MANIFEST", "Reference", "Registry", "api", "qualified", "retrying"]
 

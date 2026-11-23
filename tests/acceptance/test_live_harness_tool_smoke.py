@@ -61,7 +61,7 @@ def _tool_evidence(trajectory: dict[str, Any]) -> list[dict[str, object]]:
                     "arguments": _compact(call["arguments"], 300),
                     "result": _compact((result or {}).get("content"), 500),
                     "is_error": bool(
-                        ((result or {}).get("extra") or {}).get("ale", {}).get("is_error")
+                        ((result or {}).get("extra") or {}).get("orbit", {}).get("is_error")
                     ),
                 }
             )
@@ -81,7 +81,7 @@ def test_real_harness_exercises_its_visible_tool_surface(
     settings: tuple[str, ...],
 ) -> None:
     task = task_path(
-        "ALE_LIVE_TOOL_SMOKE_TASK",
+        "ORBIT_LIVE_TOOL_SMOKE_TASK",
         WORKSPACE_ROOT / "ale-tasks-base/tasks/demo/tool_smoke",
     )
     episode = run_task(

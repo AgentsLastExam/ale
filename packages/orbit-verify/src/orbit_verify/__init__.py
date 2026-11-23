@@ -60,7 +60,7 @@ __all__ = [
 _VERIFIER_DIR = Path(
     "C:/logs/verifier"
     if sys.platform == "win32"
-    else "/opt/ale/logs/verifier"
+    else "/opt/orbit/logs/verifier"
     if sys.platform == "darwin"
     else "/logs/verifier"
 )
@@ -233,7 +233,7 @@ def judge(
         if reference is not None:
             evidence.append(inline_evidence(reference, kind="reference"))
         if trajectory:
-            path = os.environ.get("ALE_TRAJECTORY_PATH")
+            path = os.environ.get("ORBIT_TRAJECTORY_PATH")
             if not path:
                 raise EvidenceError("no solver trajectory was recorded")
             evidence.append(read_text_evidence(path, kind="solver_trajectory"))

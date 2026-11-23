@@ -18,7 +18,7 @@ from typing import Any, ClassVar, final
 
 from pydantic import BaseModel, ValidationError
 
-from ale.core.errors import (
+from orbit.core.errors import (
     AgentError,
     AgentUnsupportedError,
     ConfigError,
@@ -26,7 +26,7 @@ from ale.core.errors import (
     PhaseTimeoutError,
     TaskError,
 )
-from ale.core.harness import (
+from orbit.core.harness import (
     AgentRun,
     AutonomousHarness,
     EffectiveAgentResources,
@@ -36,14 +36,14 @@ from ale.core.harness import (
     ResumeSupport,
     TrajectoryParseContext,
 )
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem, SseMcpServer
-from ale.run.harnesses._diagnostics import failure_detail
-from ale.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli
-from ale.run.harnesses._release import ReleaseAssets, ensure_release_binary, release_identity
-from ale.run.subscription import classify_subscription_error
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem, SseMcpServer
+from orbit.run.harnesses._diagnostics import failure_detail
+from orbit.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli
+from orbit.run.harnesses._release import ReleaseAssets, ensure_release_binary, release_identity
+from orbit.run.subscription import classify_subscription_error
 
-LOG_ROOT = ".ale-harness"
+LOG_ROOT = ".orbit-harness"
 PROMPT_PATH = f"{LOG_ROOT}/prompt.md"
 STDOUT_PATH = f"{LOG_ROOT}/stdout.log"
 STDERR_PATH = f"{LOG_ROOT}/stderr.log"

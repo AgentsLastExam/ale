@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from ale.core.harness import (
+from orbit.core.harness import (
     AutonomousHarness,
     EffectiveAgentResources,
     HarnessFamily,

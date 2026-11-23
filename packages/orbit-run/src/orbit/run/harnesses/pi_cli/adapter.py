@@ -10,13 +10,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ale.core.errors import ConfigError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses.base import (
+from orbit.core.errors import ConfigError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -24,16 +24,16 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import PiCliSettings
 
 DEFAULT_CLI_VERSION = "1.4.0"
 #: ``PI_CODING_AGENT_DIR``: models, settings, MCP servers and Skills.
-AGENT_DIR = ".pi-ale/agent"
+AGENT_DIR = ".pi-orbit/agent"
 #: The custom provider every model call goes through.
-_PROVIDER = "ale"
+_PROVIDER = "orbit"
 #: Pi's API type for each Gateway dialect. The Anthropic client appends ``/v1/messages``
 #: to its base URL itself; the OpenAI clients append only the endpoint.
 _APIS = {
@@ -125,7 +125,7 @@ class PiCliHarness(CliHarness):
                         "baseUrl": session.gateway_url + suffix,
                         "api": api,
                         # Interpolated from the environment; the file keeps the reference.
-                        "apiKey": "$ALE_GATEWAY_TOKEN",
+                        "apiKey": "$ORBIT_GATEWAY_TOKEN",
                         "models": [model],
                     }
                 }
@@ -177,7 +177,7 @@ class PiCliHarness(CliHarness):
             "PI_OFFLINE": "1",
             "PI_SKIP_VERSION_CHECK": "1",
             "PI_TELEMETRY": "0",
-            "ALE_GATEWAY_TOKEN": session.token,
+            "ORBIT_GATEWAY_TOKEN": session.token,
             "NO_COLOR": "1",
         }
         return CliCommand(f"{shlex.join(argv)} < {shlex.quote(prompt_path)}", env, requested)

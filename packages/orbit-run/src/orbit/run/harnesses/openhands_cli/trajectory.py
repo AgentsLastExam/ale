@@ -11,8 +11,8 @@ from functools import cached_property
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
@@ -23,7 +23,7 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
@@ -33,7 +33,7 @@ from ale.run.harnesses.base import (
 )
 
 #: ``OPENHANDS_PERSISTENCE_DIR``.
-STATE = ".openhands-ale"
+STATE = ".openhands-orbit"
 #: ``<conversation id>/events/event-<n>-<uuid>.json``, each written once, plus
 #: ``base_state.json`` and delegated conversations below ``subagents/<id>/``.
 CONVERSATIONS = f"{STATE}/conversations"
@@ -367,13 +367,13 @@ def _result(
         return AtifObservationResult(
             source_call_id=call_id,
             content=str(event.get("error") or ""),
-            extra={"ale": {"is_error": True}},
+            extra={"orbit": {"is_error": True}},
         )
     if event.get("kind") == "UserRejectObservation":
         return AtifObservationResult(
             source_call_id=call_id,
             content=str(event.get("rejection_reason") or "rejected"),
-            extra={"ale": {"is_error": True}},
+            extra={"orbit": {"is_error": True}},
         )
     observation = event.get("observation") if isinstance(event.get("observation"), dict) else {}
     refs = None
@@ -389,7 +389,7 @@ def _result(
         source_call_id=call_id,
         content=_content(observation.get("content"), context),
         subagent_trajectory_ref=refs,
-        extra={"ale": {"is_error": True}} if observation.get("is_error") else None,
+        extra={"orbit": {"is_error": True}} if observation.get("is_error") else None,
     )
 
 
@@ -428,10 +428,10 @@ def _mcp_extra(action: dict[str, Any], servers: list[str]) -> dict[str, Any] | N
         return None
     name = str(action.get("tool_name") or "")
     if len(servers) == 1:
-        return {"ale": {"mcp": {"server": servers[0], "tool": name}}}
+        return {"orbit": {"mcp": {"server": servers[0], "tool": name}}}
     for server in sorted(servers, key=len, reverse=True):
         if name.startswith(f"{server}_") and len(name) > len(server) + 1:
-            return {"ale": {"mcp": {"server": server, "tool": name[len(server) + 1 :]}}}
+            return {"orbit": {"mcp": {"server": server, "tool": name[len(server) + 1 :]}}}
     return None
 
 
@@ -502,4 +502,4 @@ def _extra(
     if context.incomplete:
         data["incomplete"] = True
         data["incomplete_reason"] = context.incomplete_reason or "interrupted"
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

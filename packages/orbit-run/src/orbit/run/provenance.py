@@ -1,6 +1,6 @@
 """Assembling a run's provenance record.
 
-The shapes live in ``ale.core.lock``; this is where the values are actually found. They
+The shapes live in ``orbit.core.lock``; this is where the values are actually found. They
 come from four places and no two are alike: the caller knows the task source and the
 configuration, the harness knows its own version, the container runtime knows the image
 digest, and the episode only learns which assets it materialised while running.
@@ -20,12 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from ale.core.config import RunConfig, RunTimeouts
-from ale.core.harness import EffectiveAgentResources
-from ale.core.lock import (
+from orbit.core.config import RunConfig, RunTimeouts
+from orbit.core.harness import EffectiveAgentResources
+from orbit.core.lock import (
     AgentProvenance,
     AgentResourceProvenance,
-    AleVerifyProvenance,
     AssetProvenance,
     AuthenticationProvenance,
     FrameworkProvenance,
@@ -34,6 +33,7 @@ from ale.core.lock import (
     ImageProvenance,
     JudgeProvenance,
     LimitTermination,
+    OrbitVerifyProvenance,
     ResourceProvenance,
     ResumedFrom,
     RunLock,
@@ -43,11 +43,11 @@ from ale.core.lock import (
     TaskVariableProvenance,
     VerificationProvenance,
 )
-from ale.core.result import SandboxOutcome
-from ale.core.sandbox import PreparedTaskImage, ResolvedImage, ResourceAllocation
-from ale.core.taskspec import ImageSpec, TaskSpec, VerifySpec
-from ale.run import __version__
-from ale_verify import JudgeInvocation
+from orbit.core.result import SandboxOutcome
+from orbit.core.sandbox import PreparedTaskImage, ResolvedImage, ResourceAllocation
+from orbit.core.taskspec import ImageSpec, TaskSpec, VerifySpec
+from orbit.run import __version__
+from orbit_verify import JudgeInvocation
 
 __all__ = [
     "ProvenanceInputs",
@@ -232,7 +232,7 @@ def build_lock(
     validation_resolved_image: ResolvedImage | None = None,
     validation_allocation: ResourceAllocation | None = None,
     prepared_validation_image: PreparedTaskImage | None = None,
-    ale_verify: AleVerifyProvenance | None = None,
+    orbit_verify: OrbitVerifyProvenance | None = None,
     termination: LimitTermination | None = None,
     sandbox_outcomes: tuple[SandboxOutcome, ...] = (),
     resumed_from: ResumedFrom | None = None,
@@ -266,7 +266,7 @@ def build_lock(
         validation_rounds=inputs.validation_rounds,
         validation_stage=validation_stage,
         seed=seed,
-        ale_verify=ale_verify,
+        orbit_verify=orbit_verify,
         judges=inputs.judges,
         asset=asset,
         verification=_verification(

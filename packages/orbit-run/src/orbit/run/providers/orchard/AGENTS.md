@@ -87,7 +87,7 @@ declared host loads and another is refused.
 
 ## A macOS VM that runs out of its memory
 
-**Problem.** ALE cannot tell a macOS Sandbox lost to memory from one lost otherwise, so
+**Problem.** Orbit cannot tell a macOS Sandbox lost to memory from one lost otherwise, so
 such a loss stays an environment error, which is retried.
 
 **Context.** Measured on a 16 GB Mac mini on macOS 27, with Orchard 0.58, and a 4096 MiB VM
@@ -99,7 +99,7 @@ such a loss stays an environment error, which is retried.
 - 400 processes of 16 MiB lived on in swap. 400 of 48 MiB, past memory and free disk, froze
   the guest at about 12 GiB: guestd, a new SSH session and Tart's guest agent stopped
   answering, the VM's two vCPUs ran flat out, Orchard reported it running, and the Host
-  itself reached memory pressure after five minutes. ALE's command ended after its timeout,
+  itself reached memory pressure after five minutes. Orbit's command ended after its timeout,
   or with `GuestUnreachableError` once Orchard dropped guestd's channel.
 - A RAM disk needs no privilege (`hdiutil attach -nomount ram://...`) and fills to its size
   or until macOS drops it (at 12 GiB of 20), swapped like any memory; the VM lived.

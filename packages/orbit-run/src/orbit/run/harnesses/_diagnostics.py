@@ -2,7 +2,7 @@
 
 import json
 
-from ale.run.recording import Redactor
+from orbit.run.recording import Redactor
 
 
 def error_text(value: object) -> str:

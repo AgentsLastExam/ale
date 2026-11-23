@@ -18,8 +18,8 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, solver_saves
-from ale.core.sandbox import (
+from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, solver_saves
+from orbit.core.sandbox import (
     ExecResult,
     Identity,
     ImageRef,
@@ -29,7 +29,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     verifiers_needs,
 )
-from ale.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources, TaskSpec
+from orbit.core.taskspec import ImageKind, NetworkMode, OperatingSystem, Resources, TaskSpec
 
 __all__ = [
     "IDENTIFIER",
@@ -398,7 +398,7 @@ class RunPlan(BaseModel):
     model_config = _STRICT
 
     label: str = ""
-    """What operators call the Run, such as its ALE run ID."""
+    """What operators call the Run, such as its Orbit run ID."""
     concurrency: int = Field(ge=1)
     items: tuple[PlanItem, ...]
 
@@ -471,7 +471,7 @@ class Grant(BaseModel):
 
 
 def _key(token: str) -> bytes:
-    return hashlib.sha256(b"ale-fleet-grant\0" + token.encode()).digest()
+    return hashlib.sha256(b"orbit-fleet-grant\0" + token.encode()).digest()
 
 
 def sign_grant(grant: Grant, token: str) -> str:

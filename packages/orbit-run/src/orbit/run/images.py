@@ -1,7 +1,7 @@
 """Provider-owned immutable image acquisition and offline validation.
 
-A VM disk ALE prepares from another disk is a chain of qcow2 layers: a base, then
-overlays, each holding only what changed on the one below it. Beside every layer ALE makes
+A VM disk Orbit prepares from another disk is a chain of qcow2 layers: a base, then
+overlays, each holding only what changed on the one below it. Beside every layer Orbit makes
 is its record: the identity of the layer it sits on and the SHA-256 of its own file, from
 which its identity follows as an OCI ChainID does. A base's identity is the one it was
 resolved under. A layer names its parent by a path relative to itself, so a chain stays
@@ -28,13 +28,13 @@ from typing import BinaryIO, TextIO
 import aiohttp
 import zstandard
 
-from ale.core.errors import ProviderStartError
-from ale.core.ids import content_hash
-from ale.core.sandbox import ImageRef, PreparedTaskImage, ResolvedImage
-from ale.core.taskspec import ImageKind
-from ale.run.oci import MANIFEST, Reference, Registry, api, qualified, retrying
-from ale.run.process import run
-from ale.run.sources import cache_root
+from orbit.core.errors import ProviderStartError
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import ImageRef, PreparedTaskImage, ResolvedImage
+from orbit.core.taskspec import ImageKind
+from orbit.run.oci import MANIFEST, Reference, Registry, api, qualified, retrying
+from orbit.run.process import run
+from orbit.run.sources import cache_root
 
 __all__ = [
     "acquire_lock",
@@ -66,13 +66,13 @@ __all__ = [
 #: qcow2 file cut into consecutive chunks, each compressed alone with zstd, so no layer
 #: nears a registry's layer limit, a pull reads several chunks at once and resumes chunk
 #: by chunk, and every chunk is written at its offset into the one disk the runtime uses.
-VM_DISK = "application/vnd.ale.vm-disk.v1"
-VM_DISK_CHUNK = "application/vnd.ale.vm-disk.chunk.v1+zstd"
+VM_DISK = "application/vnd.orbit.vm-disk.v1"
+VM_DISK_CHUNK = "application/vnd.orbit.vm-disk.chunk.v1+zstd"
 #: Manifest annotations: the disk file's size, and the size of every chunk but the last.
-_DISK_SIZE = "ale.vm-disk.size"
-_DISK_CHUNK_SIZE = "ale.vm-disk.chunk-size"
+_DISK_SIZE = "orbit.vm-disk.size"
+_DISK_CHUNK_SIZE = "orbit.vm-disk.chunk-size"
 #: Layer annotation: the SHA-256 of the chunk's uncompressed bytes.
-_CHUNK_DIGEST = "ale.vm-disk.chunk.digest"
+_CHUNK_DIGEST = "orbit.vm-disk.chunk.digest"
 _EMPTY_CONFIG = {
     "mediaType": "application/vnd.oci.empty.v1+json",
     "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -187,7 +187,7 @@ async def resolve_registry_reference(reference: str) -> str:
         )
     except OSError:
         raise ProviderStartError(
-            "Resolving an OCI tag requires Docker CLI with Buildx on the ALE Host; "
+            "Resolving an OCI tag requires Docker CLI with Buildx on the Orbit Host; "
             "install them or supply a digest-pinned image reference"
         ) from None
     if code != 0:
@@ -205,7 +205,7 @@ async def resolve_registry_reference(reference: str) -> str:
 
 
 async def classify_image(reference: str) -> ImageKind:
-    """Whether a registry reference names a container image or an ALE VM disk, by its
+    """Whether a registry reference names a container image or an Orbit VM disk, by its
     manifest.
 
     A reference pinned by digest that this Host already holds, as a pulled VM disk or as a
@@ -272,7 +272,7 @@ async def classify_image(reference: str) -> ImageKind:
         return ImageKind.CONTAINER
     shown = next((str(kind) for kind in (artifact, foreign, config_type, media_type) if kind), "")
     raise ProviderStartError(
-        f"{reference} is neither a container image nor an ALE VM disk "
+        f"{reference} is neither a container image nor an Orbit VM disk "
         f"({shown[:100] or 'unknown type'})"
     )
 
@@ -402,7 +402,7 @@ async def resolve_vm_image(
                     if not await valid_qcow2(disk):
                         await remove_disk(disk)
                         await _download(registry, manifest, disk)
-                    # ALE keeps the pulled disk, so the layers built on it use it in place.
+                    # Orbit keeps the pulled disk, so the layers built on it use it in place.
                     _write_record(disk, {"parent": None, "identity": manifest.digest})
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
@@ -507,7 +507,7 @@ def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
 
 
 async def resolve_prepared_vm_image(image: PreparedTaskImage) -> ResolvedImage:
-    """The prepared disk as it is now: a standalone qcow2, or a chain ALE layered whose
+    """The prepared disk as it is now: a standalone qcow2, or a chain Orbit layered whose
     layers still add up to the identity it was prepared under."""
     if image.kind is not ImageKind.VM:
         raise ProviderStartError("QemuProvider requires a prepared VM image")
@@ -543,11 +543,11 @@ async def record_layer(disk: Path, parent: str) -> str:
 
 
 async def layer_identity(disk: Path, *, on: tuple[Path, str] | None = None) -> str:
-    """The identity of a disk ALE layered, once every layer of it is shown to sit on the
+    """The identity of a disk Orbit layered, once every layer of it is shown to sit on the
     parent its record names. Hashing is done when a layer is made, not here.
 
     ``on`` names a disk below it and that disk's identity, where the check stops: a
-    snapshot sits on whatever disk its Task resolved to, which need not be ALE's.
+    snapshot sits on whatever disk its Task resolved to, which need not be Orbit's.
     """
     chain = await _chain(disk)
     identity: str | None = None
@@ -560,7 +560,7 @@ async def layer_identity(disk: Path, *, on: tuple[Path, str] | None = None) -> s
     for layer in reversed(chain):
         record = read_layer_record(layer)
         if record is None:
-            raise ProviderStartError(f"{layer} is not a VM disk layer ALE made")
+            raise ProviderStartError(f"{layer} is not a VM disk layer Orbit made")
         if record.get("parent") != identity:
             raise ProviderStartError(
                 f"{layer} was made on {record.get('parent')}, but sits on {identity}"
@@ -612,8 +612,8 @@ async def chain_mounts(disk: Path, *, writable: bool = False) -> list[str]:
 async def base_layer(image: PreparedTaskImage) -> Path:
     """The disk of ``image`` as the base of a chain, recorded under the image's identity.
 
-    A disk ALE keeps and recorded as a base, such as one it pulled from a registry, is the
-    base as it is. Any other disk may be compressed or not ALE's to keep, so the base is an
+    A disk Orbit keeps and recorded as a base, such as one it pulled from a registry, is the
+    base as it is. Any other disk may be compressed or not Orbit's to keep, so the base is an
     uncompressed copy of it, made once per Host in ``vm-builds`` beside the layers on it.
     """
     source = Path(image.runtime_ref)
@@ -648,7 +648,7 @@ async def base_layer(image: PreparedTaskImage) -> Path:
 
 
 async def finished_layer(disk: Path) -> str | None:
-    """The identity of a layer ALE finished making at ``disk``, or None when there is none."""
+    """The identity of a layer Orbit finished making at ``disk``, or None when there is none."""
     if not _record_path(disk).is_file() or not await valid_qcow2(disk):
         return None
     try:
@@ -658,8 +658,8 @@ async def finished_layer(disk: Path) -> str | None:
 
 
 async def remove_disk(disk: Path) -> None:
-    """Delete a cached disk ALE is to make again, and its layer record, unless another
-    disk in the ALE cache backs onto it.
+    """Delete a cached disk Orbit is to make again, and its layer record, unless another
+    disk in the Orbit cache backs onto it.
 
     A layer holds only what differs from the exact parent it was written on, so a new
     parent at the same path would change what every disk above it reads. The record goes
@@ -671,7 +671,7 @@ async def remove_disk(disk: Path) -> None:
             if child.resolve() != target and _backing_of(child) == target:
                 raise ProviderStartError(
                     f"the cached VM disk {disk} must be made again, but {child} is built on "
-                    "it; remove that first (a snapshot with `ale sandbox destroy`)"
+                    "it; remove that first (a snapshot with `orbit sandbox destroy`)"
                 )
     _record_path(disk).unlink(missing_ok=True)
     disk.unlink(missing_ok=True)
@@ -709,7 +709,7 @@ def _record_path(disk: Path) -> Path:
 
 
 def read_layer_record(disk: Path) -> dict[str, object] | None:
-    """The record ALE keeps beside a layer it made, or None."""
+    """The record Orbit keeps beside a layer it made, or None."""
     try:
         record = json.loads(_record_path(disk).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -795,8 +795,8 @@ async def _read_manifest(registry: Registry, reference: Reference) -> _DiskManif
     if not isinstance(manifest, dict) or manifest.get("mediaType") != MANIFEST or kind != VM_DISK:
         shown = (kind if isinstance(kind, str) else media_type)[:100] or "unknown type"
         raise ProviderStartError(
-            f"{reference} is not an ALE VM disk ({shown}); "
-            "publish its qcow2 with `ale vm-image push`"
+            f"{reference} is not an Orbit VM disk ({shown}); "
+            "publish its qcow2 with `orbit vm-image push`"
         )
     try:
         annotations = manifest["annotations"]
@@ -837,12 +837,12 @@ async def _push_chunks(
 ) -> list[dict[str, object]]:
     loop = asyncio.get_running_loop()
     slots = asyncio.Semaphore(_UPLOADS)
-    executor = ThreadPoolExecutor(_UPLOADS, thread_name_prefix="ale-vm-push")
+    executor = ThreadPoolExecutor(_UPLOADS, thread_name_prefix="orbit-vm-push")
 
     async def push(offset: int) -> dict[str, object]:
         async with slots:
             # A chunk is compressed in full before its upload, which must name its digest.
-            with tempfile.TemporaryFile(dir=scratch, prefix=".ale-vm-chunk-") as spool:
+            with tempfile.TemporaryFile(dir=scratch, prefix=".orbit-vm-chunk-") as spool:
                 length = min(CHUNK_SIZE, size - offset)
                 blob, blob_size, digest = await loop.run_in_executor(
                     executor, _compress_chunk, fd, offset, length, spool
@@ -921,7 +921,7 @@ async def _download(registry: Registry, manifest: _DiskManifest, disk: Path) -> 
 
 async def _write_disk(registry: Registry, manifest: _DiskManifest, partial: Path) -> None:
     loop = asyncio.get_running_loop()
-    executor = ThreadPoolExecutor(TRANSFERS, thread_name_prefix="ale-vm-pull")
+    executor = ThreadPoolExecutor(TRANSFERS, thread_name_prefix="orbit-vm-pull")
     fd = os.open(partial, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         if os.fstat(fd).st_size == manifest.size:

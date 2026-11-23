@@ -6,16 +6,16 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession, web
 
-from ale.core.trace import read_jsonl
-from ale.run.gateway.openai_chat_completions import (
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway.openai_chat_completions import (
     quota,
     stream_completed,
     stream_error,
     usage_from_stream,
 )
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import CallUsage, GatewaySession, Limits
-from ale.run.recording import EpisodeRecording
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import CallUsage, GatewaySession, Limits
+from orbit.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
 
@@ -220,7 +220,7 @@ async def test_chat_usage_limits_stop_the_call_after_the_threshold(
         await gateway.stop()
         await upstream.stop()
 
-    assert body["error"]["ale"]["limit"] == expected_limit
+    assert body["error"]["orbit"]["limit"] == expected_limit
     assert upstream.calls == 1
 
 

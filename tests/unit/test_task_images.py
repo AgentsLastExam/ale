@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock
 import pytest
 from tests.support import CONTAINER_BASE, edit_task_config
 
-from ale.core.capability import Arch, CapabilityProfile
-from ale.core.config import RunConfig, SandboxRetentionConfig
-from ale.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
-from ale.core.ids import content_hash
-from ale.core.sandbox import ExecResult, ImageRef, PreparedTaskImage, Provider
-from ale.core.task import Task
-from ale.core.taskspec import (
+from orbit.core.capability import Arch, CapabilityProfile
+from orbit.core.config import RunConfig, SandboxRetentionConfig
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError, TaskDefinitionError
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import ExecResult, ImageRef, PreparedTaskImage, Provider
+from orbit.core.task import Task
+from orbit.core.taskspec import (
     ContainerFeature,
     ImageKind,
     ImageSpec,
@@ -22,19 +22,19 @@ from ale.core.taskspec import (
     OperatingSystem,
     VerifySpec,
 )
-from ale.run.cli.tasks import _prepare_images
-from ale.run.harnesses.builtin import NopHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers import ProviderRegistry
-from ale.run.providers.fleet import FleetProvider
-from ale.run.task_images import (
+from orbit.run.cli.tasks import _prepare_images
+from orbit.run.harnesses.builtin import NopHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.fleet import FleetProvider
+from orbit.run.task_images import (
     prepare_task_image,
     prepare_task_image_result,
     prepare_verifier_image,
     prepare_verifier_image_result,
     resolve_image_kinds,
 )
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 
@@ -58,9 +58,9 @@ def framework_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         return image, False
 
     LAYERED.clear()
-    monkeypatch.setattr("ale.run.task_images.with_framework", layer)
-    monkeypatch.setattr("ale.run.task_images.framed_disk", frame)
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "ale-cache"))
+    monkeypatch.setattr("orbit.run.task_images.with_framework", layer)
+    monkeypatch.setattr("orbit.run.task_images.framed_disk", frame)
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "orbit-cache"))
 
 
 def _task(write_task_repo, **kwargs: object) -> object:  # type: ignore[no-untyped-def]
@@ -90,7 +90,7 @@ def _prepared(kind: ImageKind, source: str = "solver-local") -> PreparedTaskImag
         "kind": kind,
         "source": source,
         "input_identity": digest,
-        "runtime_ref": "ale-local:fixture" if kind is ImageKind.CONTAINER else "/tmp/disk.qcow2",
+        "runtime_ref": "orbit-local:fixture" if kind is ImageKind.CONTAINER else "/tmp/disk.qcow2",
         "prepared_identity": digest,
     }
     if source == "external-ref":
@@ -197,8 +197,8 @@ def _qemu_builder(  # type: ignore[no-untyped-def]
     is told.
 
     Its ``save_image`` keeps the layer it is given; ``finished_layer`` reads it back."""
-    import ale.run.task_images as images
-    from ale.run.providers.qemu import QemuSandbox
+    import orbit.run.task_images as images
+    from orbit.run.providers.qemu import QemuSandbox
 
     built: dict[Path, str] = {}
     seen: SimpleNamespace = SimpleNamespace(
@@ -258,7 +258,7 @@ def _qemu_builder(  # type: ignore[no-untyped-def]
 async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
     windows_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ale.run.task_images as images
+    import orbit.run.task_images as images
 
     seen, built = _qemu_builder(monkeypatch, tmp_path)
     registry = _Registry()
@@ -324,7 +324,7 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
             )
         }
     )
-    monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda task: None)
+    monkeypatch.setattr("orbit.run.cli.tasks.observe_task_assets", lambda task: None)
     results = await _prepare_images([windows_task, other], registry)  # type: ignore[arg-type]
     assert results[0].image.prepared_identity != results[1].image.prepared_identity
     assert len(seen.requests) == 8  # The unchanged first Task reuses its layer; the larger builds.
@@ -334,7 +334,7 @@ async def test_windows_image_cache_tracks_all_inputs_including_cli_batches(
 async def test_a_linux_image_is_built_on_its_base_disk_as_on_windows(
     linux_vm_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ale.run.task_images as images
+    import orbit.run.task_images as images
 
     seen, built = _qemu_builder(monkeypatch, tmp_path)
     registry = _Registry()
@@ -345,15 +345,15 @@ async def test_a_linux_image_is_built_on_its_base_disk_as_on_windows(
     (request,) = seen.requests
     assert request.os is OperatingSystem.LINUX and request.user == "user"
     assert request.network.mode is NetworkMode.OPEN
-    # As root, in a copy of environment/ under root-only /opt/ale, which it leaves behind.
+    # As root, in a copy of environment/ under root-only /opt/orbit, which it leaves behind.
     (sandbox,) = seen.sandboxes
-    assert sandbox.upload_dir.await_args.args[1] == "/opt/ale/environment"
+    assert sandbox.upload_dir.await_args.args[1] == "/opt/orbit/environment"
     build, cleanup = sandbox.exec.await_args_list
     assert build.args[0] == ["bash", "build.sh"]
-    assert build.kwargs["cwd"] == "/opt/ale/environment"
-    assert build.kwargs["env"] == {"ALE_HOME": "/home/user"}
+    assert build.kwargs["cwd"] == "/opt/orbit/environment"
+    assert build.kwargs["env"] == {"ORBIT_HOME": "/home/user"}
     assert "identity" not in build.kwargs
-    assert cleanup.args[0] == ["rm", "-rf", "/opt/ale/environment"]
+    assert cleanup.args[0] == ["rm", "-rf", "/opt/orbit/environment"]
     (layer,) = built
     sandbox.save_image.assert_awaited_once_with(layer)
     assert layer.parent == tmp_path / "cache/vm-builds"
@@ -374,7 +374,7 @@ async def test_a_linux_image_is_built_on_its_base_disk_as_on_windows(
     changes = (
         lambda: setattr(seen, "runner", "sha256:" + "1" * 64),
         lambda: setattr(seen, "builder", "sha256:" + "2" * 64),
-        lambda: monkeypatch.setattr(images, "LINUX_BUILD_CONTRACT", "ale-linux-bash/next"),
+        lambda: monkeypatch.setattr(images, "LINUX_BUILD_CONTRACT", "orbit-linux-bash/next"),
         lambda: monkeypatch.setattr(images, "LINUX_DISCARD", (*images.LINUX_DISCARD, "-v")),
         lambda: monkeypatch.setattr(images, "framework_identity", lambda **_: "sha256:" + "3" * 64),
     )
@@ -432,7 +432,7 @@ def _macos_builder(  # type: ignore[no-untyped-def]
     build_exit: int = 0,
     homes: tuple[str | None, str | None] = ("/Users/admin", "/Users/admin"),
 ):
-    from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
+    from orbit.run.providers.orchard import OrchardProvider, OrchardSandbox
 
     provider = OrchardProvider(SimpleNamespace())
     base = _prepared(ImageKind.VM, "external-ref")
@@ -468,7 +468,7 @@ def _macos_builder(  # type: ignore[no-untyped-def]
 async def test_macos_image_is_built_once_on_its_base(
     macos_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ale.run.task_images as images
+    import orbit.run.task_images as images
 
     monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
     registry, sandbox, requests, base = _macos_builder(monkeypatch)
@@ -481,16 +481,16 @@ async def test_macos_image_is_built_once_on_its_base(
         "artifact-check",
     ]
     assert second.steps[2].outcome == "reused" and first.image == second.image
-    assert first.image.runtime_ref.startswith("ale-built-")
+    assert first.image.runtime_ref.startswith("orbit-built-")
     assert first.image.base_materials == (base.prepared_identity,)
     (request,) = requests
     assert request.os is OperatingSystem.MACOS and request.prepared_image == base
     assert (request.user, request.sudo) == ("admin", True)
     build, cleanup = sandbox.exec.await_args_list
     assert build.args[0] == ["bash", "build.sh"]
-    assert build.kwargs["cwd"] == "/opt/ale/environment"
-    assert build.kwargs["env"] == {"ALE_HOME": "/Users/admin"}
-    assert cleanup.args[0] == ["rm", "-rf", "/opt/ale/environment"]
+    assert build.kwargs["cwd"] == "/opt/orbit/environment"
+    assert build.kwargs["env"] == {"ORBIT_HOME": "/Users/admin"}
+    assert cleanup.args[0] == ["rm", "-rf", "/opt/orbit/environment"]
     sandbox.save_image.assert_awaited_once_with(first.image)
     sandbox.destroy.assert_awaited_once()
 
@@ -499,7 +499,7 @@ async def test_macos_image_is_built_once_on_its_base(
 async def test_macos_build_gets_the_home_of_the_account_it_creates(
     write_task_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
-    import ale.run.task_images as images
+    import orbit.run.task_images as images
 
     repository = write_task_repo(
         config={
@@ -519,18 +519,18 @@ async def test_macos_build_gets_the_home_of_the_account_it_creates(
     assert (request.user, request.sudo) == ("admin", True)
     sandbox.account_home.assert_awaited_with("tester")
     build, _ = sandbox.exec.await_args_list
-    assert build.kwargs["env"] == {"ALE_HOME": "/Users/tester"}
+    assert build.kwargs["env"] == {"ORBIT_HOME": "/Users/tester"}
 
 
 @pytest.mark.parametrize(
     ("built", "message"),
-    [(None, r"has no account 'admin'"), ("/Users/elsewhere", r"not ALE_HOME \(/Users/admin\)")],
+    [(None, r"has no account 'admin'"), ("/Users/elsewhere", r"not ORBIT_HOME \(/Users/admin\)")],
 )
 @pytest.mark.asyncio
-async def test_macos_build_must_leave_the_account_at_ale_home(
+async def test_macos_build_must_leave_the_account_at_orbit_home(
     macos_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, built, message
 ) -> None:  # type: ignore[no-untyped-def]
-    import ale.run.task_images as images
+    import orbit.run.task_images as images
 
     monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
     registry, sandbox, _, _ = _macos_builder(monkeypatch, homes=("/Users/admin", built))
@@ -544,7 +544,7 @@ async def test_macos_build_must_leave_the_account_at_ale_home(
 async def test_failed_macos_build_keeps_no_image(
     macos_task: Task, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ale.run.task_images as images
+    import orbit.run.task_images as images
 
     monkeypatch.setattr(images, "cache_root", lambda: tmp_path / "cache")
     registry, sandbox, _, _ = _macos_builder(monkeypatch, build_exit=1)
@@ -583,7 +583,7 @@ async def test_buildx_uses_fixed_context_and_observes_container_identity(
             return 0, "", ""
         return 0, "sha256:" + "c" * 64 + "\n", ""
 
-    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    monkeypatch.setattr("orbit.run.task_images._run", fake_run)
     registry = _Registry()
     prepared = await prepare_task_image(task, registry.providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
     build = next(command for command in commands if command[:3] == ("docker", "buildx", "build"))
@@ -624,7 +624,7 @@ async def test_a_containerd_image_store_is_found_by_its_manifest_digest(
             return 0, manifest + "\n", ""
         return 1, "", "No such image"
 
-    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    monkeypatch.setattr("orbit.run.task_images._run", fake_run)
     prepared = await prepare_task_image(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
     assert prepared.prepared_identity == manifest
 
@@ -654,7 +654,7 @@ async def test_unchanged_task_uses_its_prepared_image_without_building(
             return 0, argv[-1], ""
         return 1, "", "No such image"
 
-    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    monkeypatch.setattr("orbit.run.task_images._run", fake_run)
     first = await prepare_task_image_result(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
     second = await prepare_task_image_result(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
     assert len(builds) == 1
@@ -712,7 +712,7 @@ async def test_build_failure_never_falls_back(
             return 0, "", ""
         return 1, "", "Dockerfile line 3 failed"
 
-    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    monkeypatch.setattr("orbit.run.task_images._run", fake_run)
     registry = _Registry()
     with pytest.raises(TaskDefinitionError, match="Dockerfile line 3"):
         await prepare_task_image(task, registry.providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
@@ -801,7 +801,7 @@ async def test_image_assets_do_not_change_the_local_source_identity(
             return 0, "", ""
         return 0, "sha256:" + "c" * 64, ""
 
-    monkeypatch.setattr("ale.run.task_images._run", fake_run)
+    monkeypatch.setattr("orbit.run.task_images._run", fake_run)
     first = await prepare_task_image(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
     asset.write_text("two")
     second = await prepare_task_image(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
@@ -877,7 +877,7 @@ async def test_verifier_builds_tests_dockerfile_unless_an_image_is_named(
         built.append(kwargs)
         return _prepared(ImageKind.CONTAINER, "verifier-local"), []
 
-    monkeypatch.setattr("ale.run.task_images._prepare_local", fake_local)
+    monkeypatch.setattr("orbit.run.task_images._prepare_local", fake_local)
     await prepare_verifier_image(task, _Registry().providers[ImageKind.CONTAINER])  # type: ignore[arg-type]
     assert built[0]["dockerfile"] == task.folder.root / "tests/Dockerfile"  # type: ignore[attr-defined]
     assert built[0]["exclude"] == ()
@@ -929,8 +929,8 @@ async def test_registry_images_are_classified_once_before_preparation(
         read.append(reference)
         return ImageKind.VM if "/vm" in reference else ImageKind.CONTAINER
 
-    monkeypatch.setattr("ale.run.task_images.classify_image", classify)
-    monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda task: None)
+    monkeypatch.setattr("orbit.run.task_images.classify_image", classify)
+    monkeypatch.setattr("orbit.run.cli.tasks.observe_task_assets", lambda task: None)
     named = write_task_repo(
         "ale-tasks-named",
         tasks=("one", "two"),
@@ -963,7 +963,7 @@ async def test_an_image_is_prepared_once_for_each_provider_that_runs_it(
     write_task_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
     """Prepared images are Provider-specific, so one is shared only within a Provider."""
-    monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda task: None)
+    monkeypatch.setattr("orbit.run.cli.tasks.observe_task_assets", lambda task: None)
     repository = write_task_repo(
         "ale-tasks-shared",
         tasks=("plain", "perf", "checked"),
@@ -1008,7 +1008,7 @@ async def test_a_registry_image_decided_a_vm_takes_no_container_features(
     async def classify(reference: str) -> ImageKind:
         return ImageKind.VM if "/vm" in reference else ImageKind.CONTAINER
 
-    monkeypatch.setattr("ale.run.task_images.classify_image", classify)
+    monkeypatch.setattr("orbit.run.task_images.classify_image", classify)
     repository = write_task_repo(
         "ale-tasks-features",
         tasks=("tool", "vm"),
@@ -1033,7 +1033,7 @@ async def test_an_episode_decides_its_image_kinds_before_preparing_them(
     write_task_repo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]
     """An episode reached without ``_prepare_images`` still prepares only decided kinds."""
-    from ale.run.episode import run_episode
+    from orbit.run.episode import run_episode
 
     task = _task(
         write_task_repo, config={"environment": {"image": "ghcr.io/acme/vm:1"}}, dockerfile=None
@@ -1049,9 +1049,9 @@ async def test_an_episode_decides_its_image_kinds_before_preparing_them(
         prepared.append((task.spec.image.kind, provider))
         raise ProviderStartError("stop before a Sandbox starts")
 
-    monkeypatch.setattr("ale.run.task_images.classify_image", classify)
-    monkeypatch.setattr("ale.run.episode.prepare_task_image", prepare)
-    monkeypatch.setattr("ale.run.episode.observe_task_assets", lambda task: None)
+    monkeypatch.setattr("orbit.run.task_images.classify_image", classify)
+    monkeypatch.setattr("orbit.run.episode.prepare_task_image", prepare)
+    monkeypatch.setattr("orbit.run.episode.observe_task_assets", lambda task: None)
     registry = _Registry()
     with pytest.raises(ProviderStartError, match="stop before"):
         await run_episode(task, EpisodeProtocol(NopHarness()), registry, run_dir=tmp_path / "runs")
@@ -1065,7 +1065,7 @@ async def test_an_episode_selects_by_the_retention_it_is_given(
     write_task_repo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]
     """A solver whose episode snapshots it goes to a Provider that saves snapshots."""
-    from ale.run.episode import run_episode
+    from orbit.run.episode import run_episode
 
     task = _task(
         write_task_repo,
@@ -1077,8 +1077,8 @@ async def test_an_episode_selects_by_the_retention_it_is_given(
     async def prepare(task: Task, _provider: object) -> PreparedTaskImage:
         raise ProviderStartError(f"stop on {task.provider}")
 
-    monkeypatch.setattr("ale.run.episode.prepare_task_image", prepare)
-    monkeypatch.setattr("ale.run.episode.observe_task_assets", lambda task: None)
+    monkeypatch.setattr("orbit.run.episode.prepare_task_image", prepare)
+    monkeypatch.setattr("orbit.run.episode.observe_task_assets", lambda task: None)
     registry = ProviderRegistry(
         RunConfig.model_validate({"sandbox": {"providers": ["daytona", "docker:runc"]}})
     )
@@ -1097,7 +1097,7 @@ async def test_an_episode_checks_on_this_host_only_the_leaves_it_selected_itself
     write_task_repo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]
     """A caller that selected its Tasks' Providers checked them before its first episode."""
-    from ale.run.episode import run_episode
+    from orbit.run.episode import run_episode
 
     task = _task(
         write_task_repo, config={"environment": {"image": "ghcr.io/acme/tool:1"}}, dockerfile=None
@@ -1110,7 +1110,7 @@ async def test_an_episode_checks_on_this_host_only_the_leaves_it_selected_itself
         raise ProviderStartError("checked on this Host")
 
     monkeypatch.setattr(ProviderRegistry, "preflight", preflight)
-    monkeypatch.setattr("ale.run.episode.observe_task_assets", lambda task: None)
+    monkeypatch.setattr("orbit.run.episode.observe_task_assets", lambda task: None)
     registry = _Registry()
     with pytest.raises(ProviderStartError, match="checked on this Host"):
         await run_episode(task, EpisodeProtocol(NopHarness()), registry, run_dir=tmp_path / "runs")
@@ -1173,7 +1173,7 @@ def _slurm(monkeypatch: pytest.MonkeyPatch) -> tuple[Provider, list[object]]:
 async def test_slurm_prepares_a_tasks_own_build_on_the_cluster(  # type: ignore[no-untyped-def]
     write_task_repo, monkeypatch
 ) -> None:
-    """No container runtime runs where ALE drives Slurm, so the build context, less setup/,
+    """No container runtime runs where Orbit drives Slurm, so the build context, less setup/,
     goes to the cluster as a recipe, keyed by what goes into it, and nothing is built or
     framed here."""
     task = _task(write_task_repo)
@@ -1214,7 +1214,7 @@ async def test_slurm_pins_a_named_image_by_its_registry_before_preparing_it(  # 
         asked.append(reference)
         return pinned
 
-    monkeypatch.setattr("ale.run.task_images.pin", pin)
+    monkeypatch.setattr("orbit.run.task_images.pin", pin)
     slurm, recipes = _slurm(monkeypatch)
     result = await prepare_task_image_result(task, slurm)
     (recipe,) = recipes

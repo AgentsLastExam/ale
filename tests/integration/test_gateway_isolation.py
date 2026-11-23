@@ -14,12 +14,12 @@ import socket
 import pytest
 from aiohttp import web
 
-from ale.core.sandbox import Identity, Sandbox, SandboxRequest
-from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
-from ale.run.gateway.proxy import EgressProxy
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession, SessionRegistry
-from ale.run.providers.docker import DockerProvider
+from orbit.core.sandbox import Identity, Sandbox, SandboxRequest
+from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
+from orbit.run.gateway.proxy import EgressProxy
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession, SessionRegistry
+from orbit.run.providers.docker import DockerProvider
 from tests.support import (
     CONTAINER_BASE,
     prepare_reference,
@@ -59,7 +59,7 @@ def sandboxes(request: pytest.FixtureRequest) -> tuple[DockerProvider, Resources
 
 
 #: Installs Docker from the image's distribution, starts it and runs a container that
-#: publishes a port: its rules are in netstack's nf_tables, beside ALE's chains in its
+#: publishes a port: its rules are in netstack's nf_tables, beside Orbit's chains in its
 #: iptables tables.
 _ENGINE = """
 export DEBIAN_FRONTEND=noninteractive
@@ -119,7 +119,7 @@ async def test_sandbox_reaches_the_gateway_and_nothing_else(
                 await _run_an_engine(sandbox)
             script = (
                 "import json,os,urllib.request\n"
-                "url=os.environ['ALE_GATEWAY_URL']\n"
+                "url=os.environ['ORBIT_GATEWAY_URL']\n"
                 "req=urllib.request.Request(\n"
                 "    url+'/v1/messages',\n"
                 "    data=json.dumps({'messages':[]}).encode(),\n"

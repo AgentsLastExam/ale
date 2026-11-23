@@ -10,11 +10,11 @@ those filters and the VM's size; the Provider applies them.
 
 from __future__ import annotations
 
-from ale.core.errors import ProviderStartError
-from ale.core.sandbox import SANDBOX_GATEWAY_PORT
-from ale.run import guestd
-from ale.run.providers.docker import tc
-from ale.run.transport import GuestClient
+from orbit.core.errors import ProviderStartError
+from orbit.core.sandbox import SANDBOX_GATEWAY_PORT
+from orbit.run import guestd
+from orbit.run.providers.docker import tc
+from orbit.run.transport import GuestClient
 
 __all__ = [
     "OOM_KILLS",

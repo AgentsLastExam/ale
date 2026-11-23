@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import TaskDefinitionError
-from ale.run.content import tree_digest
+from orbit.core.errors import TaskDefinitionError
+from orbit.run.content import tree_digest
 
 pytestmark = pytest.mark.unit
 

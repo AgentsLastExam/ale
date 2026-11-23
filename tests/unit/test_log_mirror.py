@@ -10,10 +10,10 @@ from typing import cast
 
 import pytest
 
-from ale.core.sandbox import Sandbox, SandboxFile
-from ale.core.taskspec import OperatingSystem
-from ale.run.protocol import log_mirror
-from ale.run.protocol.log_mirror import LogMirror
+from orbit.core.sandbox import Sandbox, SandboxFile
+from orbit.core.taskspec import OperatingSystem
+from orbit.run.protocol import log_mirror
+from orbit.run.protocol.log_mirror import LogMirror
 
 pytestmark = pytest.mark.unit
 
@@ -71,7 +71,7 @@ def mirror(tmp_path: Path, guest: MemoryFiles, *paths: str) -> LogMirror:
         cast(Sandbox, guest),
         home=guest.home,
         os=OperatingSystem.WINDOWS if ":" in guest.home else OperatingSystem.LINUX,
-        paths=paths or (".ale-harness", ".codex-ale/sessions"),
+        paths=paths or (".orbit-harness", ".codex-orbit/sessions"),
         target=tmp_path,
     )
 
@@ -84,21 +84,21 @@ async def test_copies_declared_files_and_directories_at_their_home_relative_path
     tmp_path: Path,
 ) -> None:
     guest = MemoryFiles()
-    guest.put(".ale-harness/stdout.log", b"stdout")
-    guest.put(".ale-harness/stderr.log", b"")
-    guest.put(".codex-ale/sessions/2026/rollout-a.jsonl", b"root\n")
-    guest.put(".codex-ale/sessions/2026/subagents/child.jsonl", b"child\n")
-    guest.put(".codex-ale/auth.json", b"not declared")
-    logs = mirror(tmp_path, guest, ".ale-harness", ".codex-ale/sessions")
+    guest.put(".orbit-harness/stdout.log", b"stdout")
+    guest.put(".orbit-harness/stderr.log", b"")
+    guest.put(".codex-orbit/sessions/2026/rollout-a.jsonl", b"root\n")
+    guest.put(".codex-orbit/sessions/2026/subagents/child.jsonl", b"child\n")
+    guest.put(".codex-orbit/auth.json", b"not declared")
+    logs = mirror(tmp_path, guest, ".orbit-harness", ".codex-orbit/sessions")
 
     await logs.sync()
     assert sorted(
         path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file()
     ) == [
-        ".ale-harness/stderr.log",
-        ".ale-harness/stdout.log",
-        ".codex-ale/sessions/2026/rollout-a.jsonl",
-        ".codex-ale/sessions/2026/subagents/child.jsonl",
+        ".orbit-harness/stderr.log",
+        ".orbit-harness/stdout.log",
+        ".codex-orbit/sessions/2026/rollout-a.jsonl",
+        ".codex-orbit/sessions/2026/subagents/child.jsonl",
     ]
     assert not logs.incomplete
 
@@ -108,7 +108,7 @@ async def test_appends_transfer_only_new_bytes_and_unchanged_files_cost_nothing(
 ) -> None:
     guest = MemoryFiles()
     character = "跨".encode()
-    guest.put(".ale-harness/stdout.log", b'{"text":"' + character[:1])
+    guest.put(".orbit-harness/stdout.log", b'{"text":"' + character[:1])
     logs = mirror(tmp_path, guest)
     await logs.sync()
     guest.reads.clear()
@@ -118,23 +118,23 @@ async def test_appends_transfer_only_new_bytes_and_unchanged_files_cost_nothing(
     assert guest.reads == [] and guest.digests == 0
 
     suffix = character[1:] + ' Windows 的内容"}\n'.encode()
-    guest.append(".ale-harness/stdout.log", suffix)
+    guest.append(".orbit-harness/stdout.log", suffix)
     await logs.sync()
     assert guest.transferred == len(suffix)
     assert (
-        copied(tmp_path, ".ale-harness/stdout.log")
-        == guest.files[guest.path(".ale-harness/stdout.log")]
+        copied(tmp_path, ".orbit-harness/stdout.log")
+        == guest.files[guest.path(".orbit-harness/stdout.log")]
     )
 
 
 @pytest.mark.parametrize("home", ["/home/user", r"C:\Users\agent"])
 async def test_cost_grows_linearly_on_linux_and_windows(tmp_path: Path, home: str) -> None:
     guest = MemoryFiles(home)
-    guest.put(".ale-harness/stdout.log", b"")
+    guest.put(".orbit-harness/stdout.log", b"")
     logs = mirror(tmp_path, guest)
     block = b"x" * (1024 * 1024)
     for _ in range(10):
-        guest.append(".ale-harness/stdout.log", block)
+        guest.append(".orbit-harness/stdout.log", block)
         await logs.sync()
     # No file identity is needed and nothing is hashed while the agent runs.
     assert guest.transferred == 10 * len(block)
@@ -142,12 +142,12 @@ async def test_cost_grows_linearly_on_linux_and_windows(tmp_path: Path, home: st
     await logs.sync(final=True)
     assert guest.transferred == 10 * len(block)
     assert guest.digests == 1
-    assert (tmp_path / ".ale-harness/stdout.log").stat().st_size == 10 * len(block)
+    assert (tmp_path / ".orbit-harness/stdout.log").stat().st_size == 10 * len(block)
 
 
 async def test_a_file_that_shrank_is_copied_again_from_its_start(tmp_path: Path) -> None:
     guest = MemoryFiles()
-    path = ".codex-ale/sessions/history.jsonl"
+    path = ".codex-orbit/sessions/history.jsonl"
     guest.put(path, b'{"turn":1}\n{"turn":2}\n')
     logs = mirror(tmp_path, guest)
     await logs.sync()
@@ -160,7 +160,7 @@ async def test_a_file_that_shrank_is_copied_again_from_its_start(tmp_path: Path)
 @pytest.mark.parametrize("rewritten", [b'{"turn":"compacted"}\n{"turn":2}\n', b'{"turn":9}\n'])
 async def test_final_sync_copies_a_rewritten_file_again(tmp_path: Path, rewritten: bytes) -> None:
     guest = MemoryFiles()
-    path = ".codex-ale/sessions/index.json"
+    path = ".codex-orbit/sessions/index.json"
     guest.put(path, b'{"turn":1}\n')
     logs = mirror(tmp_path, guest)
     await logs.sync()
@@ -175,7 +175,7 @@ async def test_file_rewritten_during_the_final_copy_is_reported_then_recovered(
     tmp_path: Path,
 ) -> None:
     guest = MemoryFiles()
-    path = ".codex-ale/sessions/state.json"
+    path = ".codex-orbit/sessions/state.json"
     guest.put(path, b'{"state":"old"}')
     logs = mirror(tmp_path, guest)
     await logs.sync()
@@ -194,42 +194,42 @@ async def test_catching_up_reads_pieces_and_hashes_only_at_the_end(
 ) -> None:
     monkeypatch.setattr(log_mirror, "_PIECE_BYTES", 4)
     guest = MemoryFiles()
-    guest.put(".ale-harness/stdout.log", b"x" * 40)
+    guest.put(".orbit-harness/stdout.log", b"x" * 40)
     logs = mirror(tmp_path, guest)
     await logs.sync()
     assert guest.digests == 0 and len(guest.reads) == 10
-    guest.append(".ale-harness/stdout.log", b"y" * 40)
+    guest.append(".orbit-harness/stdout.log", b"y" * 40)
     await logs.sync(final=True)
     assert guest.digests == 1 and len(guest.reads) == 20
     assert (
-        copied(tmp_path, ".ale-harness/stdout.log")
-        == guest.files[guest.path(".ale-harness/stdout.log")]
+        copied(tmp_path, ".orbit-harness/stdout.log")
+        == guest.files[guest.path(".orbit-harness/stdout.log")]
     )
 
 
 async def test_missing_file_keeps_its_copy_and_returns_when_it_reappears(tmp_path: Path) -> None:
     guest = MemoryFiles()
-    path = guest.put(".ale-harness/stderr.log", b"warning\n")
+    path = guest.put(".orbit-harness/stderr.log", b"warning\n")
     logs = mirror(tmp_path, guest)
     await logs.sync()
     del guest.files[path]
     await logs.sync()
-    assert copied(tmp_path, ".ale-harness/stderr.log") == b"warning\n"
-    guest.put(".ale-harness/stderr.log", b"warning\nagain\n")
+    assert copied(tmp_path, ".orbit-harness/stderr.log") == b"warning\n"
+    guest.put(".orbit-harness/stderr.log", b"warning\nagain\n")
     await logs.sync()
-    assert copied(tmp_path, ".ale-harness/stderr.log") == b"warning\nagain\n"
+    assert copied(tmp_path, ".orbit-harness/stderr.log") == b"warning\nagain\n"
 
 
 async def test_one_unreadable_file_does_not_block_the_others(tmp_path: Path) -> None:
     guest = MemoryFiles()
-    blocked = guest.put(".codex-ale/sessions/blocked.jsonl", b"secret")
-    guest.put(".ale-harness/stdout.log", b"stdout")
+    blocked = guest.put(".codex-orbit/sessions/blocked.jsonl", b"secret")
+    guest.put(".orbit-harness/stdout.log", b"stdout")
     guest.unreadable.add(blocked)
     logs = mirror(tmp_path, guest)
 
     await logs.sync()
     assert logs.incomplete
-    assert copied(tmp_path, ".ale-harness/stdout.log") == b"stdout"
+    assert copied(tmp_path, ".orbit-harness/stdout.log") == b"stdout"
     guest.unreadable.clear()
     await logs.sync()
     assert not logs.incomplete
@@ -240,13 +240,13 @@ async def test_large_backlogs_take_turns_and_a_cancelled_piece_leaves_a_valid_pr
 ) -> None:
     monkeypatch.setattr(log_mirror, "_PIECE_BYTES", 4)
     guest = MemoryFiles()
-    first = guest.put(".codex-ale/sessions/a.jsonl", b"aaaaaaaaaaaa")
-    second = guest.put(".codex-ale/sessions/b.jsonl", b"bbbbbbbbbbbb")
-    logs = mirror(tmp_path, guest, ".codex-ale/sessions")
+    first = guest.put(".codex-orbit/sessions/a.jsonl", b"aaaaaaaaaaaa")
+    second = guest.put(".codex-orbit/sessions/b.jsonl", b"bbbbbbbbbbbb")
+    logs = mirror(tmp_path, guest, ".codex-orbit/sessions")
     await logs.sync()
     assert [path for path, _, _ in guest.reads] == [first, second] * 3
 
-    guest.append(".codex-ale/sessions/a.jsonl", b"AAAAAAAA")
+    guest.append(".codex-orbit/sessions/a.jsonl", b"AAAAAAAA")
     original = guest.read_file
 
     async def cancelled_second_piece(path: str, **kwargs: int) -> bytes:
@@ -257,29 +257,29 @@ async def test_large_backlogs_take_turns_and_a_cancelled_piece_leaves_a_valid_pr
     guest.read_file = cancelled_second_piece  # type: ignore[method-assign]
     with pytest.raises(asyncio.CancelledError):
         await logs.sync()
-    assert copied(tmp_path, ".codex-ale/sessions/a.jsonl") == b"aaaaaaaaaaaaAAAA"
+    assert copied(tmp_path, ".codex-orbit/sessions/a.jsonl") == b"aaaaaaaaaaaaAAAA"
     guest.read_file = original  # type: ignore[method-assign]
     await logs.sync()
-    assert copied(tmp_path, ".codex-ale/sessions/a.jsonl") == b"aaaaaaaaaaaaAAAAAAAA"
+    assert copied(tmp_path, ".codex-orbit/sessions/a.jsonl") == b"aaaaaaaaaaaaAAAAAAAA"
 
 
 async def test_windows_guest_paths_map_to_a_posix_host_layout(tmp_path: Path) -> None:
     guest = MemoryFiles(r"C:\Users\agent")
-    guest.put(".openclaw-ale/agents/main/sessions/root.jsonl", b"root\n")
-    logs = mirror(tmp_path, guest, ".openclaw-ale/agents/main/sessions")
+    guest.put(".openclaw-orbit/agents/main/sessions/root.jsonl", b"root\n")
+    logs = mirror(tmp_path, guest, ".openclaw-orbit/agents/main/sessions")
     await logs.sync()
-    assert copied(tmp_path, ".openclaw-ale/agents/main/sessions/root.jsonl") == b"root\n"
+    assert copied(tmp_path, ".openclaw-orbit/agents/main/sessions/root.jsonl") == b"root\n"
 
 
 async def test_copy_left_by_an_earlier_mirror_is_kept_only_if_still_a_prefix(
     tmp_path: Path,
 ) -> None:
     guest = MemoryFiles()
-    guest.put(".ale-harness/stdout.log", b"first\nsecond\n")
-    (tmp_path / ".ale-harness").mkdir()
-    (tmp_path / ".ale-harness/stdout.log").write_bytes(b"first\n")
+    guest.put(".orbit-harness/stdout.log", b"first\nsecond\n")
+    (tmp_path / ".orbit-harness").mkdir()
+    (tmp_path / ".orbit-harness/stdout.log").write_bytes(b"first\n")
     await mirror(tmp_path, guest).sync(final=True)
     assert guest.transferred == len(b"second\n")
-    (tmp_path / ".ale-harness/stdout.log").write_bytes(b"other\n")
+    (tmp_path / ".orbit-harness/stdout.log").write_bytes(b"other\n")
     await mirror(tmp_path, guest).sync(final=True)
-    assert copied(tmp_path, ".ale-harness/stdout.log") == b"first\nsecond\n"
+    assert copied(tmp_path, ".orbit-harness/stdout.log") == b"first\nsecond\n"

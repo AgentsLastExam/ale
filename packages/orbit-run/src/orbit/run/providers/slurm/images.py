@@ -1,4 +1,4 @@
-"""Images prepared on the cluster, as the machine ALE runs on has no container runtime.
+"""Images prepared on the cluster, as the machine Orbit runs on has no container runtime.
 
 A Task's image is pulled, or built from its context, the framework layer is added, and the
 result is saved below the shared cache under a key of everything that went into it, by a job
@@ -18,19 +18,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ale.core.config import SlurmPartition, SlurmProviderConfig
-from ale.core.errors import ProviderStartError, TaskDefinitionError
-from ale.core.ids import content_hash
-from ale.core.sandbox import ImageKind, PreparedTaskImage
-from ale.run.framework import (
+from orbit.core.config import SlurmPartition, SlurmProviderConfig
+from orbit.core.errors import ProviderStartError, TaskDefinitionError
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import ImageKind, PreparedTaskImage
+from orbit.run.framework import (
     KEEP_ALIVE,
     container_framework,
     framework_identity,
     stage_container_framework,
 )
-from ale.run.images import acquire_lock
-from ale.run.oci import Reference, Registry, api, qualified
-from ale.run.providers.slurm.job import IMAGES, Job, cache, read, tail, write
+from orbit.run.images import acquire_lock
+from orbit.run.oci import Reference, Registry, api, qualified
+from orbit.run.providers.slurm.job import IMAGES, Job, cache, read, tail, write
 
 #: What a preparation job holds, at most: Podman builds, pulls and saves in it.
 BUILD_CPUS = 8
@@ -187,9 +187,9 @@ async def _prepare(config: SlurmProviderConfig, recipe: Recipe) -> dict[str, obj
         try:
             await asyncio.shield(job.stop(cancel=True))
         except ProviderStartError as error:
-            logging.getLogger("ale.execution").warning(
+            logging.getLogger("orbit.execution").warning(
                 "an image preparation job did not end cleanly",
-                extra={"ale_data": {"job": job.id, "error": str(error)}},
+                extra={"orbit_data": {"job": job.id, "error": str(error)}},
             )
 
 

@@ -1,8 +1,8 @@
-# ale-core
+# orbit-core
 
-`ale-core` owns the stable contracts shared by ALE implementations. It contains strict
+`orbit-core` owns the stable contracts shared by Orbit implementations. It contains strict
 models for Tasks, sandboxes, harnesses, traces, results and provenance, plus the abstract
-interfaces implemented by `ale-run`, and the protocol `ale-fleet` speaks.
+interfaces implemented by `orbit-run`, and the protocol `orbit-fleet` speaks.
 
 It never imports the orchestrator or verification implementation. A change here is a
 contract change when it alters a public model, persisted record or implementation

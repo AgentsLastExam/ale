@@ -8,7 +8,7 @@ API-key mode: `~/.gemini/antigravity-cli/settings.json` sets `"modelProvider": "
 Gateway, which serves it the `gemini` dialect:
 `POST /v1beta/models/{model}:streamGenerateContent?alt=sse`. The preset's
 `gateway.provider = "gemini"` has the Host Gateway forward those calls with
-`ALE_GEMINI_API_KEY`, to `ALE_GEMINI_BASE_URL` or else Google's own API. Google-account
+`ORBIT_GEMINI_API_KEY`, to `ORBIT_GEMINI_BASE_URL` or else Google's own API. Google-account
 (OAuth) mode, and with it the Claude and GPT-OSS models agy serves through Google, is not
 used: its backend cannot be redirected to the Gateway.
 
@@ -31,7 +31,7 @@ title, which the Gateway answers with the run's model.
 
 `search_web` is a request of its own that has Google Search run on Google's side
 (`googleSearch` grounding), and no agy setting removes the tool. Unless the Task's network
-is `open`, ALE writes a global `PreToolUse` hook to `~/.gemini/config/hooks.json` that
+is `open`, Orbit writes a global `PreToolUse` hook to `~/.gemini/config/hooks.json` that
 denies every call to it, the main agent's and its subagents' alike: the model still sees
 the tool, and a call returns the hook's refusal. The hook runs a small Python script, so
 its command does not depend on the shell agy uses. agy's other web tools, such as
@@ -39,7 +39,7 @@ its command does not depend on the shell agy uses. agy's other web tools, such a
 
 agy reads a headless prompt from stdin only as a stream-json message, so the command first
 has the Sandbox's Python (on macOS the framework's) wrap `prompt.md` into
-`.ale-harness/request.jsonl`, one `{"event": "user", "message": {"content": ...}}` line, and
+`.orbit-harness/request.jsonl`, one `{"event": "user", "message": {"content": ...}}` line, and
 feeds that to agy. agy chooses the conversation ID and reports it in its `init` and `result`
 events; a resume passes it to `--conversation`. A failed turn ends with a `result` whose
 `status` is not `SUCCESS`, exits non-zero, and writes an `AGY_ERROR:` JSON line to stderr.
@@ -67,7 +67,7 @@ which become the child's user steps.
 A background tool, such as `schedule`, returns a running notice and agy records the step
 as RUNNING; the tool's final output arrives only later, in `steps/<n>/output.txt`. When
 that file holds output the record lacks, it is kept on the step's result as
-`extra.ale.final_output`, and the result's content stays what the model received.
+`extra.orbit.final_output`, and the result's content stays what the model received.
 
 agy also keeps an abridged `transcript.jsonl`, chunked copies of both transcripts, the
 `messages/` delivered to a conversation, background `tasks/*.log`, the

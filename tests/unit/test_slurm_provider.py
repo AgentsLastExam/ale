@@ -7,10 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.capability import SandboxNeeds
-from ale.core.config import RunConfig
-from ale.core.errors import AllocationEndedError, ProviderCapabilityError, ProviderStartError
-from ale.core.sandbox import (
+from orbit.core.capability import SandboxNeeds
+from orbit.core.config import RunConfig
+from orbit.core.errors import AllocationEndedError, ProviderCapabilityError, ProviderStartError
+from orbit.core.sandbox import (
     ImageKind,
     PreparedTaskImage,
     SandboxRequest,
@@ -18,13 +18,13 @@ from ale.core.sandbox import (
     snapshot_verifier_needs,
     verifiers_needs,
 )
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run.oci import Reference, api, qualified
-from ale.run.providers import ProviderRegistry
-from ale.run.providers.slurm import images, worker
-from ale.run.providers.slurm.job import CACHE, Job, JobReady
-from ale.run.providers.slurm.job import seconds as job_seconds
-from ale.run.providers.slurm.provider import (
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from orbit.run.oci import Reference, api, qualified
+from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.slurm import images, worker
+from orbit.run.providers.slurm.job import CACHE, Job, JobReady
+from orbit.run.providers.slurm.job import seconds as job_seconds
+from orbit.run.providers.slurm.provider import (
     JOB_OVERHEAD_MB,
     MAX_SAVES,
     _capacity,
@@ -238,7 +238,7 @@ def test_an_allocation_is_kept_while_its_episode_needs_a_snapshot_in_it():
 def test_a_snapshot_handle_names_its_allocation_and_sandbox():
     held = chain()
     assert _parse(_handle(held.job, "3")) == (held.job.name, "3")
-    for wrong in ("slurm:ale-1", "slurm:x/1", "slurm:ale-1/x", "docker:ale-1/1"):
+    for wrong in ("slurm:orbit-1", "slurm:x/1", "slurm:orbit-1/x", "docker:orbit-1/1"):
         with pytest.raises(ProviderCapabilityError):
             _parse(wrong)
 
@@ -627,8 +627,8 @@ async def test_a_snapshot_of_an_allocation_slurm_ended_is_destroyed_with_its_fil
 async def test_a_sandbox_slurm_ended_is_explained_so_before_an_oom_kill_it_outlived(
     monkeypatch,
 ):
-    from ale.core.errors import AllocationEndedError, GuestUnreachableError
-    from ale.run.providers.slurm import job as job_module
+    from orbit.core.errors import AllocationEndedError, GuestUnreachableError
+    from orbit.run.providers.slurm import job as job_module
 
     class Watcher:
         async def settled(self, seconds):
@@ -737,7 +737,7 @@ async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
 ):
     """A boot from a snapshot waits in the queue past ``queue_timeout_sec``, saying why now
     and then; any other gives up at it."""
-    from ale.run.providers.slurm import job as job_module
+    from orbit.run.providers.slurm import job as job_module
 
     monkeypatch.setattr(job_module, "cache", lambda: tmp_path)
     monkeypatch.setattr(job_module, "QUEUE_NOTICE_SEC", 0)
@@ -766,7 +766,7 @@ async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
     monkeypatch.setattr(Job, "pending_reason", reason)
     job = Job(provider().config.partitions[0])
     job.directory.mkdir()
-    with caplog.at_level("INFO", logger="ale.execution"):
+    with caplog.at_level("INFO", logger="orbit.execution"):
         ready = await job.ready(None)
     assert ready.node == "n"
     assert any(

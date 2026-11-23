@@ -13,21 +13,21 @@ import pytest
 from tests.support import write_task
 from typer.testing import CliRunner
 
-from ale.core.config import RunConfig
-from ale.core.episode import Phase
-from ale.core.errors import ConfigError, TaskDefinitionError
-from ale.core.sandbox import ExecResult
-from ale.core.task import ResolvedVariables, Stage
-from ale.core.taskspec import OperatingSystem, TaskVariables, VerificationMode, VerifySpec
-from ale.core.trace import read_jsonl
-from ale.run.cli.main import app
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import NopHarness
-from ale.run.lint import lint_repository
-from ale.run.protocol.episode_protocol import EpisodeProtocol, _RecordedSandbox
-from ale.run.recording import EpisodeRecording
-from ale.run.secrets import host_credentials, resolve_task_variables
-from ale.run.tasksets.manifest import ManifestTask, load_task_folder
+from orbit.core.config import RunConfig
+from orbit.core.episode import Phase
+from orbit.core.errors import ConfigError, TaskDefinitionError
+from orbit.core.sandbox import ExecResult
+from orbit.core.task import ResolvedVariables, Stage
+from orbit.core.taskspec import OperatingSystem, TaskVariables, VerificationMode, VerifySpec
+from orbit.core.trace import read_jsonl
+from orbit.run.cli.main import app
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import NopHarness
+from orbit.run.lint import lint_repository
+from orbit.run.protocol.episode_protocol import EpisodeProtocol, _RecordedSandbox
+from orbit.run.recording import EpisodeRecording
+from orbit.run.secrets import host_credentials, resolve_task_variables
+from orbit.run.tasksets.manifest import ManifestTask, load_task_folder
 
 pytestmark = pytest.mark.unit
 
@@ -37,7 +37,7 @@ def env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[str],
     """The checkout's ``.env``, written by the test."""
     path = tmp_path / "checkout.env"
     path.write_text("")
-    monkeypatch.setenv("ALE_ENV_FILE", str(path))
+    monkeypatch.setenv("ORBIT_ENV_FILE", str(path))
     return path.write_text
 
 
@@ -83,10 +83,13 @@ def test_env_tables_reach_the_commands_harbor_gives_them(tmp_path: Path) -> None
     ("layer", "message"),
     [
         ({"environment": {"env": {"1ST": "x"}}}, r"environment\.env: '1ST' is not an environment"),
-        ({"solution": {"env": {"ALE_HOME": "x"}}}, r"solution\.env: ALE_HOME: the ALE_ prefix"),
         (
-            {"verifier": {"env": {"KEY": "${ALE_OPENAI_API_KEY}"}}},
-            r"verifier\.env: KEY: a Task cannot refer to the Host's ALE_OPENAI_API_KEY",
+            {"solution": {"env": {"ORBIT_HOME": "x"}}},
+            r"solution\.env: ORBIT_HOME: the ORBIT_ prefix",
+        ),
+        (
+            {"verifier": {"env": {"KEY": "${ORBIT_OPENAI_API_KEY}"}}},
+            r"verifier\.env: KEY: a Task cannot refer to the Host's ORBIT_OPENAI_API_KEY",
         ),
     ],
 )
@@ -169,13 +172,13 @@ def test_solution_variables_are_resolved_for_the_oracle_only(
 def test_a_host_credential_never_becomes_a_task_variable(
     tmp_path: Path, env_file: Callable[[str], None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ALE_OPENAI_API_KEY", "sk-host-model-key")
+    monkeypatch.setenv("ORBIT_OPENAI_API_KEY", "sk-host-model-key")
     monkeypatch.setenv("UPSTREAM_KEY", "upstream-key-named-by-the-run")
-    monkeypatch.setenv("ALE_OPENAI_BASE_URL", "https://api.example.org")
+    monkeypatch.setenv("ORBIT_OPENAI_BASE_URL", "https://api.example.org")
     env_file("OPENAI_API_KEY=sk-host-model-key\nKEY=upstream-key-named-by-the-run\n")
     protected = host_credentials(("UPSTREAM_KEY", ""))
-    assert {"ALE_OPENAI_API_KEY", "UPSTREAM_KEY"} <= set(protected)
-    assert "ALE_OPENAI_BASE_URL" not in protected
+    assert {"ORBIT_OPENAI_API_KEY", "UPSTREAM_KEY"} <= set(protected)
+    assert "ORBIT_OPENAI_BASE_URL" not in protected
     with pytest.raises(ConfigError) as raised:
         _resolved(
             tmp_path,
@@ -187,7 +190,7 @@ def test_a_host_credential_never_becomes_a_task_variable(
         )
     message = str(raised.value)
     assert (
-        "[environment].env OPENAI_API_KEY holds the Host credential ALE_OPENAI_API_KEY" in message
+        "[environment].env OPENAI_API_KEY holds the Host credential ORBIT_OPENAI_API_KEY" in message
     )
     assert "[verifier].env K holds the Host credential UPSTREAM_KEY" in message
     assert "sk-host-model-key" not in message
@@ -234,7 +237,7 @@ def test_mcp_headers_resolve_references_inside_their_text(
         "Authorization": "Bearer ${SEARCH_TOKEN}",
         "X-Tenant": "tenant-${SEARCH_TENANT}",
         "X-Region": "${REGION:-eu}",
-        "X-Client": "ale",
+        "X-Client": "orbit",
     }
     task = _resolved(tmp_path, _with_headers(headers), oracle=False)
     assert task.spec.variables.mcp_headers == {"search": headers}
@@ -244,7 +247,7 @@ def test_mcp_headers_resolve_references_inside_their_text(
             "Authorization": "Bearer sk-search-value",
             "X-Tenant": "tenant-acme",
             "X-Region": "eu",
-            "X-Client": "ale",
+            "X-Client": "orbit",
         }
     }
     # Only the credential is a secret: the tenant is an ordinary value in ordinary text.
@@ -273,12 +276,12 @@ def test_an_mcp_header_never_carries_a_host_credential(
     tmp_path: Path, env_file: Callable[[str], None]
 ) -> None:
     env_file("SEARCH_TOKEN=sk-host-held\n")
-    with pytest.raises(ConfigError, match="holds the Host credential ALE_ANTHROPIC_API_KEY"):
+    with pytest.raises(ConfigError, match="holds the Host credential ORBIT_ANTHROPIC_API_KEY"):
         _resolved(
             tmp_path,
             _with_headers({"Authorization": "Bearer ${SEARCH_TOKEN}"}),
             oracle=False,
-            protected={"ALE_ANTHROPIC_API_KEY": "sk-host-held"},
+            protected={"ORBIT_ANTHROPIC_API_KEY": "sk-host-held"},
         )
 
 
@@ -372,11 +375,13 @@ async def test_each_stage_receives_its_tables_beneath_the_framework_variables(
     sandbox = _Sandbox()
     protocol = EpisodeProtocol(NopHarness())
     for phase, stage in ((Phase.SETUP, Stage.SETUP), (Phase.VERIFY, Stage.TESTS)):
-        await protocol._run_stage(ctx, sandbox, PurePosixPath("/opt/ale/stage"), phase, stage=stage)  # type: ignore[arg-type]
+        await protocol._run_stage(
+            ctx, sandbox, PurePosixPath("/opt/orbit/stage"), phase, stage=stage
+        )  # type: ignore[arg-type]
     setup, verify = sandbox.envs
     assert setup is not None and verify is not None
     assert {key: setup[key] for key in ("SHARED", "ONLY")} == variables.environment
-    assert setup["ALE_STAGE_DIR"] == "/opt/ale/stage"
+    assert setup["ORBIT_STAGE_DIR"] == "/opt/orbit/stage"
     # The separate verifier declared its own [verifier.environment].env.
     assert "ONLY" not in verify and verify["OWN"] == "own" and verify["SHARED"] == "verifier"
 
@@ -401,7 +406,7 @@ async def test_stage_output_never_records_a_secret(tmp_path: Path) -> None:
     await EpisodeProtocol(NopHarness())._run_stage(
         ctx,
         sandbox,
-        PurePosixPath("/opt/ale/setup"),
+        PurePosixPath("/opt/orbit/setup"),
         Phase.SETUP,  # type: ignore[arg-type]
         stage=Stage.SETUP,
     )
@@ -418,10 +423,10 @@ async def test_stage_output_never_records_a_secret(tmp_path: Path) -> None:
 def test_every_command_reads_the_selected_credential_file_first(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     credential_file = tmp_path / "judge.env"
     credential_file.write_text("TEST_CALIBRATION_JUDGE_KEY=test-secret\n")
-    monkeypatch.setenv("ALE_ENV_FILE", str(credential_file))
+    monkeypatch.setenv("ORBIT_ENV_FILE", str(credential_file))
     monkeypatch.delenv("TEST_CALIBRATION_JUDGE_KEY", raising=False)
 
     def inspect_environment(settings: RunConfig) -> None:

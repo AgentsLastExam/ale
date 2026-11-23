@@ -1,4 +1,4 @@
-"""The ``ale`` command line.
+"""The ``orbit`` command line.
 
 Kept thin on purpose: it resolves a reference, assembles the pieces, and prints what
 came back. Every decision that matters — how a task loads, how an episode runs, what a
@@ -17,17 +17,17 @@ from typing import Annotated, Any
 
 import typer
 
-from ale.core.errors import AleError, ProviderCapabilityError
-from ale.core.sandbox import Provider
-from ale.run import __version__
-from ale.run.assets import (
+from orbit.core.errors import OrbitError, ProviderCapabilityError
+from orbit.core.sandbox import Provider
+from orbit.run import __version__
+from orbit.run.assets import (
     AssetSyncResult,
     asset_status,
     pull_assets,
     push_assets,
 )
-from ale.run.cli.assets import assets_app
-from ale.run.cli.tasks import (
+from orbit.run.cli.assets import assets_app
+from orbit.run.cli.tasks import (
     EXIT_BAD_REFERENCE,
     _calibrate,
     _config,
@@ -35,13 +35,13 @@ from ale.run.cli.tasks import (
     _reverify,
     _run_one,
 )
-from ale.run.lint import lint_repository
-from ale.run.providers import RETAINING_PROVIDERS, provider_named
-from ale.run.scaffold import scaffold_task
-from ale.run.secrets import load_env
+from orbit.run.lint import lint_repository
+from orbit.run.providers import RETAINING_PROVIDERS, provider_named
+from orbit.run.scaffold import scaffold_task
+from orbit.run.secrets import load_env
 
 app = typer.Typer(
-    name="ale",
+    name="orbit",
     help="Agents' Last Exam evaluation orchestrator.",
     no_args_is_help=True,
     add_completion=False,
@@ -72,9 +72,9 @@ def root(
         ),
     ] = False,
 ) -> None:
-    """Run, calibrate and author ALE evaluation tasks."""
+    """Run, calibrate and author Orbit evaluation tasks."""
     # Credentials come from the checkout's .env, read once here for every command. A
-    # variable already set in the environment, such as `KEY=... ale run` or a CI secret,
+    # variable already set in the environment, such as `KEY=... orbit run` or a CI secret,
     # takes precedence.
     load_env()
 
@@ -233,8 +233,8 @@ def lint(
     """Check tasks without starting a container.
 
     The cheap half of admission: everything answerable from the files alone. Run it on
-    every save; run `ale calibrate` when you want a task actually solved. Only problems
-    fail it; warnings say where a task departs from ALE's form.
+    every save; run `orbit calibrate` when you want a task actually solved. Only problems
+    fail it; warnings say where a task departs from Orbit's form.
     """
     findings = lint_repository(reference)
     for finding in findings:
@@ -253,12 +253,12 @@ def vm_image_push(
     reference: Annotated[str, typer.Argument(help="Destination OCI reference with a new tag")],
 ) -> None:
     """Publish a local qcow2 to an OCI registry as chunk layers, under a new tag."""
-    from ale.run.images import publish_vm_image
+    from orbit.run.images import publish_vm_image
 
     typer.echo(f"pushing {source} to {reference}")
     try:
         resolved = run_async(publish_vm_image(source, reference))
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
     typer.echo(f"ok    {resolved}")
@@ -274,12 +274,12 @@ def vm_image_pull(
     Chunks are fetched in parallel and checked as they are written; running the same pull
     again after an interruption keeps the chunks already in place.
     """
-    from ale.run.images import pull_vm_image
+    from orbit.run.images import pull_vm_image
 
     typer.echo(f"pulling {reference}")
     try:
         resolved = run_async(pull_vm_image(reference, destination))
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
     typer.echo(f"ok    {resolved} -> {destination}")
@@ -290,19 +290,19 @@ def new_task(
     path: Annotated[Path, typer.Argument(help="Where to create the task folder")],
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing folder")] = False,
 ) -> None:
-    """Scaffold a task that passes `ale lint` immediately.
+    """Scaffold a task that passes `orbit lint` immediately.
 
     The folder name is the Task's name, in the `agentslastexam` organization. The scaffold
     solves itself: its solution writes what its tests expect, so a new task starts from a
-    green `ale calibrate` and the author changes one thing at a time from a known-good state.
+    green `orbit calibrate` and the author changes one thing at a time from a known-good state.
     """
     try:
         created = scaffold_task(path, force=force)
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(f"{error}", err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
     typer.echo(f"created {created}")
-    typer.echo(f"next: ale lint {created}  &&  ale calibrate {created}")
+    typer.echo(f"next: orbit lint {created}  &&  orbit calibrate {created}")
 
 
 @assets_app.command("status")
@@ -315,7 +315,7 @@ def assets_status(
     """Inspect Task-local assets without reading their file contents."""
     try:
         statuses = asset_status(paths)
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
     for item in statuses:
@@ -343,7 +343,7 @@ def assets_pull(
     """Pull selected asset roots directly into their Task folders."""
     try:
         results = pull_assets(paths, force=force, revision=revision)
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
     _print_asset_sync(results)
@@ -363,7 +363,7 @@ def assets_push(
     """Push selected Task-local stage asset roots exactly."""
     try:
         results = push_assets(paths, collection=collection)
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_BAD_REFERENCE) from error
     _print_asset_sync(results)
@@ -378,10 +378,10 @@ def _print_asset_sync(results: Sequence[AssetSyncResult]) -> None:
 
 @sandbox_app.command("list")
 def sandbox_list() -> None:
-    """List ALE-managed sandboxes and snapshots requested for retention."""
+    """List Orbit-managed sandboxes and snapshots requested for retention."""
     try:
         records = run_async(_list_retained_sandboxes())
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
     for record in records:
@@ -395,10 +395,10 @@ def sandbox_list() -> None:
 def sandbox_destroy(
     handle: Annotated[str, typer.Argument(help="Retained sandbox or snapshot handle")],
 ) -> None:
-    """Destroy one ALE-retained sandbox or snapshot and its owned resources."""
+    """Destroy one Orbit-retained sandbox or snapshot and its owned resources."""
     try:
         run_async(_destroy_retained_sandbox(handle))
-    except AleError as error:
+    except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
     typer.echo(f"destroyed {handle}")
@@ -407,7 +407,7 @@ def sandbox_destroy(
 async def _list_retained_sandboxes() -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for name in RETAINING_PROVIDERS:
-        if name == "fleet" and not os.environ.get("ALE_FLEET_URL"):
+        if name == "fleet" and not os.environ.get("ORBIT_FLEET_URL"):
             continue  # no Fleet named here
         provider = provider_named(name)
         try:
@@ -431,7 +431,7 @@ async def _destroy_retained_sandbox(handle: str) -> None:
 
 async def _close(provider: Provider) -> None:
     """Close the Fleet's connections; other Providers hold none between calls."""
-    from ale.run.providers.fleet import FleetProvider
+    from orbit.run.providers.fleet import FleetProvider
 
     if isinstance(provider, FleetProvider):
         await provider.client.close()

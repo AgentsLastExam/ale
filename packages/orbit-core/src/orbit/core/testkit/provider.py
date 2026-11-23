@@ -21,14 +21,14 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from ale.core.errors import (
-    AleError,
+from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
+    OrbitError,
     ProviderCapabilityError,
     StorageExhaustedError,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
     Identity,
@@ -39,7 +39,7 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.taskspec import (
+from orbit.core.taskspec import (
     ContainerFeature,
     ImageKind,
     NetworkMode,
@@ -141,15 +141,15 @@ NESTED_CHECKS = f"""
 set -ex
 docker run --rm {_BUSYBOX} sh -c 'rm /bin/ls && ! test -e /bin/ls'
 docker run --rm {_BUSYBOX} wget -q -T 30 -O /dev/null http://example.com/
-docker network create ale-nested >/dev/null
-docker run -d --name ale-nested-web --network ale-nested -p 18080:80 {_BUSYBOX} \\
+docker network create orbit-nested >/dev/null
+docker run -d --name orbit-nested-web --network orbit-nested -p 18080:80 {_BUSYBOX} \\
     sh -c 'mkdir /w && echo served >/w/index.html && exec httpd -f -p 80 -h /w' >/dev/null
-docker run --rm --network ale-nested {_BUSYBOX} wget -q -T 30 -O - http://ale-nested-web/ \\
+docker run --rm --network orbit-nested {_BUSYBOX} wget -q -T 30 -O - http://orbit-nested-web/ \\
     | grep -qx served
 docker run --rm --network host {_BUSYBOX} wget -q -T 30 -O - http://127.0.0.1:18080/ \\
     | grep -qx served
-docker rm -f ale-nested-web >/dev/null
-docker network rm ale-nested >/dev/null
+docker rm -f orbit-nested-web >/dev/null
+docker network rm orbit-nested >/dev/null
 echo nested-container-ok
 """
 #: Installs Docker from the image's distribution, starts its daemon by hand, and checks it.
@@ -240,7 +240,7 @@ async def _reach(
 
 
 class ProviderConformance:
-    """Assertions every :class:`~ale.core.sandbox.Provider` must satisfy."""
+    """Assertions every :class:`~orbit.core.sandbox.Provider` must satisfy."""
 
     provider: Provider
     image: ImageRef | PreparedTaskImage
@@ -257,7 +257,7 @@ class ProviderConformance:
     framework: str | None = None
     """The framework identity the engine adds for this suite's requests, if it records one.
 
-    Every sandbox carries it in ``/opt/ale/framework`` whatever image it was handed. The
+    Every sandbox carries it in ``/opt/orbit/framework`` whatever image it was handed. The
     suite depends on no engine package, so a backend's suite supplies the value; ``None``
     skips the check."""
 
@@ -447,12 +447,12 @@ class ProviderConformance:
             assert (await again.exec(["echo", "again"])).stdout.strip() == "again"
             await self.provider.discard(handle)
             await self.provider.discard(handle)  # it is gone: nothing to do
-            with pytest.raises(AleError):
+            with pytest.raises(OrbitError):
                 opened.append(await self.provider.reattach(handle, *recorded))
         finally:
             for each in opened:
                 # Destroying what discard destroyed may fail; it still closes connections.
-                with contextlib.suppress(AleError):
+                with contextlib.suppress(OrbitError):
                     await each.destroy()
 
     @pytest.mark.asyncio
@@ -561,8 +561,8 @@ class ProviderConformance:
             assert framework.stdout.strip() == "0"
             probe = (
                 "command -v sudo >/dev/null && sudo -n true 2>/dev/null && echo elevated; "
-                "cat /opt/ale/guestd/main.py >/dev/null 2>&1 && echo read-guestd; "
-                "touch /etc/ale-conformance 2>/dev/null && echo wrote-etc; true"
+                "cat /opt/orbit/guestd/main.py >/dev/null 2>&1 && echo read-guestd; "
+                "touch /etc/orbit-conformance 2>/dev/null && echo wrote-etc; true"
             )
             escaped = await sandbox.exec(["sh", "-c", probe], identity=Identity.AGENT)
             assert escaped.ok and escaped.stdout.split() == [], escaped.stdout
@@ -577,7 +577,7 @@ class ProviderConformance:
         if self.framework is None:
             pytest.skip("this backend's suite names no framework identity")
         async with await self.provider.create(await self.request()) as sandbox:
-            recorded = await sandbox.read_file("/opt/ale/framework")
+            recorded = await sandbox.read_file("/opt/orbit/framework")
             assert recorded.decode().strip() == self.framework
 
     @pytest.mark.asyncio
@@ -596,7 +596,7 @@ class ProviderConformance:
             (source / "test.sh").write_text("printf stage-ok")
             (source / "link").symlink_to("assets/data.txt")
             async with await self.provider.create(await self.request()) as sandbox:
-                target = "/tmp/ale-conformance-upload"
+                target = "/tmp/orbit-conformance-upload"
                 for identity, mode in [(Identity.AGENT, 0o777), (Identity.FRAMEWORK, 0o600)]:
                     for path in source.rglob("*"):
                         if not path.is_symlink():
@@ -791,7 +791,7 @@ class ProviderConformance:
         image: its snapshot keeps it, and a Sandbox booted from the snapshot, or one of its
         own image that mounts the snapshot's volumes, sees it through a view of its own,
         whose writes reach no other Sandbox. One that mounts none leaves them on the disk."""
-        path, absent = "/srv", "/ale-conformance-absent"
+        path, absent = "/srv", "/orbit-conformance-absent"
         kept = f"{path}/kept.txt"
         mounts = any(profile.volumes for profile in await self.provider.profiles())
         saves = any(profile.snapshot for profile in await self.provider.profiles())
@@ -948,7 +948,7 @@ class ProviderConformance:
 
     @pytest.mark.asyncio
     async def test_never_gives_a_gpu_model_the_task_does_not_accept(self) -> None:
-        resources = Resources(gpus=1, gpu_types=("ALE-NO-SUCH-GPU",))
+        resources = Resources(gpus=1, gpu_types=("ORBIT-NO-SUCH-GPU",))
         try:
             sandbox = await self.provider.create(await self.request(resources=resources))
         except ProviderCapabilityError:

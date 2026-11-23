@@ -22,20 +22,20 @@ fails with the stack it was waiting in instead of blocking the suite.
 (`pytest -n 4 --dist loadfile`), so an integration test neither relies on what another file
 leaves behind nor assumes it is the only run on the host. Every Kata and gVisor sandbox, an
 `open` one's included, and every runc one whose network is not `open` gets a network of its
-own, on a subnet of ALE's own, so suites run at once on one host never exhaust Docker's
+own, on a subnet of Orbit's own, so suites run at once on one host never exhaust Docker's
 address pools
-([Docker runtimes](../packages/ale-run/src/ale/run/providers/README.md#docker-runtimes)).
+([Docker runtimes](../packages/orbit-run/src/orbit/run/providers/README.md#docker-runtimes)).
 The Kata tests run only where Kata is installed
-([Providers](../packages/ale-run/src/ale/run/providers/README.md#docker-on-kata-containers)),
-and the gVisor tests only where Docker registers ALE's build of `runsc` under every name its
+([Providers](../packages/orbit-run/src/orbit/run/providers/README.md#docker-on-kata-containers)),
+and the gVisor tests only where Docker registers Orbit's build of `runsc` under every name its
 README shows
-([gVisor](../packages/ale-run/src/ale/run/providers/README.md#docker-on-gvisor)).
+([gVisor](../packages/orbit-run/src/orbit/run/providers/README.md#docker-on-gvisor)).
 
 Run `just test-harnesses` after changing a Harness, a Gateway dialect or a CLI pin, and
 `just test-vm` after changing VM or Windows behavior. CI's backend jobs run all three. After
 changing macOS behavior, run the Orchard suites on a Mac
 ([macOS guide](../docs/guides/macos-orchard.md)). On a Mac whose local Orchard
-`scripts/setup_macos.py` keeps running, `ALE_TEST_CLI_OS=macos just test-harnesses` installs
+`scripts/setup_macos.py` keeps running, `ORBIT_TEST_CLI_OS=macos just test-harnesses` installs
 and runs every CLI in a macOS VM instead of a container: one of an image of the pinned Tahoe
 base with Node.js, built once.
 
@@ -46,10 +46,10 @@ contract; use private helpers only when the helper itself is the behavior under 
 
 Live acceptance tests make billed model calls, so CI runs none of them: a change to what
 one covers runs it locally before merging. Most run only with
-`ALE_RUN_LIVE_ACCEPTANCE=1`; the Judge tests instead skip without their provider's key.
-They load the checkout's `.env` before any test module is imported, and `ALE_ENV_FILE`
+`ORBIT_RUN_LIVE_ACCEPTANCE=1`; the Judge tests instead skip without their provider's key.
+They load the checkout's `.env` before any test module is imported, and `ORBIT_ENV_FILE`
 points every worktree at one file. Every agent and Judge call resolves its key and endpoint
-exactly as `ale` does, from `ALE_<PROVIDER>_API_KEY` and `ALE_<PROVIDER>_BASE_URL`, so a
+exactly as `orbit` does, from `ORBIT_<PROVIDER>_API_KEY` and `ORBIT_<PROVIDER>_BASE_URL`, so a
 shared gateway is configured once in `.env` rather than per test. Only the models are test
-knobs: `ALE_LIVE_ANTHROPIC_MODEL` (default `claude-sonnet-5`) and `ALE_LIVE_OPENAI_MODEL`
+knobs: `ORBIT_LIVE_ANTHROPIC_MODEL` (default `claude-sonnet-5`) and `ORBIT_LIVE_OPENAI_MODEL`
 (default `gpt-5.6-luna`); xAI calls use `grok-4.5`.

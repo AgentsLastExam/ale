@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ale_verify import checks
+from orbit_verify import checks
 
 
 def test_file_text_regex_and_json_checks(tmp_path: Path) -> None:
@@ -77,7 +77,7 @@ def test_loopback_http_and_trajectory_checks(
             }
         )
     )
-    monkeypatch.setenv("ALE_TRAJECTORY_PATH", str(trajectory))
+    monkeypatch.setenv("ORBIT_TRAJECTORY_PATH", str(trajectory))
     assert checks.trajectory_tool_used("shell")["score"] == 1
     assert checks.trajectory_tool_not_used("browser")["score"] == 1
     assert checks.trajectory_turn_count(minimum=1, maximum=1)["score"] == 1

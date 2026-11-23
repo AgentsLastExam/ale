@@ -5,7 +5,7 @@ x86_64 and aarch64, and macOS arm64. Its public settings are `reasoning_effort`,
 `max_model_steps`, `reminders` and `web_tools`.
 
 Runs Meta's Muse Code headless: `muse exec --json --prompt-file`, with `--yolo`, so
-neither Muse's approval nor its own sandbox stands between the agent and the ALE
+neither Muse's approval nor its own sandbox stands between the agent and the Orbit
 Sandbox, and `--no-foreign-personal-context`, so other agents' personal Skills stay out.
 The program is Meta's single-file release binary for the Sandbox's OS and architecture,
 pinned by SHA-256 from the release manifest.
@@ -29,7 +29,7 @@ not enough, so the Gateway URL is set there. Before each run Muse fetches
 Muse's `web_search` runs on Meta's side. In its default client mode the CLI sends each
 query to `/muse-code/search` at the model endpoint's origin, which the Gateway does not
 serve; in hosted mode each model request carries a hosted search tool instead. When
-`web_tools` is on and the Task's network is `open`, ALE sets `MUSE_WEB_SEARCH_MODE=hosted`.
+`web_tools` is on and the Task's network is `open`, Orbit sets `MUSE_WEB_SEARCH_MODE=hosted`.
 Otherwise it passes `--disable-web-tools`, which removes Muse's `web_fetch` as well,
 though it fetches locally; no switch keeps it alone.
 
@@ -51,4 +51,4 @@ Reminder agents, on unless `reminders = false`, are the exception: Muse runs the
 with no call of the model to link, and stores their sessions in the same place. The parent names each one in a `memory_reminder_child_session_linked` run event,
 so the parser leaves those sessions unconverted, named in `unconverted_native_sessions`
 without reporting them as unlinked. The step ceiling fails the run with "did not reach a
-terminal state"; ALE reports it as the `max_model_steps` Harness limit.
+terminal state"; Orbit reports it as the `max_model_steps` Harness limit.

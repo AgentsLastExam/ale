@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol import episode_protocol
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol import episode_protocol
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -43,14 +43,14 @@ async def test_setup_runs_relative_entry_as_root(tmp_path: Path) -> None:
     entry.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        'test "$PWD" = "$ALE_STAGE_DIR"\n'
+        'test "$PWD" = "$ORBIT_STAGE_DIR"\n'
         "id -u > /home/user/output/setup-uid\n"
         "chown user:user /home/user/output/setup-uid\n"
     )
     entry.chmod(0o755)
     check = task / "tests" / "verify.py"
     check.write_text(
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['root'] = checks.text_equals('/home/user/output/setup-uid', '0\\n')['score']\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"
@@ -108,7 +108,7 @@ async def test_setup_files_are_uploaded_with_the_complete_stage(
     source.parent.mkdir()
     source.write_text("dynamic")
     (task / "tests" / "verify.py").write_text(
-        "from ale_verify import checks, write\n"
+        "from orbit_verify import checks, write\n"
         "v = {}\n"
         "v['setup'] = checks.text_equals('/home/user/output/setup-ready', 'ready')['score']\n"
         "v['reward'] = sum(v.values()) / len(v.values())\n"

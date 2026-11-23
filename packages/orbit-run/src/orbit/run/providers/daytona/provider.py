@@ -45,15 +45,15 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
-from ale.core.config import DaytonaProviderConfig
-from ale.core.errors import (
+from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
+from orbit.core.config import DaytonaProviderConfig
+from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     GpuAllocation,
     ImageKind,
     ImageRef,
@@ -67,38 +67,38 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem
-from ale.run import guestd
-from ale.run.framework import MARKER, framework_identity, with_framework
-from ale.run.gpu import parse_nvidia_smi
-from ale.run.images import resolve_container_image, resolve_prepared_container_image
-from ale.run.providers import relay
-from ale.run.providers.daytona.api import DaytonaApi, DaytonaError
-from ale.run.providers.daytona.image import (
+from orbit.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem
+from orbit.run import guestd
+from orbit.run.framework import MARKER, framework_identity, with_framework
+from orbit.run.gpu import parse_nvidia_smi
+from orbit.run.images import resolve_container_image, resolve_prepared_container_image
+from orbit.run.providers import relay
+from orbit.run.providers.daytona.api import DaytonaApi, DaytonaError
+from orbit.run.providers.daytona.image import (
     ImageConfig,
     ImagePublisher,
     PublishedImage,
     image_config,
 )
-from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.memory import WATCHER, GuestEvents, shm_mb
-from ale.run.providers.privileges import set_and_prove_elevation
-from ale.run.providers.tunnel import PROXY_PORT, GatewayTunnel, TunneledSandbox, tunnel_plan
-from ale.run.sources import cache_root
-from ale.run.transport import GuestClient, StdioTransport
+from orbit.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.memory import WATCHER, GuestEvents, shm_mb
+from orbit.run.providers.privileges import set_and_prove_elevation
+from orbit.run.providers.tunnel import PROXY_PORT, GatewayTunnel, TunneledSandbox, tunnel_plan
+from orbit.run.sources import cache_root
+from orbit.run.transport import GuestClient, StdioTransport
 
 __all__ = ["HANDLE_PREFIX", "DaytonaProvider", "DaytonaSandbox"]
 
 HANDLE_PREFIX = "daytona:"
-#: Daytona organizations are shared, and other tools there use bare ``ale.*`` labels, so
-#: ALE's own live under ``ale.run.``. Listing and destroying act only on these.
-MANAGED_LABEL = "ale.run.managed"
-EPISODE_LABEL = "ale.run.episode"
-ROLE_LABEL = "ale.run.role"
-RETENTION_LABEL = "ale.run.retention"
+#: Daytona organizations are shared, and other tools there use bare ``orbit.*`` labels, so
+#: Orbit's own live under ``orbit.run.``. Listing and destroying act only on these.
+MANAGED_LABEL = "orbit.run.managed"
+EPISODE_LABEL = "orbit.run.episode"
+ROLE_LABEL = "orbit.run.role"
+RETENTION_LABEL = "orbit.run.retention"
 
-GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
+GUESTD_DIR = PurePosixPath("/opt/orbit/guestd")
 #: The framework's own Python, which the guest service and these helpers run on.
 PYTHON = guestd.PYTHON["linux"]
 #: Local ports of Daytona's daemon: toolbox API, SSH server, web terminal, and one more.
@@ -291,7 +291,7 @@ class _SshHost:
     def __init__(self, api: DaytonaApi, daytona_id: str) -> None:
         self._api = api
         self._id = daytona_id
-        self._directory = Path(tempfile.mkdtemp(prefix="ale-daytona-ssh-"))
+        self._directory = Path(tempfile.mkdtemp(prefix="orbit-daytona-ssh-"))
         self._count = 0
 
     async def argv(self, remote_command: str) -> list[str]:
@@ -520,7 +520,7 @@ class DaytonaSandbox(TunneledSandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
             gpu_devices=(
                 self.allocation.gpu.provider_addresses if self.allocation.gpu is not None else ()
             ),
@@ -580,7 +580,7 @@ class DaytonaProvider(Provider):
         if resources.gpus and gpu_types and not _daytona_gpu_types(gpu_types):
             usable = ", ".join(sorted(set(_GPU_TYPES.values())))
             problems.append(
-                f"none of gpu_types {list(gpu_types)} is a Daytona GPU ALE can use ({usable})"
+                f"none of gpu_types {list(gpu_types)} is a Daytona GPU Orbit can use ({usable})"
             )
         return tuple(problems)
 
@@ -749,7 +749,10 @@ class DaytonaProvider(Provider):
             "ttlMinutes": hours * 60,
             # Closed from the start, as a Docker sandbox on an internal network is.
             "networkBlockAll": request.network.mode is not NetworkMode.OPEN,
-            "env": {**request.env, **({"ALE_GATEWAY_URL": local_gateway} if local_gateway else {})},
+            "env": {
+                **request.env,
+                **({"ORBIT_GATEWAY_URL": local_gateway} if local_gateway else {}),
+            },
             "labels": {
                 MANAGED_LABEL: "true",
                 EPISODE_LABEL: request.episode_id,
@@ -789,7 +792,7 @@ class DaytonaProvider(Provider):
                     "image": _from_reference(data),
                     "gpus": (),
                     "running": data.get("state") == "started",
-                    "cleanup_command": f"ale sandbox destroy {handle}",
+                    "cleanup_command": f"orbit sandbox destroy {handle}",
                 }
             )
         return sorted(records, key=lambda item: str(item["handle"]))
@@ -803,7 +806,7 @@ class DaytonaProvider(Provider):
             raise ProviderStartError(f"sandbox {handle!r} does not exist")
         labels = data.get("labels") or {}
         if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "keep":
-            raise ProviderCapabilityError(f"{handle!r} is not an ALE-retained Daytona sandbox")
+            raise ProviderCapabilityError(f"{handle!r} is not an Orbit-retained Daytona sandbox")
         await self._api.delete_sandbox(daytona_id)
 
     async def attach_retained(
@@ -827,7 +830,7 @@ class DaytonaProvider(Provider):
             or labels.get(RETENTION_LABEL) != "keep"
             or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
         ):
-            raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
+            raise ProviderCapabilityError(f"{handle!r} is not a retained Orbit solver sandbox")
         if data.get("state") != "started":
             raise ProviderStartError(f"retained sandbox {handle!r} is not running")
 
@@ -929,7 +932,7 @@ def _guestd_command(agent_user: str, environment: dict[str, str]) -> str:
     removed = " ".join(f"-u {name}" for name in _RUNNER_PROXY_VARIABLES)
     assignments = " ".join(
         shlex.quote(f"{name}={value}")
-        for name, value in {**environment, "ALE_AGENT_USER": agent_user}.items()
+        for name, value in {**environment, "ORBIT_AGENT_USER": agent_user}.items()
     )
     return f"cd / && exec env {removed} {assignments} {PYTHON} -I {GUESTD_DIR / 'main.py'} --stdio"
 
@@ -949,7 +952,7 @@ def _guest_environment(
     return {
         **_image_environment(config, request),
         **request.env,
-        **({"ALE_GATEWAY_URL": local_gateway} if local_gateway else {}),
+        **({"ORBIT_GATEWAY_URL": local_gateway} if local_gateway else {}),
     }
 
 
@@ -1229,7 +1232,7 @@ def _sandbox_name(sandbox_id: str) -> str:
     The id ends in its random part, so a longer name drops its middle: the start names the
     Task and the end tells this sandbox from every other.
     """
-    name = "ale-" + re.sub(r"[^a-z0-9-]+", "-", sandbox_id.lower()).strip("-")
+    name = "orbit-" + re.sub(r"[^a-z0-9-]+", "-", sandbox_id.lower()).strip("-")
     if len(name) <= 60:
         return name
     return f"{name[:29].rstrip('-')}-{name[-29:].lstrip('-')}"

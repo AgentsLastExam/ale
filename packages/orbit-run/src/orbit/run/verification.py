@@ -1,4 +1,4 @@
-"""Locate the framework-owned ``ale_verify`` package and gate runs on its Judges."""
+"""Locate the framework-owned ``orbit_verify`` package and gate runs on its Judges."""
 
 from __future__ import annotations
 
@@ -11,17 +11,17 @@ import os
 from collections.abc import Iterable
 from pathlib import Path
 
-from ale.core.config import VerificationConfig
-from ale.core.episode import EventSink
-from ale.core.errors import ConfigError, TaskDefinitionError
-from ale.core.ids import content_hash
-from ale.run.gateway.server import REQUEST_PATHS, Gateway
-from ale.run.gateway.session import GatewaySession, Upstream
-from ale.run.secrets import provider_endpoint
-from ale_verify import ConfigurationError, endpoint_identity, judge_route, probe_judge
+from orbit.core.config import VerificationConfig
+from orbit.core.episode import EventSink
+from orbit.core.errors import ConfigError, TaskDefinitionError
+from orbit.core.ids import content_hash
+from orbit.run.gateway.server import REQUEST_PATHS, Gateway
+from orbit.run.gateway.session import GatewaySession, Upstream
+from orbit.run.secrets import provider_endpoint
+from orbit_verify import ConfigurationError, endpoint_identity, judge_route, probe_judge
 
 __all__ = [
-    "installed_ale_verify",
+    "installed_orbit_verify",
     "judge_endpoints",
     "judge_kinds",
     "open_judge_sessions",
@@ -49,18 +49,18 @@ def _hash_directory(directory: Path) -> str:
     return content_hash(entries)
 
 
-def installed_ale_verify() -> tuple[Path, str, str]:
-    source = Path(str(importlib.resources.files("ale_verify")))
+def installed_orbit_verify() -> tuple[Path, str, str]:
+    source = Path(str(importlib.resources.files("orbit_verify")))
     if not source.is_dir():
-        raise TaskDefinitionError("installed ale_verify package directory is unavailable")
+        raise TaskDefinitionError("installed orbit_verify package directory is unavailable")
     import fastjsonschema
 
     return (
         source,
-        importlib.metadata.version("ale-verify"),
+        importlib.metadata.version("orbit-verify"),
         content_hash(
             {
-                "ale_verify": _hash_directory(source),
+                "orbit_verify": _hash_directory(source),
                 "fastjsonschema": _hash_directory(Path(fastjsonschema.__file__).parent),
             }
         ),
@@ -85,9 +85,11 @@ def judge_kinds(verify_dirs: Iterable[Path]) -> frozenset[str]:
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     module_names.update(
-                        item.asname or item.name for item in node.names if item.name == "ale_verify"
+                        item.asname or item.name
+                        for item in node.names
+                        if item.name == "orbit_verify"
                     )
-                if isinstance(node, ast.ImportFrom) and node.module == "ale_verify":
+                if isinstance(node, ast.ImportFrom) and node.module == "orbit_verify":
                     judge_names.update(
                         item.asname or item.name for item in node.names if item.name == "judge"
                     )
@@ -117,11 +119,11 @@ def judge_kinds(verify_dirs: Iterable[Path]) -> frozenset[str]:
 
 
 def resolved_judges(config: VerificationConfig) -> dict[str, dict[str, str]]:
-    """Each configured Judge as ``ale_verify`` reads it: its provider's endpoint and key name.
+    """Each configured Judge as ``orbit_verify`` reads it: its provider's endpoint and key name.
 
     A Judge names only its provider, so its key and URL resolve exactly as the Gateway's do,
-    from ``ALE_<PROVIDER>_API_KEY`` and ``ALE_<PROVIDER>_BASE_URL``. An LLM Judge's endpoint
-    carries its dialect's path, which is how ``ale_verify`` learns the protocol; an Agent
+    from ``ORBIT_<PROVIDER>_API_KEY`` and ``ORBIT_<PROVIDER>_BASE_URL``. An LLM Judge's endpoint
+    carries its dialect's path, which is how ``orbit_verify`` learns the protocol; an Agent
     Judge's protocol follows from its CLI.
     """
     resolved: dict[str, dict[str, str]] = {}
@@ -161,7 +163,7 @@ async def preflight_judges(verify_dirs: Iterable[Path], config: VerificationConf
 
 
 #: The variable a verifier finds each Judge's Gateway token in.
-_TOKEN_ENV = {"llm": "ALE_LLM_JUDGE_TOKEN", "agent": "ALE_AGENT_JUDGE_TOKEN"}
+_TOKEN_ENV = {"llm": "ORBIT_LLM_JUDGE_TOKEN", "agent": "ORBIT_AGENT_JUDGE_TOKEN"}
 
 
 def judge_endpoints(config: VerificationConfig) -> dict[str, str]:

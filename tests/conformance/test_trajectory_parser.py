@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import TrajectoryReferenceError
-from ale.core.harness import TrajectoryParseContext
-from ale.run.harnesses.base import STDOUT_PATH
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.recording import BlobStore
+from orbit.core.errors import TrajectoryReferenceError
+from orbit.core.harness import TrajectoryParseContext
+from orbit.run.harnesses.base import STDOUT_PATH
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
@@ -133,8 +133,8 @@ def test_missing_result_stays_absent_and_partial_prefix_is_valid(tmp_path: Path)
         incomplete=True,
     )
     assert trajectory.steps[1].observation is None
-    assert trajectory.extra["ale"]["incomplete"] is True
-    assert trajectory.extra["ale"]["parse_issues"][0]["reason"] == "malformed_json"
+    assert trajectory.extra["orbit"]["incomplete"] is True
+    assert trajectory.extra["orbit"]["parse_issues"][0]["reason"] == "malformed_json"
 
 
 def test_orphan_result_is_rejected(tmp_path: Path) -> None:

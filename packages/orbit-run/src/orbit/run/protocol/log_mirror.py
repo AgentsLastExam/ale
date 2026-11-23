@@ -6,8 +6,8 @@ import hashlib
 import logging
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from ale.core.sandbox import Sandbox, SandboxFile
-from ale.core.taskspec import OperatingSystem
+from orbit.core.sandbox import Sandbox, SandboxFile
+from orbit.core.taskspec import OperatingSystem
 
 __all__ = ["FINAL_SYNC_TIMEOUT_SEC", "SYNC_INTERVAL_SEC", "SYNC_TIMEOUT_SEC", "LogMirror"]
 
@@ -17,7 +17,7 @@ SYNC_TIMEOUT_SEC = 30.0
 FINAL_SYNC_TIMEOUT_SEC = 300.0
 #: Bytes copied from one file before the next file gets a turn.
 _PIECE_BYTES = 8 * 1024 * 1024
-_LOGGER = logging.getLogger("ale.execution")
+_LOGGER = logging.getLogger("orbit.execution")
 
 
 class LogMirror:
@@ -149,7 +149,7 @@ class LogMirror:
             self._reported[source] = detail
             _LOGGER.warning(
                 "harness log copy will retry",
-                extra={"ale_data": {"source": source, "error": detail}},
+                extra={"orbit_data": {"source": source, "error": detail}},
             )
 
 

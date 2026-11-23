@@ -22,8 +22,8 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
 
-from ale.core.errors import GuestUnreachableError, OutputStreamError, ProviderStartError
-from ale.core.sandbox import ExecOutputSink, SandboxFile
+from orbit.core.errors import GuestUnreachableError, OutputStreamError, ProviderStartError
+from orbit.core.sandbox import ExecOutputSink, SandboxFile
 
 __all__ = ["GuestClient", "StdioTransport", "TcpTransport", "Transport"]
 
@@ -167,7 +167,7 @@ class TcpTransport:
             if code == "unsupported":
                 raise ProviderStartError(
                     f"guest service at {self._host}:{self._port} predates authenticated "
-                    "connections; rebuild the image from the current ALE base"
+                    "connections; rebuild the image from the current Orbit base"
                 )
             raise ProviderStartError(
                 f"guest service at {self._host}:{self._port} refused the framework token [{code}]"

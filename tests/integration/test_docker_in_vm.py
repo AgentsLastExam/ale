@@ -5,20 +5,20 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import RunConfig
-from ale.core.episode import Phase
-from ale.core.lock import TaskSource
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import (
+from orbit.core.config import RunConfig
+from orbit.core.episode import Phase
+from orbit.core.lock import TaskSource
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import (
     ProvenanceInputs,
     agent_provenance,
     gateway_provenance,
 )
-from ale.run.providers import ProviderRegistry
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.providers import ProviderRegistry
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import sibling_checkout
 
 TASK = sibling_checkout("ale-tasks-base") / "tasks/demo/docker_in_vm"

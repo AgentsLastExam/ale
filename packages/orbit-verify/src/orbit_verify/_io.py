@@ -78,7 +78,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 def load_config() -> dict[str, dict[str, str]]:
-    path = os.environ.get("ALE_VERIFY_CONFIG_PATH")
+    path = os.environ.get("ORBIT_VERIFY_CONFIG_PATH")
     if not path:
         return {}
     try:

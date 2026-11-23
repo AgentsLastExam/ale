@@ -2,10 +2,10 @@
 
 A Sandbox without ``gpu_memory_mb`` takes its GPUs whole. One with it shares each GPU with
 others that name it too: the Provider admits it where the memory free on the GPU, less what
-ALE's Sandboxes there reserved and do not use yet, leaves its need and a margin for other
+Orbit's Sandboxes there reserved and do not use yet, leaves its need and a margin for other
 tenants' growth, and watches what it uses while a Run holds it, since under runc nothing holds
 a process to its share, and under gVisor a failure of nvproxy's accounting could let it pass.
-The running containers' labels are the record of what ALE holds. The Host's ``nvidia-smi``
+The running containers' labels are the record of what Orbit holds. The Host's ``nvidia-smi``
 lists every process that uses a GPU by its Host PID, and a PID's cgroup names the container
 that holds it. This module reads and decides; the Provider acts.
 """
@@ -23,10 +23,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ale.core.errors import ProviderCapacityError, ProviderStartError
-from ale.core.sandbox import GpuDevice
-from ale.run.gpu import normalize_nvidia_uuid
-from ale.run.process import run
+from orbit.core.errors import ProviderCapacityError, ProviderStartError
+from orbit.core.sandbox import GpuDevice
+from orbit.run.gpu import normalize_nvidia_uuid
+from orbit.run.process import run
 
 __all__ = [
     "KILL",
@@ -69,7 +69,7 @@ _CONTAINER = re.compile(r"/docker[-/]([0-9a-f]{64})(?:\.scope)?(?=/|$)", re.MULT
 
 @dataclass(frozen=True)
 class Holder:
-    """A running ALE Sandbox that holds GPUs, as its container's labels say."""
+    """A running Orbit Sandbox that holds GPUs, as its container's labels say."""
 
     container: str
     """Its container's ID."""
@@ -172,7 +172,7 @@ async def read_processes(proc: Path = PROC) -> list[GpuProcess]:
 
 @contextlib.asynccontextmanager
 async def locked(path: Path) -> AsyncIterator[None]:
-    """Hold the lock file at ``path``, which every ALE process of every user that admits
+    """Hold the lock file at ``path``, which every Orbit process of every user that admits
     Sandboxes through one Docker daemon takes, from reading what is free until Docker has
     started the Sandbox that takes it, so two Sandboxes never take the same memory."""
     descriptor = _open_lock(path)
@@ -222,9 +222,9 @@ def admit(
     now, that a Sandbox needing ``memory_mb`` on each takes, those with the most headroom
     first.
 
-    A Sandbox that needs no memory takes a GPU no ALE Sandbox holds. One that does takes a GPU
-    no ALE Sandbox holds whole, whose headroom leaves it ``memory_mb`` and ``margin_mb``: the
-    memory free there less what each ALE Sandbox sharing it reserved and does not use yet, as
+    A Sandbox that needs no memory takes a GPU no Orbit Sandbox holds. One that does takes a GPU
+    no Orbit Sandbox holds whole, whose headroom leaves it ``memory_mb`` and ``margin_mb``: the
+    memory free there less what each Orbit Sandbox sharing it reserved and does not use yet, as
     what it uses is no longer free. Too few refuses the Sandbox, naming each GPU and why.
     """
     in_use: Counter[tuple[str, str]] = Counter()
@@ -249,7 +249,7 @@ def admit(
             considered.append(f"{label}: nvidia-smi reports no free memory")
         elif memory_mb is not None and headroom is not None and headroom < memory_mb + margin_mb:
             considered.append(
-                f"{label}: {free} MiB free, {reserved} MiB of it reserved by ALE Sandboxes "
+                f"{label}: {free} MiB free, {reserved} MiB of it reserved by Orbit Sandboxes "
                 f"that do not use it yet, so {headroom} MiB of headroom"
             )
         else:
@@ -262,7 +262,7 @@ def admit(
     if len(eligible) < count:
         plural = "s" if count > 1 else ""
         wanted = (
-            f"{count} GPU{plural} no ALE Sandbox holds"
+            f"{count} GPU{plural} no Orbit Sandbox holds"
             if memory_mb is None
             else f"{memory_mb} MiB on each of {count} GPU{plural}, and a margin of {margin_mb} MiB"
         )

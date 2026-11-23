@@ -7,7 +7,7 @@ control flow inverted to fit:
 * :class:`AutonomousHarness` — the agent owns its loop. We hand over a prompt and take
   the result; what happens in between is the agent's business. It may run inside the
   sandbox or outside it against the sandbox's exposed interfaces.
-* :class:`PolicyHarness` — the agent steps through a :class:`~ale.core.env.TaskEnv` we
+* :class:`PolicyHarness` — the agent steps through a :class:`~orbit.core.env.TaskEnv` we
   hand it. It drives, but every observation and action passes through our environment,
   so the trajectory is witnessed rather than reported.
 
@@ -26,13 +26,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ale.core.blob import BlobSink
-from ale.core.env import Observation, StepResult, TaskEnv
-from ale.core.errors import AgentUnsupportedError
-from ale.core.sandbox import Sandbox
-from ale.core.taskspec import McpServer, OperatingSystem
-from ale.core.trace import DesktopAction
-from ale.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
+from orbit.core.blob import BlobSink
+from orbit.core.env import Observation, StepResult, TaskEnv
+from orbit.core.errors import AgentUnsupportedError
+from orbit.core.sandbox import Sandbox
+from orbit.core.taskspec import McpServer, OperatingSystem
+from orbit.core.trace import DesktopAction
+from orbit.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
 
 __all__ = [
     "AgentRun",
@@ -217,7 +217,7 @@ class Harness(ABC):
     logs: tuple[str, ...] = ()
     """Files or directories this harness writes about its own run, relative to the agent's home.
 
-    ALE mirrors them into ``logs/<harness>/`` at the same relative paths while the agent
+    Orbit mirrors them into ``logs/<harness>/`` at the same relative paths while the agent
     runs, and once more after it stops; the parser reads that mirror.
 
     Not artifacts. An artifact is what the *agent produced* while doing the task, and the
@@ -234,7 +234,7 @@ class Harness(ABC):
 
     credentials: tuple[str, ...] = ()
     """Files under the agent's home, relative to it, in which this harness leaves a
-    credential: the episode token, or a subscription's. ALE removes them before the agent's
+    credential: the episode token, or a subscription's. Orbit removes them before the agent's
     disk is saved or kept, between turns included, and the harness writes them again before
     each turn."""
 
@@ -281,7 +281,7 @@ class Harness(ABC):
             ),
             extra=(
                 {
-                    "ale": {
+                    "orbit": {
                         "incomplete": True,
                         "incomplete_reason": context.incomplete_reason or "interrupted",
                     }
@@ -346,7 +346,7 @@ class PolicyHarness(Harness):
     async def rollout(self, env: TaskEnv, session: HarnessSession) -> str | None:
         """Drive ``env`` until it is done. May return a closing message.
 
-        Stop when a :class:`~ale.core.env.StepResult` reports ``done``; the environment
+        Stop when a :class:`~orbit.core.env.StepResult` reports ``done``; the environment
         enforces its own ceilings, so ignoring that is refused rather than obeyed.
         """
 

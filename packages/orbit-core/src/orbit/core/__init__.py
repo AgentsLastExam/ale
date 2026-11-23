@@ -1,15 +1,15 @@
-"""ALE core contracts.
+"""Orbit core contracts.
 
-This package defines every shape that crosses a boundary in ALE: task
+This package defines every shape that crosses a boundary in Orbit: task
 specifications, evaluation results, traces, provenance records, and the abstract
 interfaces that providers and harnesses implement.
 
-Nothing here may import ``ale.run`` (Constitution II: structural decoupling) and
+Nothing here may import ``orbit.run`` (Constitution II: structural decoupling) and
 nothing here may depend on a third-party evaluation framework (Constitution I:
 contracts first).
 """
 
-from ale.core.calibration import (
+from orbit.core.calibration import (
     CalibrationAttempt,
     CalibrationCheck,
     CalibrationEngine,
@@ -18,7 +18,7 @@ from ale.core.calibration import (
     CaseCalibrationObservation,
     TaskCalibrationObservation,
 )
-from ale.core.taskspec import ImageKind, ImageSpec
+from orbit.core.taskspec import ImageKind, ImageSpec
 
 __all__ = [
     "CalibrationAttempt",

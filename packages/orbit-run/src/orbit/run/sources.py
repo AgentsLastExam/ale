@@ -8,16 +8,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from ale.core.errors import RegistryError
-from ale.core.lock import TaskSource
+from orbit.core.errors import RegistryError
+from orbit.core.lock import TaskSource
 
 __all__ = ["ResolvedSource", "cache_root", "resolve"]
 
 
 def cache_root() -> Path:
     """Operator cache retained for non-Task assets such as VM disks and GPU locks."""
-    base = os.environ.get("ALE_CACHE_DIR") or (
-        Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ale"
+    base = os.environ.get("ORBIT_CACHE_DIR") or (
+        Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "orbit"
     )
     return Path(base)
 

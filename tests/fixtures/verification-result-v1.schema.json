@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ALE verification result v1",
+  "title": "Orbit verification result v1",
   "type": "object",
   "required": [
     "reward"

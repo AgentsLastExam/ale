@@ -14,35 +14,35 @@ An invocation fails when OpenCode prints an `error` event: for a turn that faile
 interrupted, and for a request for input it cancelled, even when the session records the
 turn as succeeded. A retried model call is a `retry` event and fails nothing.
 
-`OPENCODE_CONFIG_DIR` is `.opencode-ale`, holding the declared Skills, in place of
-`~/.config/opencode`. ALE's configuration, `.opencode-ale/ale.json`, reaches OpenCode as
+`OPENCODE_CONFIG_DIR` is `.opencode-orbit`, holding the declared Skills, in place of
+`~/.config/opencode`. Orbit's configuration, `.opencode-orbit/orbit.json`, reaches OpenCode as
 `OPENCODE_CONFIG_CONTENT`, which outranks a workspace's own `opencode.json` and
-`.opencode`. It defines one custom provider, `ale`, the episode Gateway, whose key OpenCode
-reads from `ALE_GATEWAY_TOKEN` and stores nowhere, and a policy that makes every other
+`.opencode`. It defines one custom provider, `orbit`, the episode Gateway, whose key OpenCode
+reads from `ORBIT_GATEWAY_TOKEN` and stores nowhere, and a policy that makes every other
 provider unusable, OpenCode's keyless hosted models included. Sessions, logs and snapshots
 stay where OpenCode keeps them, under `~/.local/share/opencode`.
 
 The Gateway dialect selects OpenCode's package for a compatible endpoint: Chat Completions
 (`openai-compatible`, the default), Responses (`openai-compatible/responses`), Anthropic
 Messages (`anthropic-compatible`) or Gemini (`google`, through `/v1beta`). The model is
-`ale/<model>`, and `ale/<model>#<level>` with a `reasoning_effort`; a model whose name
+`orbit/<model>`, and `orbit/<model>#<level>` with a `reasoning_effort`; a model whose name
 contains `#`, OpenCode's variant separator, fails before the agent starts.
 
 At start OpenCode would refresh its model catalog, check for updates and probe the
 loopback for Ollama (port 11434), LM Studio (1234) and vLLM (8000), which may be a Task's
 own services; the catalog and updater are off, the three discovery plugins disabled, and
-sharing a session is disabled. OpenCode downloads ripgrep 15.1.0 on its first search; ALE
+sharing a session is disabled. OpenCode downloads ripgrep 15.1.0 on its first search; Orbit
 installs that release into the `bin` directory `opencode debug paths` names, before the
 network is sealed, accepting only the archive digests OpenCode itself pins and each
 `rg`'s own.
 
-`--session` continues the session with that ID or creates it, so ALE chooses a new
+`--session` continues the session with that ID or creates it, so Orbit chooses a new
 session's ID, `ses_` and a UUID, as OpenCode requires the `ses` prefix. Each invocation
-runs through `.opencode-ale/invoke.sh`, which ALE writes, since a Windows desktop agent's
+runs through `.opencode-orbit/invoke.sh`, which Orbit writes, since a Windows desktop agent's
 command line may not exceed 1,024 characters. OpenCode keeps sessions in SQLite only, so
 after every invocation the script has `opencode session export` write the session, and
 every session it spawned at any depth, to
-`.opencode-ale/exports/<root session id>/<time>/<session id>.json`. The parser reads the
+`.opencode-orbit/exports/<root session id>/<time>/<session id>.json`. The parser reads the
 newest export, uses an invocation's JSON events only for a turn the export lacks, and adds
 an invocation's error to a turn whose session records no failure. A `subagent` call's
 metadata names the child session, whose export names its parent; the child becomes a
@@ -56,7 +56,7 @@ invocation makes it again.
 
 MCP servers are written with `codemode: false`, so their tools are on the model's tool
 list as `<server>_<tool>`, with each name's characters outside `[A-Za-z0-9_-]` as `_`; the
-parser restores the declared server name from `ale.json` and keeps the tool's name as
+parser restores the declared server name from `orbit.json` and keeps the tool's name as
 OpenCode spells it. Under OpenCode's default Code Mode a script calls them through
 `execute`, and the session keeps no result of each call. A remote server is Streamable
 HTTP, OpenCode's only remote transport, with `oauth: false` so a 401 starts no sign-in.

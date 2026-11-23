@@ -1,4 +1,4 @@
-"""AgentsLastExam's CUA desktop MCP contract, backed by ALE's local GUI layer."""
+"""AgentsLastExam's CUA desktop MCP contract, backed by Orbit's local GUI layer."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def _load_gui() -> Any:
     if beside.is_file():
         sys.path.insert(0, str(beside.parent))
         return importlib.import_module("gui")
-    return importlib.import_module("ale.run.guestd.gui")
+    return importlib.import_module("orbit.run.guestd.gui")
 
 
 gui = _load_gui()
@@ -26,7 +26,7 @@ PROTOCOL_VERSION = "2024-11-05"
 SERVER = {"name": "cua-desktop", "version": "0.3.0"}
 JSON_SCHEMA = "http://json-schema.org/draft-07/schema#"
 #: The variable that caps the longest side of a screenshot, in pixels, when the Run sets one.
-SCREENSHOT_MAX_DIMENSION = "ALE_CUA_SCREENSHOT_MAX_DIMENSION"
+SCREENSHOT_MAX_DIMENSION = "ORBIT_CUA_SCREENSHOT_MAX_DIMENSION"
 
 
 def _coordinate(description: str) -> dict[str, Any]:

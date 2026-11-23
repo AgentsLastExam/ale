@@ -1,7 +1,7 @@
 """Typed error taxonomy.
 
-Every failure in ALE maps to exactly one class here, and every class maps to exactly
-one terminal :class:`~ale.core.verdict.Status`, but a Sandbox lost to memory or storage, which
+Every failure in Orbit maps to exactly one class here, and every class maps to exactly
+one terminal :class:`~orbit.core.verdict.Status`, but a Sandbox lost to memory or storage, which
 is the agent's or the Task's by whose code ran there. That mapping is what lets the run layer
 decide retries, and what makes "why did this run stop?" answerable from a record rather
 than from a log.
@@ -17,7 +17,6 @@ __all__ = [
     "AgentResourceConflictError",
     "AgentResourceError",
     "AgentUnsupportedError",
-    "AleError",
     "AllocationEndedError",
     "AssetError",
     "BudgetExceededError",
@@ -29,6 +28,7 @@ __all__ = [
     "MemoryExhaustedError",
     "ModelProviderError",
     "NativeContinuationError",
+    "OrbitError",
     "OutputStreamError",
     "PhaseTimeoutError",
     "ProvenanceIncompleteError",
@@ -59,7 +59,7 @@ __all__ = [
 ]
 
 
-class AleError(Exception):
+class OrbitError(Exception):
     """Base class for every error the framework raises deliberately."""
 
 
@@ -67,7 +67,7 @@ class AleError(Exception):
 # These are authoring or invocation mistakes: they surface before any sandbox exists.
 
 
-class ConfigError(AleError):
+class ConfigError(OrbitError):
     """Invalid configuration: unknown key, bad value, contradictory layers."""
 
 
@@ -84,29 +84,29 @@ class AgentUnsupportedError(ConfigError):
 
 
 class SubscriptionUnavailableError(ConfigError):
-    """The requested Harness has no isolated ALE subscription credential."""
+    """The requested Harness has no isolated Orbit subscription credential."""
 
 
 class SubscriptionCompatibilityError(ConfigError):
     """The pinned native CLI cannot honor the subscription contract."""
 
 
-class RegistryError(AleError):
+class RegistryError(OrbitError):
     """A task reference could not be resolved to content."""
 
 
-class TaskDefinitionError(AleError):
+class TaskDefinitionError(OrbitError):
     """A Task folder or its ``task.toml`` is invalid."""
 
 
-class AssetError(AleError):
+class AssetError(OrbitError):
     """A declared asset could not be fetched, authenticated, or staged."""
 
 
 # --- Environment ------------------------------------------------------------------
 
 
-class EnvironmentError_(AleError):
+class EnvironmentError_(OrbitError):
     """The sandbox side failed for reasons unrelated to the agent or the task."""
 
 
@@ -174,7 +174,7 @@ class ModelProviderError(EnvironmentError_):
 # --- Agent ------------------------------------------------------------------------
 
 
-class AgentError(AleError):
+class AgentError(OrbitError):
     """The agent failed in a way that is attributable to the agent."""
 
 
@@ -194,11 +194,11 @@ class TrajectoryReferenceError(TrajectoryConversionError):
     """A trajectory call, result, subagent, or continuation reference is invalid."""
 
 
-class IncompleteTrainingDataError(AleError):
+class IncompleteTrainingDataError(OrbitError):
     """Exact token-level evidence required for a training export is absent."""
 
 
-class TornJsonlError(AleError):
+class TornJsonlError(OrbitError):
     """A JSONL file ends with an incomplete or malformed record."""
 
 
@@ -209,7 +209,7 @@ class OutputStreamError(EnvironmentError_):
 # --- Task-side failures -----------------------------------------------------------
 
 
-class TaskError(AleError):
+class TaskError(OrbitError):
     """The task's own machinery failed — a task defect, not an agent result."""
 
 
@@ -244,7 +244,7 @@ class VerificationVerdictError(VerificationInfrastructureError):
 # --- Budgets and deadlines --------------------------------------------------------
 
 
-class PhaseTimeoutError(AleError):
+class PhaseTimeoutError(OrbitError):
     """A phase exceeded its declared timeout."""
 
     def __init__(
@@ -257,7 +257,7 @@ class PhaseTimeoutError(AleError):
         self.native_session_id = native_session_id
 
 
-class BudgetExceededError(AleError):
+class BudgetExceededError(OrbitError):
     """A turn, token or model-call ceiling was reached; the gateway refused to continue."""
 
     layer = "gateway"
@@ -283,7 +283,7 @@ class HarnessLimitError(BudgetExceededError):
 # --- Provenance -------------------------------------------------------------------
 
 
-class ProvenanceIncompleteError(AleError):
+class ProvenanceIncompleteError(OrbitError):
     """A result would be reported without a complete provenance record.
 
     Raised instead of emitting the result: an unattributable number is worse than no

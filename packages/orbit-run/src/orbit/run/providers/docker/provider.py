@@ -46,16 +46,16 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
-from ale.core.capability import CapabilityProfile, GpuHold, GpuModel, SandboxNeeds, accepts_model
-from ale.core.config import GPU_MEMORY_MARGIN_MB
-from ale.core.errors import (
+from orbit.core.capability import CapabilityProfile, GpuHold, GpuModel, SandboxNeeds, accepts_model
+from orbit.core.config import GPU_MEMORY_MARGIN_MB
+from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
     StorageExhaustedError,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
     ExecOutputSink,
@@ -77,16 +77,16 @@ from ale.core.sandbox import (
     SandboxRole,
     SandboxState,
 )
-from ale.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem, Resources
-from ale.run import HELPER_RUNTIME, ale_image, guestd
-from ale.run.framework import with_framework
-from ale.run.gpu import parse_nvidia_smi
-from ale.run.images import resolve_container_image, resolve_prepared_container_image
-from ale.run.iptables import GATEWAY_CHAIN
-from ale.run.process import run
-from ale.run.providers import machine_arch, memory, relay
-from ale.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
-from ale.run.providers.docker import (
+from orbit.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem, Resources
+from orbit.run import HELPER_RUNTIME, guestd, orbit_image
+from orbit.run.framework import with_framework
+from orbit.run.gpu import parse_nvidia_smi
+from orbit.run.images import resolve_container_image, resolve_prepared_container_image
+from orbit.run.iptables import GATEWAY_CHAIN
+from orbit.run.process import run
+from orbit.run.providers import machine_arch, memory, relay
+from orbit.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
+from orbit.run.providers.docker import (
     gpu_sharing,
     gvisor,
     kata,
@@ -96,8 +96,8 @@ from ale.run.providers.docker import (
     tc,
     volumes,
 )
-from ale.run.providers.privileges import set_and_prove_elevation
-from ale.run.transport import GuestClient, StdioTransport
+from orbit.run.providers.privileges import set_and_prove_elevation
+from orbit.run.transport import GuestClient, StdioTransport
 
 __all__ = [
     "DockerProvider",
@@ -106,33 +106,33 @@ __all__ = [
 
 _log = logging.getLogger(__name__)
 
-GUESTD_DIR = PurePosixPath("/opt/ale/guestd")
+GUESTD_DIR = PurePosixPath("/opt/orbit/guestd")
 #: Any image with iptables, and tc for a Kata or gVisor sandbox, can apply a sandbox's host
-#: rules; ALE's QEMU runner, which needs both for its own guest, is one.
-NETFILTER_IMAGE = ale_image("ale-qemu-runner")
+#: rules; Orbit's QEMU runner, which needs both for its own guest, is one.
+NETFILTER_IMAGE = orbit_image("orbit-qemu-runner")
 
-LABEL = "ale.episode"
-MANAGED_LABEL = "ale.managed"
-ROLE_LABEL = "ale.role"
-RETENTION_LABEL = "ale.retention"
+LABEL = "orbit.episode"
+MANAGED_LABEL = "orbit.managed"
+ROLE_LABEL = "orbit.role"
+RETENTION_LABEL = "orbit.retention"
 #: The network mode a container was started with, which reattaching confines it by.
-NETWORK_LABEL = "ale.network"
+NETWORK_LABEL = "orbit.network"
 #: The MAC of the Host's end of a Kata or gVisor sandbox's own network, which its seal's
 #: filters match: read before the sandbox starts, and kept for a reattaching run.
-BRIDGE_MAC_LABEL = "ale.bridge-mac"
-GPU_LABEL = "ale.gpus"
+BRIDGE_MAC_LABEL = "orbit.bridge-mac"
+GPU_LABEL = "orbit.gpus"
 #: What a Sandbox that shares its GPUs reserved on each, in MiB.
-GPU_MEMORY_LABEL = "ale.gpu_memory_mb"
-PREPARED_LABEL = "ale.prepared"
+GPU_MEMORY_LABEL = "orbit.gpu_memory_mb"
+PREPARED_LABEL = "orbit.prepared"
 #: On a container, the bytes written over its Task's image that the snapshot it booted from
 #: holds, which its ``storage_mb`` counts; on a snapshot, all it holds over that image.
-WRITTEN_LABEL = "ale.written"
+WRITTEN_LABEL = "orbit.written"
 #: Set on a container that mounts its request's ``shown`` directory, which a reattaching run
 #: finds mounted rather than copies.
-SHOWN_LABEL = "ale.shown"
+SHOWN_LABEL = "orbit.shown"
 HANDLE_PREFIX = "docker:"
 #: A snapshot is a local image in this repository, tagged with its Sandbox's ID.
-SNAPSHOT_REPOSITORY = "ale-snapshot"
+SNAPSHOT_REPOSITORY = "orbit-snapshot"
 #: Prints the owner and mode of the directory it is given, which a volume artifact's view
 #: restores at its root.
 _STAT_ROOT = (
@@ -147,7 +147,7 @@ SNAPSHOT_PREFIX = f"{HANDLE_PREFIX}snapshot:"
 #: network has no default route at all, so the only address that works is one inside the
 #: sandbox's own subnet. That is the provider's half of the deny-all bargain — no route
 #: off the host, and exactly one destination still reachable.
-HOST_ALIAS = "ale-gateway.internal"
+HOST_ALIAS = "orbit-gateway.internal"
 
 
 _SHIM = re.compile(r"io\.containerd\.(\w+)\.(v\d+)")
@@ -166,12 +166,12 @@ _HOST_NVIDIA_QUERY = f"index,{_NVIDIA_QUERY},memory.total,memory.reserved,memory
 
 
 async def _gpu_holders() -> list[gpu_sharing.Holder]:
-    """Every running ALE Sandbox that holds GPUs, by its labels, which are the record of what
-    ALE holds through this Docker daemon.
+    """Every running Orbit Sandbox that holds GPUs, by its labels, which are the record of what
+    Orbit holds through this Docker daemon.
 
     Each line is ``<id> <name> <gpus label>/<gpu memory label>``. Every Sandbox is started with
     both labels, empty when it holds no GPU or holds them whole, so an image's labels never
-    stand in for them; ALE's helpers have neither, and hold nothing.
+    stand in for them; Orbit's helpers have neither, and hold nothing.
     """
     code, output, stderr = await _docker(
         "ps",
@@ -184,7 +184,7 @@ async def _gpu_holders() -> list[gpu_sharing.Holder]:
         timeout=30,
     )
     if code != 0:
-        raise ProviderStartError(f"could not list ALE's Sandboxes: {stderr.strip()}")
+        raise ProviderStartError(f"could not list Orbit's Sandboxes: {stderr.strip()}")
     found: list[gpu_sharing.Holder] = []
     for line in output.splitlines():
         if not line.strip():
@@ -314,7 +314,7 @@ async def _remove_network(network: str) -> None:
 
 
 async def _discard_network(network: str) -> None:
-    """Remove a network ALE created for a sandbox that did not start, even while the task
+    """Remove a network Orbit created for a sandbox that did not start, even while the task
     that created it is cancelled."""
     with contextlib.suppress(BaseException):
         await asyncio.shield(_docker("network", "rm", network, timeout=_REMOVE_SEC))
@@ -359,7 +359,7 @@ async def _bridge_mac(network: str, host_ip: str) -> str:
     device, which a helper on ``--network host`` lacks under rootless Docker whose network
     namespace rootlesskit detaches (``--detach-netns``).
     """
-    helper = f"ale-mac-{uuid.uuid4().hex[:12]}"
+    helper = f"orbit-mac-{uuid.uuid4().hex[:12]}"
     try:
         code, out, stderr = await _docker(
             "run", "--rm", "--name", helper, *HELPER_RUNTIME, "--network", network,
@@ -507,14 +507,14 @@ class _RuncConfinement:
         """
         if request.network.mode is NetworkMode.OPEN:
             return cls(None, await networks.host_ip())
-        network = f"ale-net-{sandbox_id}"
+        network = f"orbit-net-{sandbox_id}"
         return cls(network, await networks.create(network, internal=True))
 
     @classmethod
     async def found(
         cls, own: tuple[str, ...], networks: _Networks, labels: Mapping[str, str]
     ) -> Self:
-        """A running sandbox's, from the ALE networks it is attached to."""
+        """A running sandbox's, from the Orbit networks it is attached to."""
         if not own:
             return cls(None, await networks.host_ip())
         return cls(own[0], await _bridge_host_ip(own[0]))
@@ -614,7 +614,7 @@ class _OnOwnBridge:
 
     def __init__(self, networks: _Networks, network: str, host_ip: str, host_mac: str) -> None:
         self.networks = networks
-        #: The sandbox's network, ``ale-net-<sandbox id>``.
+        #: The sandbox's network, ``orbit-net-<sandbox id>``.
         self.network = network
         #: The Host's address on it, the one address the seal admits, and its bridge's MAC.
         self.host_ip = host_ip
@@ -625,7 +625,7 @@ class _OnOwnBridge:
     async def start(cls, sandbox_id: str, request: SandboxRequest, networks: _Networks) -> Self:
         """Its network, whatever its Task's network mode, with what the seal needs of it
         read before the sandbox starts: only the seal's own helper runs between the two."""
-        network = f"ale-net-{sandbox_id}"
+        network = f"orbit-net-{sandbox_id}"
         host_ip = await networks.create(network)
         try:
             return cls(networks, network, host_ip, await _bridge_mac(network, host_ip))
@@ -637,7 +637,7 @@ class _OnOwnBridge:
     async def found(
         cls, own: tuple[str, ...], networks: _Networks, labels: Mapping[str, str]
     ) -> Self:
-        """A running sandbox's, from the ALE network it is attached to and the bridge's MAC
+        """A running sandbox's, from the Orbit network it is attached to and the bridge's MAC
         it was started with: a helper on its network now would be its neighbour."""
         if len(own) != 1:
             raise ProviderCapabilityError("the container is on no network of its own")
@@ -740,7 +740,7 @@ class _GvisorConfinement(_OnOwnBridge):
     """A sandbox under gVisor, sealed by tc filters on its veth's egress while it is
     isolated.
 
-    ALE's chains in its netstack route the Gateway and refuse what the filters drop, so that
+    Orbit's chains in its netstack route the Gateway and refuse what the filters drop, so that
     fails at once. The sandbox's own processes lack ``CAP_NET_ADMIN`` there unless it runs a
     container engine; the filters outside are what binds it.
     """
@@ -807,7 +807,7 @@ class _GvisorConfinement(_OnOwnBridge):
         await self._netstack(container, sealed=True)
 
     async def _netstack(self, container: str, *, sealed: bool) -> None:
-        """Set ALE's chains in the sandbox's netstack; nothing when there is none to set."""
+        """Set Orbit's chains in the sandbox's netstack; nothing when there is none to set."""
         if not self._isolated and not self._gateway_port:
             return
         state = gvisor.netstack(
@@ -820,7 +820,7 @@ class _GvisorConfinement(_OnOwnBridge):
         code, _, stderr = await _docker(*gvisor.set_netstack(container, state), timeout=60)
         if code != 0:
             raise ProviderStartError(
-                f"could not set ALE's chains in the gVisor sandbox: {stderr.strip()}"
+                f"could not set Orbit's chains in the gVisor sandbox: {stderr.strip()}"
             )
 
 
@@ -878,7 +878,7 @@ class Runtime:
     with, no more and no fewer."""
     build: str = ""
     """What the version ``<runtime> --version`` reports ends in for the build of it this
-    engine runs, for one ALE builds itself."""
+    engine runs, for one Orbit builds itself."""
     drivers: tuple[str, ...] = ()
     """The command of it that lists the NVIDIA driver versions it supports, for one that
     proxies the Host's driver rather than passing it through."""
@@ -1043,11 +1043,11 @@ class _Session(StdioTransport):
         self._closing = False
         #: What the end of its stream was found to mean, which a later call then raises too.
         self._explained: GuestUnreachableError | None = None
-        #: What ALE itself stopped the Sandbox for, which the end of the stream then raises.
+        #: What Orbit itself stopped the Sandbox for, which the end of the stream then raises.
         self.stopped: GuestUnreachableError | None = None
 
     async def send(self, data: bytes) -> None:
-        # Nothing more is asked of a Sandbox ALE stops, while the stop takes effect.
+        # Nothing more is asked of a Sandbox Orbit stops, while the stop takes effect.
         if self.stopped is not None:
             raise self.stopped
         await super().send(data)
@@ -1058,7 +1058,7 @@ class _Session(StdioTransport):
         return line
 
     async def close(self) -> None:
-        # ALE ends the session before it destroys, keeps or snapshots the Sandbox, so an end
+        # Orbit ends the session before it destroys, keeps or snapshots the Sandbox, so an end
         # it causes is never taken for a death.
         self._closing = True
         await super().close()
@@ -1072,7 +1072,7 @@ class _Session(StdioTransport):
     async def explain(self, error: GuestUnreachableError) -> GuestUnreachableError:
         """A guestd that never answered failed to start, which its stderr, in ``error``,
         says at once; a session that did and ended unasked lost its sandbox, or guestd in
-        it, which is a loss to memory after an OOM kill in it; or ALE stopped it."""
+        it, which is a loss to memory after an OOM kill in it; or Orbit stopped it."""
         if self.stopped is not None:
             return self.stopped
         if self._closing or not self._answered:
@@ -1197,7 +1197,7 @@ class DockerSandbox(Sandbox):
         self.confinement = confinement
         self._client = session.client
         self._file_client = file_session.client
-        #: The guestd sessions of both clients, whose end says why ALE stopped the Sandbox.
+        #: The guestd sessions of both clients, whose end says why Orbit stopped the Sandbox.
         self._sessions = (session, file_session)
         #: What counts the OOM kills in it where Docker records none, which both sessions
         #: consult.
@@ -1245,7 +1245,7 @@ class DockerSandbox(Sandbox):
             session.abandon()
 
     async def _release(self) -> None:
-        """Stop watching it and let go of the Host's ports, then end its sessions: ALE's own
+        """Stop watching it and let go of the Host's ports, then end its sessions: Orbit's own
         end is no death."""
         self._unwatch()
         self._host_ports.release(self.container)
@@ -1399,7 +1399,7 @@ class DockerSandbox(Sandbox):
 
     def _stop_for(self, reason: GuestUnreachableError) -> None:
         """Have every call from now on, and each that waits on it now, raise ``reason``:
-        ALE is about to stop the Sandbox."""
+        Orbit is about to stop the Sandbox."""
         for session in self._sessions:
             session.stopped = reason
 
@@ -1419,14 +1419,14 @@ class DockerSandbox(Sandbox):
             f"{writer} wrote {written_mb} MiB over its image, past the {storage_mb} MiB its "
             "Task declares"
         )
-        message = f"ALE's storage watch stopped the Sandbox: {found}"
+        message = f"Orbit's storage watch stopped the Sandbox: {found}"
         _log.info("%s: %s", self.container, message)
         data = {"written_mb": written_mb, "storage_mb": storage_mb}
         self._context.run(
-            logging.getLogger("ale.execution").warning, message, extra={"ale_data": data}
+            logging.getLogger("orbit.execution").warning, message, extra={"orbit_data": data}
         )
         self._watchdog.unwatch(self.container_id)
-        self._stop_for(StorageExhaustedError(f"ALE stopped the sandbox: {found}"))
+        self._stop_for(StorageExhaustedError(f"Orbit stopped the sandbox: {found}"))
         await _docker("kill", self.container, timeout=60)
 
     async def overran(self, overrun: gpu_sharing.Overrun) -> None:
@@ -1438,7 +1438,7 @@ class DockerSandbox(Sandbox):
         and the agent sees its process killed. The kill joins the Sandbox's PID namespace
         from a helper container, once the PID's container and start time show it is still the
         process that used the memory, and the Sandbox stays watched. Where its runtime limits
-        the memory, the limit's accounting failed, which is ALE's failure: the whole Sandbox
+        the memory, the limit's accounting failed, which is Orbit's failure: the whole Sandbox
         stops, and its episode ends in an environment error that says what was found.
         """
         gpu = self.allocation.gpu
@@ -1451,7 +1451,7 @@ class DockerSandbox(Sandbox):
             self._unwatch()
             self._stop_for(
                 GuestUnreachableError(
-                    f"the sandbox itself died: ALE's GPU memory watchdog stopped it: {found}, "
+                    f"the sandbox itself died: Orbit's GPU memory watchdog stopped it: {found}, "
                     f"past {self.allocation.leaf}'s limit"
                 )
             )
@@ -1477,7 +1477,7 @@ class DockerSandbox(Sandbox):
                 )
             return
         message = (
-            f"ALE's GPU memory watchdog killed process {largest.inner_pid} ({largest.name}), "
+            f"Orbit's GPU memory watchdog killed process {largest.inner_pid} ({largest.name}), "
             f"which held {largest.used_mb} MiB: {found}, which {self.allocation.leaf} does not "
             "enforce"
         )
@@ -1490,7 +1490,9 @@ class DockerSandbox(Sandbox):
             "gpu_memory_mb": gpu.memory_mb,
         }
         _log.info("%s: %s", self.container, message)
-        context.run(logging.getLogger("ale.execution").warning, message, extra={"ale_data": data})
+        context.run(
+            logging.getLogger("orbit.execution").warning, message, extra={"orbit_data": data}
+        )
 
     async def _volume_roots(self) -> dict[str, volumes.Root]:
         """The owner and mode of each volume artifact's root, which a view of it restores."""
@@ -1550,7 +1552,7 @@ class DockerSandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {self.handle}",
+            cleanup_command=f"orbit sandbox destroy {self.handle}",
             gpu_devices=gpu_devices,
         )
 
@@ -1606,7 +1608,7 @@ class DockerSandbox(Sandbox):
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
-            cleanup_command=f"ale sandbox destroy {handle}",
+            cleanup_command=f"orbit sandbox destroy {handle}",
         )
 
 
@@ -1710,7 +1712,7 @@ class DockerProvider(Provider):
     async def preflight(self, needs: Sequence[SandboxNeeds] = ()) -> SandboxCheck | None:
         """Find each registered name the Sandboxes of ``needs`` run under, every one its
         profile declares when none are given, registered with exactly the arguments the
-        runtime takes, and the leaf's devices. A runtime ALE builds must be this engine's
+        runtime takes, and the leaf's devices. A runtime Orbit builds must be this engine's
         build, and one that proxies the NVIDIA driver must support the Host's when GPUs may
         be attached: a Sandbox needs them, or, with no needs, its profiles offer them. One
         that limits a shared Sandbox's GPU memory must list the flag that does when a Sandbox
@@ -1766,7 +1768,7 @@ class DockerProvider(Provider):
         return prepared
 
     async def _check_build(self, path: str, runtime: Runtime, *, gpus: bool, shares: bool) -> None:
-        """Check that the runtime Docker runs from ``path`` is ALE's build of it, that it has
+        """Check that the runtime Docker runs from ``path`` is Orbit's build of it, that it has
         the flag that limits GPU memory when Sandboxes share GPUs, and, when they need GPUs,
         that it supports the Host's NVIDIA driver."""
         if runtime.build:
@@ -1779,7 +1781,7 @@ class DockerProvider(Provider):
                 word.endswith(runtime.build) for word in "".join(reported).split()
             ):
                 raise ProviderStartError(
-                    f"{self.id} needs ALE's build {runtime.build} of {path}, not "
+                    f"{self.id} needs Orbit's build {runtime.build} of {path}, not "
                     f"{reported[0] if reported else 'what it reports'}; see the Providers README"
                 )
         if shares and runtime.gpu_memory_flag:
@@ -1873,7 +1875,7 @@ class DockerProvider(Provider):
             await self._refuse_deep_stacks(resolved_image.observed_ref, request.saves)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
-        container = f"ale-{sandbox_id}"
+        container = f"orbit-{sandbox_id}"
         isolated = request.network.mode is not NetworkMode.OPEN
         # Named even for runc: a Host whose default runtime is another would run it there.
         registered, grant = runtime.granted(resources.container_features)
@@ -1944,7 +1946,7 @@ class DockerProvider(Provider):
                 host_ip = confinement.host_ip
                 argv += ["--add-host", f"{HOST_ALIAS}:{host_ip}"]
                 if request.gateway_url:
-                    argv += ["-e", f"ALE_GATEWAY_URL={_sandbox_gateway(request.gateway_url)}"]
+                    argv += ["-e", f"ORBIT_GATEWAY_URL={_sandbox_gateway(request.gateway_url)}"]
                 if request.proxy_url:
                     request = request.model_copy(
                         update={"proxy_url": _reachable(request.proxy_url, host=host_ip)}
@@ -2127,13 +2129,13 @@ class DockerProvider(Provider):
 
     async def _lock_path(self) -> Path:
         """The lock file of this Docker daemon's GPU admission, by the daemon's ID, which
-        every ALE process that admits through the daemon takes, whatever its user or cache."""
+        every Orbit process that admits through the daemon takes, whatever its user or cache."""
         if self._daemon is None:
             code, out, stderr = await _docker("info", "--format", "{{.ID}}", timeout=30)
             if code != 0 or not out.strip():
                 raise ProviderStartError(f"could not identify the Docker daemon: {stderr.strip()}")
             self._daemon = out.strip()
-        return self.gpu_lock_dir / f"ale-gpu-{self._daemon}.lock"
+        return self.gpu_lock_dir / f"orbit-gpu-{self._daemon}.lock"
 
     async def _admit(
         self, resources: Resources, candidates: tuple[str, ...]
@@ -2280,7 +2282,7 @@ class DockerProvider(Provider):
                 "--user",
                 "0",
                 "--env",
-                f"ALE_AGENT_USER={agent_user}",
+                f"ORBIT_AGENT_USER={agent_user}",
                 # In a directory the agent cannot write, which root children start in.
                 "--workdir",
                 "/",
@@ -2321,14 +2323,14 @@ class DockerProvider(Provider):
             timeout=30,
         )
         if code != 0:
-            raise ProviderStartError(f"could not list ALE sandboxes: {stderr.strip()}")
+            raise ProviderStartError(f"could not list Orbit sandboxes: {stderr.strip()}")
         handles = output.split()
         found = await self._list_snapshots()
         if not handles:
             return found
         code, raw, stderr = await _docker("inspect", *handles, timeout=30)
         if code != 0 and not only_vanished(stderr):
-            raise ProviderStartError(f"could not inspect ALE sandboxes: {stderr.strip()}")
+            raise ProviderStartError(f"could not inspect Orbit sandboxes: {stderr.strip()}")
         records = json.loads(raw) if raw.strip() else []
         for record in records:
             labels = record.get("Config", {}).get("Labels", {}) or {}
@@ -2344,7 +2346,7 @@ class DockerProvider(Provider):
                     "image": record.get("Image", ""),
                     "gpus": gpu,
                     "running": bool(record.get("State", {}).get("Running")),
-                    "cleanup_command": f"ale sandbox destroy {handle}",
+                    "cleanup_command": f"orbit sandbox destroy {handle}",
                 }
             )
         return sorted(found, key=lambda item: str(item["handle"]))
@@ -2359,14 +2361,14 @@ class DockerProvider(Provider):
             timeout=30,
         )
         if code != 0:
-            raise ProviderStartError(f"could not list ALE snapshots: {stderr.strip()}")
+            raise ProviderStartError(f"could not list Orbit snapshots: {stderr.strip()}")
         found: list[dict[str, object]] = []
         for tag in output.split():
             handle = f"{SNAPSHOT_PREFIX}{tag}"
             try:
                 labels, identity = await _snapshot_record(handle)
             except ProviderCapabilityError:
-                continue  # tagged by hand, not by ALE
+                continue  # tagged by hand, not by Orbit
             except ProviderStartError:
                 continue  # destroyed by another run since it was listed
             found.append(
@@ -2378,7 +2380,7 @@ class DockerProvider(Provider):
                     "image": identity,
                     "gpus": (),
                     "running": False,
-                    "cleanup_command": f"ale sandbox destroy {handle}",
+                    "cleanup_command": f"orbit sandbox destroy {handle}",
                 }
             )
         return found
@@ -2419,7 +2421,7 @@ class DockerProvider(Provider):
         await self._destroy(handle, retained=False)
 
     async def _destroy(self, handle: str, *, retained: bool) -> None:
-        """Remove an ALE container and its network by its handle. ``retained`` requires a
+        """Remove an Orbit container and its network by its handle. ``retained`` requires a
         kept one; otherwise one that is already gone needs nothing."""
         if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
@@ -2435,17 +2437,17 @@ class DockerProvider(Provider):
         labels = record.get("Config", {}).get("Labels", {}) or {}
         kept = labels.get(RETENTION_LABEL) == "keep"
         if labels.get(MANAGED_LABEL) != "true" or (retained and not kept):
-            kind = "ALE-retained" if retained else "ALE"
+            kind = "Orbit-retained" if retained else "Orbit"
             raise ProviderCapabilityError(f"{handle!r} is not an {kind} Docker sandbox")
         networks = tuple(
             name
             for name in (record.get("NetworkSettings", {}).get("Networks", {}) or {})
-            if name.startswith("ale-net-")
+            if name.startswith("orbit-net-")
         )
         code, _, stderr = await _docker("rm", "-f", "-v", container, timeout=_REMOVE_SEC)
         if code != 0:
             raise ProviderStartError(f"could not destroy {handle}: {stderr.strip()}")
-        await volumes.Meter(container.removeprefix("ale-")).stop()
+        await volumes.Meter(container.removeprefix("orbit-")).stop()
         await volumes.remove(volumes.from_label(labels.get(volumes.MOUNTS_LABEL)))
         for network in networks:
             await _remove_network(network)
@@ -2478,7 +2480,7 @@ class DockerProvider(Provider):
         *,
         retained: bool,
     ) -> DockerSandbox:
-        """A running ALE container as a Sandbox again; ``retained`` requires a kept solver."""
+        """A running Orbit container as a Sandbox again; ``retained`` requires a kept solver."""
         if handle.startswith(SNAPSHOT_PREFIX) or not handle.startswith(HANDLE_PREFIX):
             raise ProviderCapabilityError(f"{handle!r} is not a Docker sandbox handle")
         container = handle.removeprefix(HANDLE_PREFIX)
@@ -2489,21 +2491,21 @@ class DockerProvider(Provider):
         labels = record.get("Config", {}).get("Labels", {}) or {}
         role = labels.get(ROLE_LABEL, "")
         if labels.get(MANAGED_LABEL) != "true" or role not in {r.value for r in SandboxRole}:
-            raise ProviderCapabilityError(f"{handle!r} is not an ALE Docker sandbox")
+            raise ProviderCapabilityError(f"{handle!r} is not an Orbit Docker sandbox")
         if retained and (
             labels.get(RETENTION_LABEL) != "keep"
             or role not in {SandboxRole.SOLVER.value, SandboxRole.SHARED.value}
         ):
-            raise ProviderCapabilityError(f"{handle!r} is not a retained ALE solver sandbox")
+            raise ProviderCapabilityError(f"{handle!r} is not a retained Orbit solver sandbox")
         if not record.get("State", {}).get("Running"):
             raise ProviderStartError(f"sandbox {handle!r} is not running")
 
         if record.get("Image") != image.observed_identity:
             raise ProviderCapabilityError(f"{handle!r} does not use the expected image")
         attached = record.get("NetworkSettings", {}).get("Networks", {}) or {}
-        networks = tuple(name for name in attached if name.startswith("ale-net-"))
+        networks = tuple(name for name in attached if name.startswith("orbit-net-"))
         if len(networks) > 1:
-            raise ProviderCapabilityError(f"{handle!r} has more than one ALE network")
+            raise ProviderCapabilityError(f"{handle!r} has more than one Orbit network")
         # The container, not this run's configuration, says how it was isolated, and whether
         # it is sealed now: a proxied agent's commands need the proxy only then.
         try:
@@ -2535,7 +2537,7 @@ class DockerProvider(Provider):
                 await watcher.close()
             raise
         sandbox = DockerSandbox(
-            sandbox_id=container.removeprefix("ale-"),
+            sandbox_id=container.removeprefix("orbit-"),
             request=request.model_copy(update={"role": SandboxRole(role)}),
             container=container,
             container_id=str(record.get("Id", "")),
@@ -2552,7 +2554,7 @@ class DockerProvider(Provider):
             guest_kernel=runtime.guest_kernel,
             written=int(labels.get(WRITTEN_LABEL) or 0),
             mounts=(found := volumes.from_label(labels.get(volumes.MOUNTS_LABEL))),
-            meter=volumes.Meter(container.removeprefix("ale-")) if found else None,
+            meter=volumes.Meter(container.removeprefix("orbit-")) if found else None,
         )
         sandbox.shown = labels.get(SHOWN_LABEL) == "true"
         if sealed:
@@ -2584,14 +2586,14 @@ def only_vanished(stderr: str) -> bool:
 
 
 async def _snapshot_record(handle: str) -> tuple[dict[str, str], str]:
-    """A snapshot's labels and image identity, once it is shown to be ALE's."""
+    """A snapshot's labels and image identity, once it is shown to be Orbit's."""
     code, raw, stderr = await _docker("image", "inspect", _snapshot_reference(handle), timeout=30)
     if code != 0:
         raise ProviderStartError(f"snapshot {handle!r} does not exist: {stderr.strip()}")
     record = json.loads(raw)[0]
     labels = record.get("Config", {}).get("Labels", {}) or {}
     if labels.get(MANAGED_LABEL) != "true" or labels.get(RETENTION_LABEL) != "snapshot":
-        raise ProviderCapabilityError(f"{handle!r} is not an ALE snapshot")
+        raise ProviderCapabilityError(f"{handle!r} is not an Orbit snapshot")
     return labels, str(record.get("Id", ""))
 
 

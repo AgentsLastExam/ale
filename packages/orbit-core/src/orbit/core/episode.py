@@ -16,22 +16,22 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
-from ale.core.blob import BlobSink
-from ale.core.config import LoggingPolicy, VerificationConfig
-from ale.core.harness import AgentRun, EffectiveAgentResources, HarnessSession
-from ale.core.lock import AleVerifyProvenance, LimitTermination, ResumedFrom, SandboxProvenance
-from ale.core.result import PhaseTiming, ResultRecord, SandboxOutcome, Segment, ValidationRound
-from ale.core.sandbox import (
+from orbit.core.blob import BlobSink
+from orbit.core.config import LoggingPolicy, VerificationConfig
+from orbit.core.harness import AgentRun, EffectiveAgentResources, HarnessSession
+from orbit.core.lock import LimitTermination, OrbitVerifyProvenance, ResumedFrom, SandboxProvenance
+from orbit.core.result import PhaseTiming, ResultRecord, SandboxOutcome, Segment, ValidationRound
+from orbit.core.sandbox import (
     PreparedTaskImage,
     ResolvedImage,
     ResourceAllocation,
     Sandbox,
     SandboxRequest,
 )
-from ale.core.task import ResolvedVariables, Stage, TaskSourceContext
-from ale.core.taskspec import NetworkPolicy, TaskSpec
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Rewards
+from orbit.core.task import ResolvedVariables, Stage, TaskSourceContext
+from orbit.core.taskspec import NetworkPolicy, TaskSpec
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Rewards
 
 __all__ = [
     "ArtifactSink",
@@ -284,7 +284,7 @@ class EpisodeContext:
     move_prompts: dict[int, str] = field(default_factory=dict)
     """The prompt that resumed the agent's turn a move cut, by the segment it resumed in,
     which marks where the move falls in its trajectory."""
-    ale_verify_provenance: AleVerifyProvenance | None = None
+    orbit_verify_provenance: OrbitVerifyProvenance | None = None
     verifier_resolved_image: ResolvedImage | None = None
     verifier_resource_allocation: ResourceAllocation | None = None
     validation_resolved_image: ResolvedImage | None = None

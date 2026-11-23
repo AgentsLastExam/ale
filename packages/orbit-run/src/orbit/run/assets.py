@@ -13,15 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ale.core.config import resolve_asset_collection
-from ale.core.errors import AssetError
-from ale.core.task import CALIBRATION_DIR, Task, TaskAssetObservation, TaskSourceContext
-from ale.run.secrets import hf_token
+from orbit.core.config import resolve_asset_collection
+from orbit.core.errors import AssetError
+from orbit.core.task import CALIBRATION_DIR, Task, TaskAssetObservation, TaskSourceContext
+from orbit.run.secrets import hf_token
 
 if TYPE_CHECKING:
     from huggingface_hub import HfApi
 
-    from ale.run.tasksets.manifest import TaskFolder
+    from orbit.run.tasksets.manifest import TaskFolder
 
 #: Where every Task keeps assets, relative to its folder: beside the files that read them.
 #: The reference solution's are ``solution/assets``; each further calibration case has one
@@ -146,7 +146,7 @@ def asset_status(paths: Sequence[Path]) -> tuple[TaskAssetObservation, ...]:
 
 
 def select_asset_repositories(paths: Sequence[Path]) -> tuple[AssetRepositorySelection, ...]:
-    from ale.run.tasksets.manifest import load_tasks
+    from orbit.run.tasksets.manifest import load_tasks
 
     tasks_by_root: dict[Path, AssetLocation] = {}
     for path in paths:
@@ -198,7 +198,7 @@ def pull_assets(
         commit = info.sha
         if not commit:
             raise AssetError(f"dataset {remote_repo_id} has no resolved commit")
-        with tempfile.TemporaryDirectory(prefix="ale-assets-pull-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="orbit-assets-pull-") as temporary:
             downloaded = Path(temporary)
             try:
                 snapshot_download(
@@ -253,13 +253,15 @@ def _require_absent_assets(tasks: Sequence[AssetLocation]) -> None:
 def push_assets(
     paths: Sequence[Path], *, collection: str | None = None
 ) -> tuple[AssetSyncResult, ...]:
-    from ale.run.asset_git import checkpoint_assets, publish_assets
+    from orbit.run.asset_git import checkpoint_assets, publish_assets
 
     results: list[AssetSyncResult] = []
     for selection in select_asset_repositories(paths):
         for task in selection.tasks:
             name = task.folder.root.name
-            workspace = selection.repository_root / ".ale-cache/asset-worktrees" / _task_path(task)
+            workspace = (
+                selection.repository_root / ".orbit-cache/asset-worktrees" / _task_path(task)
+            )
             checkpoint = checkpoint_assets(
                 task.folder.root,
                 workspace=workspace,
@@ -288,7 +290,7 @@ def push_assets(
 
 def asset_namespace() -> str:
     """The Hugging Face organization or user that owns asset datasets and their collection."""
-    return os.environ.get("ALE_ASSETS_NAMESPACE", "").strip() or DEFAULT_NAMESPACE
+    return os.environ.get("ORBIT_ASSETS_NAMESPACE", "").strip() or DEFAULT_NAMESPACE
 
 
 def asset_repo_id(repository_name: str) -> str:
@@ -298,7 +300,7 @@ def asset_repo_id(repository_name: str) -> str:
 def asset_collection(api: HfApi, collection: str | None = None) -> str:
     """Resolve the namespace's assets collection without depending on the caller's account."""
     namespace = asset_namespace()
-    configured = collection or os.environ.get("ALE_ASSETS_COLLECTION", "").strip()
+    configured = collection or os.environ.get("ORBIT_ASSETS_COLLECTION", "").strip()
     if configured:
         slug = resolve_asset_collection(configured).collection_slug
         item = api.get_collection(slug)
@@ -345,7 +347,7 @@ def _replace_selected_assets(tasks: Sequence[AssetLocation], downloaded: Path) -
         for root in asset_roots(task.folder.root):
             source = downloaded / task_path / root
             destination = task.folder.root / root
-            backup = destination.with_name(f".{destination.name}.ale-backup")
+            backup = destination.with_name(f".{destination.name}.orbit-backup")
             if source.is_dir():
                 list(_regular_files(source))
             entries.append((source, destination, backup))
@@ -447,7 +449,7 @@ def _regular_files(root: Path) -> Iterator[Path]:
 
 
 def _state_path(repository_root: Path) -> Path:
-    return repository_root / ".ale-cache" / "assets.json"
+    return repository_root / ".orbit-cache" / "assets.json"
 
 
 def _read_state(repository_root: Path, repository: str) -> dict[str, object]:
@@ -479,7 +481,7 @@ def _write_state(repository_root: Path, state: dict[str, object]) -> None:
 
 @contextmanager
 def _repository_lock(repository_root: Path, *, exclusive: bool) -> Iterator[None]:
-    lock = repository_root / ".ale-cache" / "assets.lock"
+    lock = repository_root / ".orbit-cache" / "assets.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     with lock.open("a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)

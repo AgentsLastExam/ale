@@ -16,8 +16,8 @@ from typing import Any, BinaryIO, Literal
 
 from aiohttp import ClientSession, ClientTimeout
 
-from ale.core.config import AgentConfig
-from ale.core.errors import (
+from orbit.core.config import AgentConfig
+from orbit.core.errors import (
     AgentError,
     SubscriptionAuthenticationError,
     SubscriptionCompatibilityError,
@@ -25,8 +25,8 @@ from ale.core.errors import (
     SubscriptionProfileError,
     SubscriptionUnavailableError,
 )
-from ale.core.lock import AuthenticationProvenance
-from ale.run.secrets import find_env_file
+from orbit.core.lock import AuthenticationProvenance
+from orbit.run.secrets import find_env_file
 
 __all__ = [
     "ResolvedAuthentication",
@@ -43,17 +43,17 @@ _PROVIDERS: dict[str, tuple[Provider, str | None, str]] = {
         "anthropic",
         None,
         "run claude setup-token with checkout-local CLAUDE_CONFIG_DIR, then put "
-        "ALE_CLAUDE_CODE_OAUTH_TOKEN in this checkout's .env",
+        "ORBIT_CLAUDE_CODE_OAUTH_TOKEN in this checkout's .env",
     ),
     "codex-cli": (
         "openai",
         "auth.json",
-        "run codex login with CODEX_HOME=$PWD/.ale/auth/codex-cli",
+        "run codex login with CODEX_HOME=$PWD/.orbit/auth/codex-cli",
     ),
     "grok-build": (
         "xai",
         "auth.json",
-        "run grok login with GROK_HOME=$PWD/.ale/auth/grok-build",
+        "run grok login with GROK_HOME=$PWD/.orbit/auth/grok-build",
     ),
 }
 _UPSTREAMS = {
@@ -101,14 +101,14 @@ class ResolvedAuthentication:
 
 def auth_root() -> Path:
     if environment := find_env_file():
-        return environment.parent / ".ale" / "auth"
+        return environment.parent / ".orbit" / "auth"
     for start in (Path.cwd().resolve(), Path(__file__).resolve()):
         for directory in (start, *start.parents):
             if (directory / "pyproject.toml").is_file() and (
-                directory / "packages" / "ale-run"
+                directory / "packages" / "orbit-run"
             ).is_dir():
-                return directory / ".ale" / "auth"
-    return Path.cwd().resolve() / ".ale" / "auth"
+                return directory / ".orbit" / "auth"
+    return Path.cwd().resolve() / ".orbit" / "auth"
 
 
 def resolve_authentication(agent: AgentConfig) -> ResolvedAuthentication:
@@ -125,7 +125,7 @@ def resolve_authentication(agent: AgentConfig) -> ResolvedAuthentication:
     profile = auth_root() / agent.name / filename if filename else None
     token = ""
     if agent.name == "claude-code":
-        token = os.environ.get("ALE_CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+        token = os.environ.get("ORBIT_CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     available = bool(token) if profile is None else profile.is_file()
 
     if requested == "api-key" or (requested == "auto" and not available):
@@ -365,7 +365,7 @@ class SubscriptionCredential:
 
     @staticmethod
     def _lock_profile(profile: Path) -> BinaryIO:
-        lock_path = profile.with_name(profile.name + ".ale.lock")
+        lock_path = profile.with_name(profile.name + ".orbit.lock")
         lock = lock_path.open("a+b")
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -441,7 +441,7 @@ def classify_subscription_error(harness: str, detail: str) -> Exception:
         )
     ):
         return SubscriptionCompatibilityError(
-            f"{harness} no longer matches ALE's pinned subscription contract: {detail}"
+            f"{harness} no longer matches Orbit's pinned subscription contract: {detail}"
         )
     if any(
         marker in lowered

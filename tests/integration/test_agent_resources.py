@@ -8,22 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import TaskError
-from ale.core.harness import HarnessSession
-from ale.core.lock import TaskSource
-from ale.core.sandbox import Identity, ImageRef, SandboxRequest
-from ale.core.taskspec import (
+from orbit.core.errors import TaskError
+from orbit.core.harness import HarnessSession
+from orbit.core.lock import TaskSource
+from orbit.core.sandbox import Identity, ImageRef, SandboxRequest
+from orbit.core.taskspec import (
     NetworkPolicy,
     Resources,
     SkillSource,
     ToolProvision,
 )
-from ale.run.agent_resources import resolve_agent_resources
-from ale.run.harnesses._npm import agent_path
-from ale.run.harnesses.base import install_skills
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.qemu import QemuProvider
+from orbit.run.agent_resources import resolve_agent_resources
+from orbit.run.harnesses._npm import agent_path
+from orbit.run.harnesses.base import install_skills
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.qemu import QemuProvider
 from tests.support import CONTAINER_BASE, prepare_reference
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
@@ -126,9 +126,9 @@ async def test_image_and_run_skills_stage_once_without_ambient_host_state(
 @pytest.mark.asyncio
 @pytest.mark.needs_kvm
 async def test_windows_copies_the_images_skills_through_git_bash(tmp_path: Path) -> None:
-    disk = os.environ.get("ALE_TEST_WINDOWS_IMAGE")
+    disk = os.environ.get("ORBIT_TEST_WINDOWS_IMAGE")
     if not disk:
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to a prepared VM disk")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to a prepared VM disk")
     image_skills = tmp_path / "image-skills"
     write_skill(image_skills / "image-skill", "image")
     write_skill(image_skills / "shared", "image")
@@ -139,7 +139,7 @@ async def test_windows_copies_the_images_skills_through_git_bash(tmp_path: Path)
     request = SandboxRequest(
         episode_id=f"skills-{uuid.uuid4().hex[:8]}",
         os="windows",
-        user=os.environ.get("ALE_TEST_WINDOWS_USER", "user"),
+        user=os.environ.get("ORBIT_TEST_WINDOWS_USER", "user"),
         sudo=False,
         prepared_image=await provider.prepare_image(
             ImageRef(kind="vm", reference="local/windows-skills")

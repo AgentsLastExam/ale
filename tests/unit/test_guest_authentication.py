@@ -15,9 +15,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ale.core.errors import ProviderStartError
-from ale.run.guestd.main import Claim, _Server, _TCPHandler, serve_stream
-from ale.run.transport import TcpTransport
+from orbit.core.errors import ProviderStartError
+from orbit.run.guestd.main import Claim, _Server, _TCPHandler, serve_stream
+from orbit.run.transport import TcpTransport
 
 pytestmark = pytest.mark.unit
 

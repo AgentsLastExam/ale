@@ -9,8 +9,8 @@ import re
 from pathlib import PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
@@ -22,10 +22,10 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses.base import NativeResult, invocations, requested_session_id
+from orbit.run.harnesses.base import NativeResult, invocations, requested_session_id
 
 #: ``FORGE_CONFIG``.
-STATE = ".forge-ale"
+STATE = ".forge-orbit"
 #: One JSON export of the whole conversation per invocation: ``<conversation id>/<time>.json``.
 DUMPS = f"{STATE}/dumps"
 #: Forge's MCP configuration, which names each server as declared.
@@ -277,7 +277,7 @@ def _result(
         source_call_id=str(tool.get("call_id") or ""),
         content=content,
         subagent_trajectory_ref=refs or None,
-        extra={"ale": {"is_error": True}} if output.get("is_error") else None,
+        extra={"orbit": {"is_error": True}} if output.get("is_error") else None,
     )
 
 
@@ -370,11 +370,11 @@ def _mcp_extra(name: str, servers: dict[str, str]) -> dict[str, Any] | None:
     for sanitized in sorted(servers, key=len, reverse=True):
         prefix = f"mcp_{sanitized}_tool_"
         if name.startswith(prefix) and len(name) > len(prefix):
-            return {"ale": {"mcp": {"server": servers[sanitized], "tool": name[len(prefix) :]}}}
+            return {"orbit": {"mcp": {"server": servers[sanitized], "tool": name[len(prefix) :]}}}
     server, separator, tool = name[4:].partition("_tool_")
     if not separator or not server or not tool:
         return None
-    return {"ale": {"mcp": {"server": server, "tool": tool}}}
+    return {"orbit": {"mcp": {"server": server, "tool": tool}}}
 
 
 def _sanitized(name: str) -> str:
@@ -395,4 +395,4 @@ def _extra(
     if context.incomplete:
         data["incomplete"] = True
         data["incomplete_reason"] = context.incomplete_reason or "interrupted"
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

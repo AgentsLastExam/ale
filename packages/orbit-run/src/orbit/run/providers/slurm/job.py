@@ -1,4 +1,4 @@
-"""Submit and drive one batch job, and the Sandboxes in it, from the machine ALE runs on: a
+"""Submit and drive one batch job, and the Sandboxes in it, from the machine Orbit runs on: a
 login node of the cluster, whose home every compute node shares."""
 
 from __future__ import annotations
@@ -15,20 +15,20 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from ale.core.config import SlurmPartition
-from ale.core.errors import (
+from orbit.core.config import SlurmPartition
+from orbit.core.errors import (
     AllocationEndedError,
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderStartError,
 )
-from ale.core.sandbox import GpuDevice
-from ale.run.process import run
-from ale.run.providers.memory import GuestEvents
-from ale.run.transport import StdioTransport
+from orbit.core.sandbox import GpuDevice
+from orbit.run.process import run
+from orbit.run.providers.memory import GuestEvents
+from orbit.run.transport import StdioTransport
 
 #: Below the account's home, which the login node and every compute node share.
-CACHE = ".cache/ale/slurm"
+CACHE = ".cache/orbit/slurm"
 #: How Slurm records a job it ended itself: at its wall time, for a job of higher
 #: priority, or as its node failed.
 ENDED = {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "DEADLINE"}
@@ -121,7 +121,7 @@ class Job:
 
     def __init__(self, partition: SlurmPartition) -> None:
         self.partition = partition
-        self.name = "ale-" + uuid.uuid4().hex
+        self.name = "orbit-" + uuid.uuid4().hex
         self.directory = cache() / self.name
         self.id = ""
 
@@ -191,9 +191,9 @@ class Job:
                 deadline = loop.time() + 1800
             if state == "PENDING" and loop.time() - noticed >= QUEUE_NOTICE_SEC:
                 noticed = loop.time()
-                logging.getLogger("ale.execution").info(
+                logging.getLogger("orbit.execution").info(
                     "a Slurm job still waits in the queue",
-                    extra={"ale_data": {"job": self.id, "reason": await self.pending_reason()}},
+                    extra={"orbit_data": {"job": self.id, "reason": await self.pending_reason()}},
                 )
             if state not in {"PENDING", "RUNNING", "CONFIGURING"}:
                 raise ProviderStartError(

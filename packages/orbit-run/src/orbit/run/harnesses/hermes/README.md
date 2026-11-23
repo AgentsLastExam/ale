@@ -2,26 +2,26 @@
 
 Runs one `hermes chat --query-file <prompt> --format stream-json --yolo` per invocation.
 Hermes is distributed only by its installer: upstream refuses wheels and has no PyPI
-package. ALE runs the official `install.sh` from commit `bf0203a7` (v0.22.5) with
+package. Orbit runs the official `install.sh` from commit `bf0203a7` (v0.22.5) with
 `--commit` pinned, so the checkout is exact and its Python dependencies install
 hash-verified from that commit's `uv.lock`; the installer also fetches its own uv,
 CPython, ffmpeg, node and ripgrep, which takes minutes per fresh Sandbox. The checkout
-lives inside `HERMES_HOME`, `.hermes-ale`: placed elsewhere, the first run installs the
+lives inside `HERMES_HOME`, `.hermes-orbit`: placed elsewhere, the first run installs the
 dependency environment again. The Anthropic dialect also installs the lockfile's
 `anthropic` extra. On Windows the same commit's `install.ps1` runs from Git Bash with the
-same choices and publishes `hermes.exe` in `.hermes-ale/bin`. Upstream supports native
+same choices and publishes `hermes.exe` in `.hermes-orbit/bin`. Upstream supports native
 Windows, so the Harness declares it, but the Windows path is unverified until a Windows
 guest runs it. On macOS `install.sh` takes its Darwin path; the image must provide Git.
 
 `config.yaml` makes the episode Gateway the one custom provider, with Hermes' transport for
 the Gateway dialect, and turns off update checks, the model catalog, shared telemetry,
 logins adopted from other agents and installs during the run. The provider's `key_cmd`
-prints the episode token from `.hermes-ale/gateway-token`, the Harness's credential file.
+prints the episode token from `.hermes-orbit/gateway-token`, the Harness's credential file.
 Hermes would pass a key variable in its environment on to its terminal tool, whose login
-environment it saves to a snapshot under `.hermes-ale/cache/scratch`. The `supports_vision`
+environment it saves to a snapshot under `.hermes-orbit/cache/scratch`. The `supports_vision`
 setting is `model.supports_vision`.
 Unset, Hermes looks the model up on models.dev, which it does for a custom provider only
-through a catalog provider ALE does not name, so it takes the model to be text-only: a
+through a catalog provider Orbit does not name, so it takes the model to be text-only: a
 tool's image, such as an MCP screenshot, then reaches the model only as a `MEDIA:` file
 path. Over Chat Completions Hermes sends a tool's image in the tool message, which
 OpenAI's API refuses, taking images in user messages only; Hermes then retries with a text
@@ -37,9 +37,9 @@ continuing episode reaches it because every Sandbox sees its Gateway at the same
 Hermes keeps sessions in SQLite and chooses a new session's ID itself, which the
 invocation's `result` event reports; `--resume` continues that exact session. After every
 invocation `hermes sessions export` writes every session of the episode home to
-`.hermes-ale/exports/<session id>/<time>.jsonl`. The parser reads the newest export, and
+`.hermes-orbit/exports/<session id>/<time>.jsonl`. The parser reads the newest export, and
 the invocation's stream-json supplies failures and any turn the export lacks. A tool's
-image is not in the export: Hermes keeps it in `.hermes-ale/cache/images`, and the result
+image is not in the export: Hermes keeps it in `.hermes-orbit/cache/images`, and the result
 names it as `MEDIA:<path>`, which the parser records as the result's image. The export
 holds every stored row with its `active` and `compacted` flags, and the parser keeps the
 rows Hermes' transcript keeps. A row removed by a rewind, or superseded by a newer copy,

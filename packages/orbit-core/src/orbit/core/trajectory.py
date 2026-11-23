@@ -1,6 +1,6 @@
 """Strict local Harbor ATIF v1.8 trajectory models.
 
-ALE reports tokens, never price, so Harbor's optional cost metrics are not modelled.
+Orbit reports tokens, never price, so Harbor's optional cost metrics are not modelled.
 """
 
 from __future__ import annotations

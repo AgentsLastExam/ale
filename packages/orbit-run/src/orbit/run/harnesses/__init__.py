@@ -5,7 +5,7 @@ Two families, distinguished by who owns the interaction loop:
 * autonomous — the agent runs its own loop; we supply a prompt and accept the result.
 * policy — the framework owns the observe/act loop and asks the harness per step.
 
-Harnesses reach sandboxes through the ``ale.core`` contract, never through a provider.
+Harnesses reach sandboxes through the ``orbit.core`` contract, never through a provider.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ def credential_files() -> tuple[str, ...]:
     Sanitation removes them all, whichever Harness ran: a solver kept or saved may hold
     another Harness's from an earlier episode it continued.
     """
-    from ale.core.harness import Harness
+    from orbit.core.harness import Harness
 
     for module in pkgutil.iter_modules(__path__):
         if module.ispkg:

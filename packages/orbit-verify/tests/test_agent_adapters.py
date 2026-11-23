@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ale_verify import JudgeError, _agents, _llm
+from orbit_verify import JudgeError, _agents, _llm
 
 
 def schema():
@@ -24,10 +24,10 @@ def agent_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path
     instruction = tmp_path / "instruction.md"
     instruction.write_text("Create a working program.")
     log = tmp_path / "agent-judge.jsonl"
-    monkeypatch.setenv("ALE_HOME", str(workspace))
-    monkeypatch.setenv("ALE_STAGE_DIR", str(tmp_path))
-    monkeypatch.setenv("ALE_TASK_INSTRUCTION_PATH", str(instruction))
-    monkeypatch.setenv("ALE_AGENT_JUDGE_LOG_PATH", str(log))
+    monkeypatch.setenv("ORBIT_HOME", str(workspace))
+    monkeypatch.setenv("ORBIT_STAGE_DIR", str(tmp_path))
+    monkeypatch.setenv("ORBIT_TASK_INSTRUCTION_PATH", str(instruction))
+    monkeypatch.setenv("ORBIT_AGENT_JUDGE_LOG_PATH", str(log))
     monkeypatch.setenv("JUDGE_KEY", "provider-secret")
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 0)
     # Verification's budget allows three retries.
@@ -219,9 +219,9 @@ def test_codex_command_root_home_cwd_version_and_final_response(
     assert (result["choice"], result["reasoning"]) == ("yes", "Observed working.")
     assert argv[:3] == ["/usr/bin/codex", "exec", "--json"]
     assert f'model_reasoning_effort="{codex_config()["reasoning_effort"]}"' in argv
-    assert 'model_provider="ale_verify"' in argv
-    assert 'model_providers.ale_verify.base_url="https://api.openai.com/v1"' in argv
-    assert "model_providers.ale_verify.supports_websockets=false" in argv
+    assert 'model_provider="orbit_verify"' in argv
+    assert 'model_providers.orbit_verify.base_url="https://api.openai.com/v1"' in argv
+    assert "model_providers.orbit_verify.supports_websockets=false" in argv
     assert kwargs["cwd"] == agent_env["workspace"]
     assert kwargs["env"]["HOME"].startswith(str(agent_env["log"].parent))
     assert Path(kwargs["env"]["CODEX_HOME"]).is_dir()

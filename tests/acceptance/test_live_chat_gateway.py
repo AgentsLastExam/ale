@@ -5,11 +5,11 @@ import json
 import pytest
 from aiohttp import ClientSession
 
-from ale.core.trace import read_jsonl
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession
-from ale.run.recording import EpisodeRecording
-from ale.run.secrets import provider_credentials
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.recording import EpisodeRecording
+from orbit.run.secrets import provider_credentials
 
 from .trajectory import LIVE, MODELS
 

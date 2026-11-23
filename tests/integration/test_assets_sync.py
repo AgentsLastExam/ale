@@ -8,8 +8,8 @@ import httpx
 import pytest
 from huggingface_hub.errors import HfHubHTTPError
 
-from ale.core.errors import AssetError
-from ale.run.assets import asset_status, pull_assets
+from orbit.core.errors import AssetError
+from orbit.run.assets import asset_status, pull_assets
 
 pytestmark = pytest.mark.integration
 
@@ -25,7 +25,7 @@ class FakeApi:
 
 
 def test_pull_replaces_only_selected_subtrees_and_records_commit(
-    ale_checkout: Path,
+    orbit_checkout: Path,
     write_task_repo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -36,7 +36,7 @@ def test_pull_replaces_only_selected_subtrees_and_records_commit(
 
     api = FakeApi()
     tokens: list[object] = []
-    monkeypatch.setenv("ALE_HF_TOKEN", "hf-checkout-token")
+    monkeypatch.setenv("ORBIT_HF_TOKEN", "hf-checkout-token")
     monkeypatch.setattr("huggingface_hub.HfApi", lambda *, token: tokens.append(token) or api)
 
     def snapshot_download(**kwargs: object) -> str:
@@ -104,7 +104,7 @@ def test_pull_preserves_assets_created_during_download(
 
 
 def test_pull_rolls_back_every_selected_root_when_replacement_fails(
-    ale_checkout: Path,
+    orbit_checkout: Path,
     write_task_repo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -137,7 +137,7 @@ def test_pull_rolls_back_every_selected_root_when_replacement_fails(
             raise OSError("simulated replacement failure")
         return str(original_copytree(source, destination))
 
-    monkeypatch.setattr("ale.run.assets.shutil.copytree", fail_second_copy)
+    monkeypatch.setattr("orbit.run.assets.shutil.copytree", fail_second_copy)
 
     with pytest.raises(AssetError, match="simulated replacement failure"):
         pull_assets([task], force=True)
@@ -148,12 +148,12 @@ def test_pull_rolls_back_every_selected_root_when_replacement_fails(
 
 
 def test_pull_reads_public_dataset_anonymously_without_collection(
-    ale_checkout: Path,
+    orbit_checkout: Path,
     write_task_repo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
     repository = write_task_repo("ale-tasks-demo", tasks=("one",))
-    monkeypatch.delenv("ALE_HF_TOKEN", raising=False)
+    monkeypatch.delenv("ORBIT_HF_TOKEN", raising=False)
     tokens: list[object] = []
 
     class Public(FakeApi):

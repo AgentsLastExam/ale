@@ -132,23 +132,23 @@ def check_caches(root: Path) -> list[Result]:
     else:
         results.append(Result(WARN, "uv cache", f"{uv_cache} not created yet", "just bootstrap"))
 
-    ale_cache = Path(
-        os.environ.get("ALE_CACHE_DIR")
-        or Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ale"
+    orbit_cache = Path(
+        os.environ.get("ORBIT_CACHE_DIR")
+        or Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "orbit"
     )
     try:
-        ale_cache.mkdir(parents=True, exist_ok=True)
-        probe = ale_cache / ".doctor-probe"
+        orbit_cache.mkdir(parents=True, exist_ok=True)
+        probe = orbit_cache / ".doctor-probe"
         probe.write_text("ok")
         probe.unlink()
-        results.append(Result(OK, "ale cache", f"{ale_cache} (shared, writable)"))
+        results.append(Result(OK, "orbit cache", f"{orbit_cache} (shared, writable)"))
     except OSError as exc:
         results.append(
             Result(
                 FAIL,
-                "ale cache",
-                f"{ale_cache} not writable: {exc}",
-                "fix permissions or set ALE_CACHE_DIR",
+                "orbit cache",
+                f"{orbit_cache} not writable: {exc}",
+                "fix permissions or set ORBIT_CACHE_DIR",
             )
         )
     return results
@@ -156,14 +156,14 @@ def check_caches(root: Path) -> list[Result]:
 
 def check_secrets(root: Path) -> list[Result]:
     """Credentials live in the checkout, so each tree can target its own provider."""
-    path = Path(os.environ.get("ALE_ENV_FILE") or root / ".env")
+    path = Path(os.environ.get("ORBIT_ENV_FILE") or root / ".env")
     if not path.exists():
         return [
             Result(
                 WARN,
                 "secrets",
                 f"{path} missing — live agent runs and gated assets will fail",
-                "cp .env.example .env  (then fill in ALE_ANTHROPIC_API_KEY)",
+                "cp .env.example .env  (then fill in ORBIT_ANTHROPIC_API_KEY)",
             )
         ]
     keys = {
@@ -171,7 +171,7 @@ def check_secrets(root: Path) -> list[Result]:
         for line in path.read_text().splitlines()
         if "=" in line and not line.lstrip().startswith("#")
     }
-    missing = sorted({"ALE_ANTHROPIC_API_KEY"} - {k for k in keys if k})
+    missing = sorted({"ORBIT_ANTHROPIC_API_KEY"} - {k for k in keys if k})
     if missing:
         return [
             Result(WARN, "secrets", f"{path} lacks {', '.join(missing)}", f"add them to {path}")
@@ -262,7 +262,7 @@ def check_sandbox_backends() -> list[Result]:
 def check_worktree(root: Path, main: Path) -> list[Result]:
     if root == main:
         return [Result(OK, "worktree", f"main checkout at {root}")]
-    expected_parent = main.parent / "ale-worktrees"
+    expected_parent = main.parent / "orbit-worktrees"
     if root.parent != expected_parent:
         return [
             Result(
@@ -272,7 +272,7 @@ def check_worktree(root: Path, main: Path) -> list[Result]:
                 f"just wt <name> creates worktrees in {expected_parent}",
             )
         ]
-    return [Result(OK, "worktree", f"{root.name} under ale-worktrees/")]
+    return [Result(OK, "worktree", f"{root.name} under orbit-worktrees/")]
 
 
 def main() -> int:
@@ -289,7 +289,7 @@ def main() -> int:
     results += check_sandbox_backends()
 
     width = max(len(r.name) for r in results)
-    print(f"ale doctor — {root}\n")
+    print(f"orbit doctor — {root}\n")
     for r in results:
         print(f"  {_GLYPH[r.status]} {r.name.ljust(width)}  {r.detail}")
         if r.fix:

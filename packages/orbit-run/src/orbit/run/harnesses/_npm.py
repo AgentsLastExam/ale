@@ -6,10 +6,10 @@ import re
 import shlex
 from pathlib import PurePosixPath, PureWindowsPath
 
-from ale.core.errors import AgentError
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem
-from ale.run.framework import MACOS_PYTHON
+from orbit.core.errors import AgentError
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem
+from orbit.run.framework import MACOS_PYTHON
 
 
 async def agent_home(sandbox: Sandbox) -> str:
@@ -26,7 +26,7 @@ async def agent_home(sandbox: Sandbox) -> str:
 
 
 def agent_python(operating_system: OperatingSystem) -> str:
-    """The Python the agent runs ALE's helper scripts on.
+    """The Python the agent runs Orbit's helper scripts on.
 
     The system's, except on macOS, which ships none recent enough, where every account may
     run the framework's.

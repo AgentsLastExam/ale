@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from ale.run.gateway.session import CallUsage
+from orbit.run.gateway.session import CallUsage
 
 __all__ = [
     "extract_usage",
@@ -158,9 +158,9 @@ def policy_body(policy: str, message: str) -> dict[str, Any]:
     return {
         "error": {
             "type": "invalid_request_error",
-            "code": f"ale_{policy}",
+            "code": f"orbit_{policy}",
             "message": message,
-            "ale": {"layer": "gateway", "policy": policy},
+            "orbit": {"layer": "gateway", "policy": policy},
         }
     }
 
@@ -172,9 +172,9 @@ def refusal_body(
 ) -> dict[str, Any]:
     return {
         "error": {
-            "type": "ale_limit_reached",
+            "type": "orbit_limit_reached",
             "message": f"{limit} limit reached ({value:g})",
-            "ale": {
+            "orbit": {
                 "layer": "gateway",
                 "limit": limit,
                 "value": value,

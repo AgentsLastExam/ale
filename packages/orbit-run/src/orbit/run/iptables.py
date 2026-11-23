@@ -1,13 +1,13 @@
-"""Set ALE's iptables chains in a Linux Sandbox, keeping every other rule in the table.
+"""Set Orbit's iptables chains in a Linux Sandbox, keeping every other rule in the table.
 
 The engine runs this source as root with CAP_NET_ADMIN on the framework's Python
 (``python3 -I -c``) with one JSON argument, such as ``{"tables": {"nat": {"chains":
-{"ALE_GATEWAY": [rule, ...]}, "jumps": {"OUTPUT": ["ALE_GATEWAY"]}}, "filter": {...}}}``.
-In each table named, each ALE_ chain listed gets exactly its rules, other ALE_ chains and
+{"ORBIT_GATEWAY": [rule, ...]}, "jumps": {"OUTPUT": ["ORBIT_GATEWAY"]}}, "filter": {...}}}``.
+In each table named, each ORBIT_ chain listed gets exactly its rules, other ORBIT_ chains and
 jumps into them go, and each built-in chain under "jumps" starts with jumps to the chains
 listed. A table is read with IPT_SO_GET_INFO and IPT_SO_GET_ENTRIES and replaced with one
 IPT_SO_SET_REPLACE on a UDP socket: gVisor's netstack checks only CAP_NET_ADMIN, and runsc
-gives an exec the CAP_NET_RAW a raw socket needs only under --net-raw. Entries ALE does not
+gives an exec the CAP_NET_RAW a raw socket needs only under --net-raw. Entries Orbit does not
 own are copied as opaque bytes, since netstack reads some back unlike they were set and a
 kernel table can hold extensions unknown here; only offsets into the table move. Rules are
 built as iptables 1.8 builds them. It uses only the standard library and imports no engine
@@ -31,15 +31,15 @@ from typing import Any
 #: The nat chain that sends a Docker sandbox's fixed Gateway port to the port the Host
 #: serves the Gateway on: in a runc sandbox's network namespace, where the network helper
 #: sets it, and in a gVisor sandbox's netstack, where this script does.
-GATEWAY_CHAIN = "ALE_GATEWAY"
+GATEWAY_CHAIN = "ORBIT_GATEWAY"
 
-#: A table's ALE chains, each name with its entries, and the jumps each built-in chain
+#: A table's Orbit chains, each name with its entries, and the jumps each built-in chain
 #: starts with, as :func:`plan` makes them.
 Chains = dict[str, list[bytes]]
 Jumps = dict[str, list[str]]
 
 HOOKS = ("PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING")
-TABLES = {  # ALE's tables and their built-in chains
+TABLES = {  # Orbit's tables and their built-in chains
     "filter": {"INPUT", "FORWARD", "OUTPUT"},
     "nat": {"PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"},
 }
@@ -52,7 +52,7 @@ REPLACE = struct.Struct("=32sIII5I5IIQ")
 IPT_SO_GET_INFO = IPT_SO_SET_REPLACE = 64
 IPT_SO_GET_ENTRIES = 65
 ACCEPT, DROP, RETURN = -2, -1, -5  # standard verdicts; one >= 0 is the offset of a jump
-CHAIN = re.compile(r"ALE_[A-Z0-9_]{1,24}")
+CHAIN = re.compile(r"ORBIT_[A-Z0-9_]{1,24}")
 INTERFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
 RULE = {"dst", "proto", "dports", "out", "in", "ctstate", "target"}
 PROTOS = {"tcp": 6, "udp": 17}
@@ -174,7 +174,7 @@ def rewrite(
     jumps: Jumps,
 ) -> tuple[list[int], list[int], bytes, int]:
     """The hook entries, underflows, entries and entry count of ``table``, as
-    IPT_SO_GET_ENTRIES returned it, with ALE's ``chains`` (name: entries) and ``jumps``."""
+    IPT_SO_GET_ENTRIES returned it, with Orbit's ``chains`` (name: entries) and ``jumps``."""
     old: list[tuple[int, bytes]] = []
     offset = 0
     while offset < len(table):
@@ -183,19 +183,19 @@ def rewrite(
         offset += size
     if not old or _target(old[-1][1]) != (b"ERROR", "ERROR"):
         raise ValueError("the table does not end with its ERROR entry")
-    # Each ALE chain, from the ERROR entry naming it to the next.
+    # Each Orbit chain, from the ERROR entry naming it to the next.
     spans: list[range] = []
     start: int | None = None
     for offset, entry in old:
         name, value = _target(entry)
         if name == b"ERROR":
             spans += [range(start, offset)] if start is not None else []
-            start = offset if value.startswith("ALE_") else None
+            start = offset if value.startswith("ORBIT_") else None
 
     def owned(offset: int) -> bool:
         return any(offset in span for span in spans)
 
-    # The new entries in order, each with what it jumps to: an old offset or an ALE chain.
+    # The new entries in order, each with what it jumps to: an old offset or an Orbit chain.
     out: list[tuple[bytes, int | str | None]] = []
     moved: dict[int, int] = {}
     firsts: dict[str, int] = {}
@@ -206,7 +206,7 @@ def rewrite(
                 hooks[hook] = size
                 out += [(_standard(0), chain) for chain in jumps.get(name, ())]
                 size += len(_standard(0)) * len(jumps.get(name, ()))
-        if offset == old[-1][0]:  # ALE's chains go last, before the table's closing entry
+        if offset == old[-1][0]:  # Orbit's chains go last, before the table's closing entry
             for chain, rules in chains.items():
                 firsts[chain] = size + len(_head(chain))
                 block = [_head(chain), *rules, _standard(RETURN)]
@@ -240,7 +240,7 @@ def _get(sock: socket.socket, option: int, data: bytes, size: int) -> bytes:
 
 
 def apply(sock: socket.socket, table: str, chains: Chains, jumps: Jumps) -> None:
-    """Read ``table``, set ALE's chains in it and replace it, again if it changed
+    """Read ``table``, set Orbit's chains in it and replace it, again if it changed
     meanwhile."""
     name = table.encode()
     for attempt in range(5):
@@ -282,7 +282,7 @@ def _lock() -> None:
 
 
 def plan(argument: str) -> dict[str, tuple[Chains, Jumps]]:
-    """Each table's ALE chains (name: entries) and jumps, from the JSON state."""
+    """Each table's Orbit chains (name: entries) and jumps, from the JSON state."""
     try:
         plans: dict[str, tuple[Chains, Jumps]] = {}
         for table, spec in json.loads(argument)["tables"].items():
@@ -292,7 +292,7 @@ def plan(argument: str) -> dict[str, tuple[Chains, Jumps]]:
             if not set(jumps) <= TABLES[table]:
                 raise ValueError(f"no such built-in chain in {table}: {sorted(jumps)}")
             if not all(CHAIN.fullmatch(chain) for chain in chains):
-                raise ValueError(f"ALE's chains are named ALE_[A-Z0-9_]: {sorted(chains)}")
+                raise ValueError(f"Orbit's chains are named ORBIT_[A-Z0-9_]: {sorted(chains)}")
             if not all(isinstance(to, list) and set(to) <= set(chains) for to in jumps.values()):
                 raise ValueError(f"jumps to chains not listed in {table}: {jumps!r}")
             plans[table] = (

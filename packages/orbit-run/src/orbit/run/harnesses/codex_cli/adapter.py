@@ -6,19 +6,19 @@ import json
 import shlex
 from pathlib import PurePosixPath
 
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import agent_path, npm_env
-from ale.run.harnesses.base import (
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
     NativeResult,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import CodexCliSettings
@@ -35,9 +35,9 @@ class CodexCliHarness(CliHarness):
     default_version = DEFAULT_CLI_VERSION
     settings_type = CodexCliSettings
     settings: CodexCliSettings
-    logs = (LOG_ROOT, ".codex-ale/sessions", trajectory.TRACES)
+    logs = (LOG_ROOT, ".codex-orbit/sessions", trajectory.TRACES)
     # Its CODEX_HOME, where a login keeps its credentials.
-    credentials = (".codex-ale/auth.json",)
+    credentials = (".codex-orbit/auth.json",)
 
     async def install_resources(
         self,
@@ -45,13 +45,13 @@ class CodexCliHarness(CliHarness):
         session: HarnessSession,
         resources: EffectiveAgentResources,
     ) -> None:
-        codex_home = agent_path(session.home) / ".codex-ale"
+        codex_home = agent_path(session.home) / ".codex-orbit"
         skills_root = codex_home / "skills"
         await sandbox.exec(["mkdir", "-p", str(skills_root)], identity=Identity.AGENT)
         await install_skills(sandbox, session, resources, skills_root)
 
         lines = [
-            'model_provider = "ale"',
+            'model_provider = "orbit"',
             f"model = {json.dumps(session.model)}",
             "check_for_update_on_startup = false",
             'approval_policy = "never"',
@@ -64,10 +64,10 @@ class CodexCliHarness(CliHarness):
         lines.extend(
             [
                 "",
-                "[model_providers.ale]",
-                'name = "ALE Gateway"',
+                "[model_providers.orbit]",
+                'name = "Orbit Gateway"',
                 f"base_url = {json.dumps(session.gateway_url + '/v1')}",
-                'env_key = "ALE_GATEWAY_TOKEN"',
+                'env_key = "ORBIT_GATEWAY_TOKEN"',
                 'wire_api = "responses"',
                 "",
             ]
@@ -136,11 +136,11 @@ class CodexCliHarness(CliHarness):
         )
         env = {
             **await npm_env(sandbox, session.home),
-            "CODEX_HOME": str(agent_path(session.home) / ".codex-ale"),
+            "CODEX_HOME": str(agent_path(session.home) / ".codex-orbit"),
             # The rollout keeps no record of a code-mode script's shell commands; this does.
             "CODEX_ROLLOUT_TRACE_ROOT": str(agent_path(session.home) / trajectory.TRACES),
             "NO_COLOR": "1",
-            "ALE_GATEWAY_TOKEN": session.token,
+            "ORBIT_GATEWAY_TOKEN": session.token,
         }
         # Codex chooses a new thread's ID itself, so only a resume asks for one.
         return CliCommand(script, env, native_session_id)

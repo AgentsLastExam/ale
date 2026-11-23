@@ -8,7 +8,7 @@ Sentry kills to keep the sandbox below its cgroup's limit on the Host and counts
 in ``oom_kill`` of cgroup v1's ``memory.oom_control``, of which neither the Host's cgroup nor
 Docker learns; and on Daytona nothing outside the sandbox says why it was lost. There a
 watcher in the Sandbox reads that count at every change and writes it to a session of its
-own, whose last line ALE keeps.
+own, whose last line Orbit keeps.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 
-from ale.core.errors import ProviderStartError
+from orbit.core.errors import ProviderStartError
 
 __all__ = ["WATCHER", "GuestEvents", "shm_mb"]
 

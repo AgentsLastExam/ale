@@ -1,6 +1,6 @@
-# ALE documentation
+# Orbit documentation
 
-This directory is the maintained description of ALE.
+This directory is the maintained description of Orbit.
 
 | Need | Read |
 |---|---|

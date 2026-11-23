@@ -10,7 +10,7 @@ It talks Anthropic's computer-use tool, so the model's own action vocabulary is 
 format and there is no prompt engineering to get wrong. Traffic goes to the gateway like
 every other harness's, which is what puts its calls in the transport trace.
 
-Claude's computer toolset uses screenshot pixels. Convert those coordinates to ALE's
+Claude's computer toolset uses screenshot pixels. Convert those coordinates to Orbit's
 normalised action space; the guest scales them back to display pixels at dispatch.
 Generic computer tools continue to declare the normalised space directly.
 """
@@ -22,21 +22,21 @@ import json
 import struct
 from typing import Any
 
-from ale.core.env import Observation, TaskEnv
-from ale.core.errors import AgentError
-from ale.core.harness import HarnessSession, StepwisePolicy
-from ale.core.taskspec import OperatingSystem
-from ale.core.trace import DesktopAction
-from ale.run.recording import Redactor
+from orbit.core.env import Observation, TaskEnv
+from orbit.core.errors import AgentError
+from orbit.core.harness import HarnessSession, StepwisePolicy
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.trace import DesktopAction
+from orbit.run.recording import Redactor
 
 from ._diagnostics import error_text
 
 __all__ = ["ComputerUseHarness", "translate_action"]
 
-#: The normalised space used by ALE desktop actions and generic computer tools.
+#: The normalised space used by Orbit desktop actions and generic computer tools.
 GRID = 1000
 
-#: Members whose results or stateful inputs ALE's stepwise environment cannot represent.
+#: Members whose results or stateful inputs Orbit's stepwise environment cannot represent.
 _DISABLED_MEMBERS = (
     "zoom",
     "middle_click",

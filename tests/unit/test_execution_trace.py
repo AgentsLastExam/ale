@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from ale.core.blob import BlobText, InlineText
-from ale.core.sandbox import ExecResult
-from ale.core.trace import (
+from orbit.core.blob import BlobText, InlineText
+from orbit.core.sandbox import ExecResult
+from orbit.core.trace import (
     CommandFinished,
     ExecutionEvent,
     PhaseStarted,
@@ -20,7 +20,7 @@ from ale.core.trace import (
     TransportReplay,
     read_jsonl,
 )
-from ale.run.recording import (
+from orbit.run.recording import (
     BlobStore,
     CommandRecorder,
     EpisodeRecording,
@@ -149,7 +149,7 @@ def test_records_of_what_the_agent_saw_lose_only_the_known_values(tmp_path: Path
 
 def test_execution_logger_routes_only_bound_records(tmp_path: Path) -> None:
     recording = EpisodeRecording(tmp_path)
-    logger = logging.getLogger("ale.execution")
+    logger = logging.getLogger("orbit.execution")
     logger.info("unbound")
     with execution_logging(
         recording.execution,
@@ -157,7 +157,7 @@ def test_execution_logger_routes_only_bound_records(tmp_path: Path) -> None:
         phase="verify",
         component="verifier",
     ):
-        logger.warning("diagnostic", extra={"ale_data": {"attempt": 2}})
+        logger.warning("diagnostic", extra={"orbit_data": {"attempt": 2}})
     records = read_jsonl(recording.execution.path).records
     assert len(records) == 1
     assert records[0]["message"] == "diagnostic"

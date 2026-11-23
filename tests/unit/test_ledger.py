@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.lock import AssetProvenance
-from ale.core.result import FailureInfo, ResultRecord
-from ale.core.task import TaskAssetObservation
-from ale.core.taskspec import TaskSpec
-from ale.core.verdict import Status
-from ale.run.ledger import Ledger, episode_identity
+from orbit.core.lock import AssetProvenance
+from orbit.core.result import FailureInfo, ResultRecord
+from orbit.core.task import TaskAssetObservation
+from orbit.core.taskspec import TaskSpec
+from orbit.core.verdict import Status
+from orbit.run.ledger import Ledger, episode_identity
 
 pytestmark = pytest.mark.unit
 

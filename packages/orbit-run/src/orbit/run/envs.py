@@ -24,10 +24,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from hashlib import sha256
 
-from ale.core.blob import BlobSink
-from ale.core.env import Observation, StepResult, TaskEnv
-from ale.core.trace import DesktopAction
-from ale.core.trajectory import (
+from orbit.core.blob import BlobSink
+from orbit.core.env import Observation, StepResult, TaskEnv
+from orbit.core.trace import DesktopAction
+from orbit.core.trajectory import (
     AtifContentPart,
     AtifImageSource,
     AtifObservation,
@@ -127,10 +127,10 @@ class SandboxEnv(TaskEnv):
             calls.append(
                 AtifToolCall(
                     tool_call_id=call_id,
-                    function_name=f"ale__desktop__{action.type}",
+                    function_name=f"orbit__desktop__{action.type}",
                     arguments=action.model_dump(mode="json", exclude_none=True),
                     extra={
-                        "ale": {
+                        "orbit": {
                             "normalized_action": action.model_dump(mode="json", exclude_none=True),
                             "accepted": accepted,
                             **({"rejection": rejection} if rejection else {}),

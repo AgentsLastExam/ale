@@ -25,7 +25,7 @@ relay with no token in them, and `gsettings`, run as the agent in its desktop se
 - The variables name the relay rather than carrying the token, so a client that cannot
   send credentials gets through, and the token stays inside guestd.
 - guestd connects over `docker exec` and ends with its run, sealed or not, so what it
-  changed is kept in `/run/ale/system-proxy.json`. A container's `/run` is part of its
+  changed is kept in `/run/orbit/system-proxy.json`. A container's `/run` is part of its
   writable layer, so a commit keeps that file with the settings it explains; a snapshot
   restores the settings before it commits. A run that reattaches to a sealed container
   starts the relay again in a guestd of its own.
@@ -34,7 +34,7 @@ relay with no token in them, and `gsettings`, run as the agent in its desktop se
 
 **Problem.** `docker run` without `--runtime` starts a container under the daemon's
 `default-runtime`. On a Host that makes another runtime the default, such as gVisor's
-`runsc`, a `docker:runc` Sandbox and ALE's helper containers would run under it unnoticed,
+`runsc`, a `docker:runc` Sandbox and Orbit's helper containers would run under it unnoticed,
 and the RunLock would name a leaf that did not start the Sandbox.
 
 **Context.** The runtime a container ran under is in `docker inspect` as
@@ -46,7 +46,7 @@ give.
 **Solution.** Every Sandbox is started with `--runtime` naming the runtime its leaf starts
 it under, `runc` included, and one for which `docker inspect` reports another is removed and
 refused. Every
-helper is started with `--runtime runc` (`ale.run.HELPER_RUNTIME`).
+helper is started with `--runtime runc` (`orbit.run.HELPER_RUNTIME`).
 
 **Decisions.**
 - The check runs on every started container, not once in preflight: it observes what ran,
@@ -101,14 +101,14 @@ Kata's guest does, made off-Host traffic fail at once but left another Host port
 on-link, waiting for its timeout.
 
 **Solution.** The sandbox boots on a network of its own (below), sealed by tc filters on
-`eth0`'s egress, and ALE's chains in netstack refuse what the seal drops, set by
-`ale/run/iptables.py` through a privileged `docker exec` on the framework's Python. Sealing
+`eth0`'s egress, and Orbit's chains in netstack refuse what the seal drops, set by
+`orbit/run/iptables.py` through a privileged `docker exec` on the framework's Python. Sealing
 changes the filters and then the chains; opening, the chains and then the filters.
 
 **Decisions.**
 - The filters are the boundary; the chains only make it fail fast. The privileged exec runs
   the sandbox's own copy of the framework's Python, which root in the sandbox can replace
-  and so hold every capability in the Sentry at ALE's next change of egress.
+  and so hold every capability in the Sentry at Orbit's next change of egress.
 - The filters that pass frames to the Host match the sandbox's own MAC and address and the
   bridge's MAC, and the ARP filter the sandbox's own ARP for the Host: one matching only
   the Host's address and port passed a packet with a forged source from a sandbox with raw
@@ -122,12 +122,12 @@ changes the filters and then the chains; opening, the chains and then the filter
   which tc replaces in place where it cannot replace a matchall: sealing a sealed sandbox
   never takes its drop away first.
 - The writer is a standard-library script rather than an iptables binary, which the image
-  may lack and ALE would have to ship and pin. It copies every entry ALE does not own as it
+  may lack and Orbit would have to ship and pin. It copies every entry Orbit does not own as it
   reads it, since netstack reads some back unlike they were set, and replaces a table
   whole, under the xtables lock, so a dockerd's rules in the sandbox survive.
 - No default-route removal: `REJECT` fails every sealed connection at once, another Host
   port included, which route removal cannot.
-- `ALE_HOST` refuses the replies to connections the Host opens, as runc's rules and Kata's
+- `ORBIT_HOST` refuses the replies to connections the Host opens, as runc's rules and Kata's
   host filter drop them, so the three runtimes confine alike.
 - `FORWARD` jumps to the chains too, so what a sandbox forwards between network namespaces
   of its own fails fast as its own processes do.
@@ -148,7 +148,7 @@ Docker names its embedded DNS server, `127.0.0.11`, which it serves through netf
 the sandbox's namespace, out of reach of a VM's guest and of netstack.
 
 **Solution.** Every Kata or gVisor Sandbox, an `open` Task's included, boots on a bridge
-network of its own, `ale-net-<sandbox id>`, which no other container joins and which goes
+network of its own, `orbit-net-<sandbox id>`, which no other container joins and which goes
 with the Sandbox: frames another container writes as the Host never reach it (measured).
 As the Sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives
 a container on the default bridge, which names the Host's upstream servers.
@@ -207,9 +207,9 @@ reports an overlap ([`subnets.py`](subnets.py)).
 - Random choice and Docker's refusal rather than a lock: nothing to share between users and
   caches, nothing a crashed process holds, and Runs creating networks at once seldom pick
   the same /29 (with n networks, n in 8192 per try).
-- The routes are read once per Provider by a runc helper on `--network host`, not in ALE's
+- The routes are read once per Provider by a runc helper on `--network host`, not in Orbit's
   own namespace: the helper runs where the daemon puts a container on the Host's network,
-  wherever ALE runs and wherever `DOCKER_HOST` points. Under `--detach-netns` that is the
+  wherever Orbit runs and wherever `DOCKER_HOST` points. Under `--detach-netns` that is the
   Host's namespace, and the bridges' then routes only rootlesskit's `10.0.2.0/24`, outside
   the block (measured). A route added after the read, such as a VPN's, is seen by the next
   Run.
@@ -265,7 +265,7 @@ relays each connection to that port on the Host's loopback (`rootless.py`).
   daemon. Only the daemon's own containers reach that namespace, as a rootful daemon's
   reach a Gateway bound to every address.
 - Made by a fresh Python, since only a process of one thread may join a user namespace, and
-  handed back over a Unix socket: ALE's process holds the listener and relays itself, so a
+  handed back over a Unix socket: Orbit's process holds the listener and relays itself, so a
   crashed run leaves nothing in the daemon's namespace and no process of its own behind.
 - An `asyncio.Protocol` relay that hands each read to the other end, rather than streams:
   in the same rounds under runc, streams moved 1.0–1.1 GiB/s from the Host and the Protocol
@@ -277,7 +277,7 @@ relays each connection to that port on the Host's loopback (`rootless.py`).
   its own.
 - A connection the Host's port refuses is reset, not ended, as a refused connection is.
 - Found as `dockerd-rootless.sh` finds it, from the daemon on the CLI's socket, and only for
-  a daemon `docker info` reports rootless; none where ALE itself runs in that namespace.
+  a daemon `docker info` reports rootless; none where Orbit itself runs in that namespace.
   Found again for each new listener, since a daemon that restarted under a long-lived node
   agent is another process; `docker info` is read once more per port, about twice a Run.
 
@@ -321,14 +321,14 @@ takes nf_tables messages from a process with `CAP_NET_ADMIN` in a network namesp
 any process holds in one it creates, since the Sentry gives every container user namespaces.
 netstack runs a packet through its iptables tables and then its nf_tables ones, as Linux
 runs both, but each tracks connections in a table of its own, and they shared a packet's
-connection and NAT flags: once ALE had set its chains, Docker's first connection panicked
-the Sentry (`packet already had NAT: DNAT performed`); ALE's patch 0008 gives each its own
+connection and NAT flags: once Orbit had set its chains, Docker's first connection panicked
+the Sentry (`packet already had NAT: DNAT performed`); Orbit's patch 0008 gives each its own
 state. The libnftnl of iptables 1.8.7 (Ubuntu 22.04, the container base) writes a
 batch's subsystem id in host byte order, which Linux takes and gVisor refused
 (`Unknown subsystem id 2560`), and that iptables writes `--sport`, `--dport` and
 `--tcp-flags` with the xtables `tcp` and `udp` matches, which gVisor took as placeholders
 that matched every packet: a lookup through Docker's embedded DNS server got no answer.
-ALE's patches 0006 and 0007 do both as Linux does. A container engine keeps its images in
+Orbit's patches 0006 and 0007 do both as Linux does. A container engine keeps its images in
 overlay layers whose whiteouts, 0:0 character devices, mark what a layer deletes; the
 Host's overlayfs, a sandbox's root, refuses to create one (`ovl_mknod`, `EPERM` under runc
 too), while gVisor creates them on a gofer filesystem with the `userxattr` option. A
@@ -340,7 +340,7 @@ to start a container (`failed to advertise addresses: operation not supported`);
 registered with `--TESTONLY-nftables` and without `--net-raw`, with `--cap-add NET_ADMIN`,
 `SYS_ADMIN` and `SYS_RESOURCE`, and with a Docker volume of its own on each of
 `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/containers` (`gvisor.py`), removed
-with the Sandbox. ALE's chains stay in netstack's iptables tables, which the engine's
+with the Sandbox. Orbit's chains stay in netstack's iptables tables, which the engine's
 nf_tables rules do not touch, and each set tracks and NATs connections on its own. Raw
 sockets and a container engine are profiles of their own, since each needs a registration of
 its own.
@@ -367,9 +367,9 @@ its own.
   A snapshot keeps them as volumes rather than in its image: an engine's layers, whiteouts
   among them, cannot be part of an image's layer, whose whiteouts would read as the layer's
   own ([Volumes](#volumes)).
-- gVisor's own gaps are closed as ALE patches that do what Linux does, rather than worked
+- gVisor's own gaps are closed as Orbit patches that do what Linux does, rather than worked
   around in the Sandbox, so that a Task needs nothing for gVisor.
-- ALE's chains stay in iptables rather than move to nf_tables, whose gVisor implementation
+- Orbit's chains stay in iptables rather than move to nf_tables, whose gVisor implementation
   has no `REJECT`: a refusal there would wait out the seal's drop again.
 - Podman's storage works on its volume, and its containers run on the host network, but
   its own networks are not offered: past the recursive bind of a namespace file that gVisor
@@ -385,7 +385,7 @@ default swap allowance, one process of a 512 MiB runc Sandbox held 1008 MiB in o
 
 **Context.** `--memory` alone sets the cgroup's `memory.max`, and Docker then lets the
 container swap as much again (`--memory-swap` twice `--memory`), as far as the Host's free
-swap, which every user of the Host shares, reaches. A VM's memory is its size, and ALE's
+swap, which every user of the Host shares, reaches. A VM's memory is its size, and Orbit's
 Linux VMs have no swap.
 
 **Solution.** Every Sandbox, on every Docker leaf, gets `--memory-swap` equal to `--memory`.
@@ -419,7 +419,7 @@ the mechanism and the measurements). `docker wait` returns once the container ha
 0.2 to 0.3 s after the session ended under rootful Docker, up to 10.5 s under rootless
 Docker on a loaded Host.
 
-**Solution.** ALE's runtime keeps a sandbox's memory below its cgroup's limit and kills in
+**Solution.** Orbit's runtime keeps a sandbox's memory below its cgroup's limit and kills in
 the Sentry, one process at a time, as a guest kernel would (patch 0009), and counts those
 kills in `memory.oom_control`, which a watcher in the sandbox writes to a `docker exec`
 session ([A sandbox that runs out of its memory](#a-sandbox-that-runs-out-of-its-memory)).
@@ -460,7 +460,7 @@ in it among the reasons.
   as Docker has stopped it, and one that runs past it lost only its session.
 - Waited on outside the timeout of the call whose session ended: that timeout bounds
   guestd's answer, and a short one would otherwise leave the death unexplained.
-- Only an end of the stream ALE did not cause, of a session guestd answered on: ALE closes
+- Only an end of the stream Orbit did not cause, of a session guestd answered on: Orbit closes
   a session before it destroys, keeps or snapshots the Sandbox, and that end is no death; a
   guestd that never answered failed to start, which its stderr says at once.
 
@@ -473,7 +473,7 @@ of gVisor's Sentry.
 
 **Context.** Measured with the container base (November 2026; at 1024 MiB with Linux 7.0,
 Docker 29.1.3 and Kata 4.3.1; at 512 MiB, no swap, with Linux 6.12, rootless Docker 29.9.3
-and ALE's runsc 0.1.2):
+and Orbit's runsc 0.1.2):
 - One process allocating past the limit is killed alone on every leaf, and the Sandbox
   lives.
 - 400 forked 16 MiB processes end the whole sandbox under runc (the OOM killer reached
@@ -513,7 +513,7 @@ stops.
 **Decisions.**
 - Docker's record, read once when the Sandbox is lost, rather than the container's cgroup
   watched while it lives: it costs no thread per Sandbox, and it outlives the container,
-  whose cgroup goes with it. It does not say whose limit was reached, which ALE does not
+  whose cgroup goes with it. It does not say whose limit was reached, which Orbit does not
   need: a loss to the Host's memory ends the Episode as one to the Sandbox's does.
 - Under gVisor both: the Sentry's kills reach neither Docker nor the Host's cgroup, and the
   Host's OOM killer still acts on memory the Sentry does not see, such as its own heap,
@@ -528,10 +528,10 @@ stops.
   watcher is in the sandbox, where root could end it; that only hides an exhaustion behind a
   lost session, as root ending guestd does. A hypervisor the Host's OOM killer ends leaves
   no record in the guest, and its loss stays a lost guest.
-- A stop by ALE, by its GPU watchdog or its storage watch
-  ([Writable storage](#writable-storage)), is reported as what ALE stopped the Sandbox for,
+- A stop by Orbit, by its GPU watchdog or its storage watch
+  ([Writable storage](#writable-storage)), is reported as what Orbit stopped the Sandbox for,
   without reading its state or its watcher: an earlier OOM kill of one process, after which
-  the Sandbox went on, leaves `OOMKilled` set or a count raised, which would make ALE's stop
+  the Sandbox went on, leaves `OOMKilled` set or a count raised, which would make Orbit's stop
   a loss to memory.
 
 ## The size of `/dev/shm`
@@ -543,7 +543,7 @@ under gVisor on Slurm, where a Linux VM of the same memory ran it (November 2026
 
 **Context.** Docker gives every container a 64 MiB `/dev/shm` (`size=65536k`), whatever its
 `--memory`. runsc mounts Docker's as a tmpfs of the Sentry of the size Docker gave
-(`--shm-size 512m` gave `size=524288k`; ALE's runsc 0.1.0, by `docker run`). Kata's
+(`--shm-size 512m` gave `size=524288k`; Orbit's runsc 0.1.0, by `docker run`). Kata's
 guest mounts its own `/dev/shm` without a size, half the microVM, and ignores `--shm-size`
 (Kata 4.3.1). A tmpfs's pages are charged to the cgroup of whoever writes them, under gVisor
 the Sentry, so `--memory` holds them as it holds a process's. Linux sizes a tmpfs at half its
@@ -599,7 +599,7 @@ isolated too.
 ## Sharing a GPU by memory
 
 **Problem.** A Task that needs a few GiB of device memory took a whole 80 GB H100, and on a
-Host whose GPUs other users' jobs share, a GPU an ALE Sandbox took could still be full: its
+Host whose GPUs other users' jobs share, a GPU an Orbit Sandbox took could still be full: its
 exclusive flock said nothing of what others use.
 
 **Context.** The Host's `nvidia-smi` reports each GPU's `memory.free` and, to an
@@ -607,7 +607,7 @@ unprivileged user, every user's compute processes by Host PID (driver 570, Novem
 PID's cgroup names its container. Under runc each CUDA process is a row; under gVisor the
 whole sandbox is one, its Sentry, whose memory is nvproxy's count. Other tenants allocate up
 front, grow in steps and start or stop in larger ones (the README's admission has the
-measures). Under rootful Docker ALE's user cannot signal a container's processes. runsc with
+measures). Under rootful Docker Orbit's user cannot signal a container's processes. runsc with
 patch 0004 limits a sandbox's device memory on each GPU by an annotation; nothing limits a
 runc container's.
 
@@ -621,14 +621,14 @@ error.
 **Decisions.**
 - One lock for the Host's GPUs rather than one per GPU: admitting a shared Sandbox reads
   every GPU's headroom, and the lock must cover the read and `docker run` both. It is named
-  by the Docker daemon's ID in `/tmp`, not kept in ALE's cache, so that every user and cache
+  by the Docker daemon's ID in `/tmp`, not kept in Orbit's cache, so that every user and cache
   that admits through one daemon takes the same lock. The running containers' labels stay
   the record, so a crashed process holds nothing; what one daemon's Sandboxes reserved and
   do not use yet is invisible through another daemon.
 - Every Sandbox gets both GPU labels, empty when unused: `docker run --label` overrides an
-  image's label of the same name, so a Task image cannot pose as ALE's record, and the
+  image's label of the same name, so a Task image cannot pose as Orbit's record, and the
   labels need no defensive parsing.
-- Headroom subtracts only what ALE's Sandboxes reserved and do not use yet: what they use is
+- Headroom subtracts only what Orbit's Sandboxes reserved and do not use yet: what they use is
   already missing from `memory.free`, and counting it twice would refuse Sandboxes that fit.
 - Among the GPUs that can take a Sandbox, the one with the most headroom does: spreading
   keeps Sandboxes away from GPUs other tenants keep busy, and from the growth of their jobs.
@@ -655,7 +655,7 @@ error.
   the next phase, which may have begun by the time the helper's container is removed.
 - Under gVisor the watchdog stops the whole Sandbox and its episode ends in an environment
   error: the Sentry is its one process, and memory past the limit means nvproxy's accounting
-  failed, which is ALE's failure, not the agent's.
+  failed, which is Orbit's failure, not the agent's.
 - One watchdog task per Docker leaf of a process, which ends when it watches nothing,
   rather than one per Sandbox: each look reads the whole Host once.
 - Polling, every 5 s: NVML has no event for memory use. A Sandbox's rows are compared with
@@ -695,7 +695,7 @@ past `storage_mb` MiB the Sandbox kills the container, logs the stop to the exec
 as the GPU watchdog logs a kill, and has its sessions raise `StorageExhaustedError`, which
 the episode records as `storage_exhausted`. A Sandbox's volumes count too, measured by a
 helper ([Volumes](#volumes)). What measuring leaves to the agent is
-[issue #152](https://github.com/AgentsLastExam/ale/issues/152).
+[issue #152](https://github.com/AgentsLastExam/orbit/issues/152).
 
 **Decisions.**
 - Measure, as Kubernetes measures `ephemeral-storage`, rather than limit: it works the same
@@ -703,7 +703,7 @@ helper ([Volumes](#volumes)). What measuring leaves to the agent is
   nothing asked of the Host.
 - From outside the Sandbox, by the daemon's count, never by asking the Sandbox, whose root
   the agent may hold.
-- Everything over the image counts, from the start, what ALE and the image write included,
+- Everything over the image counts, from the start, what Orbit and the image write included,
   as on a disk of that size: a baseline taken when the Sandbox is ready would leave out
   3.4 MiB, and what the framework and the desktop write after it would count anyway.
 - Every 5 s, not Kubernetes' 10 s: a Sandbox writing at the disk's 0.95 GB/s overshoots by
@@ -742,7 +742,7 @@ a container booted from a committed image holds only what it wrote since. The co
 layer is not in it, and an image's `Size` covers every layer below it.
 
 **Solution.** A commit measures the stopped container's `SizeRw` and labels the image
-`ale.written` with that plus what the snapshot the container booted from held; a container
+`orbit.written` with that plus what the snapshot the container booted from held; a container
 booted from a snapshot carries the label, which a reattaching run reads back, and the watch
 adds it to each measurement (`storage.Watch(base=...)`).
 
@@ -753,7 +753,7 @@ layer the commit adds, and costs one measurement the watch already makes.
 
 **Problem.** A `docker commit` cancelled with its episode, as a Run's cancellation or the
 bound on a snapshot verifier's save cancels it, is killed with its CLI. Had the daemon
-written the image by then, an `ale-snapshot:<sandbox id>` image would be left that no result
+written the image by then, an `orbit-snapshot:<sandbox id>` image would be left that no result
 or RunLock names (November 2026, found reviewing snapshot verification, which saves a solver
 mid-episode).
 
@@ -765,7 +765,7 @@ failed.
 
 **Solution.** The Sandbox remembers that it was committing until the commit returns.
 Destroying it then removes the container first, which fails any commit of it still in the
-daemon, and then `ale-snapshot:<sandbox id>`, if the daemon had finished it; a snapshot that
+daemon, and then `orbit-snapshot:<sandbox id>`, if the daemon had finished it; a snapshot that
 was handed back is left to its owner.
 
 **Decisions.**
@@ -787,7 +787,7 @@ works under runc, Kata (virtio-fs) and gVisor (gofer). An overlay's root takes i
 mode from its upper directory, root's 0755 for an empty volume, so an agent account could
 no longer write to the root of a view of its own home. An overlay's options, which name
 each layer's mount point, must fit in one page: 60 layers of
-`/var/lib/docker/volumes/ale-v-<12 hex>/_data` do. Several episodes on one daemon remove
+`/var/lib/docker/volumes/orbit-v-<12 hex>/_data` do. Several episodes on one daemon remove
 snapshot images while another lists them. A Docker engine in a gVisor Sandbox whose storage
 is an overlay view (g2, Docker 26.1.5, gVisor 0.1.4) showed again files its images' layers
 had deleted, the view hiding their whiteouts, and failed to delete another (`Operation not
@@ -813,8 +813,8 @@ and volumes that vanished since.
 - An engine's storage is copied rather than viewed: its own layers need whiteouts, which
   an overlay view hides and its upper refuses. A copy on a reflinking filesystem costs
   little; on ext4 it copies the engine's images.
-- Volumes are measured by `du` in a helper container rather than on the Host: ALE need not
-  run as root, a rootless daemon's volumes are not ALE's to walk, and the helper's walk is
+- Volumes are measured by `du` in a helper container rather than on the Host: Orbit need not
+  run as root, a rootless daemon's volumes are not Orbit's to walk, and the helper's walk is
   the walk the daemon makes of a writable layer. It runs beside the Sandbox, mounts nothing
   writable and reaches no network, and its baseline is in the helper, so that a run that
   reattaches the Sandbox measures alike.

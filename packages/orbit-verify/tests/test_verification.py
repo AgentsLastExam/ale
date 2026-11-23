@@ -5,8 +5,8 @@ import sys
 
 import pytest
 
-import ale_verify
-from ale_verify import EvidenceError, JudgeError, _io, _llm, judge, read_result, write
+import orbit_verify
+from orbit_verify import EvidenceError, JudgeError, _io, _llm, judge, read_result, write
 
 
 @pytest.fixture
@@ -27,12 +27,12 @@ def verify_env(monkeypatch, tmp_path):
         )
     )
     for key, value in {
-        "ALE_LLM_JUDGE_LOG_PATH": log,
-        "ALE_VERIFY_CONFIG_PATH": config,
+        "ORBIT_LLM_JUDGE_LOG_PATH": log,
+        "ORBIT_VERIFY_CONFIG_PATH": config,
         "JUDGE_KEY": "provider-secret",
     }.items():
         monkeypatch.setenv(key, str(value))
-    monkeypatch.setattr(ale_verify, "_VERIFIER_DIR", verifier)
+    monkeypatch.setattr(orbit_verify, "_VERIFIER_DIR", verifier)
     return verifier, log
 
 
@@ -44,8 +44,8 @@ def saved(verifier):
 
 
 def test_verifier_directory_is_harbors():
-    harbors = "/opt/ale/logs/verifier" if sys.platform == "darwin" else "/logs/verifier"
-    assert str(ale_verify._VERIFIER_DIR) == harbors
+    harbors = "/opt/orbit/logs/verifier" if sys.platform == "darwin" else "/logs/verifier"
+    assert str(orbit_verify._VERIFIER_DIR) == harbors
 
 
 def test_plain_nested_result_and_repeated_write(verify_env):
@@ -83,8 +83,8 @@ def test_feedback_is_written_beside_the_result_and_replaced_by_each_call(verify_
 @pytest.mark.parametrize(
     ("feedback", "problem"),
     [
-        ("x" * (ale_verify.MAX_FEEDBACK_BYTES + 1), "exceeds 65536 bytes"),
-        ("é" * (ale_verify.MAX_FEEDBACK_BYTES // 2 + 1), "exceeds 65536 bytes"),
+        ("x" * (orbit_verify.MAX_FEEDBACK_BYTES + 1), "exceeds 65536 bytes"),
+        ("é" * (orbit_verify.MAX_FEEDBACK_BYTES // 2 + 1), "exceeds 65536 bytes"),
         (b"bytes", "must be text"),
         ("\ud800", "surrogate"),
     ],
@@ -94,7 +94,7 @@ def test_feedback_is_bounded_text(verify_env, feedback, problem):
     with pytest.raises(ValueError, match=problem):
         write({"reward": 1}, feedback=feedback)
     assert not (verifier / "reward.json").exists()
-    write({"reward": 1}, feedback="x" * ale_verify.MAX_FEEDBACK_BYTES)
+    write({"reward": 1}, feedback="x" * orbit_verify.MAX_FEEDBACK_BYTES)
 
 
 @pytest.mark.parametrize(
@@ -220,11 +220,11 @@ def test_optional_schema_and_calls_after_write(monkeypatch, verify_env):
 
 
 def test_each_judge_kind_keeps_its_own_events(monkeypatch, verify_env):
-    from ale_verify import JudgeInvocation, _agents
+    from orbit_verify import JudgeInvocation, _agents
 
     _, llm_log = verify_env
     agent_log = llm_log.parent / "agent-judge.jsonl"
-    monkeypatch.setenv("ALE_AGENT_JUDGE_LOG_PATH", str(agent_log))
+    monkeypatch.setenv("ORBIT_AGENT_JUDGE_LOG_PATH", str(agent_log))
     config_path = llm_log.parent / "config.json"
     config = json.loads(config_path.read_text())
     config["agent"] = {**config["llm"], "adapter": "codex-cli", "version": "1.2.3"}

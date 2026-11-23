@@ -8,14 +8,14 @@ import pytest
 from pydantic import ValidationError
 from test_runtime_contracts import make_lock
 
-from ale.core.errors import VerifierOutputError
-from ale.core.lock import AleVerifyProvenance, JudgeProvenance
-from ale.core.sandbox import SandboxFile
-from ale.core.taskspec import OperatingSystem
-from ale.run.harnesses.builtin import NopHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.provenance import judge_provenance
-from ale_verify import (
+from orbit.core.errors import VerifierOutputError
+from orbit.core.lock import JudgeProvenance, OrbitVerifyProvenance
+from orbit.core.sandbox import SandboxFile
+from orbit.core.taskspec import OperatingSystem
+from orbit.run.harnesses.builtin import NopHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.provenance import judge_provenance
+from orbit_verify import (
     JudgeAttempt,
     JudgeInvocation,
 )
@@ -61,11 +61,11 @@ def test_run_lock_separates_verify_runtime_and_direct_judges() -> None:
         attempts=1,
     )
     lock = make_lock(
-        ale_verify=AleVerifyProvenance(version="0.1.0", content_hash=HASH0),
+        orbit_verify=OrbitVerifyProvenance(version="0.1.0", content_hash=HASH0),
         judges=(judge,),
     )
     dumped = lock.model_dump(mode="json")
-    assert dumped["ale_verify"]["version"] == "0.1.0"
+    assert dumped["orbit_verify"]["version"] == "0.1.0"
     assert "kits" not in dumped
     assert "dialect" not in dumped["judges"][0]
     assert "transport_call_ids" not in dumped["judges"][0]

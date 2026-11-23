@@ -10,8 +10,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
@@ -23,8 +23,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     Invocation,
     NativeResult,
     invocations,
@@ -226,18 +226,18 @@ class _Conversation:
                     "observed": observed.get("tool_name"),
                 }
             )
-        ale: dict[str, Any] = {}
+        orbit: dict[str, Any] = {}
         if str(record.get("status") or "").upper() in {"ERROR", "FAILED"}:
-            ale["is_error"] = True
+            orbit["is_error"] = True
             if error := error_text(record.get("error")):
-                ale["error"] = error
+                orbit["error"] = error
         if session_id and isinstance(step_index, int):
             output = self.context.logs_dir / BRAIN / session_id / STEP_OUTPUT.format(step_index)
             text = _read(output) if output.is_file() else ""
             if text and _plain(text) not in _plain(_text(record.get("content"))):
                 # Written after the record, as when a background task ends: the result keeps
                 # what the model received, and the tool's final output is kept beside it.
-                ale["final_output"] = text
+                orbit["final_output"] = text
         children: list[AtifTrajectory] = []
         refs: list[AtifSubagentTrajectoryRef] = []
         for child_id, spawn in spawned.get(step_index, ()) if isinstance(step_index, int) else ():
@@ -252,9 +252,9 @@ class _Conversation:
         return (
             AtifObservationResult(
                 source_call_id=call_id,
-                content=content if content else (ale.get("error") or ""),
+                content=content if content else (orbit.get("error") or ""),
                 subagent_trajectory_ref=refs or None,
-                extra={"ale": ale} if ale else None,
+                extra={"orbit": orbit} if orbit else None,
             ),
             children,
         )
@@ -489,13 +489,13 @@ def _call(step_index: Any, index: int, raw: dict[str, Any]) -> AtifToolCall:
             tool_call_id=call_id,
             function_name=f"mcp__{server}__{tool}",
             arguments=inner if isinstance(inner, dict) else {"value": inner},
-            extra={"ale": {"mcp": {"server": server, "tool": tool}, "native_tool": name}},
+            extra={"orbit": {"mcp": {"server": server, "tool": tool}, "native_tool": name}},
         )
     return AtifToolCall(tool_call_id=call_id, function_name=name, arguments=dict(arguments))
 
 
 def _native_name(call: AtifToolCall) -> str:
-    native = ((call.extra or {}).get("ale") or {}).get("native_tool")
+    native = ((call.extra or {}).get("orbit") or {}).get("native_tool")
     return native if isinstance(native, str) else call.function_name
 
 
@@ -572,4 +572,4 @@ def _parse_extra(
         data["limitations"] = [
             "Native step records are unavailable; prompts and stdout results only."
         ]
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

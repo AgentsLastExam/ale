@@ -47,7 +47,7 @@ public host, in `_set_egress` and in every test.
 
 **Problem.** A Daytona sandbox whose processes used up its memory died with nothing to say
 why: guestd's session ended (`guest session closed`), the episode became an environment
-error and was retried, and ALE's teardown then failed with
+error and was retried, and Orbit's teardown then failed with
 `409 Sandbox state change in progress`.
 
 **Context.** Measured on Daytona's `us` region, daemon 0.232.2, with the container base at
@@ -79,7 +79,7 @@ Daytona already destroys as success, and waits for it to go.
   both, so `oom` 0 points at the host.
 - Watched from inside, since nothing outside says why: the watcher shares the sandbox's
   memory and root can end it, which only hides an exhaustion behind a lost session.
-- ALE does not rank the agent's commands for the OOM killer here: 1000 kept the sandbox
+- Orbit does not rank the agent's commands for the OOM killer here: 1000 kept the sandbox
   alive in both fatal cases, but the sandbox an agent's memory ends is the agent's result
   either way.
 
@@ -104,7 +104,7 @@ in 64 MiB.
 checked and before the image's command or the agent runs. A retained sandbox keeps the mount
 while it runs, so attaching to it mounts nothing. In a 2 GiB sandbox with it written full, a
 process allocating past the rest is killed alone and the sandbox answers, as on Docker; 400
-processes of 16 MiB end the sandbox, as they do with it empty, and ALE reports
+processes of 16 MiB end the sandbox, as they do with it empty, and Orbit reports
 `MemoryExhaustedError`.
 
 **Decision.** `mount(2)` through the C library from the framework's Python, not the image's

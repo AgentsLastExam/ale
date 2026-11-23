@@ -9,23 +9,23 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import LoggingPolicy
-from ale.core.sandbox import Identity, SandboxRequest
-from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import Limits
-from ale.run.harnesses._npm import agent_home
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.harnesses.computer_use import ComputerUseHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.secrets import provider_credentials
-from ale.run.task_images import prepare_task_image_result
-from ale.run.tasksets.manifest import load_task_folder
-from ale.run.tools import resolved_cua_desktop, stage_cua_desktop
+from orbit.core.config import LoggingPolicy
+from orbit.core.sandbox import Identity, SandboxRequest
+from orbit.core.taskspec import NetworkPolicy, OperatingSystem, Resources
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import Limits
+from orbit.run.harnesses._npm import agent_home
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.harnesses.computer_use import ComputerUseHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.secrets import provider_credentials
+from orbit.run.task_images import prepare_task_image_result
+from orbit.run.tasksets.manifest import load_task_folder
+from orbit.run.tools import resolved_cua_desktop, stage_cua_desktop
 from tests.support import (
     CONTAINER_BASE,
     edit_task_config,
@@ -46,10 +46,10 @@ LINUX_IMAGE = CONTAINER_BASE
 async def test_windows_builtin_desktop_mcp_over_stdio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
-    monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+    monkeypatch.setattr("orbit.run.task_images.cache_root", lambda: tmp_path / "cache")
     provider = QemuProvider(image=image, overlay_dir=tmp_path / "qemu")
     # The base carries no Cua Driver; building a Task image on it installs one.
     task = load_task_folder(_write_windows_gui_task(tmp_path / "tasks"))
@@ -76,7 +76,7 @@ async def test_windows_builtin_desktop_mcp_over_stdio(
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "ale-acceptance", "version": "1"},
+                    "clientInfo": {"name": "orbit-acceptance", "version": "1"},
                 },
             },
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -127,10 +127,10 @@ async def test_windows_builtin_desktop_mcp_over_stdio(
 async def test_windows_task_image_installs_software_and_reuses_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
-    monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+    monkeypatch.setattr("orbit.run.task_images.cache_root", lambda: tmp_path / "cache")
     folder = _write_task(tmp_path / "tasks", OperatingSystem.WINDOWS)
     edit_task_config(folder, {"environment": {"image": str(image)}})
     (folder / "environment/assets").mkdir(parents=True)
@@ -140,7 +140,7 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
         $ErrorActionPreference = 'Stop'
         choco install 7zip --version=24.9.0 -y --no-progress --limit-output
         if ($LASTEXITCODE -notin 0, 3010) { exit $LASTEXITCODE }
-        Copy-Item .\assets\proof.txt "$env:ALE_HOME\image-proof.txt"
+        Copy-Item .\assets\proof.txt "$env:ORBIT_HOME\image-proof.txt"
         exit 0
     """).lstrip()
     )
@@ -167,7 +167,7 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
                 "-NoProfile",
                 "-Command",
                 "$ErrorActionPreference = 'Stop'; "
-                "if (Test-Path 'C:\\ProgramData\\ALE\\environment') { exit 11 }; "
+                "if (Test-Path 'C:\\ProgramData\\Orbit\\environment') { exit 11 }; "
                 "if ((Get-Content ($env:USERPROFILE + '\\image-proof.txt')) "
                 "-ne 'built from image materials') { exit 12 }; "
                 "& 'C:\\Program Files\\7-Zip\\7z.exe' i; exit $LASTEXITCODE",
@@ -180,7 +180,7 @@ async def test_windows_task_image_installs_software_and_reuses_cache(
 
 def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
     windows = operating_system is OperatingSystem.WINDOWS
-    local_linux_image = os.environ.get("ALE_TEST_LINUX_IMAGE")
+    local_linux_image = os.environ.get("ORBIT_TEST_LINUX_IMAGE")
     if windows:
         image: dict[str, object] = {"environment": {"image": "local/windows-base"}}
     elif local_linux_image:
@@ -225,11 +225,11 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                         [Security.Principal.WindowsBuiltInRole]::Administrator
                     )
                 if (-not $admin) { exit 18 }
-                if (Test-Path "C:\ProgramData\ALE\tests\assets") { exit 17 }
-                New-Item "$env:ALE_HOME\input", "$env:ALE_HOME\output" `
+                if (Test-Path "C:\ProgramData\Orbit\tests\assets") { exit 17 }
+                New-Item "$env:ORBIT_HOME\input", "$env:ORBIT_HOME\output" `
                     -ItemType Directory -Force | Out-Null
-                Copy-Item ".\seed.txt" "$env:ALE_HOME\input\seed.txt" -Force
-                Set-Content "$env:ALE_HOME\input\setup-marker.txt" "setup" -NoNewline
+                Copy-Item ".\seed.txt" "$env:ORBIT_HOME\input\seed.txt" -Force
+                Set-Content "$env:ORBIT_HOME\input\setup-marker.txt" "setup" -NoNewline
                 """
             ).lstrip()
         )
@@ -241,8 +241,8 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                     [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
                         [Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 18 }
                 $seed = (Get-Content ".\assets\suffix.txt").Trim()
-                $word = (Get-Content "$env:ALE_HOME\input\seed.txt").Trim()
-                Set-Content "$env:ALE_HOME\output\result.txt" "hello $word $seed" -NoNewline
+                $word = (Get-Content "$env:ORBIT_HOME\input\seed.txt").Trim()
+                Set-Content "$env:ORBIT_HOME\output\result.txt" "hello $word $seed" -NoNewline
                 """
             ).lstrip()
         )
@@ -253,11 +253,11 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 """\
                 #!/usr/bin/env bash
                 set -euo pipefail
-                test ! -e /opt/ale/tests/assets
-                mkdir -p "$ALE_HOME/input" "$ALE_HOME/output"
-                cp seed.txt "$ALE_HOME/input/seed.txt"
-                printf setup > "$ALE_HOME/input/setup-marker.txt"
-                chown -R user:user "$ALE_HOME/input" "$ALE_HOME/output"
+                test ! -e /opt/orbit/tests/assets
+                mkdir -p "$ORBIT_HOME/input" "$ORBIT_HOME/output"
+                cp seed.txt "$ORBIT_HOME/input/seed.txt"
+                printf setup > "$ORBIT_HOME/input/setup-marker.txt"
+                chown -R user:user "$ORBIT_HOME/input" "$ORBIT_HOME/output"
                 """
             )
         )
@@ -266,9 +266,9 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
                 """\
                 #!/usr/bin/env bash
                 set -euo pipefail
-                word=$(cat "$ALE_HOME/input/seed.txt")
+                word=$(cat "$ORBIT_HOME/input/seed.txt")
                 suffix=$(cat assets/suffix.txt)
-                printf 'hello %s %s' "$word" "$suffix" > "$ALE_HOME/output/result.txt"
+                printf 'hello %s %s' "$word" "$suffix" > "$ORBIT_HOME/output/result.txt"
                 """
             )
         )
@@ -280,8 +280,8 @@ def _write_task(root: Path, operating_system: OperatingSystem) -> Path:
         textwrap.dedent(
             "import os\n"
             "from pathlib import Path\n"
-            "from ale_verify import checks, write\n"
-            "home = Path(os.environ['ALE_HOME'])\n"
+            "from orbit_verify import checks, write\n"
+            "home = Path(os.environ['ORBIT_HOME'])\n"
             "suffix = Path('assets/expected-suffix.txt').read_text().strip()\n"
             "verification = {}\n"
             "verification['output'] = checks.text_equals(str(home / 'output/re"
@@ -306,9 +306,9 @@ def _write_windows_gui_task(root: Path) -> Path:
         "Use the visible Notepad window. Read the value after SCREEN_CODE=, type the "
         "same value after ANSWER=, and save the file. Do not change the first line.\n"
     )
-    expected = "SCREEN_CODE=ALE-5827\r\nANSWER=ALE-5827\r\n"
+    expected = "SCREEN_CODE=ORBIT-5827\r\nANSWER=ORBIT-5827\r\n"
     (task / "environment" / "setup" / "screen.txt").write_text(
-        "SCREEN_CODE=ALE-5827\r\nANSWER=\r\n"
+        "SCREEN_CODE=ORBIT-5827\r\nANSWER=\r\n"
     )
     (task / "solution" / "assets" / "answer.txt").write_text(expected)
     (task / "tests" / "assets" / "answer.txt").write_text(expected)
@@ -335,8 +335,8 @@ def _write_windows_gui_task(root: Path) -> Path:
             )) {
                 if (Test-Path -LiteralPath $path) { throw "unexpected base content: $path" }
             }
-            New-Item "$env:ALE_HOME\output" -ItemType Directory -Force | Out-Null
-            $document = "$env:ALE_HOME\output\result.txt"
+            New-Item "$env:ORBIT_HOME\output" -ItemType Directory -Force | Out-Null
+            $document = "$env:ORBIT_HOME\output\result.txt"
             Copy-Item ".\screen.txt" $document -Force
             Start-Process notepad.exe -ArgumentList "`"$document`""
             Start-Sleep -Seconds 3
@@ -344,14 +344,14 @@ def _write_windows_gui_task(root: Path) -> Path:
         ).lstrip()
     )
     (task / "solution" / "solve.ps1").write_text(
-        'Copy-Item ".\\assets\\answer.txt" "$env:ALE_HOME\\output\\result.txt" -Force\n'
+        'Copy-Item ".\\assets\\answer.txt" "$env:ORBIT_HOME\\output\\result.txt" -Force\n'
     )
     (task / "tests" / "verify.py").write_text(
         textwrap.dedent(
             "import os\n"
             "from pathlib import Path\n"
-            "from ale_verify import checks, write\n"
-            "home = Path(os.environ['ALE_HOME'])\n"
+            "from orbit_verify import checks, write\n"
+            "home = Path(os.environ['ORBIT_HOME'])\n"
             "expected = Path('assets/answer.txt').read_text()\n"
             "verification = {}\n"
             "verification['desktop_answer'] = checks.text_equals(str(home / 'o"
@@ -377,9 +377,9 @@ async def test_standard_task_assets_across_operating_systems(
     task_root = _write_task(tmp_path / "tasks", operating_system)
     task = load_task_folder(task_root)
     if operating_system is OperatingSystem.WINDOWS:
-        image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+        image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
         if not image.is_file():
-            pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+            pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to the Windows base qcow2")
         provider = QemuProvider(image=image, overlay_dir=tmp_path / "qemu")
         providers = provider_registry(provider)
     else:
@@ -405,9 +405,9 @@ async def test_standard_task_assets_across_operating_systems(
 @pytest.mark.needs_llm
 @LIVE
 async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> None:
-    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to the Windows base qcow2")
 
     task = load_task_folder(_write_windows_gui_task(tmp_path / "tasks"))
     model = MODELS["anthropic"]
@@ -441,7 +441,7 @@ async def test_real_llm_reads_and_edits_the_windows_desktop(tmp_path: Path) -> N
         for line in (result.run_dir / "trace.transport.jsonl").read_text().splitlines()
     ]
     calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or ()]
-    actions = [call["extra"]["ale"]["normalized_action"] for call in calls]
+    actions = [call["extra"]["orbit"]["normalized_action"] for call in calls]
     assert any(action["type"] == "screenshot" for action in actions)
     assert any(action["type"] in {"type", "key"} for action in actions)
     screenshots = [

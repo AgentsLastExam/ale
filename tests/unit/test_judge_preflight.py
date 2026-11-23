@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ale.core.config import RunConfig, VerificationConfig
-from ale.core.errors import ConfigError
-from ale.run import verification
-from ale.run.scaffold import scaffold_task
-from ale.run.verification import judge_kinds, preflight_judges
-from ale_verify import ConfigurationError
+from orbit.core.config import RunConfig, VerificationConfig
+from orbit.core.errors import ConfigError
+from orbit.run import verification
+from orbit.run.scaffold import scaffold_task
+from orbit.run.verification import judge_kinds, preflight_judges
+from orbit_verify import ConfigurationError
 
 pytestmark = pytest.mark.unit
 
@@ -33,10 +33,10 @@ def verifier(root: Path, source: str) -> Path:
 def test_judge_kinds_are_read_from_the_verifier_source(tmp_path: Path) -> None:
     llm = verifier(
         tmp_path / "a",
-        'from ale_verify import judge\njudge("llm", "quality", prompt="p", output_schema=s)\n',
+        'from orbit_verify import judge\njudge("llm", "quality", prompt="p", output_schema=s)\n',
     )
     agent = verifier(
-        tmp_path / "b", 'from ale_verify import judge\njudge(kind="agent", name="works")\n'
+        tmp_path / "b", 'from orbit_verify import judge\njudge(kind="agent", name="works")\n'
     )
     plain = verifier(tmp_path / "c", 'v.check("exists", result)\n')
     broken = verifier(tmp_path / "d", "def broken(:\n")
@@ -47,7 +47,7 @@ def test_judge_kinds_are_read_from_the_verifier_source(tmp_path: Path) -> None:
 
 def test_a_judge_kind_chosen_at_run_time_counts_as_both(tmp_path: Path) -> None:
     dynamic = verifier(
-        tmp_path, "import ale_verify as av\nfor kind in kinds:\n    av.judge(kind, name)\n"
+        tmp_path, "import orbit_verify as av\nfor kind in kinds:\n    av.judge(kind, name)\n"
     )
     assert judge_kinds([dynamic]) == {"llm", "agent"}
 
@@ -60,9 +60,9 @@ async def test_preflight_probes_each_used_kind_once(
     monkeypatch.setattr(
         verification, "probe_judge", lambda kind, config: probed.append((kind, config))
     )
-    monkeypatch.setenv("ALE_OPENAI_BASE_URL", "https://judge.test/")
+    monkeypatch.setenv("ORBIT_OPENAI_BASE_URL", "https://judge.test/")
     dirs = [
-        verifier(tmp_path / name, 'from ale_verify import judge\njudge("llm", "q")\n')
+        verifier(tmp_path / name, 'from orbit_verify import judge\njudge("llm", "q")\n')
         for name in ("a", "b")
     ]
     await preflight_judges(dirs, VerificationConfig.model_validate({"llm": LLM}))
@@ -73,7 +73,7 @@ async def test_preflight_probes_each_used_kind_once(
                 "model": "judge-model",
                 "reasoning_effort": "medium",
                 "base_url": "https://judge.test/v1/chat/completions",
-                "api_key_env": "ALE_OPENAI_API_KEY",
+                "api_key_env": "ORBIT_OPENAI_API_KEY",
             },
         )
     ]
@@ -83,7 +83,7 @@ async def test_preflight_probes_each_used_kind_once(
 async def test_preflight_rejects_a_missing_or_unreachable_judge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dirs = [verifier(tmp_path, 'from ale_verify import judge\njudge("llm", "q")\n')]
+    dirs = [verifier(tmp_path, 'from orbit_verify import judge\njudge("llm", "q")\n')]
     with pytest.raises(ConfigError, match=r"verification\.llm is not configured"):
         await preflight_judges(dirs, VerificationConfig())
 
@@ -99,10 +99,10 @@ async def test_preflight_rejects_a_missing_or_unreachable_judge(
 async def test_run_stops_before_any_image_or_agent_when_its_judge_is_unconfigured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     task_path = scaffold_task(tmp_path / "task")
     (task_path / "tests" / "judged.py").write_text(
-        'from ale_verify import judge\njudge("llm", "quality")\n'
+        'from orbit_verify import judge\njudge("llm", "quality")\n'
     )
     prepare = AsyncMock(side_effect=AssertionError("must not prepare images"))
     monkeypatch.setattr(task_cli, "_prepare_images", prepare)
@@ -115,7 +115,7 @@ async def test_run_stops_before_any_image_or_agent_when_its_judge_is_unconfigure
 def test_preflight_recognizes_aliases_and_ignores_task_owned_methods(tmp_path):
     path = verifier(
         tmp_path,
-        "from ale_verify import judge as assess\n"
+        "from orbit_verify import judge as assess\n"
         'assess("llm", prompt="p")\n'
         "custom.judge(image, reference)\n",
     )

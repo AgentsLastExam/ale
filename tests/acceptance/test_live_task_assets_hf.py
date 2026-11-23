@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import AssetError
-from ale.run.assets import (
+from orbit.core.errors import AssetError
+from orbit.run.assets import (
     asset_roots,
     asset_status,
     pull_assets,
@@ -18,9 +18,9 @@ from ale.run.assets import (
 
 
 def _task_path() -> Path:
-    configured = os.environ.get("ALE_LIVE_HF_TASK")
+    configured = os.environ.get("ORBIT_LIVE_HF_TASK")
     if not configured:
-        pytest.skip("set ALE_LIVE_HF_TASK to opt into the live HF asset round trip")
+        pytest.skip("set ORBIT_LIVE_HF_TASK to opt into the live HF asset round trip")
     return Path(configured).resolve()
 
 
@@ -32,7 +32,7 @@ def _clean_copy(task: Path, tmp_path: Path) -> Path:
         selection.repository_root,
         clone,
         symlinks=True,
-        ignore=shutil.ignore_patterns(".git", ".ale-cache", "assets"),
+        ignore=shutil.ignore_patterns(".git", ".orbit-cache", "assets"),
     )
     subprocess.run(["git", "init", "-q", str(clone)], check=True)
     copied = clone / relative
@@ -44,7 +44,7 @@ def _clean_copy(task: Path, tmp_path: Path) -> Path:
 @pytest.mark.needs_hf_write
 def test_authenticated_push_and_pinned_private_pull_round_trip(tmp_path: Path) -> None:
     task = _task_path()
-    collection = os.environ.get("ALE_ASSETS_COLLECTION")
+    collection = os.environ.get("ORBIT_ASSETS_COLLECTION")
     pushed = push_assets([task], collection=collection)
     assert pushed and pushed[0].commit
 
@@ -65,8 +65,8 @@ def test_private_dataset_requires_a_token(
 ) -> None:
     task = _task_path()
     clean_task = _clean_copy(task, tmp_path)
-    # Without ALE_HF_TOKEN every Hub call is anonymous; no other login stands in for it.
-    monkeypatch.delenv("ALE_HF_TOKEN", raising=False)
+    # Without ORBIT_HF_TOKEN every Hub call is anonymous; no other login stands in for it.
+    monkeypatch.delenv("ORBIT_HF_TOKEN", raising=False)
 
     with pytest.raises(AssetError, match="could not read dataset"):
         pull_assets([clean_task])

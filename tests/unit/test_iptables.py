@@ -1,4 +1,4 @@
-"""ALE's iptables writer against filter and nat tables captured from the kernel and gVisor.
+"""Orbit's iptables writer against filter and nat tables captured from the kernel and gVisor.
 
 The fixtures in ``tests/fixtures/iptables`` are those tables as IPT_SO_GET_ENTRIES returned
 them, captured in November 2026 on Linux 7.0 (runc, iptables-legacy 1.8.13) and on gVisor
@@ -7,10 +7,10 @@ release-20261109.0 (runsc, the same iptables built to open a UDP socket):
 - ``<kernel|gvisor>-foreign``: rules a Task might add, a user chain jumped to from INPUT and
   OUTPUT with multiport, conntrack, comment and owner matches, FORWARD's policy DROP, a DNAT
   chain and a MASQUERADE;
-- ``<kernel|gvisor>-reference``: the same with ALE's chains of :data:`STATES` ``reference``
+- ``<kernel|gvisor>-reference``: the same with Orbit's chains of :data:`STATES` ``reference``
   built by iptables;
 - ``gvisor-dockerd``: what the dockerd of ``docker:dind``, on iptables-legacy, created in a
-  gVisor sandbox run with ``--net-raw`` and ``CAP_NET_ADMIN``, with ALE's sealed chains set
+  gVisor sandbox run with ``--net-raw`` and ``CAP_NET_ADMIN``, with Orbit's sealed chains set
   by the writer.
 """
 
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.run import iptables as ipt
-from ale.run.providers.docker import gvisor
+from orbit.run import iptables as ipt
+from orbit.run.providers.docker import gvisor
 
 pytestmark = pytest.mark.unit
 
@@ -41,11 +41,11 @@ HOST = "172.17.0.1"
 _EPISODE = {"dst": HOST, "proto": "tcp", "dports": [27412, 27413], "target": "ACCEPT"}
 _GATEWAY = {
     "chains": {
-        "ALE_GATEWAY": [
+        "ORBIT_GATEWAY": [
             {"dst": HOST, "proto": "tcp", "dports": [7412], "target": {"DNAT": f"{HOST}:27412"}}
         ]
     },
-    "jumps": {"OUTPUT": ["ALE_GATEWAY"]},
+    "jumps": {"OUTPUT": ["ORBIT_GATEWAY"]},
 }
 _HOST = [
     _EPISODE,
@@ -69,7 +69,7 @@ _UDP = [
     {"proto": "udp", "dports": [53, 5353], "target": "DROP"},
     {"ctstate": ["NEW", "INVALID"], "target": "DROP"},
 ]
-_JUMPS = {"OUTPUT": ["ALE_HOST", "ALE_SEAL"], "INPUT": ["ALE_INPUT"]}
+_JUMPS = {"OUTPUT": ["ORBIT_HOST", "ORBIT_SEAL"], "INPUT": ["ORBIT_INPUT"]}
 
 
 def _filter(chains: dict[str, list[dict[str, object]]], jumps: dict[str, list[str]]) -> dict:
@@ -81,21 +81,28 @@ STATES = {
     for name, tables in {
         "sealed": {
             "nat": _GATEWAY,
-            "filter": _filter({"ALE_HOST": _HOST, "ALE_SEAL": _SEAL, "ALE_INPUT": _INPUT}, _JUMPS),
+            "filter": _filter(
+                {"ORBIT_HOST": _HOST, "ORBIT_SEAL": _SEAL, "ORBIT_INPUT": _INPUT}, _JUMPS
+            ),
         },
         "open": {
             "nat": _GATEWAY,
-            "filter": _filter({"ALE_HOST": _HOST, "ALE_SEAL": [], "ALE_INPUT": []}, _JUMPS),
+            "filter": _filter({"ORBIT_HOST": _HOST, "ORBIT_SEAL": [], "ORBIT_INPUT": []}, _JUMPS),
         },
         "host-only": {
             "nat": _GATEWAY,
-            "filter": _filter({"ALE_HOST": _HOST}, {"OUTPUT": ["ALE_HOST"]}),
+            "filter": _filter({"ORBIT_HOST": _HOST}, {"OUTPUT": ["ORBIT_HOST"]}),
         },
         "none": {"filter": {}, "nat": {}},
         "reference": {
             "nat": _GATEWAY,
             "filter": _filter(
-                {"ALE_HOST": _HOST, "ALE_SEAL": _SEAL, "ALE_INPUT": _INPUT, "ALE_UDP": _UDP},
+                {
+                    "ORBIT_HOST": _HOST,
+                    "ORBIT_SEAL": _SEAL,
+                    "ORBIT_INPUT": _INPUT,
+                    "ORBIT_UDP": _UDP,
+                },
                 _JUMPS,
             ),
         },
@@ -200,11 +207,11 @@ def decode(valid, hooks, under, blob, count):
 
 
 def foreign(chains):
-    """The chains and rules ALE does not own."""
+    """The chains and rules Orbit does not own."""
     return {
-        name: (policy, [r for r in rules if not (r[1] or "").startswith("ALE_")])
+        name: (policy, [r for r in rules if not (r[1] or "").startswith("ORBIT_")])
         for name, (policy, rules) in chains.items()
-        if not name.startswith("ALE_")
+        if not name.startswith("ORBIT_")
     }
 
 
@@ -253,10 +260,10 @@ def test_netstack_reads_some_rules_back_differently():
     multiport_revision = [ipt.ENTRY.size + 31]
     dnat_target_size = [ipt.ENTRY.size + 48]  # target_size 72 for an 80-byte target
     assert sorted(differ) == [
-        ("ALE_GATEWAY", True, dnat_target_size),
-        ("ALE_HOST", True, multiport_revision),
-        ("ALE_SEAL", True, multiport_revision),
-        ("ALE_UDP", True, multiport_revision),
+        ("ORBIT_GATEWAY", True, dnat_target_size),
+        ("ORBIT_HOST", True, multiport_revision),
+        ("ORBIT_SEAL", True, multiport_revision),
+        ("ORBIT_UDP", True, multiport_revision),
     ], differ
 
 
@@ -267,12 +274,12 @@ def test_apply_sets_chains_and_jumps_and_preserves_the_rest():
                 before, after = decode(*table), decode(*apply(table, state, name))
                 assert foreign(after) == foreign(before), (fixture, state, name)
                 want, jumps = expected_chains(state, name)
-                assert {c: r for c, (_, r) in after.items() if c.startswith("ALE_")} == want
+                assert {c: r for c, (_, r) in after.items() if c.startswith("ORBIT_")} == want
                 # jumps first, in order, and only those
                 for hook, (_, rules) in after.items():
                     listed = jumps.get(hook, [])
                     assert [r[1] for r in rules[: len(listed)]] == listed, (fixture, state, hook)
-                    assert not any((r[1] or "").startswith("ALE_") for r in rules[len(listed) :])
+                    assert not any((r[1] or "").startswith("ORBIT_") for r in rules[len(listed) :])
 
 
 def test_idempotent():
@@ -291,8 +298,8 @@ def test_toggle_seal_open_seal():
             assert apply(opened, "sealed", name) == sealed
             chains = decode(*opened)
             if name == "filter":
-                assert chains["ALE_SEAL"][1] == [] and chains["ALE_INPUT"][1] == []
-                assert [r[1] for r in chains["OUTPUT"][1][:2]] == ["ALE_HOST", "ALE_SEAL"]
+                assert chains["ORBIT_SEAL"][1] == [] and chains["ORBIT_INPUT"][1] == []
+                assert [r[1] for r in chains["OUTPUT"][1][:2]] == ["ORBIT_HOST", "ORBIT_SEAL"]
 
 
 def test_removing_everything_restores_the_original_bytes():
@@ -302,24 +309,24 @@ def test_removing_everything_restores_the_original_bytes():
                 assert apply(apply(table, state, name), "none", name) == table, (fixture, state)
 
 
-def test_stale_ale_chains_and_their_jumps_are_removed():
-    """iptables-built ALE chains (ALE_UDP among them) give way to the listed ones only, and
+def test_stale_orbit_chains_and_their_jumps_are_removed():
+    """iptables-built Orbit chains (ORBIT_UDP among them) give way to the listed ones only, and
     the result equals setting the same state on the table that never had them."""
     for kind in ("kernel", "gvisor"):
         for name, table in load(f"{kind}-reference").items():
             got = decode(*apply(table, "host-only", name))
-            assert {c for c in got if c.startswith("ALE_")} == {
-                "ALE_HOST" if name == "filter" else "ALE_GATEWAY"
+            assert {c for c in got if c.startswith("ORBIT_")} == {
+                "ORBIT_HOST" if name == "filter" else "ORBIT_GATEWAY"
             }
             clean = decode(*apply(load(f"{kind}-foreign")[name], "host-only", name))
             if kind == "kernel":
                 assert got == clean
-            else:  # the foreign rules are the same; ALE's own differ only where netstack's
+            else:  # the foreign rules are the same; Orbit's own differ only where netstack's
                 assert foreign(got) == foreign(clean)  # read-back of multiport/DNAT does
 
 
 def test_offsets_are_relocated():
-    """Jumps inserted at the top of INPUT and OUTPUT move everything after them; ALE's
+    """Jumps inserted at the top of INPUT and OUTPUT move everything after them; Orbit's
     chains go last, so foreign chains keep their place relative to the built-ins."""
     _, hooks, under, blob, count = load("kernel-foreign")["filter"]
     _, new_hooks, new_under, new_blob, new_count = apply(
@@ -336,8 +343,8 @@ def test_offsets_are_relocated():
     verdicts = [ipt._target(e)[1] for o, e in split(new_blob) if new_hooks[3] <= o < new_under[3]]
     first_rule = new["FOREIGN"] + 176
     assert verdicts[2] == first_rule and verdicts[:2] == [
-        new["ALE_HOST"] + 176,
-        new["ALE_SEAL"] + 176,
+        new["ORBIT_HOST"] + 176,
+        new["ORBIT_SEAL"] + 176,
     ]
     chains, _ = ipt.plan(STATES["sealed"])["filter"]
     assert new_count == count + 3 + sum(2 + len(rules) for rules in chains.values())
@@ -370,9 +377,12 @@ def _netstack(table, state, name):
 
 def test_the_providers_netstack_states_keep_every_rule_and_lead_each_hook_they_jump_from():
     """FORWARD's jumps among them, in each fixture, FORWARD's policy DROP and dockerd's own
-    FORWARD chains included; setting a state again changes nothing, and removing ALE's
+    FORWARD chains included; setting a state again changes nothing, and removing Orbit's
     chains leaves the table as it was."""
-    assert NETSTACK["sealed"]["tables"]["filter"]["jumps"]["FORWARD"] == ["ALE_HOST", "ALE_SEAL"]
+    assert NETSTACK["sealed"]["tables"]["filter"]["jumps"]["FORWARD"] == [
+        "ORBIT_HOST",
+        "ORBIT_SEAL",
+    ]
     for fixture in FIXTURES:
         for state in NETSTACK:
             for name, table in load(fixture).items():
@@ -383,7 +393,7 @@ def test_the_providers_netstack_states_keep_every_rule_and_lead_each_hook_they_j
                 for hook, (_, rules) in after.items():
                     listed = jumps.get(hook, [])
                     assert [r[1] for r in rules[: len(listed)]] == listed, (fixture, state, hook)
-                    assert not any((r[1] or "").startswith("ALE_") for r in rules[len(listed) :])
+                    assert not any((r[1] or "").startswith("ORBIT_") for r in rules[len(listed) :])
                 assert _netstack(set_, state, name) == set_, (fixture, state, name)
                 if fixture.endswith("-foreign"):
                     assert apply(set_, "none", name) == table, (fixture, state, name)
@@ -398,7 +408,7 @@ def test_rejects_states_outside_the_vocabulary():
         return False
 
     def rule(**r):
-        return {"filter": {"chains": {"ALE_X": [r]}}}
+        return {"filter": {"chains": {"ORBIT_X": [r]}}}
 
     assert not bad(rule(target="ACCEPT"))
     assert bad(rule(target="ACCEPT", dport=80))  # a misspelt key must not widen a rule
@@ -411,19 +421,19 @@ def test_rejects_states_outside_the_vocabulary():
     assert bad(rule(target="REJECT_TCP_RESET"))  # tcp-reset needs proto tcp
     assert bad(rule(proto="tcp", target={"DNAT": "1.2.3.4:80"}))  # DNAT is nat-only
     # REJECT is filter-only
-    assert bad({"nat": {"chains": {"ALE_X": [{"target": "REJECT"}]}}})
+    assert bad({"nat": {"chains": {"ORBIT_X": [{"target": "REJECT"}]}}})
     assert bad(
-        {"nat": {"chains": {"ALE_X": [{"target": {"DNAT": "1.2.3.4:80"}}]}}}
+        {"nat": {"chains": {"ORBIT_X": [{"target": {"DNAT": "1.2.3.4:80"}}]}}}
     )  # needs a proto
-    assert bad({"nat": {"chains": {"ALE_X": [{"proto": "tcp", "target": {"DNAT": "1.2.3.4"}}]}}})
+    assert bad({"nat": {"chains": {"ORBIT_X": [{"proto": "tcp", "target": {"DNAT": "1.2.3.4"}}]}}})
     assert bad(rule(dst="1.2.3", target="ACCEPT"))
     assert bad(rule(out="a" * 16, target="ACCEPT"))
     assert bad(rule(ctstate=["ESTABLISHED", "BOGUS"], target="ACCEPT"))
     assert bad(rule(target="RETURN"))
-    assert bad({"filter": {"chains": {"DOCKER": []}}})  # only ALE_ chains are ALE's
-    assert bad({"filter": {"chains": {"ALE_X": []}, "jumps": {"OUTPUT": ["ALE_Y"]}}})
-    assert bad({"filter": {"chains": {"ALE_X": []}, "jumps": {"POSTROUTING": ["ALE_X"]}}})
-    assert bad({"filter": {"chains": {"ALE_X": []}, "jumps": {"OUTPUT": "ALE_X"}}})
+    assert bad({"filter": {"chains": {"DOCKER": []}}})  # only ORBIT_ chains are Orbit's
+    assert bad({"filter": {"chains": {"ORBIT_X": []}, "jumps": {"OUTPUT": ["ORBIT_Y"]}}})
+    assert bad({"filter": {"chains": {"ORBIT_X": []}, "jumps": {"POSTROUTING": ["ORBIT_X"]}}})
+    assert bad({"filter": {"chains": {"ORBIT_X": []}, "jumps": {"OUTPUT": "ORBIT_X"}}})
     assert bad({"mangle": {}})
     assert bad({"filter": {"rules": []}})
     assert bad([])

@@ -11,7 +11,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from ale.run.gateway.session import CallUsage
+from orbit.run.gateway.session import CallUsage
 
 __all__ = [
     "extract_usage",
@@ -176,7 +176,7 @@ def policy_body(policy: str, message: str) -> dict[str, Any]:
         "error": {
             "type": "invalid_request_error",
             "message": message,
-            "ale": {"layer": "gateway", "policy": policy},
+            "orbit": {"layer": "gateway", "policy": policy},
         },
     }
 
@@ -189,14 +189,14 @@ def refusal_body(
     """The error an agent sees when a ceiling is reached.
 
     Shaped like a provider error on purpose: harnesses already know how to stop on one,
-    so no agent needs to learn about ALE to respect a budget.
+    so no agent needs to learn about Orbit to respect a budget.
     """
     return {
         "type": "error",
         "error": {
-            "type": "ale_limit_reached",
+            "type": "orbit_limit_reached",
             "message": f"{limit} limit reached ({value:g})",
-            "ale": {
+            "orbit": {
                 "layer": "gateway",
                 "limit": limit,
                 "value": value,

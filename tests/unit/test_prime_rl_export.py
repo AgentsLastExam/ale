@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from ale.core.errors import IncompleteTrainingDataError
-from ale.core.trajectory import (
+from orbit.core.errors import IncompleteTrainingDataError
+from orbit.core.trajectory import (
     AtifAgent,
     AtifAudioSource,
     AtifContentPart,
@@ -12,7 +12,7 @@ from ale.core.trajectory import (
     AtifStep,
     AtifTrajectory,
 )
-from ale.run.exporters import prime_rl_samples
+from orbit.run.exporters import prime_rl_samples
 
 pytestmark = pytest.mark.unit
 
@@ -33,7 +33,7 @@ def exact_metrics() -> AtifMetrics:
         completion_token_ids=[3, 4],
         logprobs=[-0.1, -0.2],
         extra={
-            "ale": {
+            "orbit": {
                 "sampled_mask": [False, False, True, True],
                 "temperature": 0.7,
             }
@@ -42,7 +42,7 @@ def exact_metrics() -> AtifMetrics:
 
 
 def test_exact_training_data_converts_without_retokenization() -> None:
-    (sample,) = prime_rl_samples(trajectory(exact_metrics()), env_name="ale")
+    (sample,) = prime_rl_samples(trajectory(exact_metrics()), env_name="orbit")
     assert sample.token_ids == [1, 2, 3, 4]
     assert sample.mask == [False, False, True, True]
     assert sample.logprobs == [0.0, 0.0, -0.1, -0.2]
@@ -61,7 +61,7 @@ def test_multimodal_training_data_requires_and_preserves_exact_processor_state(
     metrics = exact_metrics().model_copy(
         update={
             "extra": {
-                "ale": {
+                "orbit": {
                     "sampled_mask": [False, False, True, True],
                     "temperature": 0.7,
                     "mm_kwargs": {"pixel_values": "provider-owned-reference"},
@@ -132,7 +132,7 @@ def test_multimodal_training_data_rejects_missing_processor_state(media_type: st
         AtifMetrics(),
         exact_metrics().model_copy(update={"logprobs": [-0.1]}),
         exact_metrics().model_copy(
-            update={"extra": {"ale": {"sampled_mask": [True], "temperature": 0.7}}}
+            update={"extra": {"orbit": {"sampled_mask": [True], "temperature": 0.7}}}
         ),
     ],
 )

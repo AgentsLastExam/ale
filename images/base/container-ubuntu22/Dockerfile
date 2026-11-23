@@ -11,7 +11,7 @@
 #
 # What we change is one thing. cua-lite bakes its own in-container server at
 # /opt/lite/stdio_server.py; this image bakes no guest service at all. The engine copies
-# its own guestd into /opt/ale when it prepares a Task image, so the guest service always
+# its own guestd into /opt/orbit when it prepares a Task image, so the guest service always
 # matches the engine driving it and an image release never has to follow a guestd change.
 #
 # Their isolation model for the guest service is worth keeping — the engine installs it
@@ -60,7 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pulseaudio pulseaudio-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# ALE verification requires Python 3.12+. Jammy's system 3.10 remains at its explicit
+# Orbit verification requires Python 3.12+. Jammy's system 3.10 remains at its explicit
 # /usr/bin/python3.10 path for GNOME's distro Python modules; normal PATH lookup uses this
 # pinned, relocatable build for the guest service, Task stages, and agents.
 ARG PYTHON_VERSION=3.12.14

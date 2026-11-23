@@ -11,11 +11,11 @@ dist/
 .ruff_cache/
 .mypy_cache/
 
-# ALE runtime output (never committed)
+# Orbit runtime output (never committed)
 runs/
 .cache/
-.ale/
-.ale-cache/
+.orbit/
+.orbit-cache/
 /.ale-brew/
 *.qcow2
 task-data/

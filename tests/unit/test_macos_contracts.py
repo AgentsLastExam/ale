@@ -8,11 +8,11 @@ import pytest
 from pydantic import ValidationError
 from tests.support import merged_config, write_task
 
-from ale.core.config import RunConfig
-from ale.core.errors import TaskDefinitionError
-from ale.core.taskspec import ImageKind, OperatingSystem
-from ale.run.providers import ProviderRegistry
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.config import RunConfig
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.taskspec import ImageKind, OperatingSystem
+from orbit.run.providers import ProviderRegistry
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 IMAGE = "ghcr.io/example/macos@sha256:" + "a" * 64
@@ -95,7 +95,7 @@ def test_a_macos_verifier_image_is_a_vm(tmp_path: Path) -> None:
 
 
 def test_the_registry_builds_orchard_once_by_its_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ale.run.providers import orchard, qemu
+    from orbit.run.providers import orchard, qemu
 
     built = []
 

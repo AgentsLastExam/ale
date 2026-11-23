@@ -14,8 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifFinalMetrics,
@@ -28,8 +28,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
@@ -42,7 +42,7 @@ DB = f"{DB_DIR}/db.sqlite"
 ARTIFACTS = ".zcode/cli/artifacts"
 AGENTS = ".zcode/cli/agents"
 #: Where the adapter keeps the provider file holding the episode token; never evidence.
-PRIVATE = ".zcode-ale"
+PRIVATE = ".zcode-orbit"
 _IMAGE_TYPES = frozenset(("image/png", "image/jpeg", "image/gif", "image/webp"))
 _DATA_URL = re.compile(r"data:([^;,]+);base64,(.*)", re.DOTALL)
 
@@ -280,7 +280,7 @@ class _Conversation:
         extra = None
         if display.get("kind") == "mcp_tool":
             extra = {
-                "ale": {
+                "orbit": {
                     "mcp": {"server": display.get("serverName"), "tool": display.get("toolName")}
                 }
             }
@@ -308,7 +308,7 @@ class _Conversation:
             source_call_id=call_id,
             content=content,
             subagent_trajectory_ref=refs.get(call_id),
-            extra={"ale": {"is_error": True}} if status == "error" else None,
+            extra={"orbit": {"is_error": True}} if status == "error" else None,
         )
 
     def _attachment(self, item: dict[str, Any], session_id: str) -> AtifContentPart:
@@ -411,7 +411,7 @@ def _emit(builder: TrajectoryBuilder, step: _Step) -> None:
 
 
 def _is_prompt(message: _Message, *, root: bool) -> bool:
-    """A prompt sent to the session: ALE's to the root, the parent's to a subagent.
+    """A prompt sent to the session: Orbit's to the root, the parent's to a subagent.
 
     ZCode also records context it injects, such as its agent listing, as model-only user
     messages; those are not turns.
@@ -505,4 +505,4 @@ def _extra(
         data["limitations"] = [
             "Native tool and conversation records are unavailable; stdout text only."
         ]
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from ale.run import framework_windows as installer
-from ale.run import guestd
+from orbit.run import framework_windows as installer
+from orbit.run import guestd
 
 pytestmark = pytest.mark.unit
 
@@ -108,11 +108,11 @@ def test_a_disk_that_cannot_run_the_framework_says_why(
 def test_the_service_is_registered_in_the_control_set_the_disk_boots_from(registry) -> None:  # type: ignore[no-untyped-def]
     registry(_disk(current="dword:00000002"))
     text = installer.service_key(Path("/hives"), "user", "172.30.0.1")
-    assert "[HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet002\\Services\\ALEGuestd]" in text
+    assert "[HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet002\\Services\\OrbitGuestd]" in text
     assert '"Start"=dword:00000002' in text and '"ObjectName"="LocalSystem"' in text
     assert (
-        '"ImagePath"="\\"C:\\\\ProgramData\\\\ALE\\\\python\\\\python.exe\\" -I -S '
-        '\\"C:\\\\ProgramData\\\\ALE\\\\guestd\\\\service.py\\" \\"user\\" 172.30.0.1"'
+        '"ImagePath"="\\"C:\\\\ProgramData\\\\Orbit\\\\python\\\\python.exe\\" -I -S '
+        '\\"C:\\\\ProgramData\\\\Orbit\\\\guestd\\\\service.py\\" \\"user\\" 172.30.0.1"'
     ) in text
     registry({})
     with pytest.raises(installer.Lacks, match="no control set"):
@@ -166,14 +166,14 @@ def test_the_framework_is_installed_and_its_marker_written_last(
     assert not install[0]
     steps = [line.strip() for line in install[1].strip().splitlines()]
     assert steps[:3] == [
-        "mkdir-p /ProgramData/ALE",
-        "rm-rf /ProgramData/ALE/guestd",
-        "rm-rf /ProgramData/ALE/cua-driver",
+        "mkdir-p /ProgramData/Orbit",
+        "rm-rf /ProgramData/Orbit/guestd",
+        "rm-rf /ProgramData/Orbit/cua-driver",
     ]
-    assert "copy-in /framework/guestd /ProgramData/ALE" in steps
-    assert "copy-in /framework/cua-driver /ProgramData/ALE" in steps
-    assert {"rm-rf /ProgramData/ALE/python", "copy-in /python /ProgramData/ALE"} <= set(steps)
-    assert steps[-1] == f'write /ProgramData/ALE/framework "{identity}\\n"'
+    assert "copy-in /framework/guestd /ProgramData/Orbit" in steps
+    assert "copy-in /framework/cua-driver /ProgramData/Orbit" in steps
+    assert {"rm-rf /ProgramData/Orbit/python", "copy-in /python /ProgramData/Orbit"} <= set(steps)
+    assert steps[-1] == f'write /ProgramData/Orbit/framework "{identity}\\n"'
     assert steps[-2].startswith("upload ") and steps[-2].endswith("/Windows/System32/config/SYSTEM")
 
 
@@ -195,7 +195,7 @@ def test_a_disk_that_lacks_something_prints_one_line_and_changes_nothing(
          "--identity", "sha256:" + "a" * 64, "--runner-address", "172.30.0.1"],
     )  # fmt: skip
     assert installer.main() == 1
-    assert capsys.readouterr().err.startswith("ALE: the agent account 'user' does not exist")
+    assert capsys.readouterr().err.startswith("Orbit: the agent account 'user' does not exist")
     assert all("upload" not in commands for commands in edits)  # only the reads ran
 
 

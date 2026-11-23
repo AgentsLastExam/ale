@@ -23,12 +23,12 @@ from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ale.core.errors import ProviderStartError
-from ale.core.ids import content_hash
-from ale.core.sandbox import DesktopResolution, PreparedTaskImage
-from ale.run.framework import macos_framework_identity, macos_framework_payload
-from ale.run.images import acquire_lock
-from ale.run.providers.orchard.client import (
+from orbit.core.errors import ProviderStartError
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import DesktopResolution, PreparedTaskImage
+from orbit.run.framework import macos_framework_identity, macos_framework_payload
+from orbit.run.images import acquire_lock
+from orbit.run.providers.orchard.client import (
     PULL_TIMEOUT_SEC,
     LocalOrchard,
     OrchardClient,
@@ -38,7 +38,7 @@ from ale.run.providers.orchard.client import (
     delete_owned,
     vm_spec,
 )
-from ale.run.sources import cache_root
+from orbit.run.sources import cache_root
 
 __all__ = [
     "FORGET_DISPLAYS",
@@ -128,7 +128,7 @@ async def frame_image(local: LocalOrchard, image: PreparedTaskImage, *, user: st
             framed = FramedImage(**json.loads(record.read_text()))
             if framed.name in images:
                 return framed
-        name = f"ale-framed-{key}"
+        name = f"orbit-framed-{key}"
         # Clones of an earlier framing of this image would boot instead of the new one.
         for stale in sorted(image for image in images if image.startswith(f"{name}-")):
             await local.tart("delete", stale)
@@ -150,7 +150,7 @@ async def at_resolution(
     async with _exclusive(f"{name}.lock"):
         if name in await local.local_images():
             return name
-        work = f"ale-frame-{uuid.uuid4().hex}"
+        work = f"orbit-frame-{uuid.uuid4().hex}"
         try:
             await local.tart("clone", framed.name, work)
             await local.tart("set", work, "--display", f"{resolution}pt")
@@ -192,7 +192,7 @@ async def _frame(
     # image that was prepared. Deduplicating, that pull starts the disk as an APFS clone of a
     # cached image sharing at least 1 GB with it, such as the base's earlier version, so the
     # chunks they share take no new space. A local image is only cloned.
-    work = f"ale-frame-{uuid.uuid4().hex}"
+    work = f"orbit-frame-{uuid.uuid4().hex}"
     pull = ["--deduplicate"] if image.source == "external-ref" else []
     await local.tart("clone", *pull, image.runtime_ref, work, timeout_sec=PULL_TIMEOUT_SEC)
     try:
@@ -217,7 +217,7 @@ async def _first_login(local: LocalOrchard, work: str, framed: FramedImage, *, u
     await client.start()
     owned: OwnedVM | None = None
     try:
-        spec = vm_spec(f"ale-settle-{uuid.uuid4().hex}", work, cpus=2, memory_mb=4096)
+        spec = vm_spec(f"orbit-settle-{uuid.uuid4().hex}", work, cpus=2, memory_mb=4096)
         owned = await create_owned(client, spec)
         await await_running(client, owned)
         loop = asyncio.get_running_loop()

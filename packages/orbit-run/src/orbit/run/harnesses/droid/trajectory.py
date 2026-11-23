@@ -9,8 +9,8 @@ from collections.abc import Iterator
 from pathlib import PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifFinalMetrics,
@@ -21,7 +21,7 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
@@ -33,7 +33,7 @@ from ale.run.harnesses.base import (
 )
 
 #: Droid's state directory below the agent home: ``<FACTORY_HOME_OVERRIDE>/.factory``.
-STATE = ".droid-ale/.factory"
+STATE = ".droid-orbit/.factory"
 #: Sessions are ``<cwd, with each separator a dash>/<session id>.jsonl`` below this.
 SESSIONS = f"{STATE}/sessions"
 #: How Droid names an MCP tool: ``<server>___<tool>``.
@@ -185,7 +185,7 @@ def _native_steps(
                 results[call_id] = AtifObservationResult(
                     source_call_id=call_id,
                     content=_content(block.get("content"), context),
-                    extra={"ale": {"is_error": True}} if block.get("is_error") else None,
+                    extra={"orbit": {"is_error": True}} if block.get("is_error") else None,
                 )
     reported = False
     for event in turn:
@@ -198,7 +198,7 @@ def _native_steps(
         message = event["message"]
         role = message.get("role")
         timestamp = event.get("timestamp") if isinstance(event.get("timestamp"), str) else None
-        extra = {"ale": {"native_event_ids": [str(event.get("id"))]}} if event.get("id") else None
+        extra = {"orbit": {"native_event_ids": [str(event.get("id"))]}} if event.get("id") else None
         if role == "user" and message.get("visibility") == "user_only":
             # A notice Droid shows its user, such as an unreachable provider.
             builder.add(source="system", message=_text(message), timestamp=timestamp, extra=extra)
@@ -284,7 +284,7 @@ def _stream_steps(
                 event["value"] if "value" in event else (event.get("error") or {}).get("message"),
                 context,
             ),
-            extra={"ale": {"is_error": True}} if event.get("isError") else None,
+            extra={"orbit": {"is_error": True}} if event.get("isError") else None,
         )
         for event in stream
         if event.get("type") == "tool_result"
@@ -390,7 +390,7 @@ def _mcp_extra(name: str) -> dict[str, Any] | None:
     server, separator, tool = name.partition(_MCP_SEPARATOR)
     if not separator or not server or not tool:
         return None
-    return {"ale": {"mcp": {"server": server, "tool": tool}}}
+    return {"orbit": {"mcp": {"server": server, "tool": tool}}}
 
 
 def _count(usage: dict[str, Any], key: str) -> int:
@@ -411,4 +411,4 @@ def _extra(
     if context.incomplete:
         data["incomplete"] = True
         data["incomplete_reason"] = context.incomplete_reason or "interrupted"
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

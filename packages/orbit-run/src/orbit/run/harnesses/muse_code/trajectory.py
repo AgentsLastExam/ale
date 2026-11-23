@@ -10,8 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifFinalMetrics,
@@ -24,7 +24,7 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
@@ -293,7 +293,7 @@ class _Conversation:
                 source_call_id=call_id, content=reason
             )
             holder.results[call_id] = current.model_copy(
-                update={"extra": {"ale": {"is_error": True}}}
+                update={"extra": {"orbit": {"is_error": True}}}
             )
         for step in steps:
             _emit(builder, step)
@@ -439,7 +439,7 @@ def _call(raw: dict[str, Any], tools: dict[str, dict[str, str]]) -> AtifToolCall
         if name.startswith("mcp__") and separator and server and tool
         else None
     )
-    extra = {"ale": {"mcp": mcp}} if mcp else None
+    extra = {"orbit": {"mcp": mcp}} if mcp else None
     return AtifToolCall(
         tool_call_id=str(raw.get("call_id") or raw.get("id") or ""),
         function_name=name,
@@ -485,7 +485,7 @@ def _provided(event: dict[str, Any]) -> tuple[AtifToolCall, AtifObservationResul
         AtifObservationResult(
             source_call_id=call_id,
             content=json.dumps(outcome, ensure_ascii=False, default=str),
-            extra=None if status == "completed" else {"ale": {"is_error": True}},
+            extra=None if status == "completed" else {"orbit": {"is_error": True}},
         ),
     )
 
@@ -612,4 +612,4 @@ def _extra(
         data["limitations"] = [
             "Native tool and conversation records are unavailable; stdout text only."
         ]
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

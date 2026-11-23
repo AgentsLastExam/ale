@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ale.core.harness import TrajectoryParseContext
-from ale.core.trajectory import (
+from orbit.core.harness import TrajectoryParseContext
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifFinalMetrics,
@@ -24,8 +24,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
@@ -36,7 +36,7 @@ from ale.run.harnesses.base import (
     unconverted,
 )
 
-HOME = ".qwen-ale"
+HOME = ".qwen-orbit"
 PROJECTS = f"{HOME}/projects"
 #: Qwen appends this to a prompt read from stdin before recording and sending it.
 STDIN_SEPARATOR = "\n\n"
@@ -195,7 +195,7 @@ class _Conversation:
                     text = text.removesuffix(STDIN_SEPARATOR)
                 steps.append(_Step("user", text, _timestamp(record)))
             elif kind == "user" or (kind == "system" and record.get("subtype") == "notification"):
-                # Model-visible text the CLI injected rather than a prompt ALE sent.
+                # Model-visible text the CLI injected rather than a prompt Orbit sent.
                 text = "".join(str(part.get("text") or "") for part in parts)
                 if text:
                     steps.append(_Step("system", text, _timestamp(record)))
@@ -231,7 +231,7 @@ class _Conversation:
                         content=self._content(response),
                         subagent_trajectory_ref=refs.get(call_id),
                         extra=(
-                            {"ale": {"is_error": True}}
+                            {"orbit": {"is_error": True}}
                             if status is not None and status != "success"
                             else None
                         ),
@@ -303,7 +303,7 @@ class _Conversation:
         return embedded, refs
 
     def _content(self, response: dict[str, Any]) -> str | list[AtifContentPart]:
-        """A function response's output, with its inline media copied to ALE's blobs."""
+        """A function response's output, with its inline media copied to Orbit's blobs."""
         body = response.get("response")
         if isinstance(body, dict) and set(body) == {"output"} and isinstance(body["output"], str):
             text = body["output"]
@@ -376,12 +376,12 @@ def _call(raw: dict[str, Any]) -> AtifToolCall:
         tool_call_id=call_id,
         function_name=name,
         arguments=dict(arguments),
-        extra={"ale": extra} if extra else None,
+        extra={"orbit": extra} if extra else None,
     )
 
 
 def _is_prompt(record: dict[str, Any], *, root: bool) -> bool:
-    """A prompt sent to this agent: ALE's for the session, the parent's for a subagent."""
+    """A prompt sent to this agent: Orbit's for the session, the parent's for a subagent."""
     if record.get("type") != "user" or record.get("subtype"):
         return False
     return record.get("provenance") == "real_user" if root else True
@@ -465,4 +465,4 @@ def _extra(
         data["limitations"] = [
             "Native tool and conversation records are unavailable; stdout text only."
         ]
-    return {"ale": data} if data else None
+    return {"orbit": data} if data else None

@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
-from ale.run.framework import MACOS_DRIVER, MACOS_DRIVER_APP, MACOS_DRIVER_SOCKET, MACOS_PYTHON
-from ale.run.guestd import gui
-from ale.run.transport import GuestClient
+from orbit.core.errors import ProviderCapabilityError, ProviderStartError
+from orbit.run.framework import MACOS_DRIVER, MACOS_DRIVER_APP, MACOS_DRIVER_SOCKET, MACOS_PYTHON
+from orbit.run.guestd import gui
+from orbit.run.transport import GuestClient
 
 _RETRY_INTERVAL = 1.0
 _PROBE = """

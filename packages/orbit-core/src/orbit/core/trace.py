@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ale.core.blob import InlineTextOrBlob
+from orbit.core.blob import InlineTextOrBlob
 
 __all__ = [
     "CommandFinished",

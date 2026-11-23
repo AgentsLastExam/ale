@@ -11,12 +11,12 @@ import pytest
 from tests.support import edit_task_config
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
-from ale.core.config import RunConfig, SandboxRetentionConfig
-from ale.core.errors import ConfigError, ProviderCapabilityError, TaskDefinitionError
-from ale.core.harness import NativeContinuation
-from ale.core.lock import ResourceProvenance, ResumedFrom, RunLock
-from ale.core.result import ResultRecord, SandboxOutcome
-from ale.core.sandbox import (
+from orbit.core.config import RunConfig, SandboxRetentionConfig
+from orbit.core.errors import ConfigError, ProviderCapabilityError, TaskDefinitionError
+from orbit.core.harness import NativeContinuation
+from orbit.core.lock import ResourceProvenance, ResumedFrom, RunLock
+from orbit.core.result import ResultRecord, SandboxOutcome
+from orbit.core.sandbox import (
     DesktopResolution,
     ExecResult,
     PreparedTaskImage,
@@ -24,8 +24,8 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.taskspec import NetworkPolicy, OperatingSystem, Resources
-from ale.core.trajectory import (
+from orbit.core.taskspec import NetworkPolicy, OperatingSystem, Resources
+from orbit.core.trajectory import (
     AtifAgent,
     AtifObservation,
     AtifObservationResult,
@@ -34,19 +34,19 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.core.verdict import Status
-from ale.run.cli.tasks import _continuation, _continued, _prepare_images
-from ale.run.episode import _Lease
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.protocol.episode_protocol import (
+from orbit.core.verdict import Status
+from orbit.run.cli.tasks import _continuation, _continued, _prepare_images
+from orbit.run.episode import _Lease
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.protocol.episode_protocol import (
     EpisodeProtocol,
     Resume,
     _continued_segment,
     _require_agent_episode,
 )
-from ale.run.providers import ProviderRegistry
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
+from orbit.run.providers import ProviderRegistry
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
 
 pytestmark = pytest.mark.unit
 #: The Run's Providers; these checks never ask one for a Sandbox.
@@ -127,7 +127,7 @@ def _retained(handle: str) -> RetainedSandbox:
         episode_id="later",
         roles=("solver",),
         reason="kept",
-        cleanup_command=f"ale sandbox destroy {handle}",
+        cleanup_command=f"orbit sandbox destroy {handle}",
     )
 
 
@@ -218,8 +218,8 @@ def test_a_shared_sandbox_follows_the_solvers_retention_first(
 @pytest.mark.parametrize(
     ("os", "path"),
     [
-        (OperatingSystem.LINUX, "/opt/ale/agent-episode"),
-        (OperatingSystem.WINDOWS, r"C:\ProgramData\ALE\agent-episode"),
+        (OperatingSystem.LINUX, "/opt/orbit/agent-episode"),
+        (OperatingSystem.WINDOWS, r"C:\ProgramData\Orbit\agent-episode"),
     ],
 )
 async def test_a_retained_solver_serves_only_the_episode_whose_agent_it_holds(
@@ -247,7 +247,7 @@ async def test_a_retained_solver_serves_only_the_episode_whose_agent_it_holds(
 
 @pytest.mark.asyncio
 async def test_a_snapshot_continuation_boots_a_new_solver_and_claims_it(tmp_path: Path) -> None:
-    held = {"/opt/ale/agent-episode": b"earlier"}
+    held = {"/opt/orbit/agent-episode": b"earlier"}
 
     async def read_file(path: str, **_: object) -> bytes:
         return held[path]
@@ -288,7 +288,7 @@ async def test_a_snapshot_continuation_boots_a_new_solver_and_claims_it(tmp_path
     protocol = EpisodeProtocol(ClaudeCodeHarness(), resume=Resume(source=source, trajectory=None))
     assert await protocol._provision(ctx) is sandbox  # type: ignore[arg-type]
     assert acquired[0].snapshot == "docker:snapshot:kept"
-    assert held == {"/opt/ale/agent-episode": b"later"}
+    assert held == {"/opt/orbit/agent-episode": b"later"}
     assert ctx.resumed_from == source
 
     # Another episode's state is refused; the lease reaps the new solver.
@@ -344,12 +344,12 @@ async def test_retention_removes_every_task_stage_and_names_the_agents_episode(
 
     arguments = {argument for argv in removed for argument in argv}
     assert {
-        "/opt/ale/setup",
-        "/opt/ale/tests",
-        "/home/user/.ale-solution",
+        "/opt/orbit/setup",
+        "/opt/orbit/tests",
+        "/home/user/.orbit-solution",
         "/logs/verifier",
     } <= arguments
-    assert written == ({"/opt/ale/agent-episode": b"episode"} if marked else {})
+    assert written == ({"/opt/orbit/agent-episode": b"episode"} if marked else {})
     assert sanitized == [(True, None)]
 
 
@@ -376,9 +376,9 @@ async def test_windows_retention_empties_the_bases_stage_directories() -> None:
 
     stages, others, result = commands
     # The base made these directories with their own ACL; only what is in them goes.
-    assert r"'C:\ProgramData\ALE\setup','C:\ProgramData\ALE\tests'" in stages
+    assert r"'C:\ProgramData\Orbit\setup','C:\ProgramData\Orbit\tests'" in stages
     assert "Get-ChildItem -LiteralPath $stage" in stages
-    assert r"'C:\Users\user\.ale-solution'" in others
+    assert r"'C:\Users\user\.orbit-solution'" in others
     # A missing path is skipped like `rm -rf` does, not silenced into a failing exit.
     assert "Test-Path -LiteralPath $path" in others
     assert "SilentlyContinue" not in stages + others
@@ -452,7 +452,7 @@ def _segment_of(
         step.model_copy(update={"step_id": index})
         for index, step in enumerate(parsed.steps[start:stop], start=1)
     ]
-    extra = None if prior is None else {"ale": {"resumed_from": {"native_steps": prior}}}
+    extra = None if prior is None else {"orbit": {"resumed_from": {"native_steps": prior}}}
     return parsed.model_copy(update={"steps": steps, "trajectory_id": "earlier", "extra": extra})
 
 
@@ -475,7 +475,7 @@ def test_a_continuation_keeps_only_its_own_turn_and_the_subagents_it_spawned() -
     assert [child.trajectory_id for child in segment.subagent_trajectories or ()] == ["child-1"]
     assert segment.session_id == "session"
     assert segment.final_metrics is not None and segment.final_metrics.total_steps == 3
-    assert (segment.extra or {})["ale"]["resumed_from"] == {
+    assert (segment.extra or {})["orbit"]["resumed_from"] == {
         "episode_id": "earlier",
         "trajectory_id": "earlier",
         "native_steps": 3,
@@ -487,7 +487,7 @@ def test_a_continuation_of_a_continuation_counts_every_earlier_segment() -> None
     second = _segment_of(parsed, 3, 6, prior=3)
     segment = _continued_segment(parsed, _resume(second))
     assert segment.steps[0].message == "turn 2"
-    assert (segment.extra or {})["ale"]["resumed_from"]["native_steps"] == 6
+    assert (segment.extra or {})["orbit"]["resumed_from"]["native_steps"] == 6
 
 
 @pytest.mark.parametrize("earlier", ["missing", "mismatch", "unknown"])
@@ -497,14 +497,14 @@ def test_an_unfound_boundary_keeps_the_whole_session_and_says_so(earlier: str) -
         "missing": None,
         "mismatch": _segment_of(parsed, 1, 2),
         "unknown": _segment_of(parsed, 0, 3).model_copy(
-            update={"extra": {"ale": {"resumed_from": {"episode_id": "older"}}}}
+            update={"extra": {"orbit": {"resumed_from": {"episode_id": "older"}}}}
         ),
     }[earlier]
     segment = _continued_segment(parsed, _resume(source))
     assert segment.steps == parsed.steps
-    ale = (segment.extra or {})["ale"]
-    assert ale["parse_issues"][0]["reason"] == "continuation_boundary_not_found"
-    assert "native_steps" not in ale["resumed_from"]
+    orbit = (segment.extra or {})["orbit"]
+    assert orbit["parse_issues"][0]["reason"] == "continuation_boundary_not_found"
+    assert "native_steps" not in orbit["resumed_from"]
 
 
 # --- the earlier episode's records ---
@@ -735,7 +735,7 @@ def test_a_validation_rounds_snapshot_that_outlived_its_episode_is_never_continu
         provider="docker",
         handle="docker:snapshot:round",
         reason="could not destroy snapshot docker:snapshot:round: busy",
-        cleanup_command="ale sandbox destroy docker:snapshot:round",
+        cleanup_command="orbit sandbox destroy docker:snapshot:round",
     )
     final = left.model_copy(
         update={
@@ -827,8 +827,8 @@ async def test_a_continued_solver_is_selected_to_its_keeper_before_anything_is_p
         prepared.append(provider.id)
         raise ProviderCapabilityError("stop after selection")
 
-    monkeypatch.setattr("ale.run.cli.tasks.prepare_task_image_result", prepare)
-    monkeypatch.setattr("ale.run.cli.tasks.observe_task_assets", lambda _task: None)
+    monkeypatch.setattr("orbit.run.cli.tasks.prepare_task_image_result", prepare)
+    monkeypatch.setattr("orbit.run.cli.tasks.observe_task_assets", lambda _task: None)
     continued = _continued(episode, [task], RunConfig())
     registry = ProviderRegistry(
         RunConfig.model_validate({"sandbox": {"providers": ["daytona", "docker:runc"]}})

@@ -1,11 +1,11 @@
-# ALE developer surface.
+# Orbit developer surface.
 #
 # Every recipe is plain shell, so anything here can also be run by hand.
 # Install just itself with:  uv tool install rust-just
 #
 # Golden rules (see CLAUDE.md):
 #   * always `uv run <cmd>` — never activate a venv, never `pip install`
-#   * worktrees live in ../ale-worktrees/, created with `just wt <name>`
+#   * worktrees live in ../orbit-worktrees/, created with `just wt <name>`
 #   * run `just doctor` before debugging any environment problem
 
 set shell := ["bash", "-uc"]
@@ -25,12 +25,12 @@ bootstrap:
 doctor:
     @env -u UV_FROZEN uv run --no-project python scripts/doctor.py
 
-# Create a worktree under ../ale-worktrees/<name> and bootstrap it in one step.
+# Create a worktree under ../orbit-worktrees/<name> and bootstrap it in one step.
 wt name:
     #!/usr/bin/env bash
     set -euo pipefail
     main="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
-    dest="$(dirname "$main")/ale-worktrees/{{ name }}"
+    dest="$(dirname "$main")/orbit-worktrees/{{ name }}"
     if [ -d "$dest" ]; then
         echo ">> worktree already exists: $dest"
     else
@@ -44,7 +44,7 @@ wt-rm name:
     #!/usr/bin/env bash
     set -euo pipefail
     main="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
-    dest="$(dirname "$main")/ale-worktrees/{{ name }}"
+    dest="$(dirname "$main")/orbit-worktrees/{{ name }}"
     git -C "$main" worktree remove "$dest" --force
     git -C "$main" branch -d "{{ name }}" || true
 
@@ -62,7 +62,7 @@ test-int:
 test-harnesses:
     @uv run pytest -m "needs_cli_install"
 
-# VM Sandboxes on KVM; the Windows tests also need ALE_TEST_WINDOWS_IMAGE.
+# VM Sandboxes on KVM; the Windows tests also need ORBIT_TEST_WINDOWS_IMAGE.
 test-vm:
     @uv run pytest -m "needs_kvm"
 
@@ -81,4 +81,4 @@ images:
 
 # The canonical smoke run against a Task folder: one command, one verdict.
 demo task:
-    @uv run ale run {{ task }} --agent claude-code
+    @uv run orbit run {{ task }} --agent claude-code

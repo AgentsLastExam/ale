@@ -7,14 +7,14 @@ the Sandbox rather than leaving an agent a screen its RunLock does not describe.
 
 from __future__ import annotations
 
-from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import DesktopResolution
-from ale.run.transport import GuestClient
+from orbit.core.errors import ProviderCapabilityError
+from orbit.core.sandbox import DesktopResolution
+from orbit.run.transport import GuestClient
 
 __all__ = ["CONTAINER_VARIABLE", "require_resolution"]
 
 #: Where a container desktop takes its size from. The name is the one VNC desktop images
-#: share, the ALE container base among them, but any X server can start at it.
+#: share, the Orbit container base among them, but any X server can start at it.
 CONTAINER_VARIABLE = "VNC_RESOLUTION"
 
 

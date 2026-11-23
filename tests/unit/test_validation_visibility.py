@@ -9,8 +9,8 @@ import pytest
 from tests.support import MemorySandbox, RoundsProvider, TurnsHarness, Verifiers, rounds_task
 from tests.unit.test_validation_rounds import _run, _task
 
-from ale.core.sandbox import SandboxRole
-from ale.core.verdict import Status
+from orbit.core.sandbox import SandboxRole
+from orbit.core.verdict import Status
 
 pytestmark = pytest.mark.unit
 
@@ -50,7 +50,7 @@ async def test_the_stage_that_validates_is_copied_for_the_agent_as_setup_ends(
         (role, identity) for role, target, identity in uploaded if target == "/opt/validation"
     ] == [(SandboxRole.SHARED, None)]
     # The round's verifier and the final one each ran the stage the Host staged for them.
-    assert f"/opt/ale/{stage}" in provider.sandboxes[1].uploads
+    assert f"/opt/orbit/{stage}" in provider.sandboxes[1].uploads
     named = "validation set" if validation_dir else "test set that scores your final state"
     assert harness.prompts[0].endswith(
         f"The files of the {named} are at /opt/validation, {_NOTE}\n"
@@ -89,7 +89,7 @@ async def test_by_default_no_stage_reaches_the_agent(tmp_path: Path, verifiers: 
 def test_a_shown_tests_dir_is_part_of_what_the_agent_depended_on(tmp_path: Path) -> None:
     """A retained solver stays reverifiable across a change to tests/ only while its agent
     could not read tests/."""
-    from ale.run.tasksets.manifest import load_tasks
+    from orbit.run.tasksets.manifest import load_tasks
 
     for visibility in (False, True):
         task = rounds_task(
@@ -142,7 +142,7 @@ async def test_a_leaf_that_mounts_the_stage_read_only_spares_the_copy(
 
 
 def test_docker_mounts_a_path_with_a_comma_as_one_field() -> None:
-    from ale.run.providers.docker.provider import _bind_mount
+    from orbit.run.providers.docker.provider import _bind_mount
 
     assert _bind_mount("/tasks/a,b/validation", "/opt/validation") == (
         'type=bind,"src=/tasks/a,b/validation",dst=/opt/validation,readonly'

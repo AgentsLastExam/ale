@@ -16,7 +16,7 @@ window that the receiver refills as it writes to its socket, so one slow stream 
 the reader of the shared pipe wait and never grows an unbounded buffer.
 
 Standard library only, and no engine imports: this file is copied into images (as
-``/opt/ale/guestd/tunnel.py``) and imported by the Host from the same source.
+``/opt/orbit/guestd/tunnel.py``) and imported by the Host from the same source.
 """
 
 from __future__ import annotations
@@ -283,7 +283,7 @@ async def _serve(listeners: list[tuple[int, int]]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ale-tunnel", description="ALE sandbox tunnel")
+    parser = argparse.ArgumentParser(prog="orbit-tunnel", description="Orbit sandbox tunnel")
     parser.add_argument(
         "--listen",
         action="append",

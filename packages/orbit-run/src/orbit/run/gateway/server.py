@@ -28,11 +28,11 @@ from typing import Any
 
 from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout, web
 
-from ale.core.episode import EventSink
-from ale.core.errors import ConfigError
-from ale.core.trace import TransportCall, TransportReplay, UpstreamError
-from ale.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
-from ale.run.gateway.session import (
+from orbit.core.episode import EventSink
+from orbit.core.errors import ConfigError
+from orbit.core.trace import TransportCall, TransportReplay, UpstreamError
+from orbit.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
+from orbit.run.gateway.session import (
     CallUsage,
     GatewayReservation,
     GatewaySession,
@@ -41,8 +41,8 @@ from ale.run.gateway.session import (
     Upstream,
     UpstreamFailure,
 )
-from ale.run.recording import Redactor
-from ale.run.subscription import SubscriptionCredential
+from orbit.run.recording import Redactor
+from orbit.run.subscription import SubscriptionCredential
 
 __all__ = ["REQUEST_PATHS", "Gateway"]
 
@@ -213,7 +213,7 @@ class Gateway:
         session = self._authenticate(request)
         if request.path != REQUEST_PATHS.get(self._dialect_name(session)):
             raise web.HTTPNotFound(
-                text=json.dumps({"type": "error", "error": {"type": "ale_wrong_dialect"}}),
+                text=json.dumps({"type": "error", "error": {"type": "orbit_wrong_dialect"}}),
                 content_type="application/json",
             )
         started = asyncio.get_running_loop().time()
@@ -232,18 +232,21 @@ class Gateway:
         session = self.sessions.resolve(token)
         if session is None and self._refuse_suspended(token, request):
             return _google_error(
-                403, "PERMISSION_DENIED", "this ALE session is suspended", "ALE_SESSION_SUSPENDED"
+                403,
+                "PERMISSION_DENIED",
+                "this Orbit session is suspended",
+                "ORBIT_SESSION_SUSPENDED",
             )
         if session is None:
             return _google_error(
-                401, "UNAUTHENTICATED", "unknown ALE episode token", "ALE_UNKNOWN_SESSION"
+                401, "UNAUTHENTICATED", "unknown Orbit episode token", "ORBIT_UNKNOWN_SESSION"
             )
         if self._dialect_name(session) != "gemini":
             return _google_error(
                 404,
                 "NOT_FOUND",
                 f"this episode's Gateway dialect is {self._dialect_name(session)}, not gemini",
-                "ALE_WRONG_DIALECT",
+                "ORBIT_WRONG_DIALECT",
             )
         try:
             payload = json.loads(await request.read() or b"{}")
@@ -251,7 +254,7 @@ class Gateway:
             payload = None
         if not isinstance(payload, dict):
             return _google_error(
-                400, "INVALID_ARGUMENT", "request body is not a JSON object", "ALE_INVALID_BODY"
+                400, "INVALID_ARGUMENT", "request body is not a JSON object", "ORBIT_INVALID_BODY"
             )
         payload = self._authoritative(payload, session)
 
@@ -586,7 +589,7 @@ class Gateway:
             refused="web_tools",
         )
         message = (
-            "provider-side network tools need a Task with open network; the ALE Gateway "
+            "provider-side network tools need a Task with open network; the Orbit Gateway "
             f"refuses {', '.join(named)}"
         )
         return web.json_response(
@@ -602,12 +605,12 @@ class Gateway:
         session = self.sessions.resolve(token)
         if session is None and self._refuse_suspended(token, request):
             raise web.HTTPForbidden(
-                text=json.dumps({"type": "error", "error": {"type": "ale_session_suspended"}}),
+                text=json.dumps({"type": "error", "error": {"type": "orbit_session_suspended"}}),
                 content_type="application/json",
             )
         if session is None:
             raise web.HTTPUnauthorized(
-                text=json.dumps({"type": "error", "error": {"type": "ale_unknown_session"}}),
+                text=json.dumps({"type": "error", "error": {"type": "orbit_unknown_session"}}),
                 content_type="application/json",
             )
         return session
@@ -956,7 +959,7 @@ class Gateway:
         response: dict[str, Any],
     ) -> None:
         root = session.exact_token_dir
-        evidence = response.get("ale_token_data")
+        evidence = response.get("orbit_token_data")
         if root is None or not isinstance(evidence, dict):
             return
         retained = dict(evidence)

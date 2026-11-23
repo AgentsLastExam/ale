@@ -39,7 +39,7 @@ deletes a snapshot whose save finishes after its Sandbox's lease ended.
 
 **Decisions.**
 - What remains open: a save that finishes between the Run's giving it up and its release
-  reaching the Node is kept, recorded as its Node's, and listed by `ale sandbox list` for an
+  reaching the Node is kept, recorded as its Node's, and listed by `orbit sandbox list` for an
   operator to destroy. Closing it would need the control plane to tell such a snapshot from
   one a crashed Run's retention kept, which it keeps on purpose.
 

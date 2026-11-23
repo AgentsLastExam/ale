@@ -5,16 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.config import AgentJudgeConfig, VerificationConfig
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.harnesses.builtin import OracleHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.tasksets.manifest import load_tasks
-from ale_verify import JudgeAttempt, JudgeInvocation, judge, write
+from orbit.core.config import AgentJudgeConfig, VerificationConfig
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.harnesses.builtin import OracleHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.tasksets.manifest import load_tasks
+from orbit_verify import JudgeAttempt, JudgeInvocation, judge, write
 from tests.support import CONTAINER_BASE, provider_registry
 
 pytestmark = pytest.mark.integration
@@ -34,13 +34,13 @@ def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajec
         '"base_url":"https://example.test","api_key_env":"KEY"}}'
     )
     for key, value in {
-        "ALE_AGENT_JUDGE_LOG_PATH": record,
-        "ALE_VERIFY_CONFIG_PATH": config,
-        "ALE_TRAJECTORY_PATH": trajectory,
+        "ORBIT_AGENT_JUDGE_LOG_PATH": record,
+        "ORBIT_VERIFY_CONFIG_PATH": config,
+        "ORBIT_TRAJECTORY_PATH": trajectory,
         "KEY": "secret",
     }.items():
         monkeypatch.setenv(key, str(value))
-    monkeypatch.setattr("ale_verify._VERIFIER_DIR", tmp_path / "verifier")
+    monkeypatch.setattr("orbit_verify._VERIFIER_DIR", tmp_path / "verifier")
 
     def fake(**kwargs):  # type: ignore[no-untyped-def]
         return (
@@ -69,7 +69,7 @@ def test_multiple_agent_judges_allow_later_checks_without_touching_solver_trajec
             ),
         )
 
-    monkeypatch.setattr("ale_verify._agents.run", fake)
+    monkeypatch.setattr("orbit_verify._agents.run", fake)
     first = judge("agent", "functional", prompt="Test.")
     second = judge("agent", "functional", prompt="Test again.")
     write({"reward": float(first["works"] and second["works"]), "late": 42})
@@ -96,8 +96,8 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     model_provider: str,
 ) -> None:
     secret = "agent-direct-secret"
-    monkeypatch.setenv(f"ALE_{model_provider.upper()}_API_KEY", secret)
-    monkeypatch.setenv(f"ALE_{model_provider.upper()}_BASE_URL", "https://example.test")
+    monkeypatch.setenv(f"ORBIT_{model_provider.upper()}_API_KEY", secret)
+    monkeypatch.setenv(f"ORBIT_{model_provider.upper()}_BASE_URL", "https://example.test")
     task_root = scaffold_task(tmp_path / "agent-integrity")
     (task_root / "task.toml").write_text(
         (task_root / "task.toml").read_text().replace("memory_mb = 4096", "memory_mb = 512")
@@ -142,7 +142,7 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
         "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 verify.py\n"
     )
     (task_root / "tests" / "verify.py").write_text(
-        "from ale_verify import judge, write\n"
+        "from orbit_verify import judge, write\n"
         "v = {}\n"
         "v['functional'] = {'no': 0.0, 'yes': 1.0}[judge('agent', 'functio"
         "nal', prompt='Inspect result.txt.', output_schema={'type': 'objec"

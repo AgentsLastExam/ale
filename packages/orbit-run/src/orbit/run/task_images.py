@@ -19,16 +19,16 @@ from typing import Literal
 
 from pydantic import ValidationError
 
-from ale.core.errors import (
-    AleError,
+from orbit.core.errors import (
+    OrbitError,
     ProviderCapabilityError,
     ProviderStartError,
     TaskDefinitionError,
 )
-from ale.core.ids import content_hash
-from ale.core.sandbox import ImageRef, PreparedTaskImage, Provider, SandboxRequest
-from ale.core.task import Task, TaskFolder
-from ale.core.taskspec import (
+from orbit.core.ids import content_hash
+from orbit.core.sandbox import ImageRef, PreparedTaskImage, Provider, SandboxRequest
+from orbit.core.task import Task, TaskFolder
+from orbit.core.taskspec import (
     ImageKind,
     ImageSpec,
     NetworkMode,
@@ -38,8 +38,8 @@ from ale.core.taskspec import (
     TaskSpec,
     VerificationMode,
 )
-from ale.run.content import tree_digest
-from ale.run.framework import (
+from orbit.run.content import tree_digest
+from orbit.run.framework import (
     KEEP_ALIVE,
     MATERIALIZER_IMAGE,
     fleet_framework_identity,
@@ -49,28 +49,28 @@ from ale.run.framework import (
     windows_framework_identity,
     with_framework,
 )
-from ale.run.images import (
+from orbit.run.images import (
     acquire_lock,
     classify_image,
     finished_layer,
     remove_disk,
     resolve_loaded_image,
 )
-from ale.run.process import run
-from ale.run.providers.fleet import FleetProvider
-from ale.run.providers.orchard import OrchardProvider, OrchardSandbox
-from ale.run.providers.orchard.client import CONTROL_ACCOUNT
-from ale.run.providers.qemu.provider import (
+from orbit.run.process import run
+from orbit.run.providers.fleet import FleetProvider
+from orbit.run.providers.orchard import OrchardProvider, OrchardSandbox
+from orbit.run.providers.orchard.client import CONTROL_ACCOUNT
+from orbit.run.providers.qemu.provider import (
     LINUX_DISCARD,
     NTFS_DISCARD,
     RUNNER_IMAGE,
     QemuProvider,
 )
-from ale.run.providers.slurm import SlurmProvider
-from ale.run.providers.slurm.images import Recipe, pin
-from ale.run.providers.slurm.images import key as cluster_key
-from ale.run.sources import cache_root
-from ale.run.tasksets.manifest import BUILD_SCRIPTS, SETUP_DIR, describe
+from orbit.run.providers.slurm import SlurmProvider
+from orbit.run.providers.slurm.images import Recipe, pin
+from orbit.run.providers.slurm.images import key as cluster_key
+from orbit.run.sources import cache_root
+from orbit.run.tasksets.manifest import BUILD_SCRIPTS, SETUP_DIR, describe
 
 __all__ = [
     "ImagePreparationResult",
@@ -89,9 +89,9 @@ __all__ = [
 #: of validation rounds.
 ImageRole = Literal["solver", "verifier", "validation"]
 
-WINDOWS_BUILD_CONTRACT = "ale-windows-powershell/v1"
-LINUX_BUILD_CONTRACT = "ale-linux-bash/v1"
-MACOS_BUILD_CONTRACT = "ale-macos-bash/v1"
+WINDOWS_BUILD_CONTRACT = "orbit-windows-powershell/v1"
+LINUX_BUILD_CONTRACT = "orbit-linux-bash/v1"
+MACOS_BUILD_CONTRACT = "orbit-macos-bash/v1"
 
 
 @dataclass(frozen=True)
@@ -122,7 +122,7 @@ class ImagePreparationResult:
 async def _stage[T](name: str, operation: Awaitable[T]) -> T:
     try:
         return await operation
-    except AleError as error:
+    except OrbitError as error:
         message = str(error).replace("\n", " ")
         if len(message) > 2000:
             message = f"{message[:1000]} ... {message[-995:]}"
@@ -543,7 +543,7 @@ async def _on_cluster(
     task: Task, role: ImageRole, provider: SlurmProvider
 ) -> ImagePreparationResult:
     """One of a Task's images as the Slurm Provider prepares it, on the cluster, from what
-    the Task declares, as no container runtime runs where ALE does: a named image pinned by
+    the Task declares, as no container runtime runs where Orbit does: a named image pinned by
     the digest its registry gives it now, or the Task's own build, with the framework layer.
 
     Its key covers what goes into it: the pinned name, or the build context as
@@ -886,7 +886,7 @@ async def _prepare_macos_image(
             raise TaskDefinitionError(f"macOS image inputs cannot be symlinks: {entry}")
     context_identity = await asyncio.to_thread(_vm_context_identity, context)
     user = task.spec.image.user
-    # build.sh runs as root, in a VM of the base framed for the account ALE controls it
+    # build.sh runs as root, in a VM of the base framed for the account Orbit controls it
     # through, so it may create the Task's account; a sandbox frames the result for that.
     builder_identity = content_hash(
         {
@@ -909,7 +909,7 @@ async def _prepare_macos_image(
         source="solver-local",
         input_identity=identity,
         image_source_identity=task.image_source_digest,
-        runtime_ref="ale-built-" + identity.removeprefix("sha256:")[:32],
+        runtime_ref="orbit-built-" + identity.removeprefix("sha256:")[:32],
         prepared_identity=identity,
         base_materials=(base.prepared_identity,),
         builder_identity=builder_identity,
@@ -956,18 +956,18 @@ async def _prepare_macos_image(
 async def _build_macos_image(
     sandbox: OrchardSandbox, context: Path, *, user: str, timeout_sec: float
 ) -> None:
-    """Run ``build.sh`` with ``ALE_HOME`` set to the home of the Task's account, as on Windows.
+    """Run ``build.sh`` with ``ORBIT_HOME`` set to the home of the Task's account, as on Windows.
 
     That is the home the base gives the account, or ``/Users/<user>`` for an account the
     build creates, which must give it that home.
     """
     home = await sandbox.account_home(user) or f"/Users/{user}"
-    target = "/opt/ale/environment"
+    target = "/opt/orbit/environment"
     await sandbox.upload_dir(str(context), target)
     result = await sandbox.exec(
         ["bash", "build.sh"],
         cwd=target,
-        env={"ALE_HOME": home},
+        env={"ORBIT_HOME": home},
         timeout_sec=timeout_sec,
     )
     if not result.ok:
@@ -981,7 +981,7 @@ async def _build_macos_image(
     if built != home:
         raise TaskDefinitionError(
             f"environment/build.sh gave the account {user!r} the home {built}, "
-            f"not ALE_HOME ({home})"
+            f"not ORBIT_HOME ({home})"
         )
     result = await sandbox.exec(["rm", "-rf", target], timeout_sec=60)
     if not result.ok:
@@ -1042,7 +1042,7 @@ async def _build_qemu_image(
     build's inputs changed meanwhile.
 
     The script runs as the framework's own account (root, or an administrator on Windows)
-    in a copy of ``environment/``, with ``ALE_HOME`` set to the agent's home.
+    in a copy of ``environment/``, with ``ORBIT_HOME`` set to the agent's home.
     """
     provider = QemuProvider(overlay_dir=context.parent / "vm", runner_image=runner_identity)
     sandbox = await provider.create_builder(
@@ -1058,7 +1058,7 @@ async def _build_qemu_image(
     )
     script = BUILD_SCRIPTS[operating_system]
     if operating_system is OperatingSystem.WINDOWS:
-        target = r"C:\ProgramData\ALE\environment"
+        target = r"C:\ProgramData\Orbit\environment"
         build = [
             "powershell.exe",
             "-NoProfile",
@@ -1077,8 +1077,8 @@ async def _build_qemu_image(
             f"Remove-Item -LiteralPath '{target}' -Recurse -Force -ErrorAction Stop",
         ]
     else:
-        # Under /opt/ale, which only root may read.
-        target = "/opt/ale/environment"
+        # Under /opt/orbit, which only root may read.
+        target = "/opt/orbit/environment"
         build = ["bash", script]
         remove = ["rm", "-rf", target]
     try:
@@ -1086,7 +1086,7 @@ async def _build_qemu_image(
         result = await sandbox.exec(
             build,
             cwd=target,
-            env={"ALE_HOME": sandbox.agent_home},
+            env={"ORBIT_HOME": sandbox.agent_home},
             timeout_sec=timeout_sec,
         )
         if not result.ok:
@@ -1125,8 +1125,8 @@ async def _build_oci(
 
     context = dockerfile.parent
     input_identity = _input_identity(source, source_digest)
-    tag = f"ale-{source}:{input_identity.removeprefix('sha256:')}"
-    with tempfile.TemporaryDirectory(prefix="ale-image-") as temporary:
+    tag = f"orbit-{source}:{input_identity.removeprefix('sha256:')}"
+    with tempfile.TemporaryDirectory(prefix="orbit-image-") as temporary:
         metadata_file = Path(temporary) / "metadata.json"
         file_arguments: tuple[str, ...] = ()
         if exclude:

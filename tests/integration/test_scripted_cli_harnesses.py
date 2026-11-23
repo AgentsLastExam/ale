@@ -17,26 +17,26 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import OperatingSystem
-from ale.core.trace import read_jsonl
-from ale.core.trajectory import AtifTrajectory
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession
-from ale.run.harnesses.base import CONTINUE_PROMPT, CliHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.droid import DroidHarness
-from ale.run.harnesses.forgecode import ForgecodeHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.hermes import HermesHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
-from ale.run.harnesses.pi_cli import PiCliHarness
-from ale.run.protocol.log_mirror import LogMirror
-from ale.run.recording import BlobStore, EpisodeRecording
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import OperatingSystem
+from orbit.core.trace import read_jsonl
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.harnesses.base import CONTINUE_PROMPT, CliHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.droid import DroidHarness
+from orbit.run.harnesses.forgecode import ForgecodeHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.hermes import HermesHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
+from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.protocol.log_mirror import LogMirror
+from orbit.run.recording import BlobStore, EpisodeRecording
 from tests.integration.scripted_model import FINAL, ScriptedModel
 from tests.support import cli_os, cli_sandbox
 
@@ -216,7 +216,7 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
         assert leaked <= set(harness.credentials), leaked
         trajectory = await mirrored_trajectory(tmp_path, episode, prompts[0], native_id)
 
-    assert not (trajectory.extra or {}).get("ale", {}).get("parse_issues")
+    assert not (trajectory.extra or {}).get("orbit", {}).get("parse_issues")
     users = [step.message for step in trajectory.steps if step.source == "user"]
     assert users == list(prompts)
     calls = [call for step in trajectory.steps for call in step.tool_calls or ()]
@@ -269,11 +269,11 @@ async def test_cli_subagents_link_to_the_calls_that_spawned_them(tmp_path: Path,
     model = ScriptedModel(
         tool_pattern=case.tool_pattern,
         delegations=(
-            ("ALE-DELEGATE-ROOT", tool, arguments("ALE-DELEGATE-CHILD: delegate the proof.")),
-            ("ALE-DELEGATE-CHILD", tool, arguments("Write the proof file.")),
+            ("ORBIT-DELEGATE-ROOT", tool, arguments("ORBIT-DELEGATE-CHILD: delegate the proof.")),
+            ("ORBIT-DELEGATE-CHILD", tool, arguments("Write the proof file.")),
         ),
     )
-    prompt = "ALE-DELEGATE-ROOT: delegate the proof."
+    prompt = "ORBIT-DELEGATE-ROOT: delegate the proof."
     async with scripted(tmp_path, name, case, model) as episode:
         run = await episode.harness.launch(
             prompt, episode.sandbox, episode.session, timeout_sec=600
@@ -283,7 +283,7 @@ async def test_cli_subagents_link_to_the_calls_that_spawned_them(tmp_path: Path,
             tmp_path, episode, prompt, run.continuation.native_session_id
         )
 
-    assert not (trajectory.extra or {}).get("ale", {}).get("parse_issues")
+    assert not (trajectory.extra or {}).get("orbit", {}).get("parse_issues")
     (child,) = trajectory.subagent_trajectories or ()
     assert child.trajectory_id.startswith(f"{trajectory.trajectory_id}-subagent-")
     refs = [

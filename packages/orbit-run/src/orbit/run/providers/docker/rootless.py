@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ale.core.errors import ProviderStartError
+from orbit.core.errors import ProviderStartError
 
 __all__ = ["HostPorts", "Namespaces", "namespaces"]
 

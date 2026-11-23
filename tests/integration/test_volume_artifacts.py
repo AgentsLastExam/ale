@@ -13,20 +13,20 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.errors import StorageExhaustedError
-from ale.core.sandbox import Identity, ImageRef, Provider, SandboxRequest
-from ale.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
-from ale.core.verdict import Status
-from ale.run.episode import EpisodeResult, run_episode
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
-from ale.run.providers.docker import volumes as docker_volumes
-from ale.run.providers.firecracker import FirecrackerProvider
-from ale.run.providers.qemu import QemuProvider
-from ale.run.providers.slurm import SlurmProvider
-from ale.run.scaffold import scaffold_task
-from ale.run.task_images import prepare_task_image
-from ale.run.tasksets.manifest import load_tasks
+from orbit.core.errors import StorageExhaustedError
+from orbit.core.sandbox import Identity, ImageRef, Provider, SandboxRequest
+from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
+from orbit.core.verdict import Status
+from orbit.run.episode import EpisodeResult, run_episode
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.providers.docker import volumes as docker_volumes
+from orbit.run.providers.firecracker import FirecrackerProvider
+from orbit.run.providers.qemu import QemuProvider
+from orbit.run.providers.slurm import SlurmProvider
+from orbit.run.scaffold import scaffold_task
+from orbit.run.task_images import prepare_task_image
+from orbit.run.tasksets.manifest import load_tasks
 from tests.support import (
     CONTAINER_BASE,
     VM_BASE,
@@ -49,9 +49,9 @@ HOME = "/home/user"
 VERIFY = """\
 import os
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 
-home = Path(os.environ["ALE_HOME"])
+home = Path(os.environ["ORBIT_HOME"])
 work = home / "work.txt"
 lines = work.read_text().splitlines() if work.is_file() else []
 seen = sorted(name for name in ("link", "fifo", "cache") if os.path.lexists(home / name))
@@ -62,7 +62,7 @@ result = {"reward": round(min(1.0, len(lines) / 3), 2), "lines": lines, "seen": 
           "leaked": leaked}
 write(result, feedback=f"{len(lines)} of 3 lines")
 """
-TEST = '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ALE_VERIFY_PYTHON" verify.py\n'
+TEST = '#!/usr/bin/env bash\nset -euo pipefail\nexec "$ORBIT_VERIFY_PYTHON" verify.py\n'
 #: The image's home holds what copying never carries, which no separate verifier's view may
 #: show.
 MAKE = (
@@ -101,7 +101,7 @@ def _task(root: Path, mode: str, validation: str | None, *, vm: bool = False) ->
     return root
 
 
-def _ale_volumes(owner: str) -> list[str]:
+def _orbit_volumes(owner: str) -> list[str]:
     listed = subprocess.run(
         ["docker", "volume", "ls", "--filter", f"label={docker_volumes.VOLUME_LABEL}",
          "--format", f'{{{{.Name}}}} {{{{.Label "{docker_volumes.VOLUME_LABEL}"}}}}'],
@@ -129,7 +129,7 @@ async def test_an_agent_works_in_a_volume_every_verifier_sees_through_a_view_of_
     _runtime(runtime)
     result = await _episode(tmp_path, mode, validation, DockerProvider(runtime=runtime))
     _check(result, mode, validation)
-    assert _ale_volumes(result.episode_id) == []
+    assert _orbit_volumes(result.episode_id) == []
 
 
 @pytest.mark.needs_kvm
@@ -178,9 +178,9 @@ WINDOWS_VOLUME = r"C:\Users\user\.scripted-cli"
 WINDOWS_VERIFY = """\
 import os
 from pathlib import Path
-from ale_verify import write
+from orbit_verify import write
 
-volume = Path(os.environ["ALE_HOME"]) / ".scripted-cli"
+volume = Path(os.environ["ORBIT_HOME"]) / ".scripted-cli"
 turns = sorted(path.name for path in volume.glob("scripted/turn-*.md"))
 marker = volume / "verifier-was-here"
 leaked = marker.exists()
@@ -188,7 +188,7 @@ marker.write_text("a verifier's own")
 reward = round(min(1.0, len(turns) / 3), 2)
 write({"reward": reward, "turns": turns, "leaked": leaked}, feedback=f"{len(turns)} of 3")
 """
-WINDOWS_TEST = "& $env:ALE_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
+WINDOWS_TEST = "& $env:ORBIT_VERIFY_PYTHON .\\verify.py\nexit $LASTEXITCODE\n"
 
 
 @pytest.mark.needs_kvm
@@ -205,10 +205,10 @@ async def test_an_agent_works_in_a_volume_of_a_windows_vm(
     verifier's guest brings a copy of the snapshot's disk online and finds it through a
     junction in place of its own."""
     request.getfixturevalue("kvm_host")
-    image = Path(os.environ.get("ALE_TEST_WINDOWS_IMAGE", ""))
+    image = Path(os.environ.get("ORBIT_TEST_WINDOWS_IMAGE", ""))
     if not image.is_file():
-        pytest.skip("set ALE_TEST_WINDOWS_IMAGE to the Windows base qcow2")
-    monkeypatch.setattr("ale.run.task_images.cache_root", lambda: tmp_path / "cache")
+        pytest.skip("set ORBIT_TEST_WINDOWS_IMAGE to the Windows base qcow2")
+    monkeypatch.setattr("orbit.run.task_images.cache_root", lambda: tmp_path / "cache")
     size = {"cpus": 2, "memory_mb": 4096}
     config: dict[str, object] = {
         "artifacts": [WINDOWS_VOLUME],
@@ -333,7 +333,7 @@ async def test_what_a_sandbox_writes_to_its_volume_counts_against_its_storage(
             await sandbox.exec(
                 ["sh", "-c", "head -c 100M /dev/urandom > /srv/b && sleep 30"], timeout_sec=120
             )
-    assert _ale_volumes(sandbox.sandbox_id) == []
+    assert _orbit_volumes(sandbox.sandbox_id) == []
 
 
 ENGINE = """\

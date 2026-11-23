@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ale.core.taskspec import NetworkPolicy
-from ale.core.trace import UpstreamError
+from orbit.core.taskspec import NetworkPolicy
+from orbit.core.trace import UpstreamError
 
 __all__ = [
     "CallUsage",

@@ -11,8 +11,8 @@ import uuid
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-from ale.core.errors import ProviderCapabilityError
-from ale.core.sandbox import GpuDevice
+from orbit.core.errors import ProviderCapabilityError
+from orbit.core.sandbox import GpuDevice
 
 _UUID = re.compile(
     r"^GPU-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",

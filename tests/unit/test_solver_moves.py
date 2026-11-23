@@ -29,17 +29,17 @@ from tests.support import (
 )
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
-from ale.core.config import RunTimeouts
-from ale.core.errors import AllocationEndedError, PhaseTimeoutError
-from ale.core.harness import AgentRun, HarnessSession
-from ale.core.sandbox import ExecResult, PreparedTaskImage, SandboxRequest, SandboxRole
-from ale.core.trajectory import AtifTrajectory
-from ale.core.verdict import Status
-from ale.run.episode import run_episode
-from ale.run.protocol import episode_protocol
-from ale.run.protocol.episode_protocol import MOVED_PROMPT, EpisodeProtocol
-from ale.run.provenance import ProvenanceInputs
-from ale.run.tasksets.manifest import ManifestTask
+from orbit.core.config import RunTimeouts
+from orbit.core.errors import AllocationEndedError, PhaseTimeoutError
+from orbit.core.harness import AgentRun, HarnessSession
+from orbit.core.sandbox import ExecResult, PreparedTaskImage, SandboxRequest, SandboxRole
+from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import Status
+from orbit.run.episode import run_episode
+from orbit.run.protocol import episode_protocol
+from orbit.run.protocol.episode_protocol import MOVED_PROMPT, EpisodeProtocol
+from orbit.run.provenance import ProvenanceInputs
+from orbit.run.tasksets.manifest import ManifestTask
 
 pytestmark = pytest.mark.unit
 
@@ -170,7 +170,7 @@ def _marked(result: Any, key: str) -> list[Any]:
         (result.run_dir / "trajectory.json").read_text()
     )
     return [
-        ((step.extra or {}).get("ale") or {}).get(key)
+        ((step.extra or {}).get("orbit") or {}).get(key)
         for step in trajectory.steps
         if step.source == "user"
     ]
@@ -324,7 +324,7 @@ async def test_a_shared_verifier_that_would_not_last_moves_its_solver_where_it_d
     result = await _run(tmp_path, provider, task, harness)
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    tested = [sandbox for stage, sandbox in verifiers.runs if stage == "/opt/ale/tests"]
+    tested = [sandbox for stage, sandbox in verifiers.runs if stage == "/opt/orbit/tests"]
     solvers = _solvers(provider)
     assert tested == [solvers[1].sandbox_id]
     assert solvers[1].request.duration_sec == task.spec.timeouts.verify
@@ -349,7 +349,7 @@ async def test_the_last_turn_keeps_its_sandbox_for_a_shared_verifier(
     # Each run had its Sandbox's 0.8 s less the 0.3 s kept, so the work took two of them.
     assert harness.timeouts[0] == pytest.approx(0.5, abs=0.05)
     assert [item.began for item in result.record.segments] == ["provisioned", "moved"]
-    tested = [sandbox for stage, sandbox in verifiers.runs if stage == "/opt/ale/tests"]
+    tested = [sandbox for stage, sandbox in verifiers.runs if stage == "/opt/orbit/tests"]
     solvers = _solvers(provider)
     assert len(solvers) == 2 and tested == [solvers[1].sandbox_id]
     assert solvers[1].request.duration_sec is None
@@ -418,7 +418,7 @@ async def test_a_round_whose_verifier_lost_its_allocation_runs_again_on_its_snap
     result = await _run(tmp_path, provider, _task(tmp_path, rounds=1), harness)
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    validated = [sandbox for stage, sandbox in verifiers.runs if stage == "/opt/ale/validation"]
+    validated = [sandbox for stage, sandbox in verifiers.runs if stage == "/opt/orbit/validation"]
     assert len(validated) == 2 and validated[0] == lost[0] != validated[1]
     assert [(item.index, item.status, item.reward) for item in result.record.validation_rounds] == [
         (1, Status.COMPLETED, round(1 / 3, 2))
@@ -437,7 +437,7 @@ async def test_a_cli_whose_run_its_sandboxs_deadline_cut_resumes_its_session(
         async def prepare_command(  # type: ignore[no-untyped-def]
             self, prompt_path, sandbox, session, *, native_session_id
         ):
-            from ale.run.harnesses.base import CliCommand
+            from orbit.run.harnesses.base import CliCommand
 
             return CliCommand("cut-cli-run", {}, "scripted")
 
@@ -446,7 +446,7 @@ async def test_a_cli_whose_run_its_sandboxs_deadline_cut_resumes_its_session(
 
     async def exec(self: MemorySandbox, argv: Any, **options: Any) -> ExecResult:
         command = " ".join(str(part) for part in argv)
-        if "mkdir -p" in command and ".ale-harness" in command:
+        if "mkdir -p" in command and ".orbit-harness" in command:
             # The log files the CLI's shell would create.
             for match in re.finditer(r": > ('[^']*'|\S+)", command):
                 self.files[shlex.split(match.group(1))[0]] = b""
@@ -458,7 +458,7 @@ async def test_a_cli_whose_run_its_sandboxs_deadline_cut_resumes_its_session(
         self.files[f"{home}/.scripted-cli/scripted/run-{len(runs)}.md"] = b"run"
         if len(runs) == 1:
             return ExecResult(exit_code=None, timed_out=True)
-        out = f"{home}/.ale-harness/stdout.log"
+        out = f"{home}/.orbit-harness/stdout.log"
         reply = json.dumps({"session_id": "scripted", "result": "done"}) + "\n"
         self.files[out] = self.files.get(out, b"") + reply.encode()
         return ExecResult(exit_code=0)
@@ -481,8 +481,8 @@ def test_selection_asks_every_leaf_to_hold_a_verifier_for_its_limit(
     """A shared verifier runs in the solver and a snapshot verifier on the leaf that saved
     the snapshot, so the solver's leaf must hold one that long; the Run's limit holds over
     the Task's."""
-    from ale.core.config import RunTimeouts
-    from ale.run.providers import _sandboxes
+    from orbit.core.config import RunTimeouts
+    from orbit.run.providers import _sandboxes
 
     task = _task(tmp_path, rounds=1, mode=mode)
     limit = task.spec.timeouts.verify

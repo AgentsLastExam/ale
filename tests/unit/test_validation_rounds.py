@@ -22,8 +22,8 @@ from tests.support import (
 )
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
-from ale.core.config import RunConfig, SandboxRetentionConfig
-from ale.core.errors import (
+from orbit.core.config import RunConfig, SandboxRetentionConfig
+from orbit.core.errors import (
     AgentError,
     AgentUnsupportedError,
     BudgetExceededError,
@@ -36,31 +36,31 @@ from ale.core.errors import (
     TaskError,
     VerifierOutputError,
 )
-from ale.core.harness import (
+from orbit.core.harness import (
     AgentRun,
     AutonomousHarness,
     HarnessSession,
     ResumeSupport,
 )
-from ale.core.lock import LimitTermination
-from ale.core.result import ResultRecord
-from ale.core.sandbox import ExecResult, PreparedTaskImage, SandboxRequest, SandboxRole
-from ale.core.task import Stage
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskConfig
-from ale.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
-from ale.core.verdict import Status
-from ale.run.cli.tasks import _retained_source_episodes
-from ale.run.episode import check_retention, run_episode
-from ale.run.gateway.server import Gateway
-from ale.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.lint import lint_repository
-from ale.run.protocol import episode_protocol
-from ale.run.protocol.episode_protocol import EpisodeProtocol, validation_rounds
-from ale.run.provenance import ProvenanceInputs
-from ale.run.scaffold import scaffold_task
-from ale.run.secrets import resolve_task_variables
-from ale.run.tasksets.manifest import ManifestTask, load_tasks
+from orbit.core.lock import LimitTermination
+from orbit.core.result import ResultRecord
+from orbit.core.sandbox import ExecResult, PreparedTaskImage, SandboxRequest, SandboxRole
+from orbit.core.task import Stage
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskConfig
+from orbit.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
+from orbit.core.verdict import Status
+from orbit.run.cli.tasks import _retained_source_episodes
+from orbit.run.episode import check_retention, run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.lint import lint_repository
+from orbit.run.protocol import episode_protocol
+from orbit.run.protocol.episode_protocol import EpisodeProtocol, validation_rounds
+from orbit.run.provenance import ProvenanceInputs
+from orbit.run.scaffold import scaffold_task
+from orbit.run.secrets import resolve_task_variables
+from orbit.run.tasksets.manifest import ManifestTask, load_tasks
 
 pytestmark = pytest.mark.unit
 
@@ -130,9 +130,9 @@ async def test_n_rounds_give_n_validations_and_n_plus_one_turns_then_tests_once(
     # tests/ scored the final state, once; validation/ the state after turns 1 and 2.
     assert result.verdict.rewards == {"reward": 1.0}
     assert [stage for stage, _ in verifiers.runs] == [
-        "/opt/ale/validation",
-        "/opt/ale/validation",
-        "/opt/ale/tests",
+        "/opt/orbit/validation",
+        "/opt/orbit/validation",
+        "/opt/orbit/tests",
     ]
     rounds = result.record.validation_rounds
     assert [(item.index, item.status, item.reward) for item in rounds] == [
@@ -200,7 +200,7 @@ async def test_the_prompts_say_how_the_turns_go_and_show_validation_never_tests(
     )
     users = [step for step in trajectory.steps if step.source == "user"]
     assert [step.message for step in users] == harness.prompts
-    assert [(step.extra or {}).get("ale", {}).get("validation_round") for step in users] == [
+    assert [(step.extra or {}).get("orbit", {}).get("validation_round") for step in users] == [
         None,
         1,
         2,
@@ -224,7 +224,7 @@ async def test_each_turn_has_what_is_left_of_the_agents_time(
 
     verifiers.seen = validating
     monkeypatch.setattr(
-        "ale.run.protocol.episode_protocol.time", SimpleNamespace(monotonic=lambda: clock[0])
+        "orbit.run.protocol.episode_protocol.time", SimpleNamespace(monotonic=lambda: clock[0])
     )
     harness = Timed()
     result = await _run(tmp_path, RoundsProvider(), _task(tmp_path, rounds=2), harness)
@@ -250,7 +250,7 @@ async def test_a_turn_that_did_not_end_normally_is_the_last(
     assert len(harness.prompts) == 2
     assert [item.index for item in result.record.validation_rounds] == [1]
     assert result.record.rewards == {"reward": 0.67}
-    assert [stage for stage, _ in verifiers.runs][-1] == "/opt/ale/tests"
+    assert [stage for stage, _ in verifiers.runs][-1] == "/opt/orbit/tests"
     assert provider.snapshots == {}
     assert all(sandbox.destroyed for sandbox in provider.sandboxes)
 
@@ -295,7 +295,7 @@ async def test_a_turn_whose_program_fails_while_the_provider_fails_ends_unscored
     assert "overloaded (HTTP 529)" in failure.message
     assert "API Error: 529 Overloaded" in failure.message
     assert result.record.rewards is None
-    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/validation"]
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/orbit/validation"]
     assert all(sandbox.destroyed for sandbox in provider.sandboxes)
 
 
@@ -333,7 +333,7 @@ async def test_a_turn_answers_for_its_own_runs_calls_only(
     )
 
     assert result.verdict.status is Status.AGENT_ERROR, result.verdict.failure
-    assert [stage for stage, _ in verifiers.runs][-1] == "/opt/ale/tests"
+    assert [stage for stage, _ in verifiers.runs][-1] == "/opt/orbit/tests"
 
 
 def test_only_the_programs_own_failure_is_put_down_to_a_failing_provider() -> None:
@@ -431,7 +431,7 @@ async def test_a_rounds_snapshot_that_cannot_be_destroyed_is_recorded_and_never_
     tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The agent's turns go on; the snapshot is left for its cleanup command, which the
-    operator finds by ``ale sandbox list``, and recorded as not destroyed rather than as a
+    operator finds by ``orbit sandbox list``, and recorded as not destroyed rather than as a
     snapshot a later Run takes up, and the final solver's kept snapshot is still kept."""
     provider, harness = RoundsProvider(), TurnsHarness()
     destroy = provider.destroy_retained
@@ -451,7 +451,7 @@ async def test_a_rounds_snapshot_that_cannot_be_destroyed_is_recorded_and_never_
     (left,) = [item for item in result.record.sandboxes if item.handle == handle]
     assert (left.outcome, left.cleanup_command) == (
         "not-destroyed",
-        f"ale sandbox destroy {handle}",
+        f"orbit sandbox destroy {handle}",
     )
     assert left.reason is not None and "busy" in left.reason
     assert {"handle": handle} in await provider.list_retained()
@@ -489,15 +489,15 @@ async def test_validation_is_never_in_a_solver_and_tests_never_in_a_validation_v
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     validators = [sandbox for sandbox in provider.sandboxes if sandbox.request.snapshot]
     for sandbox in provider.sandboxes:
-        staged = {target for target in sandbox.uploads if target.startswith("/opt/ale/")}
+        staged = {target for target in sandbox.uploads if target.startswith("/opt/orbit/")}
         if sandbox.request.role is not SandboxRole.VERIFIER:
             # No solver holds validation/ or what it wrote.
-            assert "/opt/ale/validation" not in staged
+            assert "/opt/orbit/validation" not in staged
             assert "/logs/verifier/feedback.md" not in sandbox.files or (
                 mode == "shared" and sandbox is provider.sandboxes[-1]
             )
-        elif "/opt/ale/validation" in staged:
-            assert "/opt/ale/tests" not in staged
+        elif "/opt/orbit/validation" in staged:
+            assert "/opt/orbit/tests" not in staged
     assert validators
 
 
@@ -530,7 +530,7 @@ async def test_the_trace_records_each_rounds_save_validation_and_boot(
 async def test_the_log_mirror_follows_the_solver_across_boots(
     tmp_path: Path, verifiers: Verifiers
 ) -> None:
-    from ale.core.config import LoggingPolicy
+    from orbit.core.config import LoggingPolicy
 
     task = _task(tmp_path, rounds=2)
     lock = make_lock()
@@ -625,7 +625,7 @@ async def test_without_validation_tests_validates_each_round_as_a_copy_of_it_wou
 
     # tests/ scored the state after turns 1 and 2 in the rounds' verifiers, and the final
     # state once, which alone is the Episode's reward.
-    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/tests"] * 3
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/orbit/tests"] * 3
     rounds = result.record.validation_rounds
     assert [(item.index, item.status, item.reward) for item in rounds] == [
         (1, Status.COMPLETED, 0.33),
@@ -633,7 +633,7 @@ async def test_without_validation_tests_validates_each_round_as_a_copy_of_it_wou
     ]
     assert result.verdict.rewards == {"reward": 1.0}
     # Each round's run of tests/ has the trajectory so far, as the final one has all of it.
-    assert ["ALE_TRAJECTORY_PATH" in env for env in verifiers.envs] == [True, True, True]
+    assert ["ORBIT_TRAJECTORY_PATH" in env for env in verifiers.envs] == [True, True, True]
     # Each round's feedback reaches the agent and is recorded; the final run's reaches no one.
     assert [item.feedback and item.feedback.path for item in rounds] == [
         "validation/1/feedback.md",
@@ -692,7 +692,7 @@ async def test_tests_is_in_no_solver_while_the_agent_works_when_it_validates(
 
     class Watching(TurnsHarness):
         async def _turn(self, prompt: str, sandbox: Any, *args: Any) -> AgentRun:
-            staged = {target for target in sandbox.uploads if target.startswith("/opt/ale/")}
+            staged = {target for target in sandbox.uploads if target.startswith("/opt/orbit/")}
             seen.append(staged | ({"/logs/verifier/feedback.md"} & set(sandbox.files)))
             return await super()._turn(prompt, sandbox, *args)
 
@@ -702,7 +702,7 @@ async def test_tests_is_in_no_solver_while_the_agent_works_when_it_validates(
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert len(seen) == 3
     assert not any(
-        {"/opt/ale/tests", "/opt/ale/validation", "/logs/verifier/feedback.md"} & staged
+        {"/opt/orbit/tests", "/opt/orbit/validation", "/logs/verifier/feedback.md"} & staged
         for staged in seen
     )
     # Nor did any solver hold it before its save: only the last shared one, after the last
@@ -710,14 +710,14 @@ async def test_tests_is_in_no_solver_while_the_agent_works_when_it_validates(
     last = provider.sandboxes[-1] if mode == "shared" else None
     for sandbox in provider.sandboxes:
         if sandbox.request.role is not SandboxRole.VERIFIER and sandbox is not last:
-            assert "/opt/ale/tests" not in sandbox.uploads
+            assert "/opt/orbit/tests" not in sandbox.uploads
     validators = [
         sandbox
         for sandbox in provider.sandboxes
-        if sandbox.request.role is SandboxRole.VERIFIER and "/opt/ale/tests" in sandbox.uploads
+        if sandbox.request.role is SandboxRole.VERIFIER and "/opt/orbit/tests" in sandbox.uploads
     ]
     assert len(validators) == (2 if mode == "shared" else 3)
-    assert not any("/opt/ale/validation" in sandbox.uploads for sandbox in provider.sandboxes)
+    assert not any("/opt/orbit/validation" in sandbox.uploads for sandbox in provider.sandboxes)
 
 
 # --- what is refused before anything starts ---
@@ -857,8 +857,8 @@ async def test_each_solver_asks_for_the_saves_still_to_come(
 
 @pytest.mark.asyncio
 async def test_a_solver_rounds_save_asks_for_a_leaf_that_saves_that_many_in_a_row() -> None:
-    from ale.core.errors import ProviderCapabilityError
-    from ale.core.taskspec import NetworkPolicy, Resources
+    from orbit.core.errors import ProviderCapabilityError
+    from orbit.core.taskspec import NetworkPolicy, Resources
 
     request = SandboxRequest(
         episode_id="episode",
@@ -888,8 +888,8 @@ async def test_selection_passes_over_a_provider_that_cannot_save_every_round(
 ) -> None:
     """Firecracker stacks a layer for each save, eight at most: a Task with more rounds goes
     to the next Provider, or is refused before anything starts."""
-    from ale.core.errors import ProviderCapabilityError
-    from ale.run.providers.firecracker import FirecrackerProvider
+    from orbit.core.errors import ProviderCapabilityError
+    from orbit.run.providers.firecracker import FirecrackerProvider
 
     firecracker = FirecrackerProvider(snapshot_dir=tmp_path / "snapshots")
     for rounds, chosen in ((8, "firecracker"), (9, "docker:runc")):
@@ -912,7 +912,7 @@ async def test_selection_passes_over_a_provider_that_cannot_save_every_round(
 def test_a_round_is_scored_exactly_when_it_completed() -> None:
     from datetime import UTC, datetime
 
-    from ale.core.result import FailureInfo, ValidationRound
+    from orbit.core.result import FailureInfo, ValidationRound
 
     now = datetime.now(UTC)
     ValidationRound(index=1, status=Status.COMPLETED, reward=0.5, started_at=now, finished_at=now)
@@ -962,7 +962,7 @@ async def test_feedback_that_is_too_large_or_not_text_fails_its_round(
 
     async def exec(self: MemorySandbox, argv: Any, **options: Any) -> ExecResult:
         result = await exec_(self, argv, **options)
-        if list(argv) == ["bash", "test.sh"] and options.get("cwd") == "/opt/ale/validation":
+        if list(argv) == ["bash", "test.sh"] and options.get("cwd") == "/opt/orbit/validation":
             self.files["/logs/verifier/feedback.md"] = feedback
         return result
 
@@ -1006,7 +1006,7 @@ async def test_calibration_runs_validation_once_on_a_snapshot_of_the_final_state
     (validator,) = provider.booted(SandboxRole.VERIFIER)
     assert booted.snapshot == validator.snapshot is not None
     assert (first.planned_saves, booted.planned_saves) == (1, 0)
-    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/validation", "/opt/ale/tests"]
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/orbit/validation", "/opt/orbit/tests"]
     assert verifiers.runs[1][1] == provider.sandboxes[-1].sandbox_id
     assert provider.snapshots == {}
     assert result.lock is not None and result.lock.validation_rounds == 0
@@ -1037,7 +1037,7 @@ async def test_calibration_checks_tests_where_it_validates_the_agents_rounds(
     # in a solver booted from it.
     (round_,) = result.record.validation_rounds
     assert round_.status is Status.COMPLETED
-    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/tests", "/opt/ale/tests"]
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/orbit/tests", "/opt/orbit/tests"]
     (validator,) = provider.booted(SandboxRole.VERIFIER)
     assert validator.snapshot is not None
     # The oracle receives no rounds, and its RunLock still says tests/ validated.
@@ -1063,13 +1063,13 @@ async def test_calibrate_checks_the_stage_that_validates_where_there_is_one(
     from importlib import import_module
     from unittest.mock import AsyncMock
 
-    from ale.core.result import ValidationRound
-    from ale.core.verdict import Verdict
-    from ale.run.episode import EpisodeResult
-    from ale.run.providers import ProviderRegistry
-    from ale.run.recording import atomic_write_json
+    from orbit.core.result import ValidationRound
+    from orbit.core.verdict import Verdict
+    from orbit.run.episode import EpisodeResult
+    from orbit.run.providers import ProviderRegistry
+    from orbit.run.recording import atomic_write_json
 
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     root = _task(tmp_path, rounds=rounds, validation_dir=validation).folder.root
     lock = make_lock()
     checked: list[int] = []
@@ -1129,11 +1129,11 @@ async def test_a_calibration_case_that_ends_early_gets_no_validation_check(
     )
     assert result.verdict.status is Status.AGENT_ERROR
     assert result.record.validation_rounds == ()
-    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/tests"]
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/orbit/tests"]
 
 
 def test_a_case_may_expect_other_scores_of_validation(tmp_path: Path) -> None:
-    from ale.core.taskspec import CalibrationCase
+    from orbit.core.taskspec import CalibrationCase
 
     case = CalibrationCase.model_validate(
         {"name": "solution", "expect": {"reward": 1}, "expect_validation": {"reward": [0.5, 1]}}
@@ -1169,13 +1169,13 @@ async def test_calibrate_checks_validation_of_every_case_against_its_expectation
 
     import jsonschema
 
-    from ale.core.result import ValidationRound
-    from ale.core.verdict import Verdict
-    from ale.run.episode import EpisodeResult
-    from ale.run.providers import ProviderRegistry
-    from ale.run.recording import atomic_write_json
+    from orbit.core.result import ValidationRound
+    from orbit.core.verdict import Verdict
+    from orbit.run.episode import EpisodeResult
+    from orbit.run.providers import ProviderRegistry
+    from orbit.run.recording import atomic_write_json
 
-    task_cli = import_module("ale.run.cli.tasks")
+    task_cli = import_module("orbit.run.cli.tasks")
     root = _task(tmp_path, rounds=0).folder.root
     edit_task_config(
         root,
@@ -1261,8 +1261,8 @@ async def test_each_turn_stages_its_mcp_servers_from_what_was_declared(
     tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A booted solver's MCP command is made executable again, as the first turn's was."""
-    from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer
-    from ale.core.taskspec import StdioMcpServer
+    from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer
+    from orbit.core.taskspec import StdioMcpServer
 
     files = tmp_path / "mcp"
     files.mkdir()
@@ -1307,7 +1307,7 @@ async def test_each_turn_stages_its_mcp_servers_from_what_was_declared(
     )
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert len(harness.prompts) == 3
-    command = "/home/user/.ale-mcp/local/server.sh"
+    command = "/home/user/.orbit-mcp/local/server.sh"
     assert [command in held for held in executable.values() if held] == [True] * 3
 
 
@@ -1334,10 +1334,10 @@ async def test_a_later_turn_that_cannot_start_in_what_the_agent_left_is_its_stop
     assert len(harness.prompts) == 1
     # The agent was never given round 1's prompt, so its session lacks none.
     trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
-    assert not (trajectory.get("extra") or {}).get("ale", {}).get("parse_issues")
+    assert not (trajectory.get("extra") or {}).get("orbit", {}).get("parse_issues")
     assert [item.index for item in result.record.validation_rounds] == [1]
     assert result.verdict.rewards == {"reward": 0.33}
-    assert verifiers.runs[-1][0] == "/opt/ale/tests"
+    assert verifiers.runs[-1][0] == "/opt/orbit/tests"
 
 
 @pytest.mark.asyncio
@@ -1345,7 +1345,7 @@ async def test_a_turn_that_ended_after_a_gateway_limit_is_the_last(
     tmp_path: Path, verifiers: Verifiers
 ) -> None:
     """It exited normally, but the Gateway had refused one of its calls: a budget stop."""
-    from ale.run.gateway.session import LimitReached, SessionRegistry
+    from orbit.run.gateway.session import LimitReached, SessionRegistry
 
     registry = SessionRegistry()
 
@@ -1375,7 +1375,7 @@ async def test_the_agents_session_is_open_only_while_its_turns_run(
 ) -> None:
     """Between turns and after the last, the Gateway refuses the agent's token, and the
     credential files its Harness declares are gone from what a round saves."""
-    from ale.run.gateway.session import SessionRegistry
+    from orbit.run.gateway.session import SessionRegistry
 
     registry = SessionRegistry()
     tokens: list[str] = []
@@ -1555,7 +1555,7 @@ async def test_feedback_holding_a_judges_token_fails_and_other_credentials_are_r
 
 
 def test_a_rounds_prompt_the_session_lacks_is_a_parse_issue() -> None:
-    from ale.run.protocol.episode_protocol import _with_marked_prompts
+    from orbit.run.protocol.episode_protocol import _with_marked_prompts
 
     builder = TrajectoryBuilder(
         trajectory_id="t", session_id="s", agent=AtifAgent(name="turns", version="1")
@@ -1568,9 +1568,9 @@ def test_a_rounds_prompt_the_session_lacks_is_a_parse_issue() -> None:
         key="validation_round",
         what="validation round",
     )
-    rounds = [(step.extra or {}).get("ale", {}).get("validation_round") for step in marked.steps]
+    rounds = [(step.extra or {}).get("orbit", {}).get("validation_round") for step in marked.steps]
     assert rounds == [None, 1, None]
-    issues = (marked.extra or {})["ale"]["parse_issues"]
+    issues = (marked.extra or {})["orbit"]["parse_issues"]
     assert [issue["reason"] for issue in issues] == ["validation_round_not_found"]
 
 
@@ -1591,13 +1591,13 @@ async def test_each_round_gets_the_trajectory_of_the_turns_so_far_and_records_it
     exec_ = MemorySandbox.exec
 
     async def exec(self: MemorySandbox, argv: Any, **options: Any) -> ExecResult:
-        if list(argv) == ["bash", "test.sh"] and options.get("cwd") == f"/opt/ale/{stage}":
+        if list(argv) == ["bash", "test.sh"] and options.get("cwd") == f"/opt/orbit/{stage}":
             round_ = self.request.role is SandboxRole.VERIFIER
-            data = json.loads(self.files[f"/opt/ale/{stage}/trajectory.json"])
+            data = json.loads(self.files[f"/opt/orbit/{stage}/trajectory.json"])
             said = [step["message"] for step in data["steps"] if step["source"] == "agent"]
-            staged.append((round_, said, (options.get("env") or {}).get("ALE_TRAJECTORY_PATH")))
+            staged.append((round_, said, (options.get("env") or {}).get("ORBIT_TRAJECTORY_PATH")))
             if round_:
-                self.files[f"/opt/ale/{stage}/llm-judge.jsonl"] = judged.encode()
+                self.files[f"/opt/orbit/{stage}/llm-judge.jsonl"] = judged.encode()
         return await exec_(self, argv, **options)
 
     monkeypatch.setattr(MemorySandbox, "exec", exec)
@@ -1605,9 +1605,9 @@ async def test_each_round_gets_the_trajectory_of_the_turns_so_far_and_records_it
     task = _task(tmp_path, rounds=2, validation_dir=stage == "validation")
     result = await _run(tmp_path, RoundsProvider(), task, harness)
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    path = f"/opt/ale/{stage}/trajectory.json"
+    path = f"/opt/orbit/{stage}/trajectory.json"
     rounds = [(True, ["turn 1"], path), (True, ["turn 1", "turn 2"], path)]
-    final = [(False, ["turn 1", "turn 2", "turn 3"], "/opt/ale/tests/trajectory.json")]
+    final = [(False, ["turn 1", "turn 2", "turn 3"], "/opt/orbit/tests/trajectory.json")]
     assert staged == (rounds if stage == "validation" else rounds + final)
     # The round's own copy, complete, its earlier round's prompt marked as the final one is.
     kept = AtifTrajectory.model_validate_json(
@@ -1615,8 +1615,8 @@ async def test_each_round_gets_the_trajectory_of_the_turns_so_far_and_records_it
     )
     users = [step for step in kept.steps if step.source == "user"]
     assert [step.message for step in users] == harness.prompts[:2]
-    assert (users[1].extra or {})["ale"]["validation_round"] == 1
-    assert not (kept.extra or {}).get("ale", {}).get("incomplete")
+    assert (users[1].extra or {})["orbit"]["validation_round"] == 1
+    assert not (kept.extra or {}).get("orbit", {}).get("incomplete")
     assert result.lock is not None
     assert [judge.placement for judge in result.lock.judges] == ["validate", "validate"]
 
@@ -1625,7 +1625,7 @@ async def test_each_round_gets_the_trajectory_of_the_turns_so_far_and_records_it
 async def test_a_round_whose_logs_were_not_all_copied_gets_a_trajectory_marked_incomplete(
     tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ale.run.protocol.log_mirror import LogMirror
+    from orbit.run.protocol.log_mirror import LogMirror
 
     sync = LogMirror.sync
     calls = [0]
@@ -1642,10 +1642,10 @@ async def test_a_round_whose_logs_were_not_all_copied_gets_a_trajectory_marked_i
     result = await _run(tmp_path, RoundsProvider(), task, TurnsHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     kept = json.loads((result.run_dir / "validation" / "1" / "trajectory.json").read_text())
-    assert kept["extra"]["ale"]["incomplete_reason"] == "collection_failed"
+    assert kept["extra"]["orbit"]["incomplete_reason"] == "collection_failed"
     # The final copy retried, so the episode's own trajectory is complete.
     final = json.loads((result.run_dir / "trajectory.json").read_text())
-    assert not (final.get("extra") or {}).get("ale", {}).get("incomplete")
+    assert not (final.get("extra") or {}).get("orbit", {}).get("incomplete")
 
 
 @pytest.mark.asyncio
@@ -1679,8 +1679,8 @@ async def test_validation_places_the_rounds_of_tests_where_there_is_no_validatio
     (validator,) = provider.booted(SandboxRole.VERIFIER)
     assert (validator.snapshot, validator.resources.cpus) == (None, 3)
     assert runs == [
-        (SandboxRole.VERIFIER, "/home/user/grade", ["bash", "/opt/ale/tests/test.sh"]),
-        (SandboxRole.SHARED, "/opt/ale/tests", ["bash", "test.sh"]),
+        (SandboxRole.VERIFIER, "/home/user/grade", ["bash", "/opt/orbit/tests/test.sh"]),
+        (SandboxRole.SHARED, "/opt/orbit/tests", ["bash", "test.sh"]),
     ]
 
 
@@ -1713,7 +1713,7 @@ async def test_a_turn_that_leaves_no_time_is_the_last(
             return await super()._turn(*args)
 
     monkeypatch.setattr(
-        "ale.run.protocol.episode_protocol.time", SimpleNamespace(monotonic=lambda: clock[0])
+        "orbit.run.protocol.episode_protocol.time", SimpleNamespace(monotonic=lambda: clock[0])
     )
     harness = Slow()
     result = await _run(tmp_path, RoundsProvider(), _task(tmp_path, rounds=2), harness)
@@ -1741,7 +1741,7 @@ async def test_the_verifiers_variables_reach_validation(
     exec_ = MemorySandbox.exec
 
     async def exec(self: MemorySandbox, argv: Any, **options: Any) -> ExecResult:
-        if list(argv) == ["bash", "test.sh"] and options.get("cwd") == "/opt/ale/validation":
+        if list(argv) == ["bash", "test.sh"] and options.get("cwd") == "/opt/orbit/validation":
             given.append((options.get("env") or {}).get("ROUND_FLAG"))
         return await exec_(self, argv, **options)
 
@@ -1765,8 +1765,8 @@ async def test_the_judges_sessions_are_open_only_while_a_verifier_runs(
     tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A Judge's token that reaches the agent between its turns is refused in the next."""
-    from ale.core.config import VerificationConfig
-    from ale.run.gateway.session import GatewaySession, SessionRegistry
+    from orbit.core.config import VerificationConfig
+    from orbit.run.gateway.session import GatewaySession, SessionRegistry
 
     registry = SessionRegistry()
 
@@ -1779,7 +1779,7 @@ async def test_the_judges_sessions_are_open_only_while_a_verifier_runs(
 
     judge = GatewaySession(episode_id="e", model="judge", purpose="judge")
     monkeypatch.setattr(
-        "ale.run.episode.open_judge_sessions", lambda *_, **__: {"llm": registry.open(judge)}
+        "orbit.run.episode.open_judge_sessions", lambda *_, **__: {"llm": registry.open(judge)}
     )
     in_turns: list[bool] = []
 
@@ -1807,7 +1807,7 @@ async def test_every_harness_credential_files_go_before_a_rounds_save(
     tmp_path: Path, verifiers: Verifiers
 ) -> None:
     """Whichever Harness runs: another's, from an earlier episode, go as well."""
-    left = "/home/user/.codex-ale/auth.json"
+    left = "/home/user/.codex-orbit/auth.json"
 
     class Leaving(TurnsHarness):
         async def _turn(self, prompt: str, sandbox: Any, session: Any, timeout: float) -> Any:
@@ -1844,9 +1844,9 @@ async def test_the_next_solver_waits_for_room_it_lost_while_validation_ran(
     tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Another Run took its GPUs, say: it tries again under a bound of the framework's."""
-    from ale.core.errors import ProviderCapacityError
+    from orbit.core.errors import ProviderCapacityError
 
-    monkeypatch.setattr("ale.run.protocol.episode_protocol.BOOT_RETRY_SEC", 0.0)
+    monkeypatch.setattr("orbit.run.protocol.episode_protocol.BOOT_RETRY_SEC", 0.0)
     provider, harness = RoundsProvider(), TurnsHarness()
     provider.refusal = ProviderCapacityError
     refused = iter([True, True])
@@ -1858,7 +1858,7 @@ async def test_the_next_solver_waits_for_room_it_lost_while_validation_ran(
     result = await _run(tmp_path, provider, _task(tmp_path, rounds=1), harness)
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert len(harness.prompts) == 2
-    monkeypatch.setattr("ale.run.protocol.episode_protocol.BOOT_WAIT_SEC", 0.0)
+    monkeypatch.setattr("orbit.run.protocol.episode_protocol.BOOT_WAIT_SEC", 0.0)
     provider.fail = lambda request: (
         bool(request.snapshot) and request.role is not (SandboxRole.VERIFIER)
     )

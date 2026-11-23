@@ -59,7 +59,7 @@ process writes a heartbeat every second while another uses memory:
 
 gVisor's root tests TestOOMScoreAdjSingle and TestOOMScoreAdjMulti
 (test/root/oom_score_adj_test.go) still expect the container's value on the
-Sentry and the gofer; ALE's build does not run them.
+Sentry and the gofer; Orbit's build does not run them.
 
 diff --git a/runsc/container/container.go b/runsc/container/container.go
 index 3b80cd4..6773449 100644

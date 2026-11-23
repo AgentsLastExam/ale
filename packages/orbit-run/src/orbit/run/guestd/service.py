@@ -1,4 +1,4 @@
-"""The ALE guest service on Windows: runs guestd and Cua Driver in the agent's session.
+"""The Orbit guest service on Windows: runs guestd and Cua Driver in the agent's session.
 
 The framework is installed into a disk offline, and a logon task can only be registered by
 a running Windows, so this service starts the framework instead. Windows starts it at boot
@@ -23,13 +23,13 @@ import threading
 from ctypes import wintypes as w
 from pathlib import Path
 
-NAME = "ALEGuestd"
-ROOT = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ALE"
+NAME = "OrbitGuestd"
+ROOT = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "Orbit"
 PORT = 7411
 #: SMBIOS serial the Host sets when the Task grants the agent Administrator access.
-SUDO_SERIAL = "ale-sudo"
+SUDO_SERIAL = "orbit-sudo"
 #: Where Cua Driver serves guestd's calls; ``gui.py`` connects to the same pipe.
-CUA_DRIVER_PIPE = r"\\.\pipe\ale-cua-driver"
+CUA_DRIVER_PIPE = r"\\.\pipe\orbit-cua-driver"
 _CUA_DRIVER_ARGS = (
     f"serve --socket {CUA_DRIVER_PIPE} --permission-mode unrestricted "
     "--dangerously-bypass-approvals"
@@ -242,7 +242,7 @@ class Service:
         return True
 
     def _lock_down(self) -> None:
-        """Limit the framework's files to SYSTEM and Administrators, as /opt/ale is on Linux.
+        """Limit the framework's files to SYSTEM and Administrators, as /opt/orbit is on Linux.
 
         Every account may still read and run Cua Driver, as /usr/local/bin/cua-driver on
         Linux: the agent's ``cua-desktop`` MCP server runs it to reach the driver started here.
@@ -261,12 +261,12 @@ class Service:
     def _open_port(self) -> None:
         """Let the Host's runner, and nothing else, reach guestd."""
         subprocess.run(
-            ["netsh", "advfirewall", "firewall", "delete", "rule", "name=ALE guest service"],
+            ["netsh", "advfirewall", "firewall", "delete", "rule", "name=Orbit guest service"],
             capture_output=True,
             check=False,
         )
         self._run(
-            "netsh", "advfirewall", "firewall", "add", "rule", "name=ALE guest service", "dir=in",
+            "netsh", "advfirewall", "firewall", "add", "rule", "name=Orbit guest service", "dir=in",
             "action=allow", "protocol=TCP", f"localport={PORT}",
             f"remoteip={self.runner_address}",
         )  # fmt: skip
@@ -349,9 +349,9 @@ class Service:
             if key:
                 values[key] = value
         values.update(
-            ALE_AGENT_USER=self.user,
-            ALE_AGENT_HOME=values.get("USERPROFILE", ""),
-            ALE_AGENT_SUDO=sudo,
+            ORBIT_AGENT_USER=self.user,
+            ORBIT_AGENT_HOME=values.get("USERPROFILE", ""),
+            ORBIT_AGENT_SUDO=sudo,
         )
         return ctypes.create_unicode_buffer(
             "\0".join(f"{key}={value}" for key, value in sorted(values.items())) + "\0"

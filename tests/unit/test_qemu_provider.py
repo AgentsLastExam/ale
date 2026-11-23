@@ -20,15 +20,15 @@ from typing import Any
 import pytest
 from tests.support import FakeQemuImg, write_qcow2
 
-from ale.core.capability import Arch
-from ale.core.errors import (
+from orbit.core.capability import Arch
+from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
     ProviderStartError,
     TaskDefinitionError,
 )
-from ale.core.sandbox import (
+from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
     DesktopResolution,
     Identity,
@@ -39,18 +39,18 @@ from ale.core.sandbox import (
     SandboxRequest,
     SandboxRole,
 )
-from ale.core.taskspec import (
+from orbit.core.taskspec import (
     ImageKind,
     NetworkMode,
     NetworkPolicy,
     OperatingSystem,
     Resources,
 )
-from ale.run.framework import MATERIALIZER_IMAGE
-from ale.run.gpu import parse_nvidia_smi
-from ale.run.images import chain_identity
-from ale.run.providers import runner
-from ale.run.providers.qemu.provider import (
+from orbit.run.framework import MATERIALIZER_IMAGE
+from orbit.run.gpu import parse_nvidia_smi
+from orbit.run.images import chain_identity
+from orbit.run.providers import runner
+from orbit.run.providers.qemu.provider import (
     EPISODE_LABEL,
     GATEWAY_CHAIN,
     GPU_LABEL,
@@ -69,7 +69,7 @@ from ale.run.providers.qemu.provider import (
     _verify_qemu_gpus,
     _VfioGpu,
 )
-from ale.run.providers.runner import url_port
+from orbit.run.providers.runner import url_port
 
 pytestmark = pytest.mark.unit
 
@@ -84,9 +84,9 @@ def request(**overrides: object) -> SandboxRequest:
             kind="vm",
             source="external-ref",
             input_identity=digest,
-            runtime_ref="/tmp/ale-ubuntu-desktop.qcow2",
+            runtime_ref="/tmp/orbit-ubuntu-desktop.qcow2",
             prepared_identity=digest,
-            resolved_reference="local:///tmp/ale-ubuntu-desktop.qcow2",
+            resolved_reference="local:///tmp/orbit-ubuntu-desktop.qcow2",
         ),
         "resources": Resources(cpus=2, memory_mb=2048),
         "network": NetworkPolicy(),
@@ -117,7 +117,7 @@ class TestPreflight:
 
     def test_a_missing_image_names_the_way_to_prepare_one(self, tmp_path: Path) -> None:
         provider = QemuProvider(image=tmp_path / "absent.qcow2")
-        with pytest.raises(ProviderCapabilityError, match=r"ale prepare"):
+        with pytest.raises(ProviderCapabilityError, match=r"orbit prepare"):
             asyncio.run(provider.preflight())
 
     def test_problems_are_reported_together(self, tmp_path: Path) -> None:
@@ -129,11 +129,11 @@ class TestPreflight:
             assert "guest image" in str(error)
 
 
-def test_overlays_and_snapshots_live_in_the_ale_cache(
+def test_overlays_and_snapshots_live_in_the_orbit_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The operator places VM storage, on a fast disk say, with ``ALE_CACHE_DIR`` alone."""
-    monkeypatch.setenv("ALE_CACHE_DIR", str(tmp_path / "cache"))
+    """The operator places VM storage, on a fast disk say, with ``ORBIT_CACHE_DIR`` alone."""
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "cache"))
     provider = QemuProvider()
     assert provider.overlay_dir == tmp_path / "cache" / "qemu"
     assert provider.snapshot_dir == tmp_path / "cache" / "qemu-snapshots"
@@ -151,9 +151,9 @@ def test_cancelled_boot_removes_the_started_runner(
     async def cancel_sleep(_seconds: float) -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
-    monkeypatch.setattr("ale.run.providers.qemu.provider.asyncio.sleep", cancel_sleep)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.images._run", FakeQemuImg())
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.asyncio.sleep", cancel_sleep)
     base = write_qcow2(tmp_path / "base.qcow2")
     task = write_qcow2(tmp_path / "task.qcow2", backing="base.qcow2")
 
@@ -161,7 +161,7 @@ def test_cancelled_boot_removes_the_started_runner(
         asyncio.run(QemuProvider()._boot(request(retention="keep"), tmp_path, task, 7411))
 
     assert commands[-1][:3] == ("docker", "rm", "-f")
-    assert commands[-1][3].startswith("ale-qemu-")
+    assert commands[-1][3].startswith("orbit-qemu-")
     started = commands[0]
     for label in (
         f"{MANAGED_LABEL}=true",
@@ -197,9 +197,9 @@ async def test_windows_admin_boot_is_explicit_and_uses_the_resolved_runner(
     async def no_sleep(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
-    monkeypatch.setattr("ale.run.providers.qemu.provider.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.images._run", FakeQemuImg())
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.asyncio.sleep", no_sleep)
     runner = "sha256:" + "a" * 64
     await QemuProvider(runner_image=runner)._boot(
         request(os=operating_system, sudo=sudo), tmp_path, write_qcow2(tmp_path / "b.qcow2"), 7411
@@ -207,7 +207,7 @@ async def test_windows_admin_boot_is_explicit_and_uses_the_resolved_runner(
     assert commands[0][-1] == runner
     assert "VM_NET_IP=172.30.0.2" in commands[0]
     arguments = next(item for item in commands[0] if item.startswith("ARGUMENTS="))
-    assert ("-smbios type=1,serial=ale-sudo" in arguments) is marker
+    assert ("-smbios type=1,serial=orbit-sudo" in arguments) is marker
 
 
 @pytest.mark.asyncio
@@ -224,9 +224,9 @@ async def test_the_display_announces_the_requested_resolution(
     async def no_sleep(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
-    monkeypatch.setattr("ale.run.providers.qemu.provider.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.images._run", FakeQemuImg())
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.asyncio.sleep", no_sleep)
     await QemuProvider()._boot(
         request(os=operating_system, desktop_resolution="1366x768"),
         tmp_path,
@@ -280,7 +280,7 @@ async def test_a_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
     sandbox._file_client = Client()  # type: ignore[assignment]
     sandbox._sealed = False
     sandbox.request = request(os=operating_system)
-    sandbox.container = "ale-qemu-build"
+    sandbox.container = "orbit-qemu-build"
     sandbox.storage = tmp_path / "storage"
     base = write_qcow2(tmp_path / "vm-builds/base.qcow2", data=b"windows")
     overlay = write_qcow2(sandbox.storage / "data.qcow2", backing=str(base), data=b"office")
@@ -288,8 +288,8 @@ async def test_a_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
         kind="vm", prepared_identity=DIGEST, observed_identity=DIGEST, observed_ref=str(base)
     )
     destination = base.parent / "task.qcow2"
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.images._run", FakeQemuImg())
     if failure:
         with pytest.raises(ProviderStartError, match="shut down"):
             await sandbox.save_image(destination)
@@ -300,12 +300,12 @@ async def test_a_build_keeps_its_overlay_as_a_layer_after_a_clean_shutdown(
     identity = await sandbox.save_image(destination)
     assert sandbox._file_client.closed and shutdown == []
     wait, discard = commands
-    assert wait == ("docker", "wait", "ale-qemu-build")
+    assert wait == ("docker", "wait", "orbit-qemu-build")
     # The VM builder discards free space, with the overlay writable and its base not: NTFS
     # by its own bitmap, any Linux filesystem by trimming it.
     assert discard[:2] == ("docker", "run") and MATERIALIZER_IMAGE in discard
     assert discard[-2:] == (
-        "/ale/ntfs_discard.py" if operating_system == "windows" else "qcow2",
+        "/orbit/ntfs_discard.py" if operating_system == "windows" else "qcow2",
         str(overlay.resolve()),
     )
     if operating_system == "linux":
@@ -365,10 +365,10 @@ async def test_a_build_vm_frames_its_own_overlay_on_the_base_copy_before_it_boot
     async def ready(_provider: QemuProvider) -> None:
         pass
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_prepared_vm_image", resolve)
-    monkeypatch.setattr("ale.run.providers.qemu.provider.base_layer", copy)
-    monkeypatch.setattr("ale.run.providers.qemu.provider.frame_disk", frame)
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", FakeQemuImg())
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.resolve_prepared_vm_image", resolve)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.base_layer", copy)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.frame_disk", frame)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", FakeQemuImg())
     monkeypatch.setattr(QemuProvider, "_boot", boot)
     monkeypatch.setattr(QemuProvider, "preflight", ready)
     with pytest.raises(TaskDefinitionError if fails else Booted):
@@ -415,7 +415,7 @@ def _snapshotting(
     sandbox.volumes = ("/work",)
     sandbox.sandbox_id = sandbox_id
     sandbox.request = request(role="shared")
-    sandbox.container = "ale-qemu-solver"
+    sandbox.container = "orbit-qemu-solver"
     sandbox.storage = tmp_path / sandbox_id
     write_qcow2(sandbox.storage / "data.qcow2", backing=booted.observed_ref, data=b"written")
     sandbox.snapshot_dir = tmp_path / "cache/qemu-snapshots"
@@ -432,8 +432,8 @@ def _snapshot_run(monkeypatch: pytest.MonkeyPatch, commands: list[tuple[str, ...
             return await qemu_img(*argv)
         return (0, "0\n", "") if argv[:2] == ("docker", "wait") else (0, "", "")
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-    monkeypatch.setattr("ale.run.images._run", qemu_img)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.images._run", qemu_img)
     return qemu_img
 
 
@@ -451,12 +451,12 @@ async def test_a_snapshot_is_the_overlay_kept_on_its_prepared_disk(
     assert commands == [
         ("sync",),
         ("systemctl", "poweroff", "--no-block"),
-        ("docker", "wait", "ale-qemu-solver"),
+        ("docker", "wait", "orbit-qemu-solver"),
     ]
     assert FakeQemuImg.backing(disk) == "../../vm-builds/base.qcow2"
     assert disk.read_bytes().endswith(b"written")
     assert retained.handle == "qemu:snapshot:e1-abcdef"
-    assert retained.cleanup_command == "ale sandbox destroy qemu:snapshot:e1-abcdef"
+    assert retained.cleanup_command == "orbit sandbox destroy qemu:snapshot:e1-abcdef"
     record = json.loads((disk.parent / "snapshot.json").read_text())
     assert record == {
         "managed": True,
@@ -531,7 +531,7 @@ async def test_a_failed_snapshot_leaves_nothing_behind(
             return 1, "", "no space left"
         return await qemu_img(*argv)
 
-    monkeypatch.setattr("ale.run.images._run", full)
+    monkeypatch.setattr("orbit.run.images._run", full)
     sandbox = _snapshotting(tmp_path, commands)
     with pytest.raises(ProviderStartError, match="no space left"):
         await sandbox.snapshot(roles=("solver",), reason="kept")
@@ -555,11 +555,11 @@ async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
 
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
         if argv[:3] == ("docker", "ps", "-a"):
-            return 0, ("runner\n" if "label=ale.qemu.managed=true" in argv[-1] else ""), ""
+            return 0, ("runner\n" if "label=orbit.qemu.managed=true" in argv[-1] else ""), ""
         assert argv[:2] == ("docker", "inspect")
-        return 0, json.dumps([{"Name": "/ale-qemu-fork", "Mounts": mounts}]), ""
+        return 0, json.dumps([{"Name": "/orbit-qemu-fork", "Mounts": mounts}]), ""
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
     provider = QemuProvider(overlay_dir=tmp_path / "overlays", snapshot_dir=snapshots)
     assert provider._list_snapshots() == [
         {
@@ -570,13 +570,13 @@ async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
             "image": DIGEST,
             "gpus": (),
             "running": False,
-            "cleanup_command": "ale sandbox destroy qemu:snapshot:e1-abcdef",
+            "cleanup_command": "orbit sandbox destroy qemu:snapshot:e1-abcdef",
         }
     ]
     # A runner mounts every layer of its chain at its Host path.
     layer = str(disk.resolve())
     mounts.append({"Type": "bind", "Source": layer, "Destination": layer})
-    with pytest.raises(ProviderStartError, match="qemu:ale-qemu-fork runs on it"):
+    with pytest.raises(ProviderStartError, match="qemu:orbit-qemu-fork runs on it"):
         await provider.destroy_retained("qemu:snapshot:e1-abcdef")
     mounts.clear()
     await provider.destroy_retained("qemu:snapshot:e1-abcdef")
@@ -586,7 +586,9 @@ async def test_a_snapshot_is_listed_and_not_destroyed_while_a_vm_runs_on_it(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("module_name", ["ale.run.providers.qemu.provider", "ale.run.task_images"])
+@pytest.mark.parametrize(
+    "module_name", ["orbit.run.providers.qemu.provider", "orbit.run.task_images"]
+)
 async def test_cancelled_image_command_reaps_its_subprocess(
     monkeypatch: pytest.MonkeyPatch, module_name: str
 ) -> None:
@@ -629,7 +631,7 @@ async def test_qemu_retain_returns_a_provider_qualified_handle() -> None:
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox._client = client  # type: ignore[attr-defined]
     sandbox._file_client = Client()  # type: ignore[assignment]
-    sandbox.container = "ale-qemu-test"  # type: ignore[attr-defined]
+    sandbox.container = "orbit-qemu-test"  # type: ignore[attr-defined]
     sandbox.request = request(retention="keep")  # type: ignore[attr-defined]
     sandbox.allocation = SimpleNamespace(gpu=None)  # type: ignore[attr-defined]
 
@@ -638,8 +640,8 @@ async def test_qemu_retain_returns_a_provider_qualified_handle() -> None:
     assert client.closed
     assert sandbox._file_client.closed
     assert retained.provider == "qemu"
-    assert retained.handle == f"{HANDLE_PREFIX}ale-qemu-test"
-    assert retained.cleanup_command == "ale sandbox destroy qemu:ale-qemu-test"
+    assert retained.handle == f"{HANDLE_PREFIX}orbit-qemu-test"
+    assert retained.cleanup_command == "orbit sandbox destroy qemu:orbit-qemu-test"
 
 
 @pytest.mark.asyncio
@@ -658,7 +660,7 @@ async def test_qemu_retained_listing_and_destroy_remove_the_overlay(
         STORAGE_LABEL: str(storage),
     }
     record = {
-        "Name": "/ale-qemu-test",
+        "Name": "/orbit-qemu-test",
         "Image": "sha256:runner",
         "Config": {"Labels": labels},
         "State": {"Running": True},
@@ -676,22 +678,22 @@ async def test_qemu_retained_listing_and_destroy_remove_the_overlay(
             return 0, "", ""
         raise AssertionError(argv)
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
 
     assert await QemuProvider().list_retained() == [
         {
             "provider": "qemu",
-            "handle": "qemu:ale-qemu-test",
+            "handle": "qemu:orbit-qemu-test",
             "episode": "episode",
             "role": "solver",
             "image": "sha256:runner",
             "gpus": ("0000:65:00.0",),
             "running": True,
-            "cleanup_command": "ale sandbox destroy qemu:ale-qemu-test",
+            "cleanup_command": "orbit sandbox destroy qemu:orbit-qemu-test",
         }
     ]
-    await QemuProvider().destroy_retained("qemu:ale-qemu-test")
-    assert removed == ["ale-qemu-test"]
+    await QemuProvider().destroy_retained("qemu:orbit-qemu-test")
+    assert removed == ["orbit-qemu-test"]
     assert not storage.exists()
 
 
@@ -705,9 +707,9 @@ async def test_qemu_retained_solver_can_be_reattached(
     below = write_qcow2(tmp_path / "below.qcow2")
     base = write_qcow2(tmp_path / "base.qcow2", backing="below.qcow2")
     write_qcow2(storage / "data.qcow2", backing=str(base))
-    monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
+    monkeypatch.setattr("orbit.run.images._run", FakeQemuImg())
     record = {
-        "Name": "/ale-qemu-test",
+        "Name": "/orbit-qemu-test",
         "Config": {
             "Labels": {
                 MANAGED_LABEL: "true",
@@ -754,9 +756,9 @@ async def test_qemu_retained_solver_can_be_reattached(
     ) -> tuple[str, str, bool]:
         return "user", "/home/user", False
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-    monkeypatch.setattr("ale.run.providers.runner._RunnerTransport", Transport)
-    monkeypatch.setattr("ale.run.providers.runner.GuestClient", Client)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.runner._RunnerTransport", Transport)
+    monkeypatch.setattr("orbit.run.providers.runner.GuestClient", Client)
     monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
     allocation = ResourceAllocation(
         cpus=2,
@@ -774,7 +776,7 @@ async def test_qemu_retained_solver_can_be_reattached(
     )
 
     sandbox = await QemuProvider().attach_retained(
-        "qemu:ale-qemu-test", request(), allocation, image
+        "qemu:orbit-qemu-test", request(), allocation, image
     )
 
     assert sandbox.storage == storage
@@ -790,14 +792,16 @@ async def test_qemu_retained_solver_can_be_reattached(
     for elsewhere in (tmp_path / "other.qcow2", below):
         other = image.model_copy(update={"observed_ref": str(elsewhere)})
         with pytest.raises(ProviderCapabilityError, match="expected image"):
-            await QemuProvider().attach_retained("qemu:ale-qemu-test", request(), allocation, other)
+            await QemuProvider().attach_retained(
+                "qemu:orbit-qemu-test", request(), allocation, other
+            )
 
 
 class _LeftRunning:
     """A runner a crashed node agent left: a verifier VM it created with retention destroy,
     behind a scripted docker CLI."""
 
-    handle = "qemu:ale-qemu-test"
+    handle = "qemu:orbit-qemu-test"
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         self.storage = tmp_path / "episode"
@@ -805,7 +809,7 @@ class _LeftRunning:
         (self.storage / "guestd-token").write_text("token\n")
         base = write_qcow2(tmp_path / "base.qcow2")
         write_qcow2(self.storage / "data.qcow2", backing=str(base))
-        monkeypatch.setattr("ale.run.images._run", FakeQemuImg())
+        monkeypatch.setattr("orbit.run.images._run", FakeQemuImg())
         self.labels = {
             MANAGED_LABEL: "true",
             RETENTION_LABEL: "destroy",
@@ -814,7 +818,7 @@ class _LeftRunning:
             STORAGE_LABEL: str(self.storage),
         }
         self.record: dict[str, Any] = {
-            "Name": "/ale-qemu-test",
+            "Name": "/orbit-qemu-test",
             "Config": {"Labels": self.labels},
             "State": {"Running": True},
             "Mounts": [{"Type": "bind", "Source": str(self.storage), "Destination": "/storage"}],
@@ -843,7 +847,7 @@ class _LeftRunning:
             if self.failure is not None:
                 return 1, "", self.failure
             if self.removed:
-                return 1, "", "Error: No such object: ale-qemu-test"
+                return 1, "", "Error: No such object: orbit-qemu-test"
             return 0, json.dumps([self.record]), ""
 
         class Transport:
@@ -858,9 +862,9 @@ class _LeftRunning:
         ) -> tuple[str, str, bool]:
             return "user", "/home/user", False
 
-        monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
-        monkeypatch.setattr("ale.run.providers.runner._RunnerTransport", Transport)
-        monkeypatch.setattr("ale.run.providers.runner.GuestClient", lambda _: self.client)
+        monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
+        monkeypatch.setattr("orbit.run.providers.runner._RunnerTransport", Transport)
+        monkeypatch.setattr("orbit.run.providers.runner.GuestClient", lambda _: self.client)
         monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
         self.allocation = ResourceAllocation(
             cpus=2,
@@ -881,18 +885,18 @@ async def test_a_vm_a_crashed_process_left_is_reattached_or_discarded_whatever_i
 ) -> None:
     left = _LeftRunning(monkeypatch, tmp_path)
     handle, allocation, image = left.handle, left.allocation, left.image
-    with pytest.raises(ProviderCapabilityError, match="not a retained ALE solver"):
+    with pytest.raises(ProviderCapabilityError, match="not a retained Orbit solver"):
         await QemuProvider().attach_retained(handle, request(), allocation, image)
     sandbox = await QemuProvider().reattach(handle, request(), allocation, image)
     assert sandbox.handle == handle
     assert sandbox.request.role.value == "verifier"
 
     await QemuProvider().discard(handle)
-    assert left.removed == ["ale-qemu-test"] and not left.storage.exists()
+    assert left.removed == ["orbit-qemu-test"] and not left.storage.exists()
     await QemuProvider().discard(handle)  # gone already: nothing to do
     left.labels[MANAGED_LABEL] = "false"
     left.removed.clear()
-    with pytest.raises(ProviderCapabilityError, match="not an ALE QEMU sandbox"):
+    with pytest.raises(ProviderCapabilityError, match="not an Orbit QEMU sandbox"):
         await QemuProvider().reattach(handle, request(), allocation, image)
 
 
@@ -947,7 +951,7 @@ def test_overlay_uses_the_prepared_disks_virtual_size(
             return 0, '{"virtual-size":42949672960}', ""
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
     asyncio.run(QemuProvider()._make_overlay(tmp_path / "overlay.qcow2", tmp_path / "base.qcow2"))
     assert commands[-1][-1] == "42949672960"
 
@@ -963,7 +967,7 @@ def test_overlay_size_is_driven_by_requested_storage(
             return 0, '{"virtual-size":7516192768}', ""
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
     asyncio.run(
         QemuProvider()._make_overlay(
             tmp_path / "overlay.qcow2",
@@ -1039,7 +1043,7 @@ def test_desktop_readiness_retries_a_transient_probe_timeout(
     async def no_sleep(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.asyncio.sleep", no_sleep)
     client = Client()
     asyncio.run(QemuProvider()._await_desktop(client, timeout_sec=1))  # type: ignore[arg-type]
     assert client.calls == 2
@@ -1181,8 +1185,8 @@ async def test_prepared_vm_is_checked_without_runtime_reference_resolution(
     async def forbidden(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("a prepared VM must not be pulled again")
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_prepared_vm_image", check)
-    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_vm_image", forbidden)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.resolve_prepared_vm_image", check)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.resolve_vm_image", forbidden)
     assert await QemuProvider().prepare_image(prepared) is prepared
     assert seen == [prepared]
 
@@ -1205,8 +1209,8 @@ async def test_vm_reference_uses_provider_acquisition_and_wrong_kind_is_refused(
             observed_ref=image.runtime_ref,
         )
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_vm_image", acquire)
-    monkeypatch.setattr("ale.run.providers.qemu.provider.resolve_prepared_vm_image", check)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.resolve_vm_image", acquire)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider.resolve_prepared_vm_image", check)
     assert (
         await QemuProvider().prepare_image(ImageRef(kind="vm", reference="ghcr.io/acme/vm:v1"))
         == prepared
@@ -1402,7 +1406,7 @@ def test_open_mode_uses_only_the_runner_firewall(monkeypatch: pytest.MonkeyPatch
     async def fake_run(*_argv: str, **_kwargs: object) -> tuple[int, str, str]:
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox.request = request(network=NetworkPolicy(mode=NetworkMode.OPEN))  # type: ignore[attr-defined]
     sandbox.container = "runner"  # type: ignore[attr-defined]
@@ -1441,9 +1445,9 @@ def test_the_relay_is_injected_into_every_command_while_sealed() -> None:
         "https_proxy": f"http://{RELAY}",
         "NO_PROXY": "172.30.0.1,localhost,127.0.0.1",
     }
-    asyncio.run(sandbox.exec(["true"], env={"ALE_STAGE_DIR": "/opt/ale/tests"}))
+    asyncio.run(sandbox.exec(["true"], env={"ORBIT_STAGE_DIR": "/opt/orbit/tests"}))
     assert sandbox._client.env["HTTPS_PROXY"] == f"http://{RELAY}"  # type: ignore[attr-defined]
-    assert sandbox._client.env["ALE_STAGE_DIR"] == "/opt/ale/tests"  # type: ignore[attr-defined]
+    assert sandbox._client.env["ORBIT_STAGE_DIR"] == "/opt/orbit/tests"  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(
@@ -1465,7 +1469,7 @@ def test_a_list_forwards_gateway_and_proxy_ports(
         commands.append(command)
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
     provider = QemuProvider()
     host = asyncio.run(
         provider._wire_network(
@@ -1485,7 +1489,7 @@ def test_allowlist_direct_bypass_is_dropped(monkeypatch: pytest.MonkeyPatch) -> 
         rules.append(argv[-1])
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox.request = request(  # type: ignore[attr-defined]
         network=NetworkPolicy(mode=NetworkMode.ALLOWLIST, allowed_hosts=("example.com",))
@@ -1520,7 +1524,7 @@ def _sealing_sandbox(
         client.calls.append(argv[-1])
         return 0, "", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox.request = request(  # type: ignore[attr-defined]
         os=operating_system,
@@ -1631,7 +1635,7 @@ def test_an_allowlist_guest_gets_its_own_proxy_settings_back_before_power_off(
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
         return 0, "0\n", ""
 
-    monkeypatch.setattr("ale.run.providers.qemu.provider._run", fake_run)
+    monkeypatch.setattr("orbit.run.providers.qemu.provider._run", fake_run)
     sandbox = QemuSandbox.__new__(QemuSandbox)
     sandbox.request = request(  # type: ignore[attr-defined]
         os=operating_system,
@@ -1651,7 +1655,7 @@ def test_an_allowlist_guest_gets_its_own_proxy_settings_back_before_power_off(
 
 
 def test_only_whole_clusters_of_ntfs_free_space_are_discarded() -> None:
-    from ale.run.providers.qemu.ntfs_discard import Volume, discardable
+    from orbit.run.providers.qemu.ntfs_discard import Volume, discardable
 
     kib, mib = 1024, 1024 * 1024
     bitmap = bytearray(b"\xff" * (64 * mib // (4 * kib) // 8))
@@ -1684,14 +1688,14 @@ def test_only_whole_clusters_of_ntfs_free_space_are_discarded() -> None:
         # For a cgroup's limit in the VM: an OOM kill all the same.
         (
             "[    3.02] Out of memory: Killed process 802 (gnome-shell) total-vm:9123kB\n"
-            "[    6.27] Started ale-guestd.service - ALE guest service.\n"
+            "[    6.27] Started orbit-guestd.service - Orbit guest service.\n"
             "[   41.50] Memory cgroup out of memory: Killed process 2210 (python3) "
             "total-vm:812345kB\n",
             "guestd in the VM was lost after an OOM kill in it (its Task declares 4096 MiB): its "
             "console shows 2 messages of its kernel's OOM killer, the last 'Memory cgroup out of "
             "memory: Killed process 2210 (python3)'",
         ),
-        ("[    6.27] Started ale-guestd.service - ALE guest service.\n", None),
+        ("[    6.27] Started orbit-guestd.service - Orbit guest service.\n", None),
     ],
 )
 async def test_a_lost_guest_is_explained_by_its_kernels_console(
@@ -1705,8 +1709,8 @@ async def test_a_lost_guest_is_explained_by_its_kernels_console(
         asked.append(argv)
         return 0, console, ""
 
-    monkeypatch.setattr("ale.run.providers.runner.run", logs)
-    guest_console = runner.Console("ale-qemu-e1", 4096)
+    monkeypatch.setattr("orbit.run.providers.runner.run", logs)
+    guest_console = runner.Console("orbit-qemu-e1", 4096)
     transport = runner._RunnerTransport(17411, "token", guest_console)
     reader = asyncio.StreamReader()
     reader.feed_data(b"{}\n")
@@ -1716,7 +1720,7 @@ async def test_a_lost_guest_is_explained_by_its_kernels_console(
     with pytest.raises(GuestUnreachableError) as ended:
         await transport.recv()
     explained = await transport.explain(ended.value)
-    assert asked == [("docker", "logs", "ale-qemu-e1")]
+    assert asked == [("docker", "logs", "orbit-qemu-e1")]
     if lost is None:
         assert explained is ended.value
     else:

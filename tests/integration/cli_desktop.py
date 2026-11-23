@@ -42,33 +42,33 @@ from typing import Any, get_args
 
 import pytest
 
-import ale.run.harnesses
-from ale.core.config import Dialect
-from ale.core.errors import ConfigError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.trajectory import AtifContentPart, AtifTrajectory
-from ale.run.gateway.server import REQUEST_PATHS, Gateway
-from ale.run.gateway.session import GatewaySession, Upstream
-from ale.run.harnesses.antigravity_cli import AntigravityCliHarness
-from ale.run.harnesses.base import CliHarness
-from ale.run.harnesses.claude_code import ClaudeCodeHarness
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.droid import DroidHarness
-from ale.run.harnesses.forgecode import ForgecodeHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.hermes import HermesHarness
-from ale.run.harnesses.kimi_code import KimiCodeHarness
-from ale.run.harnesses.muse_code import MuseCodeHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.harnesses.openhands_cli import OpenHandsCliHarness
-from ale.run.harnesses.pi_cli import PiCliHarness
-from ale.run.harnesses.qwen_code import QwenCodeHarness
-from ale.run.harnesses.zcode import ZCodeHarness
-from ale.run.protocol.log_mirror import LogMirror
-from ale.run.recording import EpisodeRecording
-from ale.run.tools import CUA_DESKTOP_NAME, resolved_cua_desktop, stage_cua_desktop
+import orbit.run.harnesses
+from orbit.core.config import Dialect
+from orbit.core.errors import ConfigError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.trajectory import AtifContentPart, AtifTrajectory
+from orbit.run.gateway.server import REQUEST_PATHS, Gateway
+from orbit.run.gateway.session import GatewaySession, Upstream
+from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
+from orbit.run.harnesses.base import CliHarness
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.droid import DroidHarness
+from orbit.run.harnesses.forgecode import ForgecodeHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.hermes import HermesHarness
+from orbit.run.harnesses.kimi_code import KimiCodeHarness
+from orbit.run.harnesses.muse_code import MuseCodeHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
+from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.harnesses.qwen_code import QwenCodeHarness
+from orbit.run.harnesses.zcode import ZCodeHarness
+from orbit.run.protocol.log_mirror import LogMirror
+from orbit.run.recording import EpisodeRecording
+from orbit.run.tools import CUA_DESKTOP_NAME, resolved_cua_desktop, stage_cua_desktop
 from tests.integration.scripted_model import FINAL, Call, ScriptedModel, Step, tool_results
 from tests.support import cli_os, cli_sandbox
 
@@ -220,16 +220,16 @@ CLIS: dict[type[CliHarness], Reach] = {
 
 
 def cli_harnesses() -> list[type[CliHarness]]:
-    """Every concrete CLI Harness ALE ships."""
-    for module in pkgutil.iter_modules(ale.run.harnesses.__path__):
-        importlib.import_module(f"{ale.run.harnesses.__name__}.{module.name}")
+    """Every concrete CLI Harness Orbit ships."""
+    for module in pkgutil.iter_modules(orbit.run.harnesses.__path__):
+        importlib.import_module(f"{orbit.run.harnesses.__name__}.{module.name}")
     found: set[type[CliHarness]] = set()
     pending = list(CliHarness.__subclasses__())
     while pending:
         harness = pending.pop()
         pending.extend(harness.__subclasses__())
-        # Test doubles subclass it too; only the shipped adapters are ALE's.
-        shipped = harness.__module__.startswith(f"{ale.run.harnesses.__name__}.")
+        # Test doubles subclass it too; only the shipped adapters are Orbit's.
+        shipped = harness.__module__.startswith(f"{orbit.run.harnesses.__name__}.")
         if shipped and not inspect.isabstract(harness):
             found.add(harness)
     return sorted(found, key=lambda harness: harness.name)
@@ -357,7 +357,7 @@ async def _screen(sandbox: Sandbox, home: str) -> tuple[int, int]:
             "params": {"name": "get_screen_size", "arguments": {}},
         },
     ]
-    inbox = f"{home}/.ale-screen-size.jsonl"
+    inbox = f"{home}/.orbit-screen-size.jsonl"
     await sandbox.write_file(
         inbox,
         "".join(json.dumps(request) + "\n" for request in requests).encode(),
@@ -675,9 +675,9 @@ def _jpeg(data: bytes) -> tuple[int, int]:
 def _recorded(
     trajectory: AtifTrajectory, case: Case, screen: tuple[int, int], work: Path
 ) -> list[str]:
-    ale = (trajectory.extra or {}).get("ale") or {}
-    if ale.get("parse_issues"):
-        return [f"the trajectory has parse issues: {ale['parse_issues']}"]
+    orbit = (trajectory.extra or {}).get("orbit") or {}
+    if orbit.get("parse_issues"):
+        return [f"the trajectory has parse issues: {orbit['parse_issues']}"]
     problems = []
     steps = trajectory.steps
     if not any(step.source == "user" and PROMPT in _text(step.message) for step in steps):
@@ -695,12 +695,12 @@ def _recorded(
         result = results.get(call.tool_call_id)
         if result is None:
             problems.append(f"the trajectory records no result of {call.function_name}")
-        elif ((result.extra or {}).get("ale") or {}).get("is_error"):
+        elif ((result.extra or {}).get("orbit") or {}).get("is_error"):
             problems.append(f"{call.function_name} failed: {_text(result.content)[:300]}")
     shots = [
         call
         for call in calls
-        if ((call.extra or {}).get("ale") or {}).get("mcp")
+        if ((call.extra or {}).get("orbit") or {}).get("mcp")
         == {"server": CUA_DESKTOP_NAME, "tool": "screenshot"}
     ]
     if len(shots) != 1:

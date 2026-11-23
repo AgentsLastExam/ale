@@ -9,11 +9,11 @@ import pytest
 from tests.support import edit_task_config as edit
 from typer.testing import CliRunner
 
-from ale.core.errors import TaskDefinitionError
-from ale.core.taskspec import SCHEMA_VERSION
-from ale.run.cli.main import app
-from ale.run.lint import lint_repository
-from ale.run.scaffold import scaffold_task
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.taskspec import SCHEMA_VERSION
+from orbit.run.cli.main import app
+from orbit.run.lint import lint_repository
+from orbit.run.scaffold import scaffold_task
 
 pytestmark = pytest.mark.unit
 
@@ -158,10 +158,10 @@ def test_lint_fails_only_on_a_problem(tmp_path: Path) -> None:
     assert result.stderr.endswith("1 problem(s), 1 warning(s)\n")
 
 
-def test_preparation_says_where_a_task_departs_from_ale_s_form(
+def test_preparation_says_where_a_task_departs_from_orbit_s_form(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cli = importlib.import_module("ale.run.cli.tasks")
+    cli = importlib.import_module("orbit.run.cli.tasks")
     prepared: list[object] = []
 
     async def prepare(tasks: list[object], *_: object) -> list[object]:
@@ -177,9 +177,9 @@ def test_preparation_says_where_a_task_departs_from_ale_s_form(
     assert len(prepared) == 1
     assert result.stderr.splitlines() == [
         'warning  agentslastexam/fresh: task.toml: Harbor\'s schema_version "1.4", so it is '
-        'read as a Harbor Task in ALE\'s format "0.2"',
+        'read as a Harbor Task in Orbit\'s format "0.2"',
         "warning  agentslastexam/fresh: environment/Dockerfile: debian can change under the "
-        "Task; ALE uses the version it names when the image is prepared and records its "
+        "Task; Orbit uses the version it names when the image is prepared and records its "
         "digest; name an exact version",
     ]
 
@@ -244,7 +244,7 @@ def test_assets_cli_accepts_multiple_paths_and_force(
             ),
         )
 
-    cli = importlib.import_module("ale.run.cli.main")
+    cli = importlib.import_module("orbit.run.cli.main")
     monkeypatch.setattr(cli, "pull_assets", pull)
     first = tmp_path / "one"
     second = tmp_path / "two"

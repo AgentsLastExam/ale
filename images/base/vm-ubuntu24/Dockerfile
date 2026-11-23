@@ -1,4 +1,4 @@
-# The root filesystem of ALE's Linux VM base disk, which build.sh makes from it.
+# The root filesystem of Orbit's Linux VM base disk, which build.sh makes from it.
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -34,7 +34,7 @@ RUN id -u user >/dev/null 2>&1 || useradd --create-home --shell /bin/bash user
 
 COPY images/base/vm-ubuntu24/20-wired.network /etc/systemd/network/20-wired.network
 COPY images/base/vm-ubuntu24/gdm-custom.conf /etc/gdm3/custom.conf
-COPY images/builders/vm-materializer/10-root.conf /usr/lib/repart.d/10-ale-root.conf
+COPY images/builders/vm-materializer/10-root.conf /usr/lib/repart.d/10-orbit-root.conf
 
 RUN mkdir -p /efi /home/user/.config \
     && touch /home/user/.config/gnome-initial-setup-done \

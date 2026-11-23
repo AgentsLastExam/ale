@@ -12,7 +12,7 @@ builders/
 runtimes/
 ├── qemu-runner/         container that runs a prepared qcow2 with QEMU/KVM
 ├── firecracker-runner/  container that runs a container Task as a Firecracker microVM
-└── gvisor/              ALE's patched gVisor runsc, a container runtime for Docker
+└── gvisor/              Orbit's patched gVisor runsc, a container runtime for Docker
 ```
 
 Task repositories extend or reference only entries under `base/`. The VM bases are disks:
@@ -32,28 +32,28 @@ The image contract and identity rules are defined in
 
 Every image is published once per version and never overwritten. The builder and runner
 run the engine's own logic, so they share the engine's version
-(`packages/ale-run/pyproject.toml`) and a changed one ships with the next engine version.
+(`packages/orbit-run/pyproject.toml`) and a changed one ships with the next engine version.
 A base carries no part of the framework and has its own version: the Linux bases' are in
-`BASES` in `packages/ale-run/src/ale/run/__init__.py`, the Windows base's in its README.
+`BASES` in `packages/orbit-run/src/orbit/run/__init__.py`, the Windows base's in its README.
 Raise a base's version to publish it changed.
 
 ```bash
 just images                                  # pull published images, build unpublished ones
-images/build.sh ale-qemu-runner              # one image
+images/build.sh orbit-qemu-runner              # one image
 ```
 
 `.github/workflows/images.yml` publishes each version once; its manual `promote` input
 gives an already-published image a version without rebuilding it. It pushes with this
-repository's workflow token, so each GHCR package must grant `AgentsLastExam/ale` write
+repository's workflow token, so each GHCR package must grant `AgentsLastExam/orbit` write
 access in its package settings (Manage Actions access); a package first pushed by hand has
 none, and its pushes fail with `permission_denied: write_package`. It publishes the Linux
 VM base, a disk, with these two commands; `images/build.sh` builds an unpublished one into
-ALE's cache instead, where a Task names it by path:
+Orbit's cache instead, where a Task names it by path:
 
 ```bash
 images/base/vm-ubuntu24/build.sh disk.qcow2
-uv run ale vm-image push disk.qcow2 ghcr.io/agentslastexam/vm-ubuntu24-base:VERSION
+uv run orbit vm-image push disk.qcow2 ghcr.io/agentslastexam/vm-ubuntu24-base:VERSION
 ```
 
 The Windows base's disk is not in the repository, so it is published from a Host that
-has it, with `ale vm-image push`. Do not add Task content or Provider credentials here.
+has it, with `orbit vm-image push`. Do not add Task content or Provider credentials here.

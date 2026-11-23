@@ -10,12 +10,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ale.core.errors import AgentError, ConfigError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import (
+from orbit.core.errors import AgentError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import (
     agent_home,
     agent_path,
     agent_python,
@@ -25,7 +25,7 @@ from ale.run.harnesses._npm import (
     reported_version,
     version_mismatch,
 )
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     PROMPT_ARGUMENT_WINDOWS_ENV,
     CliCommand,
@@ -35,7 +35,7 @@ from ale.run.harnesses.base import (
     install_skills,
     prompt_argument,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import InputFormat, ZCodeSettings
@@ -54,7 +54,7 @@ INSTALLER_SHA512 = (
     "5af39bd81e0d9d174d14800ab8c27e4b4bc24feb907d57e98853cbb2b686f0a4"
     "021d35d046cbc2e7c3a44f3efdb277db9a60a401eb57522fd1277f5b286f93f2"
 )
-#: The files ALE runs, by their path in the installer's data archive.
+#: The files Orbit runs, by their path in the installer's data archive.
 FILES = {
     "./opt/ZCode/resources/glm/zcode.cjs": (
         "zcode.cjs",
@@ -183,7 +183,7 @@ class ZCodeHarness(CliHarness):
         super().__init__(cli_version=cli_version, settings=settings)
 
     def integrity(self) -> str:
-        """``sha256:`` of the files ALE runs, named with their own digests."""
+        """``sha256:`` of the files Orbit runs, named with their own digests."""
         lines = sorted(f"{name} {digest}" for name, digest in FILES.values())
         return "sha256:" + hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
@@ -264,8 +264,8 @@ class ZCodeHarness(CliHarness):
 
         api, suffix = _APIS[self.gateway_dialect]
         provider = {
-            "providerId": "ale",
-            "providerName": "ALE Gateway",
+            "providerId": "orbit",
+            "providerName": "Orbit Gateway",
             "config": {
                 "group": "standard-personal",
                 # ZCode reads only a literal key here; it is the episode token, readable
@@ -283,17 +283,21 @@ class ZCodeHarness(CliHarness):
         if isinstance(self.settings.input_format, InputFormat):
             properties["inputFormat"] = self.settings.input_format.native
         # A partial rule, which ZCode lays over what its catalog says of the model.
-        rule = {"providerId": "ale", "modelId": session.model, "config": {"properties": properties}}
+        rule = {
+            "providerId": "orbit",
+            "modelId": session.model,
+            "config": {"properties": properties},
+        }
         personal = {
             "schemaVersion": 1,
             "config": {
-                "providerOrder": ["ale"],
+                "providerOrder": ["orbit"],
                 "providerConfigRules": {"providerRules": [provider]},
                 "modelConfigRules": {
                     "providerModelRules": [rule],
                     "manualProviderModelRules": [],
                 },
-                "defaultModelSelection": {"providerId": "ale", "modelId": session.model},
+                "defaultModelSelection": {"providerId": "orbit", "modelId": session.model},
             },
         }
         await sandbox.write_file(

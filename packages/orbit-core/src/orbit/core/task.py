@@ -8,13 +8,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from ale.core.lock import TaskVariableProvenance
-from ale.core.sandbox import PreparedTaskImage
-from ale.core.taskspec import SOLUTION_CASE, OperatingSystem, TaskSpec, TaskVariables
-from ale.core.verdict import Rewards
+from orbit.core.lock import TaskVariableProvenance
+from orbit.core.sandbox import PreparedTaskImage
+from orbit.core.taskspec import SOLUTION_CASE, OperatingSystem, TaskSpec, TaskVariables
+from orbit.core.verdict import Rewards
 
 if TYPE_CHECKING:
-    from ale.core.episode import EpisodeContext
+    from orbit.core.episode import EpisodeContext
 
 __all__ = [
     "CALIBRATION_DIR",
@@ -144,7 +144,7 @@ class Task(ABC):
         self.harbor = harbor
         """Whether it was read as a Harbor Task, so Harbor's defaults apply where it sets none."""
         self.warnings = warnings
-        """Where it departs from ALE's form, each naming the file it is about."""
+        """Where it departs from Orbit's form, each naming the file it is about."""
         self.task_digest = task_digest
         self.non_verifier_digest = non_verifier_digest
         self.image_source_digest = image_source_digest

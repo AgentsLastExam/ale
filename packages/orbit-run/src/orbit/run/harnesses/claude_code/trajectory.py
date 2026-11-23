@@ -11,15 +11,15 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ale.core.blob import InlineText
-from ale.core.errors import (
+from orbit.core.blob import InlineText
+from orbit.core.errors import (
     TrajectoryReferenceError,
 )
-from ale.core.harness import (
+from orbit.core.harness import (
     TrajectoryParseContext,
 )
-from ale.core.trace import DesktopAction
-from ale.core.trajectory import (
+from orbit.core.trace import DesktopAction
+from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
@@ -30,8 +30,8 @@ from ale.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from ale.run.harnesses._diagnostics import error_text
-from ale.run.harnesses.base import (
+from orbit.run.harnesses._diagnostics import error_text
+from orbit.run.harnesses.base import (
     Invocation,
     NativeResult,
     invocations,
@@ -41,7 +41,7 @@ from ale.run.harnesses.base import (
     stdout_events,
     unconverted,
 )
-from ale.run.tools import CUA_DESKTOP_NAME
+from orbit.run.tools import CUA_DESKTOP_NAME
 
 PROJECTS = ".claude-config/projects"
 
@@ -234,7 +234,7 @@ def _parse_events(
             version=context.agent_version,
             model_name=context.model or None,
         ),
-        extra={"ale": root_extra} if root_extra else None,
+        extra={"orbit": root_extra} if root_extra else None,
     )
     instruction_added = False
 
@@ -337,7 +337,7 @@ def _parse_events(
                         AtifObservationResult(
                             source_call_id=call_id,
                             content=rendered,
-                            extra={"ale": result_extra} if result_extra else None,
+                            extra={"orbit": result_extra} if result_extra else None,
                         )
                     )
             builder.add(
@@ -614,29 +614,29 @@ def _atif_content(
 def _step_extra(
     event: dict[str, Any], *, attachments: list[dict[str, Any]] | None = None
 ) -> dict[str, Any] | None:
-    ale: dict[str, Any] = {}
+    orbit: dict[str, Any] = {}
     message = event.get("message")
     native_id = (message.get("id") if isinstance(message, dict) else None) or event.get("uuid")
     if native_id:
-        ale["native_event_ids"] = [str(native_id)]
+        orbit["native_event_ids"] = [str(native_id)]
     if attachments:
-        ale["attachments"] = attachments
-    return {"ale": ale} if ale else None
+        orbit["attachments"] = attachments
+    return {"orbit": orbit} if orbit else None
 
 
 def _tool_extra(name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
     if not name.startswith("mcp__"):
         return None
     _, server, tool = [*name.split("__", 2), "", ""][:3]
-    ale: dict[str, Any] = {"mcp": {"server": server, "tool": tool}}
+    orbit: dict[str, Any] = {"mcp": {"server": server, "tool": tool}}
     if server == CUA_DESKTOP_NAME:
         try:
             action = _cua_action(tool, arguments)
         except ValidationError:
             action = None
         if action is not None:
-            ale["normalized_action"] = action.model_dump(mode="json", exclude_none=True)
-    return {"ale": ale}
+            orbit["normalized_action"] = action.model_dump(mode="json", exclude_none=True)
+    return {"orbit": orbit}
 
 
 def _text_of(event: dict[str, Any]) -> str:

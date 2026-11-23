@@ -13,11 +13,11 @@ from ._io import redact
 def journal(
     kind: Literal["llm", "agent"], event: dict[str, Any], secrets: tuple[str, ...] = ()
 ) -> None:
-    path = os.environ.get(f"ALE_{kind.upper()}_JUDGE_LOG_PATH")
+    path = os.environ.get(f"ORBIT_{kind.upper()}_JUDGE_LOG_PATH")
     if not path:
         return
     tokens = tuple(
-        os.environ.get(key, "") for key in ("ALE_LLM_JUDGE_TOKEN", "ALE_AGENT_JUDGE_TOKEN")
+        os.environ.get(key, "") for key in ("ORBIT_LLM_JUDGE_TOKEN", "ORBIT_AGENT_JUDGE_TOKEN")
     )
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -7,21 +7,21 @@ from pathlib import Path
 
 import pytest
 
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import SandboxRequest
-from ale.core.taskspec import NetworkPolicy, Resources
-from ale.core.trace import read_jsonl
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import GatewaySession
-from ale.run.harnesses.base import CONTINUE_PROMPT
-from ale.run.harnesses.codex_cli import CodexCliHarness
-from ale.run.harnesses.grok_build import GrokBuildHarness
-from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
-from ale.run.harnesses.opencode import OpenCodeHarness
-from ale.run.protocol.log_mirror import LogMirror
-from ale.run.providers.docker import DockerProvider
-from ale.run.recording import EpisodeRecording
-from ale.run.secrets import provider_credentials
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import SandboxRequest
+from orbit.core.taskspec import NetworkPolicy, Resources
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import GatewaySession
+from orbit.run.harnesses.base import CONTINUE_PROMPT
+from orbit.run.harnesses.codex_cli import CodexCliHarness
+from orbit.run.harnesses.grok_build import GrokBuildHarness
+from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
+from orbit.run.harnesses.opencode import OpenCodeHarness
+from orbit.run.protocol.log_mirror import LogMirror
+from orbit.run.providers.docker import DockerProvider
+from orbit.run.recording import EpisodeRecording
+from orbit.run.secrets import provider_credentials
 from tests.support import CONTAINER_BASE, prepare_reference
 
 from .trajectory import LIVE, MODELS, llm_audit_evidence, native_session_file
@@ -247,7 +247,7 @@ def _native_turns(harness: str, logs: Path, native_id: str) -> list[dict[str, st
                 turns.append({"session_id": session_id, "message": text})
     elif harness == "opencode":
         # One export per invocation, each of the whole session; the newest holds every turn.
-        exports = logs / ".opencode-ale/exports" / native_id
+        exports = logs / ".opencode-orbit/exports" / native_id
         newest = max(path for path in exports.iterdir() if not path.name.startswith("."))
         data = json.loads((newest / f"{native_id}.json").read_text())
         turns.extend(

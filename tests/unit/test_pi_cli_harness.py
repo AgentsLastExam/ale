@@ -8,18 +8,18 @@ from pathlib import Path, PurePosixPath
 import pytest
 from tests.unit.test_cli_harnesses import FakeSandbox, resources, session
 
-from ale.core.config import load_run_config
-from ale.core.errors import AgentError, ConfigError
-from ale.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
-from ale.core.taskspec import StreamableHttpMcpServer
-from ale.run.cli.tasks import PRESET_DIR, _harness
-from ale.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
-from ale.run.harnesses.pi_cli import PiCliHarness
-from ale.run.recording import BlobStore
+from orbit.core.config import load_run_config
+from orbit.core.errors import AgentError, ConfigError
+from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
+from orbit.core.taskspec import StreamableHttpMcpServer
+from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
+from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.recording import BlobStore
 
 pytestmark = pytest.mark.unit
 
-AGENT_DIR = "/home/agent/.pi-ale/agent"
+AGENT_DIR = "/home/agent/.pi-orbit/agent"
 SESSION_ID = "0b7c5f1e-6f39-4f0a-9d47-6a0f0c8f3a11"
 
 
@@ -82,9 +82,9 @@ async def test_the_gateway_is_the_only_provider_and_holds_a_token_reference(
 
     assert json.loads(sandbox.files[f"{AGENT_DIR}/models.json"]) == {
         "providers": {
-            "ale": {
+            "orbit": {
                 "api": api,
-                "apiKey": "$ALE_GATEWAY_TOKEN",
+                "apiKey": "$ORBIT_GATEWAY_TOKEN",
                 "baseUrl": base_url,
                 "models": [
                     {
@@ -99,14 +99,14 @@ async def test_the_gateway_is_the_only_provider_and_holds_a_token_reference(
         }
     }
     settings = json.loads(sandbox.files[f"{AGENT_DIR}/settings.json"])
-    assert settings["defaultProvider"] == "ale" and settings["enableInstallTelemetry"] is False
+    assert settings["defaultProvider"] == "orbit" and settings["enableInstallTelemetry"] is False
     assert all(b'"token"' not in data for data in sandbox.files.values())
 
 
 async def test_defaults_leave_model_limits_thinking_and_input_to_pi() -> None:
     sandbox = FakeSandbox()
     await PiCliHarness().install_resources(sandbox, session(), EffectiveAgentResources())  # type: ignore[arg-type]
-    (model,) = json.loads(sandbox.files[f"{AGENT_DIR}/models.json"])["providers"]["ale"]["models"]
+    (model,) = json.loads(sandbox.files[f"{AGENT_DIR}/models.json"])["providers"]["orbit"]["models"]
     assert model == {"id": "test-model"}
     off = FakeSandbox()
     await PiCliHarness(settings={"thinking": "off"}).install_resources(
@@ -153,21 +153,21 @@ async def test_skills_and_mcp_servers_are_direct_native_tools(tmp_path: Path) ->
 async def test_command_reads_stdin_into_one_exact_session(native_session_id: str | None) -> None:
     harness = PiCliHarness(settings={"thinking": "low", "disabled_tools": ["write"]})
     command = await harness.prepare_command(
-        "/home/agent/.ale-harness/prompt.md",
+        "/home/agent/.orbit-harness/prompt.md",
         FakeSandbox(),  # type: ignore[arg-type]
         session(),
         native_session_id=native_session_id,
     )
     invocation, prompt = command.script.split(" < ")
-    assert prompt == "/home/agent/.ale-harness/prompt.md"
+    assert prompt == "/home/agent/.orbit-harness/prompt.md"
     argv = shlex.split(invocation)
     options = {flag: argv[argv.index(flag) + 1] for flag in argv if flag.startswith("--")}
     assert argv[0] == "pi"
     assert options == {
         "--mode": "json",
-        "--provider": "ale",
+        "--provider": "orbit",
         "--model": "test-model",
-        "--session-dir": "/home/agent/.pi-ale/sessions",
+        "--session-dir": "/home/agent/.pi-orbit/sessions",
         "--session-id": command.session_id,
         "--thinking": "low",
         "--exclude-tools": "write",
@@ -175,7 +175,7 @@ async def test_command_reads_stdin_into_one_exact_session(native_session_id: str
     assert native_session_id is None or command.session_id == native_session_id
     assert command.env["PI_CODING_AGENT_DIR"] == AGENT_DIR
     assert command.env["PI_OFFLINE"] == "1"
-    assert command.env["ALE_GATEWAY_TOKEN"] == "token"
+    assert command.env["ORBIT_GATEWAY_TOKEN"] == "token"
 
 
 def events(*items: dict[str, object]) -> str:
@@ -218,7 +218,7 @@ async def test_json_mode_exits_zero_on_a_model_error_but_the_run_fails() -> None
 
 def test_session_files_carry_the_exact_id_after_their_timestamp() -> None:
     harness = PiCliHarness()
-    sessions = PurePosixPath(".pi-ale/sessions")
+    sessions = PurePosixPath(".pi-orbit/sessions")
     name = f"2026-10-26T04-16-51-318Z_{SESSION_ID}.jsonl"
     assert harness.is_session_file(sessions / name, SESSION_ID)
     assert not harness.is_session_file(sessions / name, SESSION_ID[1:])
@@ -242,7 +242,7 @@ def recorded_context(root: Path, **updates: object) -> TrajectoryParseContext:
 
 
 def write_session(root: Path, *entries: dict[str, object]) -> None:
-    path = root / ".pi-ale/sessions" / f"2026-10-26T00-00-00-000Z_{SESSION_ID}.jsonl"
+    path = root / ".pi-orbit/sessions" / f"2026-10-26T00-00-00-000Z_{SESSION_ID}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(events({"type": "session", "version": 3, "id": SESSION_ID}, *entries))
 
@@ -316,7 +316,7 @@ def test_the_active_branch_converts_with_mcp_results_and_failures(tmp_path: Path
     agent = trajectory.steps[1]
     assert agent.reasoning_content == "plan"
     (call,) = agent.tool_calls or ()
-    assert call.extra == {"ale": {"mcp": {"server": "task-proof", "tool": "derive"}}}
+    assert call.extra == {"orbit": {"mcp": {"server": "task-proof", "tool": "derive"}}}
     assert agent.observation.results[0].content == "fragment"  # type: ignore[union-attr]
     assert agent.metrics is not None and agent.metrics.cached_tokens == 1
     assert not trajectory.extra
@@ -374,10 +374,10 @@ def test_a_launch_and_its_resume_convert_in_native_order(tmp_path: Path) -> None
 
 def test_without_the_session_each_turn_comes_from_its_json_events(tmp_path: Path) -> None:
     write_resumed_run(tmp_path)
-    shutil.rmtree(tmp_path / ".pi-ale")
+    shutil.rmtree(tmp_path / ".pi-orbit")
     trajectory = PiCliHarness().parse_trajectory(recorded_context(tmp_path))
 
-    assert trajectory.extra["ale"]["parse_issues"] == [  # type: ignore[index]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "native_session_unavailable", "session_id": SESSION_ID}
     ]
     assert [(step.source, step.message) for step in trajectory.steps] == RESUMED_STEPS

@@ -10,7 +10,7 @@ PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 
 
 class ClaudeCodeSettings(BaseModel):
-    """The complete ALE-supported Claude Code configuration."""
+    """The complete Orbit-supported Claude Code configuration."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

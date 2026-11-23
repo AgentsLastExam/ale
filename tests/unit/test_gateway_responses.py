@@ -8,16 +8,16 @@ from typing import ClassVar
 import pytest
 from aiohttp import ClientSession, web
 
-from ale.core.trace import read_jsonl
-from ale.run.gateway.openai_responses import (
+from orbit.core.trace import read_jsonl
+from orbit.run.gateway.openai_responses import (
     quota,
     stream_completed,
     stream_error,
     usage_from_stream,
 )
-from ale.run.gateway.server import Gateway
-from ale.run.gateway.session import CallUsage, GatewaySession, Limits
-from ale.run.recording import EpisodeRecording
+from orbit.run.gateway.server import Gateway
+from orbit.run.gateway.session import CallUsage, GatewaySession, Limits
+from orbit.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
 
@@ -200,7 +200,7 @@ async def test_disconnected_downstream_does_not_cancel_upstream_accounting(
             raise AssertionError("a disconnected downstream has no writable EOF")
 
     monkeypatch.setattr(
-        "ale.run.gateway.server.web.StreamResponse",
+        "orbit.run.gateway.server.web.StreamResponse",
         DisconnectedResponse,
     )
     recording = EpisodeRecording(tmp_path)

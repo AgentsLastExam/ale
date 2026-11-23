@@ -5,8 +5,8 @@ stack, netstack, takes the container's address and routes at boot and sends and 
 every frame through a packet socket on the container's veth: the namespace's netfilter never
 sees them, and netstack never sees a network attached later. So a gVisor sandbox boots on a
 bridge network of its own, which is not internal: tc filters on its veth's egress, in its
-network namespace outside the sandbox, seal it, and opening egress removes them. ALE's own
-chains in netstack, set by :mod:`ale.run.iptables`, route its Gateway and make what the seal
+network namespace outside the sandbox, seal it, and opening egress removes them. Orbit's own
+chains in netstack, set by :mod:`orbit.run.iptables`, route its Gateway and make what the seal
 drops fail at once. This module builds both, the sandbox's size, and what a sandbox that
 runs a container engine is given; the Provider applies them.
 """
@@ -16,9 +16,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ale.core.sandbox import SANDBOX_GATEWAY_PORT
-from ale.run import guestd, iptables
-from ale.run.providers.docker import tc
+from orbit.core.sandbox import SANDBOX_GATEWAY_PORT
+from orbit.run import guestd, iptables
+from orbit.run.providers.docker import tc
 
 __all__ = [
     "ARGUMENTS",
@@ -80,15 +80,15 @@ ENGINE_CAPABILITIES = ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE")
 #: Each gets a Docker volume of its own: the engine's overlay layers mark what they delete
 #: with whiteouts, which the Host's overlayfs, the sandbox's root, refuses to create.
 ENGINE_STORAGE = ("/var/lib/docker", "/var/lib/containerd", "/var/lib/containers")
-#: The version of ALE's build of runsc this engine runs, ``VERSION`` in
+#: The version of Orbit's build of runsc this engine runs, ``VERSION`` in
 #: images/runtimes/gvisor/build.sh, and what ``runsc --version`` reports of it.
 VERSION = "0.1.4"
-BUILD = f"+ale.{VERSION}"
+BUILD = f"+orbit.{VERSION}"
 #: The ``runsc`` command that lists the NVIDIA driver versions nvproxy supports.
 DRIVERS = ("nvproxy", "list-supported-drivers")
 #: What the kernel log of every gVisor sandbox starts with.
 BANNER = "Starting gVisor"
-#: The flag of ALE's runsc (patch 0004) that limits the device memory a sandbox allocates
+#: The flag of Orbit's runsc (patch 0004) that limits the device memory a sandbox allocates
 #: through nvproxy on each of its GPUs, which ``runsc flags`` lists. A sandbox's annotation
 #: sets it for that sandbox alone.
 GPU_MEMORY_FLAG = "nvproxy-gpu-memory-limit"
@@ -173,12 +173,12 @@ def unseal(peers: tc.Peers) -> list[str]:
 def netstack(
     host_ip: str, *, gateway_port: str, ports: list[str], isolated: bool, sealed: bool
 ) -> dict[str, object]:
-    """ALE's chains in a gVisor sandbox's netstack, as :mod:`ale.run.iptables` takes them.
+    """Orbit's chains in a gVisor sandbox's netstack, as :mod:`orbit.run.iptables` takes them.
 
-    ``ALE_GATEWAY`` sends the fixed Gateway port to ``gateway_port``, when there is one.
-    An isolated sandbox's ``ALE_HOST`` refuses every port of the Host's address but the
-    episode's ``ports``, always; while it is sealed, ``ALE_SEAL`` refuses everything else it
-    sends and ``ALE_INPUT`` drops what it did not ask for. Refused, a connection fails at
+    ``ORBIT_GATEWAY`` sends the fixed Gateway port to ``gateway_port``, when there is one.
+    An isolated sandbox's ``ORBIT_HOST`` refuses every port of the Host's address but the
+    episode's ``ports``, always; while it is sealed, ``ORBIT_SEAL`` refuses everything else it
+    sends and ``ORBIT_INPUT`` drops what it did not ask for. Refused, a connection fails at
     once rather than waiting out the drop outside. ``FORWARD`` jumps too, for what a sandbox
     forwards between network namespaces of its own.
     """
@@ -214,12 +214,12 @@ def netstack(
                 {"target": "DROP"},
             ]
         chains = {
-            "ALE_HOST": [*episode, *({"dst": host_ip} | refusal for refusal in reject)],
-            "ALE_SEAL": outward,
-            "ALE_INPUT": inbound,
+            "ORBIT_HOST": [*episode, *({"dst": host_ip} | refusal for refusal in reject)],
+            "ORBIT_SEAL": outward,
+            "ORBIT_INPUT": inbound,
         }
-        outbound = ["ALE_HOST", "ALE_SEAL"]
-        jumps = {"OUTPUT": outbound, "FORWARD": outbound, "INPUT": ["ALE_INPUT"]}
+        outbound = ["ORBIT_HOST", "ORBIT_SEAL"]
+        jumps = {"OUTPUT": outbound, "FORWARD": outbound, "INPUT": ["ORBIT_INPUT"]}
         confined = {"chains": chains, "jumps": jumps}
     return {"tables": {"nat": nat, "filter": confined}}
 

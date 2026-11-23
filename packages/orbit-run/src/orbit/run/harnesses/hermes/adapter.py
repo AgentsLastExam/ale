@@ -10,12 +10,12 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
-from ale.core.errors import AgentError, ConfigError, HarnessLimitError
-from ale.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
-from ale.core.sandbox import Identity, Sandbox
-from ale.core.taskspec import StdioMcpServer
-from ale.core.trajectory import AtifTrajectory
-from ale.run.harnesses._npm import (
+from orbit.core.errors import AgentError, ConfigError, HarnessLimitError
+from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
+from orbit.core.sandbox import Identity, Sandbox
+from orbit.core.taskspec import StdioMcpServer
+from orbit.core.trajectory import AtifTrajectory
+from orbit.run.harnesses._npm import (
     agent_home,
     agent_path,
     bash_command,
@@ -23,7 +23,7 @@ from ale.run.harnesses._npm import (
     npm_env,
     reported_version,
 )
-from ale.run.harnesses.base import (
+from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
     CliHarness,
@@ -31,7 +31,7 @@ from ale.run.harnesses.base import (
     http_headers,
     install_skills,
 )
-from ale.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
+from orbit.run.tools import CUA_DESKTOP_NAME, stage_cua_desktop
 
 from . import trajectory
 from .settings import HermesSettings
@@ -182,7 +182,7 @@ class HermesHarness(CliHarness):
         await sandbox.write_file(str(token), session.token.encode(), identity=Identity.AGENT)
         await sandbox.exec(["chmod", "600", str(token)], identity=Identity.AGENT)
         transport, suffix = _TRANSPORTS[self.gateway_dialect]
-        model: dict[str, Any] = {"provider": "ale", "default": session.model}
+        model: dict[str, Any] = {"provider": "orbit", "default": session.model}
         if self.settings.supports_vision != "default":
             model["supports_vision"] = self.settings.supports_vision
         config: dict[str, Any] = {
@@ -190,7 +190,7 @@ class HermesHarness(CliHarness):
             "_config_version": 51,
             "model": model,
             "providers": {
-                "ale": {
+                "orbit": {
                     "api": session.gateway_url + suffix,
                     # Run through the platform's shell.
                     "key_cmd": (

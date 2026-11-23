@@ -11,14 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from ale.core.errors import TaskDefinitionError
-from ale.core.sandbox import PreparedTaskImage, SandboxRequest
-from ale.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
-from ale.run import guestd
-from ale.run.framework import MARKER, framework_identity, with_framework
-from ale.run.harnesses.builtin import NopHarness
-from ale.run.protocol.episode_protocol import EpisodeProtocol
-from ale.run.providers.docker import DockerProvider
+from orbit.core.errors import TaskDefinitionError
+from orbit.core.sandbox import PreparedTaskImage, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
+from orbit.run import guestd
+from orbit.run.framework import MARKER, framework_identity, with_framework
+from orbit.run.harnesses.builtin import NopHarness
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.docker import DockerProvider
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -58,7 +58,7 @@ async def test_an_image_without_python_gets_the_frameworks(tmp_path: Path) -> No
     request = SandboxRequest(
         episode_id="no-python",
         prepared_image=await provider.prepare_image(
-            _built(tmp_path, NO_PYTHON, "ale-test-no-python:latest")
+            _built(tmp_path, NO_PYTHON, "orbit-test-no-python:latest")
         ),
         resources=Resources(cpus=1, memory_mb=512),
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
@@ -75,11 +75,11 @@ async def test_an_image_without_python_gets_the_frameworks(tmp_path: Path) -> No
         # Verification has no Python of the image's to use, so it gets the framework's.
         ctx = SimpleNamespace(spec=SimpleNamespace(os=OperatingSystem.LINUX))
         python, site = await EpisodeProtocol(NopHarness())._site_packages(ctx, sandbox)  # type: ignore[arg-type]
-        assert python == guestd.PYTHON["linux"] and site.startswith("/opt/ale/python/")
+        assert python == guestd.PYTHON["linux"] and site.startswith("/opt/orbit/python/")
 
 
 @pytest.mark.asyncio
 async def test_an_image_without_glibc_is_refused_by_name(tmp_path: Path) -> None:
-    image = _built(tmp_path, MUSL, "ale-test-musl:latest")
+    image = _built(tmp_path, MUSL, "orbit-test-musl:latest")
     with pytest.raises(TaskDefinitionError, match="glibc"):
         await with_framework(image.runtime_ref, user="user")

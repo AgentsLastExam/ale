@@ -1,6 +1,6 @@
 # Slurm provider
 
-Decided: ALE runs on a login node of the cluster, never on a machine that reaches one, and a
+Decided: Orbit runs on a login node of the cluster, never on a machine that reaches one, and a
 Run drives that one cluster; joining clusters or other machines is not this Provider's.
 OpenRSI's login nodes have no Docker, no Podman and no subordinate ID range for the account,
 so no container runs there, and images are prepared on the cluster. Measured on OpenRSI's
@@ -14,15 +14,15 @@ The home is NFS (version 3, default attribute caching), whose client trusts its 
 listing of a directory, so a file another machine just made can be missing to a lookup for
 up to a minute. Measured on the login node: a file a job wrote showed 20 s later to a plain
 lookup, and within the 0.5 s it was polled at once the directory was listed first, as
-opening a directory makes the client read it again. Every file ALE waits for in a job's
+opening a directory makes the client read it again. Every file Orbit waits for in a job's
 directory is therefore looked up after its directory is listed, and a preparation job's
 result, which it writes as it ends, is still read for 90 s after the job ends before its
 absence is a failure.
 
 OpenRSI's QoS wall times are 3 h (`short`), 6 h (`dev`, `mid`) and 12 h (`long`, `lowprio`),
 and the others preempt `lowprio` with 120 s of grace (`PreemptMode=REQUEUE`, which cancels
-ALE's `--no-requeue` jobs). An allocation's deadline is read from Slurm's own count rather
-than from a clock, and `--signal` is not used: everything before the save is ALE's, on the
+Orbit's `--no-requeue` jobs). An allocation's deadline is read from Slurm's own count rather
+than from a clock, and `--signal` is not used: everything before the save is Orbit's, on the
 login node, and Slurm states the end exactly as the job starts, so a signal to the batch
 step would only be a later second path. Decided: an allocation that Slurm ends first,
 preempted or on a failed node, loses its node's store and what the Sandbox held, and the
@@ -74,8 +74,8 @@ A boot that does not fit beside what runs gets an allocation of its own, loading
 snapshot from a `podman save` archive on the shared home, as does a snapshot the Run keeps,
 whose allocation ends with the episode.
 
-The batch step, not ALE, starts each Sandbox's step (`srun --exact`), so ALE's own process
-ending never ends it; ALE only writes the request and reads the step's files on the shared
+The batch step, not Orbit, starts each Sandbox's step (`srun --exact`), so Orbit's own process
+ending never ends it; Orbit only writes the request and reads the step's files on the shared
 home. With `--ignore-cgroups` alone, one allocating process could take down the entire
 Sentry, so the runtime reads the nearest cgroup above the step that has a `memory.max`,
 without joining or modifying it. The batch step holds Podman's pause namespace through
@@ -115,7 +115,7 @@ A Sandbox's `/dev/shm` is Podman's `--shm-size` of half its Task's memory
 container, so runsc reaches it through its gofer (`9p`), where it mounts Docker's as a tmpfs
 of the Sentry; its pages are charged to the step's cgroup all the same. A `--tmpfs` at
 `/dev/shm`, which replaces Podman's with a tmpfs of the Sentry as under Docker, was slower.
-Measured on OpenRSI (Podman 4.9.3, ALE's runsc 0.1.4, November 2026), with PyTorch's
+Measured on OpenRSI (Podman 4.9.3, Orbit's runsc 0.1.4, November 2026), with PyTorch's
 DataLoader of 8 workers and batches of 64 images of 3×224×224 float32 on one H100, in a
 Sandbox of 16 CPUs and 16 GiB, three passes each, in both orders:
 
