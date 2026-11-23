@@ -1,0 +1,95 @@
+rdmaproxy: accept mlx5 data-direct uverbs calls
+
+Backport of upstream gVisor commit 574094148cae18e739634382c0a28d60520c319a
+("Accept mlx5 data-direct uverbs calls in rdmaproxy",
+https://github.com/google/gvisor/pull/17524, merged 2026-11-21), which no
+release has yet (the newest is release-20261116.0). Its diff is unchanged;
+drop this patch when moving to a release that has it.
+
+What: rdmaproxy, gVisor's proxy of the host's /dev/infiniband/uverbs*
+devices (--rdmaproxy), passes two mlx5 "data direct" calls to the host
+instead of failing them with EINVAL: the method
+MLX5_IB_METHOD_GET_DATA_DIRECT_SYSFS_PATH (0x1001) of the device object,
+whose one attribute is a buffer the host kernel fills with a sysfs path, and
+the attribute MLX5_IB_ATTR_REG_DMABUF_MR_ACCESS_FLAGS (0x1000) of
+UVERBS_METHOD_REG_DMABUF_MR, an inline u32 of flags. The attribute goes into
+the core schema, so other drivers' devices accept it too; the host driver
+validates it.
+
+Why: the libmlx5 of a newer rdma-core, such as the AWS EFA installer 1.47's,
+makes both calls. NCCL's NET/IB transport then failed to initialize on
+Mellanox HCAs under gVisor and NCCL fell back to TCP sockets without an
+error; the Sentry logged "rdmaproxy: unsupported ioctl object=0
+method=4097" and "rdmaproxy: unsupported attr id=0x1000 on object=7
+method=4". The libmlx5 of Ubuntu's rdma-core makes neither call.
+
+Verified: upstream built //pkg/sentry/devices/rdmaproxy/... and
+//pkg/abi/ib and, on an mlx5 host with an EFA-installer image, NCCL selected
+NET/IB and moved its traffic over RDMA. Here, the diff applies unchanged
+after 0001 to 0010 to the same three files as the pull request's base, and
+runsc builds with it.
+
+diff --git a/pkg/abi/ib/ib.go b/pkg/abi/ib/ib.go
+index ba1053ee646..06aa4163917 100644
+--- a/pkg/abi/ib/ib.go
++++ b/pkg/abi/ib/ib.go
+@@ -301,6 +301,15 @@ const (
+ const (
+ 	MLX5_IB_OBJECT_UAR = 0x1008
+ 
++	// enum mlx5_ib_device_methods.
++	MLX5_IB_METHOD_GET_DATA_DIRECT_SYSFS_PATH = 0x1001
++
++	// enum mlx5_ib_get_data_direct_sysfs_path_attrs.
++	MLX5_IB_ATTR_GET_DATA_DIRECT_SYSFS_PATH = 0x1000
++
++	// enum mlx5_ib_reg_dmabuf_mr_attrs.
++	MLX5_IB_ATTR_REG_DMABUF_MR_ACCESS_FLAGS = 0x1000
++
+ 	// enum mlx5_ib_uar_obj_methods.
+ 	MLX5_IB_METHOD_UAR_OBJ_ALLOC   = 0x1000
+ 	MLX5_IB_METHOD_UAR_OBJ_DESTROY = 0x1001
+diff --git a/pkg/sentry/devices/rdmaproxy/cxproxy/cxproxy.go b/pkg/sentry/devices/rdmaproxy/cxproxy/cxproxy.go
+index 094cea0f7f0..f70efd44d91 100644
+--- a/pkg/sentry/devices/rdmaproxy/cxproxy/cxproxy.go
++++ b/pkg/sentry/devices/rdmaproxy/cxproxy/cxproxy.go
+@@ -89,12 +89,17 @@ func (cxDriver) PrepareCreateDMA(t *kernel.Task, uhwIn []byte) (*rdmaproxy.Pinne
+ 	return &bufs, nil
+ }
+ 
+-// Schemas implements rdmaproxy.Driver.Schemas. It models the mlx5 UAR (User
+-// Access Region — the CQ/QP doorbell page) object: alloc returns an mmap
++// Schemas implements rdmaproxy.Driver.Schemas. It models the data-direct sysfs
++// path query and the mlx5 UAR (User Access Region) object. UAR alloc returns an mmap
+ // offset that the app maps through the uverbs FD via the generic passthrough,
+ // so no address translation is needed here.
+ func (cxDriver) Schemas() map[uint32]*rdmaproxy.MethodSchema {
+ 	return map[uint32]*rdmaproxy.MethodSchema{
++		rdmaproxy.SchemaKey(ib.UVERBS_OBJECT_DEVICE, ib.MLX5_IB_METHOD_GET_DATA_DIRECT_SYSFS_PATH): {
++			Attrs: map[uint16]rdmaproxy.AttrType{
++				ib.MLX5_IB_ATTR_GET_DATA_DIRECT_SYSFS_PATH: rdmaproxy.AttrPtrOut,
++			},
++		},
+ 		rdmaproxy.SchemaKey(ib.MLX5_IB_OBJECT_UAR, ib.MLX5_IB_METHOD_UAR_OBJ_ALLOC): {
+ 			Attrs: map[uint16]rdmaproxy.AttrType{
+ 				ib.MLX5_IB_ATTR_UAR_OBJ_ALLOC_HANDLE:      rdmaproxy.AttrIdr,
+diff --git a/pkg/sentry/devices/rdmaproxy/schema.go b/pkg/sentry/devices/rdmaproxy/schema.go
+index d485635dfbd..f3db2a489cf 100644
+--- a/pkg/sentry/devices/rdmaproxy/schema.go
++++ b/pkg/sentry/devices/rdmaproxy/schema.go
+@@ -237,10 +237,11 @@ func buildSchemas() map[uint32]*MethodSchema {
+ 				ib.UVERBS_ATTR_REG_DMABUF_MR_IOVA:      AttrPtrIn,
+ 				// The DMABUF fd is translated from an app fd to a host fd in
+ 				// the DMABUF-specific pre-processing step.
+-				ib.UVERBS_ATTR_REG_DMABUF_MR_FD:           AttrInline,
+-				ib.UVERBS_ATTR_REG_DMABUF_MR_ACCESS_FLAGS: AttrPtrIn,
+-				ib.UVERBS_ATTR_REG_DMABUF_MR_RESP_LKEY:    AttrPtrOut,
+-				ib.UVERBS_ATTR_REG_DMABUF_MR_RESP_RKEY:    AttrPtrOut,
++				ib.UVERBS_ATTR_REG_DMABUF_MR_FD:            AttrInline,
++				ib.UVERBS_ATTR_REG_DMABUF_MR_ACCESS_FLAGS:  AttrPtrIn,
++				ib.UVERBS_ATTR_REG_DMABUF_MR_RESP_LKEY:     AttrPtrOut,
++				ib.UVERBS_ATTR_REG_DMABUF_MR_RESP_RKEY:     AttrPtrOut,
++				ib.MLX5_IB_ATTR_REG_DMABUF_MR_ACCESS_FLAGS: AttrInline,
+ 			},
+ 		},
+ 		SchemaKey(ib.UVERBS_OBJECT_MR, ib.UVERBS_METHOD_MR_DESTROY): {

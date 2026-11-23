@@ -2,7 +2,8 @@
 
 This directory builds Orbit's gVisor runtime: `runsc` from an official gVisor release with
 the patches in [`patches/`](patches/) applied in order. The patches are Orbit's own and are
-not sent upstream; a stock `runsc` lacks them.
+not sent upstream, apart from backports of upstream changes that no release has yet; a stock
+`runsc` lacks them.
 
 | Patch | Effect |
 |---|---|
@@ -15,6 +16,8 @@ not sent upstream; a stock `runsc` lacks them.
 | `0007-nftables-xt-tcp-udp-matches` | A rule that the `iptables` 1.8.7 of Ubuntu 22.04 writes with `--sport`, `--dport` or `--tcp-flags`, through the xtables `tcp` and `udp` matches, matches only the packets it names, instead of every one. |
 | `0008-netstack-nftables-connection-state-of-its-own` | Under `--TESTONLY-nftables`, a packet that iptables tracks and NATs, as once any of its tables is set, is tracked and NATed by nf_tables as well, each by its own rules, instead of the Sentry panicking (`packet already had NAT`) and ending the sandbox. |
 | `0009-runsc-sentry-oom-killer-below-cgroup-limit` | A container whose cgroup has a memory limit and no swap loses only the process the Sentry's own OOM killer chooses when its memory runs out, as under runc, instead of, at times, the whole sandbox; the Sentry counts its kills in `memory.oom_control` ([Out of memory](#out-of-memory)). |
+| `0011-rdmaproxy-mlx5-data-direct` | Under `--rdmaproxy`, NCCL in an image with a newer rdma-core's libmlx5, such as the AWS EFA installer's, uses InfiniBand on Mellanox HCAs instead of falling back to TCP sockets without an error; a backport of upstream gVisor's [#17524](https://github.com/google/gvisor/pull/17524), which no release has yet. |
+| `0012-rdmaproxy-bind-mounted-uverbs-devices` | Under `--rdmaproxy`, a container that rootless Podman gives an InfiniBand device with `--device /dev/infiniband/uverbsN` can use it, instead of finding no RDMA device (`Failed to get IB devices list: Function not implemented`) because Podman bind-mounts the device rather than listing it among the spec's devices. |
 
 Each patch's header says what it changes, why, and how it was verified.
 
@@ -34,7 +37,7 @@ gVisor's release tarball:
 
 `runsc` and its sidecars come from one build and are installed together. The image's
 version is `VERSION` in [`build.sh`](build.sh), and `runsc --version` reports the release
-and that version, such as `release-20261109.0+orbit.0.1.4`. Nothing in it depends on the
+and that version, such as `release-20261109.0+orbit.0.1.5`. Nothing in it depends on the
 engine, so it has its own version, raised when the build changes.
 
 ## Install on a Host
@@ -43,7 +46,7 @@ Copy `/gvisor` into a directory of its own version, so that an upgrade never rep
 binaries of a sandbox that is running:
 
 ```bash
-version=0.1.4
+version=0.1.5
 dir=/usr/local/lib/orbit-gvisor/$version
 id=$(docker create ghcr.io/agentslastexam/orbit-gvisor:$version)
 sudo mkdir -p "$dir"
@@ -60,7 +63,7 @@ alone:
 {
   "runtimes": {
     "runsc": {
-      "path": "/usr/local/lib/orbit-gvisor/0.1.4/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.5/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -68,7 +71,7 @@ alone:
       ]
     },
     "runsc-net-raw": {
-      "path": "/usr/local/lib/orbit-gvisor/0.1.4/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.5/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -77,7 +80,7 @@ alone:
       ]
     },
     "runsc-nested": {
-      "path": "/usr/local/lib/orbit-gvisor/0.1.4/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.5/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",

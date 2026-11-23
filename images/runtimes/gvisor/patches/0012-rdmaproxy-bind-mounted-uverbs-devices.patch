@@ -1,0 +1,270 @@
+runsc: list bind-mounted RDMA devices as devices under --rdmaproxy
+
+What: with --rdmaproxy, runsc create, run and restore move each mount of the
+bundle's spec whose destination starts with /dev/infiniband/uverbs and whose
+source is a character device on the host to the spec's devices
+(linux.devices) and drop the mount. The device takes the mount's destination
+as its path and the host device's major and minor numbers, as an engine that
+lists it would, and mode 0666 and root as its owner, as runsc spec gives TPU
+devices. They do it where they read the bundle's config.json
+(specutils.ReadSpec): the gofer and the sandbox get the spec they read
+through a sealed copy (specutils.CopySpec), and later commands from the
+container's saved state, so all of them see the devices and none the mounts.
+Without --rdmaproxy, or with it set only by a flag annotation, which runsc
+applies after it reads the spec, the spec is left as it is.
+
+Why: rdmaproxy proxies only the uverbs devices in linux.devices:
+specutils.RDMAEnabled turns RDMA on only for them, the gofer bind-mounts only
+them into its /dev (sandboxsetup.SetupDev), and the Sentry registers only
+them (boot's rdmaproxyRegisterDevices). Rootless Podman cannot create device
+nodes, so for --device /dev/infiniband/uverbsN it bind-mounts the host
+device and leaves it out of linux.devices. Under runsc with --rdmaproxy the
+sandbox then had no RDMA device, and libibverbs in it failed with "Failed to
+get IB devices list: Function not implemented".
+
+Verified:
+- //runsc/specutils:specutils_test passes with the new tests of the
+  conversion (TestUverbsMountsToDevices, TestReadSpecUverbsMounts).
+- On OpenRSI's H100 Slurm nodes, under rootless Podman 4.9.3 with
+  --rdmaproxy: Orbit's runsc 0.1.5, which carries this patch, gave a
+  Sandbox of two nodes its InfiniBand devices, and NCCL all-reduced 1 GiB
+  across their 16 H100s with GPUDirect RDMA at 412 GB/s. Before it, the
+  same conversion done by a wrapper that rewrote the bundle's config.json
+  before runsc create gave ib_write_bw 391.8 Gb/s between two HCAs of one
+  node in gVisor against 393.3 Gb/s on the bare node; without it, no RDMA
+  device.
+
+diff --git a/runsc/specutils/BUILD b/runsc/specutils/BUILD
+index 3e396f3..8b9262b 100644
+--- a/runsc/specutils/BUILD
++++ b/runsc/specutils/BUILD
+@@ -44,6 +44,7 @@ go_test(
+     size = "small",
+     srcs = [
+         "gofer_conf_test.go",
++        "rdma_test.go",
+         "specutils_test.go",
+     ],
+     embed = [":specutils"],
+diff --git a/runsc/specutils/rdma.go b/runsc/specutils/rdma.go
+index a09ff20..9a8987c 100644
+--- a/runsc/specutils/rdma.go
++++ b/runsc/specutils/rdma.go
+@@ -15,10 +15,13 @@
+ package specutils
+ 
+ import (
++	"os"
+ 	"path"
+ 	"strings"
+ 
+ 	specs "github.com/opencontainers/runtime-spec/specs-go"
++	"golang.org/x/sys/unix"
++	"gvisor.dev/gvisor/pkg/log"
+ 	"gvisor.dev/gvisor/pkg/rdma"
+ 	"gvisor.dev/gvisor/runsc/config"
+ )
+@@ -61,3 +64,40 @@ func specHasUverbsDevice(spec *specs.Spec) bool {
+ 	}
+ 	return false
+ }
++
++// uverbsMountsToDevices moves each mount of a host character device at a
++// /dev/infiniband/uverbs* destination from the spec's mounts to its devices,
++// the only RDMA devices rdmaproxy proxies. A runtime that cannot create device
++// nodes, such as rootless Podman, bind-mounts the host device for --device
++// instead of listing it. Each device takes the mount's destination as its path
++// and the host device's major and minor numbers, as a runtime that lists it
++// would, and gets mode 0666 and root as its owner, as runsc spec gives TPU
++// devices.
++func uverbsMountsToDevices(spec *specs.Spec) {
++	mounts := spec.Mounts[:0]
++	for _, m := range spec.Mounts {
++		var st unix.Stat_t
++		if !strings.HasPrefix(m.Destination, "/dev/infiniband/uverbs") ||
++			unix.Stat(m.Source, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFCHR {
++			mounts = append(mounts, m)
++			continue
++		}
++		if spec.Linux == nil {
++			spec.Linux = &specs.Linux{}
++		}
++		mode := os.FileMode(0666)
++		var uid, gid uint32
++		dev := specs.LinuxDevice{
++			Path:     m.Destination,
++			Type:     "c",
++			Major:    int64(unix.Major(uint64(st.Rdev))),
++			Minor:    int64(unix.Minor(uint64(st.Rdev))),
++			FileMode: &mode,
++			UID:      &uid,
++			GID:      &gid,
++		}
++		log.Infof("Listing RDMA device %q (%d:%d), bind-mounted from %q, as a device", dev.Path, dev.Major, dev.Minor, m.Source)
++		spec.Linux.Devices = append(spec.Linux.Devices, dev)
++	}
++	spec.Mounts = mounts
++}
+diff --git a/runsc/specutils/rdma_test.go b/runsc/specutils/rdma_test.go
+new file mode 100644
+index 0000000..d09a4d6
+--- /dev/null
++++ b/runsc/specutils/rdma_test.go
+@@ -0,0 +1,125 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package specutils
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"reflect"
++	"testing"
++
++	specs "github.com/opencontainers/runtime-spec/specs-go"
++	"gvisor.dev/gvisor/runsc/config"
++)
++
++// uverbsDevice is the device that uverbsMountsToDevices lists for a mount of
++// /dev/null, character device 1:3, at path.
++func uverbsDevice(path string) specs.LinuxDevice {
++	mode := os.FileMode(0666)
++	var uid, gid uint32
++	return specs.LinuxDevice{Path: path, Type: "c", Major: 1, Minor: 3, FileMode: &mode, UID: &uid, GID: &gid}
++}
++
++func bindMount(src, dst string) specs.Mount {
++	return specs.Mount{Destination: dst, Source: src, Type: "bind", Options: []string{"bind", "nosuid", "noexec"}}
++}
++
++// TestUverbsMountsToDevices checks that only mounts of a character device at a
++// uverbs destination become devices, in order and after the spec's own.
++func TestUverbsMountsToDevices(t *testing.T) {
++	dir := t.TempDir()
++	file := filepath.Join(dir, "uverbs1")
++	if err := os.WriteFile(file, nil, 0666); err != nil {
++		t.Fatal(err)
++	}
++	gpu := specs.LinuxDevice{Path: "/dev/nvidia0", Type: "c", Major: 195, Minor: 0}
++	for _, tc := range []struct {
++		name        string
++		mounts      []specs.Mount
++		devices     []specs.LinuxDevice
++		wantMounts  []specs.Mount
++		wantDevices []specs.LinuxDevice
++	}{
++		{
++			name:        "char-devices",
++			mounts:      []specs.Mount{bindMount("/dev/null", "/dev/infiniband/uverbs0"), bindMount(dir, "/data"), bindMount("/dev/null", "/dev/infiniband/uverbs7")},
++			devices:     []specs.LinuxDevice{gpu},
++			wantMounts:  []specs.Mount{bindMount(dir, "/data")},
++			wantDevices: []specs.LinuxDevice{gpu, uverbsDevice("/dev/infiniband/uverbs0"), uverbsDevice("/dev/infiniband/uverbs7")},
++		},
++		{
++			name:        "other-destination",
++			mounts:      []specs.Mount{bindMount("/dev/null", "/dev/infiniband/rdma_cm"), bindMount("/dev/null", "/dev/null")},
++			wantMounts:  []specs.Mount{bindMount("/dev/null", "/dev/infiniband/rdma_cm"), bindMount("/dev/null", "/dev/null")},
++			wantDevices: nil,
++		},
++		{
++			name:        "not-a-char-device",
++			mounts:      []specs.Mount{bindMount(file, "/dev/infiniband/uverbs1"), bindMount(dir, "/dev/infiniband/uverbs2"), bindMount(filepath.Join(dir, "missing"), "/dev/infiniband/uverbs3")},
++			wantMounts:  []specs.Mount{bindMount(file, "/dev/infiniband/uverbs1"), bindMount(dir, "/dev/infiniband/uverbs2"), bindMount(filepath.Join(dir, "missing"), "/dev/infiniband/uverbs3")},
++			wantDevices: nil,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			spec := &specs.Spec{Mounts: tc.mounts, Linux: &specs.Linux{Devices: tc.devices}}
++			uverbsMountsToDevices(spec)
++			if !reflect.DeepEqual(spec.Mounts, tc.wantMounts) {
++				t.Errorf("mounts got %+v, want %+v", spec.Mounts, tc.wantMounts)
++			}
++			if !reflect.DeepEqual(spec.Linux.Devices, tc.wantDevices) {
++				t.Errorf("devices got %+v, want %+v", spec.Linux.Devices, tc.wantDevices)
++			}
++		})
++	}
++}
++
++// TestReadSpecUverbsMounts checks that ReadSpec lists a bind-mounted uverbs
++// device as a device, so that RDMA is enabled, with --rdmaproxy only.
++func TestReadSpecUverbsMounts(t *testing.T) {
++	bundle := t.TempDir()
++	data, err := json.Marshal(&specs.Spec{
++		Version: "1.0.0",
++		Process: &specs.Process{Args: []string{"/bin/true"}},
++		Root:    &specs.Root{Path: "rootfs"},
++		Mounts:  []specs.Mount{bindMount("/dev/null", "/dev/infiniband/uverbs0")},
++		Linux:   &specs.Linux{},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(bundle, "config.json"), data, 0644); err != nil {
++		t.Fatal(err)
++	}
++	for _, rdmaProxy := range []bool{false, true} {
++		conf := &config.Config{RDMAProxy: rdmaProxy}
++		spec, err := ReadSpec(bundle, SpecOpts{Conf: conf})
++		if err != nil {
++			t.Fatalf("ReadSpec with --rdmaproxy=%t: %v", rdmaProxy, err)
++		}
++		wantMounts := []specs.Mount{bindMount("/dev/null", "/dev/infiniband/uverbs0")}
++		var wantDevices []specs.LinuxDevice
++		if rdmaProxy {
++			wantMounts = nil
++			wantDevices = []specs.LinuxDevice{uverbsDevice("/dev/infiniband/uverbs0")}
++		}
++		if len(spec.Mounts)+len(wantMounts) > 0 && !reflect.DeepEqual(spec.Mounts, wantMounts) || !reflect.DeepEqual(spec.Linux.Devices, wantDevices) {
++			t.Errorf("ReadSpec with --rdmaproxy=%t: mounts %+v and devices %+v, want %+v and %+v", rdmaProxy, spec.Mounts, spec.Linux.Devices, wantMounts, wantDevices)
++		}
++		if got := RDMAEnabled(spec, conf); got != rdmaProxy {
++			t.Errorf("RDMAEnabled() with --rdmaproxy=%t got %t", rdmaProxy, got)
++		}
++	}
++}
+diff --git a/runsc/specutils/specutils.go b/runsc/specutils/specutils.go
+index 2e70add..1bb1448 100644
+--- a/runsc/specutils/specutils.go
++++ b/runsc/specutils/specutils.go
+@@ -270,14 +270,25 @@ type SpecOpts struct {
+ 
+ // ReadSpec reads an OCI runtime spec from the given bundle directory.
+ // ReadSpec also normalizes all potential relative paths into absolute
+-// path, e.g. spec.Root.Path, mount.Source.
++// path, e.g. spec.Root.Path, mount.Source. With --rdmaproxy, it lists RDMA
++// devices that the spec bind-mounts as devices (uverbsMountsToDevices).
+ func ReadSpec(bundleDir string, opts SpecOpts) (*specs.Spec, error) {
+ 	specFile, err := os.Open(filepath.Join(bundleDir, "config.json"))
+ 	if err != nil {
+ 		return nil, fmt.Errorf("error opening spec file %q: %v", filepath.Join(bundleDir, "config.json"), err)
+ 	}
+ 	defer specFile.Close()
+-	return ReadSpecFromFile(bundleDir, specFile, opts)
++	spec, err := ReadSpecFromFile(bundleDir, specFile, opts)
++	if err != nil {
++		return nil, err
++	}
++	// Here, where runsc create, run and restore read the bundle's spec, and
++	// not in ReadSpecFromFile: the gofer, the sandbox and later commands get
++	// the spec read here, so they all see the devices in place of the mounts.
++	if opts.Conf.RDMAProxy {
++		uverbsMountsToDevices(spec)
++	}
++	return spec, nil
+ }
+ 
+ // ReadSpecFromFile reads an OCI runtime spec from the given file, from its
