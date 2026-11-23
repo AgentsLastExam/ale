@@ -690,7 +690,8 @@ def free_port() -> int:
 async def test_the_tunnel_runs_isolated_in_the_root_directory() -> None:
     tunnel = GatewayTunnel(LocalRelay(), listeners=[(7412, 0)], targets=[("127.0.0.1", 1)])  # type: ignore[arg-type]
     assert shlex.split(tunnel._command)[:7] == [
-        "cd", "/", "&&", "exec", "/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/tunnel.py"
+        "cd", "/", "&&", "exec",
+        "/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/tunnel.py",
     ]  # fmt: skip
 
 

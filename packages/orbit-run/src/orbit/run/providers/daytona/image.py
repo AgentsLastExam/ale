@@ -76,7 +76,8 @@ class PublishedImage:
     """An adapted image in Daytona's registry."""
 
     ref: str
-    """``<registry>/<project>/orbit-task@sha256:<manifest digest>``: what the sandbox builds from."""
+    """``<registry>/<project>/orbit-task@sha256:<manifest digest>``: what the sandbox builds
+    from."""
     digest: str
     framed_id: str
     """The local image the Task prepared, with the framework layer."""

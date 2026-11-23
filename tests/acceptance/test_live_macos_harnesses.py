@@ -76,7 +76,8 @@ def _write_task(root: Path, image: str, user: str, *, policy: bool) -> Path:
     (task / "tests" / "verify.py").write_text(
         "from pathlib import Path\nfrom orbit_verify import write\n"
         f"p = Path({f'{home}/output/result.txt'!r})\n"
-        "write({'reward': float(p.is_file() and p.read_text().strip() == 'Orbit macOS verified')})\n"
+        "text = p.read_text().strip() if p.is_file() else ''\n"
+        "write({'reward': float(text == 'Orbit macOS verified')})\n"
     )
     return task
 

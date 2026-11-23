@@ -53,7 +53,7 @@ REPLACE = struct.Struct("=32sIII5I5IIQ")
 IPT_SO_GET_INFO = IPT_SO_SET_REPLACE = 64
 IPT_SO_GET_ENTRIES = 65
 ACCEPT, DROP, RETURN = -2, -1, -5  # standard verdicts; one >= 0 is the offset of a jump
-CHAIN = re.compile(r"ORBIT_[A-Z0-9_]{1,24}")
+CHAIN = re.compile(r"ORBIT_[A-Z0-9_]{1,22}")
 INTERFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
 RULE = {"dst", "proto", "dports", "out", "in", "ctstate", "target"}
 PROTOS = {"tcp": 6, "udp": 17}
