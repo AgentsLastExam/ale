@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Protocol, Self
 
@@ -250,6 +251,10 @@ class SandboxRequest(BaseModel):
     planned_saves: int = Field(default=0, ge=0)
     """How many validations still to come save this solver, each the one booted
     from the previous save, whatever its retention."""
+    duration_sec: float | None = Field(default=None, gt=0)
+    """How long the episode may need the Sandbox, where it bounds that, as a verifier's time
+    limit does. A Provider that holds a Sandbox only until a deadline starts it where that
+    leaves it this long."""
     volumes: tuple[str, ...] = ()
     """The Task's volume candidates (:attr:`~ale.core.taskspec.TaskSpec.volume_candidates`).
     A leaf that mounts volumes makes each that is a directory in the image a volume of its
@@ -314,6 +319,7 @@ class SandboxRequest(BaseModel):
             resources=self.resources.model_copy(update={"sudo": self.sudo}),
             snapshot=self.saves > 0 or self.snapshot is not None or self.volumes_from is not None,
             saves=self.saves,
+            duration_sec=self.duration_sec,
             verifier=verifiers_needs(
                 self.image_kind,
                 self.os,
@@ -509,6 +515,11 @@ class Sandbox(ABC):
         self.volumes: tuple[str, ...] = ()
         #: Whether it mounted its request's ``shown`` directory, read-only.
         self.shown = False
+        #: The latest time at which the episode must begin to save it, where its Provider
+        #: holds it only until a set time, as a scheduler's allocation of a wall time does;
+        #: what saving it and writing it where another Sandbox can boot from it takes is left
+        #: after it. None where the Provider holds it as long as it is asked to.
+        self.deadline: datetime | None = None
 
     def release_resources(self) -> None:
         """Release Provider allocations after the underlying sandbox has stopped."""

@@ -18,6 +18,7 @@ __all__ = [
     "AgentResourceError",
     "AgentUnsupportedError",
     "AleError",
+    "AllocationEndedError",
     "AssetError",
     "BudgetExceededError",
     "ConfigError",
@@ -131,6 +132,11 @@ class GuestUnreachableError(EnvironmentError_):
     """The guest service stopped answering mid-episode."""
 
 
+class AllocationEndedError(GuestUnreachableError):
+    """The scheduler that held the Sandbox's allocation ended it before the episode did: its
+    wall time ran out, a job of higher priority preempted it, or its node failed."""
+
+
 class ResourceExhaustedError(GuestUnreachableError):
     """The Sandbox, or the guest service in it, was lost to its memory or its storage: the
     agent's result in the Sandbox it ran in from its phase on, and a Task defect in setup or
@@ -239,10 +245,14 @@ class VerificationVerdictError(VerificationInfrastructureError):
 class PhaseTimeoutError(AleError):
     """A phase exceeded its declared timeout."""
 
-    def __init__(self, phase: str, limit_sec: float) -> None:
+    def __init__(
+        self, phase: str, limit_sec: float, *, native_session_id: str | None = None
+    ) -> None:
         super().__init__(f"phase {phase!r} exceeded its {limit_sec:g}s timeout")
         self.phase = phase
         self.limit_sec = limit_sec
+        #: The native session an agent's run that its limit cut left, which it can resume.
+        self.native_session_id = native_session_id
 
 
 class BudgetExceededError(AleError):

@@ -18,7 +18,12 @@ from ale.run.harnesses.codex_cli import CodexCliHarness
 from ale.run.harnesses.grok_build import GrokBuildHarness
 from ale.run.harnesses.openclaw_cli import OpenClawCliHarness
 from ale.run.protocol import episode_protocol
-from ale.run.protocol.episode_protocol import EpisodeProtocol, ReverificationProtocol
+from ale.run.protocol.episode_protocol import (
+    EpisodeProtocol,
+    ReverificationProtocol,
+    _AgentTime,
+    _Solver,
+)
 from ale.run.recording import EpisodeRecording
 
 pytestmark = pytest.mark.unit
@@ -72,6 +77,7 @@ def _context(path: Path) -> SimpleNamespace:
         agent_resources=SimpleNamespace(digest="resources"),
         home="/home/agent",
         validation_prompts={},
+        move_prompts={},
     )
 
 
@@ -135,7 +141,14 @@ async def test_polling_only_copies_logs_and_retries_after_a_timeout(tmp_path, mo
                 retried.set()
             await asyncio.Event().wait()
 
-    worker = asyncio.create_task(EpisodeProtocol(NeverConverted())._poll_logs(Collector()))
+    ctx = SimpleNamespace(
+        run_dir=tmp_path, episode_id="e", validation_rounds=[], agent_run=None, segments=[]
+    )
+    worker = asyncio.create_task(
+        EpisodeProtocol(NeverConverted())._poll_logs(
+            ctx, Collector(), _AgentTime(60.0), _Solver(SimpleNamespace(), None)
+        )
+    )
     try:
         await asyncio.wait_for(retried.wait(), timeout=1)
     finally:

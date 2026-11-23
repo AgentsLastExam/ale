@@ -148,7 +148,8 @@ class PhaseStarted(_ExecutionEvent):
 class PhaseFinished(_ExecutionEvent):
     kind: Literal["phase_finished"] = "phase_finished"
     phase: str
-    outcome: Literal["succeeded", "failed", "timed_out", "cancelled"]
+    outcome: Literal["succeeded", "failed", "timed_out", "cancelled", "moved"]
+    """``moved`` for an agent's run its Sandbox's deadline cut, as the solver moves."""
     duration_ms: int = Field(ge=0)
 
 

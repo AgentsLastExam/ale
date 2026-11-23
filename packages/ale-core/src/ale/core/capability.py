@@ -102,6 +102,9 @@ class CapabilityProfile(BaseModel):
     max_saves: int | None = Field(default=None, ge=1)
     """How many snapshots in a row it saves, of a Sandbox booted from an image and of each
     one booted from the snapshot before; ``None`` when it saves any number."""
+    max_duration_sec: float | None = Field(default=None, gt=0)
+    """How long it holds one Sandbox at most, as a scheduler holds an allocation for its wall
+    time; ``None`` when it holds one as long as asked."""
     gpus: bool = False
     """Whether it attaches NVIDIA GPUs."""
     gpu_models: tuple[GpuModel, ...] = ()
@@ -145,6 +148,10 @@ class SandboxNeeds(BaseModel):
     """What the verifier that boots from its snapshot needs: a snapshot verifier, or a shared
     validation round's. Only the leaf that saved a snapshot boots from it, so one profile
     serves both."""
+    duration_sec: float | None = Field(default=None, gt=0)
+    """How long the leaf may have to hold one Sandbox for it at once: a verifier's limit, a
+    shared verifier's in the solver it runs in, or the longest of the verifiers that boot from
+    a solver's snapshot, on the leaf that saved it."""
 
 
 def solver_saves(validations: int, *, snapshot_verified: bool, kept_as_snapshot: bool) -> int:
@@ -261,6 +268,15 @@ def unmet(profile: CapabilityProfile, needs: SandboxNeeds) -> tuple[str, ...]:
         reasons.append("saves and boots no snapshots")
     elif profile.max_saves is not None and needs.saves > profile.max_saves:
         reasons.append(f"saves {needs.saves} snapshots in a row, more than its {profile.max_saves}")
+    if (
+        profile.max_duration_sec is not None
+        and needs.duration_sec is not None
+        and needs.duration_sec > profile.max_duration_sec
+    ):
+        reasons.append(
+            f"holds a Sandbox for {profile.max_duration_sec:g} s at most, not the "
+            f"{needs.duration_sec:g} s a verifier may take"
+        )
     if needs.verifier is not None:
         reasons.extend(
             f"the verifier booted from its snapshot: {why}"

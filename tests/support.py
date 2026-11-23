@@ -855,6 +855,47 @@ printf '{{"session_id": "%s", "result": "turn %s"}}\\n' {shlex.quote(session_id)
         return builder.build()
 
 
+class WorkingCliHarness(ScriptedCliHarness):
+    """A CLI that works for ``lines`` lines of work in its first turn, one every ``every``
+    seconds, appended to ``work.txt`` with when and on which host each was written, and goes
+    on from the last line when its session resumes, as an agent whose turn is interrupted
+    does; each run first notes the first line of its prompt in ``prompts.txt`` and starts a
+    process meant to outlive it, noting in ``survivors`` any an earlier run left running."""
+
+    def __init__(self, lines: int, *, every: int = 10) -> None:
+        super().__init__()
+        self.lines = lines
+        self.every = every
+
+    async def prepare_command(  # type: ignore[no-untyped-def]
+        self, prompt_path, sandbox, session, *, native_session_id
+    ):
+        from ale.run.harnesses.base import CliCommand
+
+        session_id = native_session_id or "scripted"
+        home = shlex.quote(session.home)
+        directory = shlex.quote(f"{session.home}/.scripted-cli/{session_id}")
+        script = f"""
+mkdir -p {directory}
+run=$(( $(ls {directory} | wc -l) + 1 ))
+cp {shlex.quote(prompt_path)} {directory}/run-$run.md
+head -n 1 {directory}/run-$run.md >> {home}/prompts.txt
+for process in /proc/[0-9]*; do
+  if tr '\\0' ' ' < "$process/cmdline" 2>/dev/null | grep -q '^sleep 9999'; then
+    echo "run $run" >> {home}/survivors
+  fi
+done
+(setsid sleep 9999 > /dev/null 2>&1 &)
+touch {home}/work.txt
+while [ "$(wc -l < {home}/work.txt)" -lt {self.lines} ]; do
+  echo "$(date +%s) $(hostname) run $run" >> {home}/work.txt
+  sleep {self.every}
+done
+printf '{{"session_id": "%s", "result": "run %s"}}\\n' {shlex.quote(session_id)} "$run"
+"""
+        return CliCommand(script.strip(), {}, session_id)
+
+
 class TraceSink:
     """An episode's execution trace, as the episode's logging writes it."""
 

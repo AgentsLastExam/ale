@@ -19,6 +19,23 @@ directory is therefore looked up after its directory is listed, and a preparatio
 result, which it writes as it ends, is still read for 90 s after the job ends before its
 absence is a failure.
 
+OpenRSI's QoS wall times are 3 h (`short`), 6 h (`dev`, `mid`) and 12 h (`long`, `lowprio`),
+and the others preempt `lowprio` with 120 s of grace (`PreemptMode=REQUEUE`, which cancels
+ALE's `--no-requeue` jobs). An allocation's deadline is read from Slurm's own count rather
+than from a clock, and `--signal` is not used: everything before the save is ALE's, on the
+login node, and Slurm states the end exactly as the job starts, so a signal to the batch
+step would only be a later second path. Decided: an allocation that Slurm ends first,
+preempted or on a failed node, loses its node's store and what the Sandbox held, and the
+episode fails, to be retried from its start where the Run allows retries, rather than
+resumed from periodic write-outs, which would cost a whole image's `podman save` to NFS each
+time and lose the work since the last one all the same.
+
+Measured on OpenRSI (`cpu_1`, a 1-CPU Sandbox of `container-ubuntu22-base`, wall times of 10
+minutes, 2 of them to drain): an episode of 720 s of the agent's work ran in three
+allocations, on both nodes, each run cut 120 s before its allocation's deadline; saving the
+solver, writing it out, ending the allocation, queueing and booting it in the next took 140
+s and 214 s, none of it the agent's.
+
 OpenRSI's H100 and B200 compute nodes run rootless Podman without a delegated user cgroup.
 Slurm owns resource enforcement: it limits each step of a job on its own, at
 `job_<id>/step_<n>/user` (memory, zero swap and a cpuset narrowed to the step), below the

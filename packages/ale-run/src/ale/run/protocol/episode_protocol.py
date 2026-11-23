@@ -35,6 +35,7 @@ from ale.core.episode import ArtifactSink, EpisodeContext, Phase
 from ale.core.errors import (
     AgentError,
     AgentUnsupportedError,
+    AllocationEndedError,
     BudgetExceededError,
     ConfigError,
     EnvironmentError_,
@@ -61,7 +62,14 @@ from ale.core.harness import (
     TrajectoryParseContext,
 )
 from ale.core.lock import AleVerifyProvenance, ResumedFrom, SandboxProvenance
-from ale.core.result import FailureInfo, PhaseTiming, ValidationFeedback, ValidationRound
+from ale.core.result import (
+    EpisodeProgress,
+    FailureInfo,
+    PhaseTiming,
+    Segment,
+    ValidationFeedback,
+    ValidationRound,
+)
 from ale.core.sandbox import (
     ExecOutputSink,
     ExecResult,
@@ -143,15 +151,30 @@ _AGENT_STOPS = (PhaseTimeoutError, BudgetExceededError, AgentError)
 #: Upper bound on the setup phase: a guard against a hung setup, not a scored budget.
 SETUP_TIMEOUT_SEC = 1800.0
 
-#: Upper bound on waiting for room for the solver a validation round boots, such as GPUs
-#: another Run took while the round's verifier ran, and how long it waits between tries; a
-#: framework guard outside the agent's time.
+#: Upper bound on waiting for room for the solver a validation round or a move boots, such as
+#: GPUs another Run took while the round's verifier ran, and how long it waits between tries;
+#: a framework guard outside the agent's time.
 BOOT_WAIT_SEC = 1800.0
 BOOT_RETRY_SEC = 10.0
 
 #: Upper bound on sanitizing a solver and saving it as the snapshot its verifier, or a
 #: validation round, boots from: a guard against a hung save, outside the verifier's budget.
 SNAPSHOT_TIMEOUT_SEC = 1800.0
+
+#: Before a Sandbox's deadline, what stopping the agent, copying its logs and sanitizing the
+#: solver take, which the agent's run leaves for them; the save itself is the Provider's.
+MOVE_MARGIN_SEC = 120.0
+#: Less than this left in a Sandbox before its deadline, a turn does not start there: the
+#: solver moves first.
+MIN_TURN_SEC = 60.0
+
+#: The prompt that resumes a turn its Sandbox's deadline cut, in the solver booted where it
+#: goes on. Framework-owned and neutral: it says what happened and how much time is left.
+MOVED_PROMPT = (
+    "Your work was interrupted and moved to another machine. Your files are as you left "
+    "them, but every process you were running, and any command in progress, was stopped. "
+    "Continue the task. Time left: {minutes} minutes.\n"
+)
 
 #: Below the instruction, verbatim above it, when the agent receives validation rounds, by
 #: the stage that validates. Framework-owned and neutral: it says how the episode goes on,
@@ -385,7 +408,7 @@ class Resume:
 @dataclass
 class _Solver:
     """The Sandbox the agent's state is in: the first solver, or the one the last validation
-    round booted, and the earlier ones, saved, whose snapshots the lease holds."""
+    round or move booted, and the earlier ones, saved, whose snapshots the lease holds."""
 
     sandbox: Sandbox
     image: PreparedTaskImage | None
@@ -395,20 +418,86 @@ class _Solver:
     """Set once it is being saved as a snapshot: saving stops it, and the lease then holds
     the snapshot in its place."""
     rounds: list[Sandbox] = field(default_factory=list)
-    """The solver the last validation round saved, whose snapshot the current one runs on;
-    the lease holds any earlier one whose snapshot could not be destroyed yet."""
+    """The solver the last validation round or move saved, whose snapshot the current one
+    runs on; the lease holds any earlier one whose snapshot could not be destroyed yet."""
+    booted_from: str | None = None
+    """That snapshot's handle."""
+    continuation: NativeContinuation | None = None
+    """The native session the agent's work goes on in, once one was reported."""
 
 
 @dataclass
 class _AgentTime:
-    """The agent's time: ``total`` across all its turns, of which ``used`` is spent."""
+    """The agent's time: ``total`` across all its turns, of which ``used`` is spent, and the
+    run going on since ``running`` (monotonic), if one is."""
 
     total: float
     used: float = 0.0
+    running: float | None = None
 
     @property
     def remaining(self) -> float:
         return self.total - self.used
+
+    @property
+    def spent(self) -> float:
+        """What is spent, the run going on included."""
+        return self.used + (time.monotonic() - self.running if self.running is not None else 0)
+
+
+@dataclass(frozen=True)
+class _Cut:
+    """A turn its Sandbox's deadline cut, or kept from starting, to go on in the solver
+    booted where it can: with ``prompt`` and ``continuation``, as it was to start, unless it
+    ``ran``, when the agent's session resumes with the prompt that says so."""
+
+    prompt: str | None
+    continuation: NativeContinuation | None
+    ran: bool
+
+
+class _Moved(Exception):
+    """The agent's run its Sandbox's deadline cut, which goes on where the solver moves, in
+    the native ``continuation`` it left."""
+
+    def __init__(self, continuation: NativeContinuation) -> None:
+        super().__init__("the agent's run was cut as its solver moves")
+        self.continuation = continuation
+
+
+def _cut(left: float | None, budget: _AgentTime) -> bool:
+    """Whether a run its Sandbox has ``left`` for ended at its Sandbox's deadline rather than
+    at the end of the agent's time, which ``budget`` holds as the run began."""
+    return left is not None and left < budget.remaining
+
+
+def _too_brief(sandbox: Sandbox, budget: _AgentTime) -> bool:
+    """Whether too little is left of ``sandbox`` to start a run in, the agent having more."""
+    left = _left(sandbox)
+    return left is not None and left < min(MIN_TURN_SEC, budget.remaining)
+
+
+def _unresumable(harness: Harness, budget: _AgentTime) -> ProviderCapabilityError:
+    """What ends an episode whose Sandbox's deadline cut a run that cannot go on elsewhere."""
+    return ProviderCapabilityError(
+        f"the Sandbox's deadline cut {harness.name}'s run before the agent's time was up "
+        f"({budget.remaining:.0f} s of it), and it left no native session to resume"
+    )
+
+
+def _lasts(sandbox: Sandbox, seconds: float | None) -> bool:
+    """Whether ``sandbox`` is held for ``seconds`` more, where they bound what runs there."""
+    if sandbox.deadline is None or seconds is None:
+        return True
+    return (sandbox.deadline - datetime.now(UTC)).total_seconds() >= seconds
+
+
+def _left(sandbox: Sandbox) -> float | None:
+    """How long the agent may still work in ``sandbox`` before the episode saves it, where
+    its Provider holds it only until a deadline."""
+    if sandbox.deadline is None:
+        return None
+    return (sandbox.deadline - datetime.now(UTC)).total_seconds() - MOVE_MARGIN_SEC
 
 
 #: A handle that stands for the snapshot a solver is yet to be saved as, in a request whose
@@ -521,6 +610,8 @@ class EpisodeProtocol:
             _require_resume(self.harness)
         image = ctx.prepared_image
         solver = _Solver(await self._timed(ctx, Phase.PROVISION, self._provision(ctx)), image)
+        if self.resume is not None:
+            solver.continuation = self.resume.source.continuation
         logs = (
             LogMirror(
                 solver.sandbox,
@@ -532,30 +623,44 @@ class EpisodeProtocol:
             if self.agent_enabled and self.harness.logs
             else None
         )
+        budget = _AgentTime(self.timeouts.agent or spec.timeouts.agent)
         try:
             await self._with_deadline(
                 ctx, Phase.SETUP, SETUP_TIMEOUT_SEC, self._setup(task, ctx, solver.sandbox)
             )
-            budget = _AgentTime(self.timeouts.agent or spec.timeouts.agent)
             if self.agent_enabled:
-                await self._agent(task, ctx, solver.sandbox, logs=logs, budget=budget)
+                self._segment_begins(ctx, solver, budget, "provisioned")
+                await self._work(task, ctx, solver, logs=logs, budget=budget)
             if self.validates:
                 await self._validation_rounds(task, ctx, solver, logs=logs, budget=budget)
-            sandbox = solver.sandbox
+            self._segment_ends(ctx, solver, budget)
             handle: str | None = None
             viewed: tuple[str, ...] = ()
             try:
-                viewed = await self._viewed(ctx, sandbox, spec.verify, saved=False)
-                await self._capture_solver_evidence(ctx, sandbox, logs=logs, viewed=viewed)
+                viewed = await self._viewed(ctx, solver.sandbox, spec.verify, saved=False)
+                await self._capture_solver_evidence(ctx, solver.sandbox, logs=logs, viewed=viewed)
                 if mode is VerificationMode.SNAPSHOT or viewed:
                     solver.saved = True
-                    handle = await self._save_solver(ctx, sandbox)
+                    handle = await self._save_solver(ctx, solver.sandbox)
+                elif mode is VerificationMode.SHARED and not _lasts(
+                    solver.sandbox, self._verify_timeout(ctx)
+                ):
+                    # Verified where it is, it would be lost first: it moves where it lasts.
+                    await self._move(
+                        ctx,
+                        solver,
+                        logs=None,
+                        budget=budget,
+                        segment=False,
+                        lasting=self._verify_timeout(ctx),
+                    )
             except BaseException as error:
                 # The solver's own: what the agent left is what fails to be copied or saved.
                 ctx.failure_phase = Phase.AGENT
                 if ctx.agent_stop is not None and isinstance(error, Exception):
                     raise ctx.agent_stop from error
                 raise
+            sandbox = solver.sandbox
 
             async def verify() -> dict[str, float]:
                 if mode is VerificationMode.SHARED:
@@ -591,6 +696,7 @@ class EpisodeProtocol:
                     await self._sanitize_for_retention(ctx, verifier)
                     await ctx.sandboxes.release(verifier)
 
+            self._record_progress(ctx, budget, "verifying", solver)
             try:
                 rewards = await self._with_deadline(
                     ctx, Phase.VERIFY, self._verify_timeout(ctx), verify()
@@ -606,6 +712,9 @@ class EpisodeProtocol:
                 ctx.failure_phase = Phase.AGENT
                 raise ctx.agent_stop from error
         finally:
+            # The agent's work ends with the episode however it ends.
+            with contextlib.suppress(Exception):
+                self._segment_ends(ctx, solver, budget)
             # Teardown runs on every path, including cancellation.
             await asyncio.shield(
                 self._timed(
@@ -729,6 +838,7 @@ class EpisodeProtocol:
             prepared_image=prepared,
             snapshot=snapshot,
             volumes_from=volumes_from,
+            duration_sec=self._verify_timeout(ctx, validation=validation),
             resources=resources.as_resources(),
             **_network(ctx, placed.network),
             gateway_url=ctx.session.gateway_url or None,
@@ -796,6 +906,7 @@ class EpisodeProtocol:
                 role=SandboxRole.VERIFIER,
                 prepared_image=image,
                 snapshot=handle,
+                duration_sec=self._verify_timeout(ctx, validation=True),
                 resources=resources,
                 **_network(ctx, validation.network),
                 gateway_url=ctx.session.gateway_url or None,
@@ -823,12 +934,15 @@ class EpisodeProtocol:
         image: PreparedTaskImage | None,
         *,
         validations: int,
+        lasting: float | None = None,
     ) -> Sandbox:
-        """The next turn's solver, booted from the snapshot a validation round saved, with
-        the solver's resources and network; ``validations`` rounds still to come save it in
-        turn."""
+        """A solver booted from the snapshot a validation round or a move saved, with the
+        solver's resources and network, held ``lasting`` seconds where given; ``validations``
+        still to come save it in turn."""
         request = self._solver_request(ctx, validations=validations, image=image)
-        return await ctx.sandboxes.acquire(request.model_copy(update={"snapshot": handle}))
+        return await ctx.sandboxes.acquire(
+            request.model_copy(update={"snapshot": handle, "duration_sec": lasting})
+        )
 
     async def _boot_when_there_is_room(
         self,
@@ -837,31 +951,38 @@ class EpisodeProtocol:
         image: PreparedTaskImage | None,
         *,
         validations: int,
+        lasting: float | None = None,
     ) -> Sandbox:
-        """Boot the next turn's solver, waiting, up to ``BOOT_WAIT_SEC``, while what it
+        """Boot a solver from a saved one, waiting, up to ``BOOT_WAIT_SEC``, while what it
         needs is in use: another Run may take its GPUs while the round's verifier runs."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + BOOT_WAIT_SEC
         while True:
             try:
-                return await self._boot_solver(ctx, handle, image, validations=validations)
+                return await self._boot_solver(
+                    ctx, handle, image, validations=validations, lasting=lasting
+                )
             except ProviderCapacityError as error:
                 if loop.time() + BOOT_RETRY_SEC > deadline:
                     raise ProviderCapacityError(
-                        f"the next turn's solver found no room in {BOOT_WAIT_SEC:.0f} s: {error}"
+                        f"the booted solver found no room in {BOOT_WAIT_SEC:.0f} s: {error}"
                     ) from error
                 logging.getLogger("ale.execution").info(
-                    "the next turn's solver waits for room",
+                    "the booted solver waits for room",
                     extra={"ale_data": {"error": str(error)}},
                 )
                 await asyncio.sleep(BOOT_RETRY_SEC)
 
     async def _save_solver(
-        self, ctx: EpisodeContext, sandbox: Sandbox, *, validation: bool = False
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        *,
+        carried: Literal["round", "move"] | None = None,
     ) -> str:
         """Sanitize the solver and save its disk as the snapshot its verifier boots from, or
-        a ``validation`` round's and the next turn's solver do, which stops it, and return
-        the snapshot's handle.
+        that a validation ``round``'s verifier and next turn's solver, or the solver a
+        ``move`` boots, boot from, which stops it, and return the snapshot's handle.
 
         It runs under a framework bound of its own, as setup does, so that the verifier's
         budget covers only booting the verifier and its tests; the trace attributes it to
@@ -879,7 +1000,7 @@ class EpisodeProtocol:
             try:
                 async with bound:
                     await self._sanitize_for_retention(ctx, sandbox, for_snapshot=True)
-                    return await ctx.sandboxes.snapshot(sandbox, validation=validation)
+                    return await ctx.sandboxes.snapshot(sandbox, carried=carried)
             except TimeoutError as exc:
                 if not bound.expired():
                     # A timeout of the save's own, which says what timed out.
@@ -975,29 +1096,33 @@ class EpisodeProtocol:
         self,
         task: Task,
         ctx: EpisodeContext,
-        sandbox: Sandbox,
+        solver: _Solver,
         *,
         logs: LogMirror | None = None,
         budget: _AgentTime | None = None,
         prompt: str | None = None,
         continuation: NativeContinuation | None = None,
         round_index: int | None = None,
-    ) -> None:
+        segment: int | None = None,
+    ) -> _Cut | None:
         """One turn of the agent, with what is left of its time: the first, launched with the
         instruction, or resumed with it in the session a continued episode left; or a later
-        one, resumed with ``prompt``, validation round ``round_index``'s, in its own
-        ``continuation``. The egress session is the agent's from the moment its network is
-        applied until the turn ends, whatever ends it."""
+        one, resumed with ``prompt``, validation round ``round_index``'s, or the one that
+        resumes the turn a move cut in ``segment``, in its own ``continuation``.
+        The egress session is the agent's from the moment its network is applied until the
+        turn ends, whatever ends it. Return how it goes on where its Sandbox's deadline cut
+        it, or kept it from starting."""
         try:
-            await self._turn(
+            return await self._turn(
                 task,
                 ctx,
-                sandbox,
+                solver,
                 logs=logs,
                 budget=budget,
                 prompt=prompt,
                 continuation=continuation,
                 round_index=round_index,
+                segment=segment,
             )
         finally:
             if ctx.open_egress_session is not None:
@@ -1007,18 +1132,22 @@ class EpisodeProtocol:
         self,
         task: Task,
         ctx: EpisodeContext,
-        sandbox: Sandbox,
+        solver: _Solver,
         *,
         logs: LogMirror | None,
         budget: _AgentTime | None,
         prompt: str | None,
         continuation: NativeContinuation | None,
         round_index: int | None,
-    ) -> None:
+        segment: int | None,
+    ) -> _Cut | None:
         spec = ctx.spec
-        ctx.agent_started = True
+        sandbox = solver.sandbox
         budget = budget or _AgentTime(self.timeouts.agent or spec.timeouts.agent)
-        timeout = budget.remaining
+        asked = _Cut(prompt, continuation, ran=False)
+        if _too_brief(sandbox, budget):
+            return asked
+        ctx.agent_started = True
         first = prompt is None
         if first:
             prompt = self._instruction(ctx)
@@ -1027,16 +1156,22 @@ class EpisodeProtocol:
 
         harness = self.harness
         if isinstance(harness, PolicyHarness):
+            left = _left(sandbox)
             try:
                 await self._with_deadline(
-                    ctx, Phase.AGENT, timeout, self._rollout(harness, ctx, sandbox)
+                    ctx,
+                    Phase.AGENT,
+                    budget.remaining if left is None else min(left, budget.remaining),
+                    self._rollout(harness, ctx, sandbox),
                 )
             except _AGENT_STOPS as error:
+                if isinstance(error, PhaseTimeoutError) and _cut(left, budget):
+                    raise _unresumable(harness, budget) from error
                 ctx.agent_stop = error
             finally:
                 if ctx.open_agent_session is not None:
                     ctx.open_agent_session(False)
-            return
+            return None
 
         oracle = harness if isinstance(harness, OracleHarness) else None
         if oracle is not None and first:
@@ -1086,9 +1221,14 @@ class EpisodeProtocol:
             )
             stop.__cause__ = error
             ctx.agent_stop = stop
-            return
+            return None
         if first:
             await self._apply_network(ctx, sandbox, spec.network, Phase.AGENT)
+        # Bounded from here, as what came before took the Sandbox's time too.
+        if _too_brief(sandbox, budget):
+            return asked
+        left = _left(sandbox)
+        timeout = budget.remaining if left is None else min(left, budget.remaining)
 
         variables = ctx.variables.values
 
@@ -1100,10 +1240,12 @@ class EpisodeProtocol:
                 actor="task" if oracle is not None else "framework",
                 env=variables.oracle() if oracle is not None else variables.environment,
             )
-            started = time.monotonic()
+            started = budget.running = time.monotonic()
+            # Only a prompt the agent was given is looked for in its session.
             if round_index is not None:
-                # Only a prompt the agent was given is looked for in its session.
                 ctx.validation_prompts[round_index] = prompt
+            if segment is not None:
+                ctx.move_prompts[segment] = prompt
             with _limit_terminated(ctx):
                 if ctx.open_agent_session is not None:
                     ctx.open_agent_session(True)
@@ -1114,36 +1256,71 @@ class EpisodeProtocol:
                         run = await harness.resume(
                             prompt, continuation, recorded, session, timeout_sec=timeout
                         )
+                except PhaseTimeoutError as error:
+                    if not _cut(left, budget) or isinstance(error.__cause__, TimeoutError):
+                        raise
+                    # Its Sandbox's deadline, not the agent's time, ended the run: the turn
+                    # goes on where the solver moves, in the session it left.
+                    left_by = error.native_session_id or (
+                        continuation.native_session_id if continuation else None
+                    )
+                    if left_by is None or harness.resume_support is not ResumeSupport.NATIVE:
+                        raise _unresumable(harness, budget) from error
+                    raise _Moved(
+                        NativeContinuation(harness=harness.name, native_session_id=left_by)
+                    ) from error
                 finally:
                     # Only the agent's own run spends its time and its model session: no
                     # save, validation or boot, and nothing its programs left running.
                     budget.used += time.monotonic() - started
+                    budget.running = None
                     if ctx.open_agent_session is not None:
                         ctx.open_agent_session(False)
                 ctx.agent_run = run
+                solver.continuation = run.continuation or solver.continuation
                 if run.exit_code != 0:
                     detail = run.final_message or "no diagnostic output"
                     raise AgentError(f"{harness.name} exited {run.exit_code}: {detail}")
 
-        polling = asyncio.create_task(self._poll_logs(logs)) if logs is not None else None
+        polling = asyncio.create_task(self._poll_logs(ctx, logs, budget, solver))
         try:
-            backstop = None if timeout is None else timeout + AGENT_STOP_GRACE_SEC
+            backstop = timeout + AGENT_STOP_GRACE_SEC
             await self._with_deadline(ctx, Phase.AGENT, backstop, launch())
+        except _Moved as moved:
+            solver.continuation = moved.continuation
+            with self._traced(ctx, Phase.AGENT):
+                logging.getLogger("ale.execution").info(
+                    "the solver's Sandbox reached its deadline; the agent's run was cut",
+                    extra={"ale_data": {"left_sec": round(budget.remaining)}},
+                )
+            return _Cut(None, moved.continuation, ran=True)
         except _AGENT_STOPS as error:
             # Past the backstop the guest no longer replies, so nothing there can be verified.
             if isinstance(error, PhaseTimeoutError) and isinstance(error.__cause__, TimeoutError):
                 raise
             ctx.agent_stop = error
         finally:
-            if polling is not None:
-                polling.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await polling
+            polling.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await polling
+        return None
 
-    async def _poll_logs(self, logs: LogMirror) -> None:
-        """Copy what the agent appended to its logs while it runs; conversion waits."""
+    async def _poll_logs(
+        self, ctx: EpisodeContext, logs: LogMirror | None, budget: _AgentTime, solver: _Solver
+    ) -> None:
+        """Copy what the agent appended to its logs while it runs, conversion waiting, and
+        record how far the episode got."""
         while True:
             await asyncio.sleep(SYNC_INTERVAL_SEC)
+            try:
+                self._record_progress(ctx, budget, "agent", solver)
+            except Exception as exc:
+                logging.getLogger("ale.execution").warning(
+                    "recording the episode's progress failed; will retry",
+                    extra={"ale_data": {"error": type(exc).__name__}},
+                )
+            if logs is None:
+                continue
             try:
                 async with asyncio.timeout(SYNC_TIMEOUT_SEC):
                     await logs.sync()
@@ -1152,6 +1329,162 @@ class EpisodeProtocol:
                     "periodic harness log copy failed; will retry",
                     extra={"ale_data": {"error": type(exc).__name__}},
                 )
+
+    async def _work(
+        self,
+        task: Task,
+        ctx: EpisodeContext,
+        solver: _Solver,
+        *,
+        logs: LogMirror | None,
+        budget: _AgentTime,
+        prompt: str | None = None,
+        continuation: NativeContinuation | None = None,
+        round_index: int | None = None,
+    ) -> None:
+        """One turn of the agent, in as many solvers as its Sandboxes' deadlines take: each
+        time one cuts the turn, or leaves no time to start it, the solver moves where it can
+        go on, and the agent resumes its session there, with the time it has left."""
+        segment: int | None = None
+        moved = False
+        while True:
+            cut = await self._agent(
+                task,
+                ctx,
+                solver,
+                logs=logs,
+                budget=budget,
+                prompt=prompt,
+                continuation=continuation,
+                round_index=round_index,
+                segment=segment,
+            )
+            if cut is None:
+                return
+            if moved and not cut.ran:
+                raise ProviderCapabilityError(
+                    "the solver moved to a Sandbox its Provider holds too briefly to start a "
+                    f"turn in: less than {MIN_TURN_SEC:g} s before its deadline"
+                )
+            await self._move(ctx, solver, logs=logs, budget=budget)
+            moved = True
+            prompt, continuation = cut.prompt, cut.continuation
+            if cut.ran:
+                prompt = MOVED_PROMPT.format(minutes=_minutes(budget.remaining))
+                round_index, segment = None, len(ctx.segments)
+
+    async def _move(
+        self,
+        ctx: EpisodeContext,
+        solver: _Solver,
+        *,
+        logs: LogMirror | None,
+        budget: _AgentTime,
+        segment: bool = True,
+        lasting: float | None = None,
+    ) -> None:
+        """Save the solver, whose Sandbox its Provider is to lose first, and boot it from the
+        snapshot where it lasts, ``lasting`` seconds where given, without running setup
+        again, as a validation round boots the next turn's; a ``segment`` of the agent's work
+        goes on there."""
+        logger = logging.getLogger("ale.execution")
+        with self._traced(ctx, Phase.AGENT):
+            logger.info(
+                "the solver's Sandbox reaches its deadline; the solver moves",
+                extra={"ale_data": {"deadline": str(solver.sandbox.deadline)}},
+            )
+            if logs is not None:
+                await self._copy_logs(logs)
+            self._segment_ends(ctx, solver, budget, "moving")
+            solver.saved = True
+            try:
+                handle = await self._save_solver(ctx, solver.sandbox, carried="move")
+            except BaseException:
+                ctx.failure_phase = Phase.AGENT
+                raise
+            earlier, solver.rounds = solver.rounds, [solver.sandbox]
+            await self._release_rounds(ctx, earlier)
+        validations = max(self.validations - len(ctx.validation_rounds), 0)
+        booted = await self._timed(
+            ctx,
+            Phase.PROVISION,
+            self._boot_when_there_is_room(
+                ctx, handle, solver.image, validations=validations, lasting=lasting
+            ),
+        )
+        solver.sandbox, solver.saved, solver.booted_from = booted, False, handle
+        if logs is not None:
+            logs.follow(booted)
+        if segment:
+            self._segment_begins(ctx, solver, budget, "moved")
+        with self._traced(ctx, Phase.AGENT):
+            logger.info(
+                "the solver moved",
+                extra={"ale_data": {"handle": handle, "sandbox": booted.sandbox_id}},
+            )
+
+    def _segment_begins(
+        self,
+        ctx: EpisodeContext,
+        solver: _Solver,
+        budget: _AgentTime,
+        began: Literal["provisioned", "round", "moved"],
+        round_index: int | None = None,
+    ) -> None:
+        sandbox = solver.sandbox
+        ctx.segments.append(
+            Segment(
+                index=len(ctx.segments) + 1,
+                began=began,
+                round=round_index,
+                sandbox_id=sandbox.sandbox_id,
+                allocation=sandbox.allocation,
+                booted_from=solver.booted_from,
+                started_at=datetime.now(UTC),
+            )
+        )
+        self._record_progress(ctx, budget, "agent", solver)
+
+    def _segment_ends(
+        self,
+        ctx: EpisodeContext,
+        solver: _Solver,
+        budget: _AgentTime,
+        phase: Literal["agent", "moving", "validating", "verifying"] = "agent",
+    ) -> None:
+        """End the segment the agent works in, with the time it spent in it, as the episode
+        goes on to ``phase``."""
+        if not ctx.segments or ctx.segments[-1].ended_at is not None:
+            return
+        before = sum(segment.agent_sec for segment in ctx.segments[:-1])
+        ctx.segments[-1] = ctx.segments[-1].model_copy(
+            update={"ended_at": datetime.now(UTC), "agent_sec": max(budget.used - before, 0.0)}
+        )
+        self._record_progress(ctx, budget, phase, solver)
+
+    def _record_progress(
+        self,
+        ctx: EpisodeContext,
+        budget: _AgentTime,
+        phase: Literal["agent", "moving", "validating", "verifying"],
+        solver: _Solver,
+    ) -> None:
+        """Record how far the episode got in ``progress.json``, rewritten as it goes, so that
+        it outlives the process that runs the episode."""
+        continuation = solver.continuation
+        atomic_write_json(
+            ctx.run_dir / "progress.json",
+            EpisodeProgress(
+                episode_id=ctx.episode_id,
+                phase=phase,
+                agent_sec=budget.total,
+                agent_used_sec=max(budget.spent, 0.0),
+                rounds=len(ctx.validation_rounds),
+                continuation=continuation,
+                segments=tuple(ctx.segments),
+                updated_at=datetime.now(UTC),
+            ),
+        )
 
     def _instruction(self, ctx: EpisodeContext) -> str:
         """The first prompt: the instruction, verbatim, and, when the agent receives
@@ -1237,9 +1570,11 @@ class EpisodeProtocol:
                     )
                     artifacts = ctx.artifacts.for_validation(directory)
                     await self._collect_artifacts(ctx, solver.sandbox, artifacts, viewed)
+                self._segment_ends(ctx, solver, budget, "validating")
+                self._record_progress(ctx, budget, "validating", solver)
                 solver.saved = True
                 try:
-                    handle = await self._save_solver(ctx, solver.sandbox, validation=True)
+                    handle = await self._save_solver(ctx, solver.sandbox, carried="round")
                 except BaseException:
                     ctx.failure_phase = Phase.AGENT
                     raise
@@ -1259,7 +1594,7 @@ class EpisodeProtocol:
 
             async def boot(handle: str = handle, index: int = index) -> Sandbox:
                 booted = await self._boot_when_there_is_room(
-                    ctx, handle, solver.image, validations=max(self.validation_rounds - index, 0)
+                    ctx, handle, solver.image, validations=max(self.validations - index, 0)
                 )
                 logger.info(
                     "a validation round booted the next solver",
@@ -1268,14 +1603,12 @@ class EpisodeProtocol:
                 return booted
 
             booted = await self._timed(ctx, Phase.PROVISION, boot())
-            solver.sandbox, solver.saved = booted, False
+            solver.sandbox, solver.saved, solver.booted_from = booted, False, handle
             if logs is not None:
                 logs.follow(booted)
             if not self.validation_rounds:
                 return
-            ctx.validation_rounds[-1] = ctx.validation_rounds[-1].model_copy(
-                update={"solver_allocation": booted.allocation}
-            )
+            self._segment_begins(ctx, solver, budget, "round", index)
             assert ctx.agent_run is not None and ctx.agent_run.continuation is not None
             prompt = _round_prompt(
                 ctx.validation_rounds[-1],
@@ -1284,10 +1617,10 @@ class EpisodeProtocol:
                 budget.remaining,
                 ctx.validation_stage,
             )
-            await self._agent(
+            await self._work(
                 task,
                 ctx,
-                booted,
+                solver,
                 logs=logs,
                 budget=budget,
                 prompt=prompt,
@@ -1296,7 +1629,8 @@ class EpisodeProtocol:
             )
 
     async def _release_rounds(self, ctx: EpisodeContext, saved: Sequence[Sandbox]) -> None:
-        """Release the solvers earlier rounds saved, whose snapshots nothing runs on any more.
+        """Release the solvers earlier rounds or moves saved, whose snapshots nothing runs on
+        any more.
         One that cannot be destroyed now is left to the lease, which tries again as the
         episode ends and then records it as not destroyed."""
         for sandbox in saved:
@@ -1359,7 +1693,9 @@ class EpisodeProtocol:
         feedback text the agent receives.
 
         A round that produces no score is recorded with its failure, and the agent receives
-        it as such: the round counts, and the episode goes on.
+        it as such: the round counts, and the episode goes on. One whose verifier's
+        allocation its scheduler ended runs once more on the same snapshot, which no verifier
+        changed: that attempt is not the round's.
         """
         directory = ctx.run_dir / "validation" / str(index)
         started_at = datetime.now(UTC)
@@ -1395,22 +1731,34 @@ class EpisodeProtocol:
             )
 
         outcome: tuple[float, str | None] | Exception
-        try:
-            outcome = await self._with_deadline(
-                ctx, Phase.VALIDATE, self._verify_timeout(ctx, validation=True), run()
-            )
-        except Exception as error:
-            outcome = error
-        unreleased: RetentionFinalizationError | None = None
-        if verifier is not None:
-            # Outside what makes the round unscored: a verifier that cannot be destroyed ends
-            # the episode, as the verifier of tests/ does, once the round is recorded.
+        for attempt in (1, 2):
+            verifier = None
             try:
-                await ctx.sandboxes.release(verifier)
-            except RetentionFinalizationError as exc:
-                unreleased = exc
-        if isinstance(outcome, RetentionFinalizationError):
-            raise outcome
+                outcome = await self._with_deadline(
+                    ctx, Phase.VALIDATE, self._verify_timeout(ctx, validation=True), run()
+                )
+            except Exception as error:
+                outcome = error
+            unreleased: RetentionFinalizationError | None = None
+            if verifier is not None:
+                # Outside what makes the round unscored: a verifier that cannot be destroyed
+                # ends the episode, as the verifier of tests/ does, once the round is recorded.
+                try:
+                    await ctx.sandboxes.release(verifier)
+                except RetentionFinalizationError as exc:
+                    unreleased = exc
+            if isinstance(outcome, RetentionFinalizationError):
+                raise outcome
+            if attempt == 1 and isinstance(outcome, AllocationEndedError) and unreleased is None:
+                ctx.failure_phase = failure_phase
+                with self._traced(ctx, Phase.VALIDATE):
+                    logging.getLogger("ale.execution").warning(
+                        "a validation round's verifier lost its allocation; the round runs "
+                        "again on the same snapshot",
+                        extra={"ale_data": {"round": index, "error": str(outcome)}},
+                    )
+                continue
+            break
         feedback = self._record_round(ctx, index, directory, started_at, failure_phase, outcome)
         if unreleased is not None:
             raise unreleased
@@ -2053,9 +2401,9 @@ class EpisodeProtocol:
         rounds: Sequence[Sandbox] = (),
     ) -> None:
         """Capture what an interrupted agent left, then release the solver: sanitized first,
-        unless it was ``snapshotted`` for its verifier or a validation round, which stopped
-        it, and whose snapshot the lease releases in its place; then the solvers of earlier
-        rounds, whose snapshots go once nothing runs on them."""
+        unless it was ``snapshotted`` for its verifier, a validation round or a move, which
+        stopped it, and whose snapshot the lease releases in its place; then the solvers of
+        earlier rounds and moves, whose snapshots go once nothing runs on them."""
         # Best-effort interrupted evidence does not replace the primary failure.
         if ctx.agent_started and not ctx.solver_evidence_captured:
             try:
@@ -2193,7 +2541,12 @@ class EpisodeProtocol:
             trajectory = self.harness.parse_trajectory(context)
             if self.resume is not None:
                 trajectory = _continued_segment(trajectory, self.resume)
-            trajectory = _with_validation_rounds(trajectory, ctx.validation_prompts)
+            trajectory = _with_marked_prompts(
+                trajectory, ctx.validation_prompts, key="validation_round", what="validation round"
+            )
+            trajectory = _with_marked_prompts(
+                trajectory, ctx.move_prompts, key="moved", what="moved segment"
+            )
         except Exception as exc:
             # The agent finished; a converter defect must not decide its score. Keep the
             # minimal truthful trajectory, say why, and keep the native evidence.
@@ -2447,10 +2800,7 @@ class EpisodeProtocol:
     def _verify_timeout(self, ctx: EpisodeContext, *, validation: bool = False) -> float | None:
         """The limit of ``tests/``'s verifier, or of a validation round's: the Run's verify
         limit, which holds for both, or else the Task's own."""
-        if self.timeouts.verify == "unlimited":
-            return None
-        own = ctx.spec.validation_timeout if validation else ctx.spec.timeouts.verify
-        return self.timeouts.verify or own
+        return self.timeouts.verification(ctx.spec, validation=validation)
 
     async def _with_deadline(self, ctx, phase: Phase, seconds: float | None, coro):  # type: ignore[no-untyped-def]
         return await self._timed(ctx, phase, coro, timeout_sec=seconds)
@@ -2510,6 +2860,10 @@ class EpisodeProtocol:
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
+        except _Moved:
+            # No failure: the run goes on where the solver moves.
+            outcome = "moved"
+            raise
         except BaseException:
             outcome = "failed"
             ctx.failure_phase = phase
@@ -2530,7 +2884,7 @@ class EpisodeProtocol:
                     episode_id=ctx.episode_id,
                     phase=phase.value,
                     component=self.component,
-                    level="info" if outcome == "succeeded" else "error",
+                    level="info" if outcome in ("succeeded", "moved") else "error",
                     outcome=outcome,  # type: ignore[arg-type]
                     duration_ms=elapsed,
                 ),
@@ -2848,28 +3202,33 @@ def _round_prompt(
     return "\n".join(lines)
 
 
-def _with_validation_rounds(trajectory: AtifTrajectory, prompts: dict[int, str]) -> AtifTrajectory:
-    """Mark the user step of each validation round's prompt with ``validation_round``, which
-    is where the agent's next turn begins; a prompt the parsed session lacks is a parse
-    issue."""
+def _with_marked_prompts(
+    trajectory: AtifTrajectory, prompts: dict[int, str], *, key: str, what: str
+) -> AtifTrajectory:
+    """Mark the user step of each of ``prompts`` with ``key``: where a validation round's
+    next turn begins, or where a turn a move cut resumes; a prompt the parsed session lacks
+    is a parse issue."""
     if not prompts:
         return trajectory
-    by_prompt = {prompt.strip(): index for index, prompt in prompts.items()}
+    steps = list(trajectory.steps)
     found: set[int] = set()
-    steps = []
-    for step in trajectory.steps:
-        index = by_prompt.get(_text(step).strip()) if step.source == "user" else None
-        if index is not None and index not in found:
-            found.add(index)
-            extra = dict(step.extra or {})
-            extra["ale"] = {**(extra.get("ale") or {}), "validation_round": index}
-            step = step.model_copy(update={"extra": extra})
-        steps.append(step)
+    # In order, as they were given: two may read the same.
+    position = 0
+    for index, prompt in sorted(prompts.items()):
+        for at in range(position, len(steps)):
+            step = steps[at]
+            if step.source == "user" and _text(step).strip() == prompt.strip():
+                extra = dict(step.extra or {})
+                extra["ale"] = {**(extra.get("ale") or {}), key: index}
+                steps[at] = step.model_copy(update={"extra": extra})
+                found.add(index)
+                position = at + 1
+                break
     trajectory = trajectory.model_copy(update={"steps": steps})
     for index in sorted(set(prompts) - found):
         issue = {
-            "reason": "validation_round_not_found",
-            "detail": f"no user message of the session is validation round {index}'s prompt",
+            "reason": f"{key}_not_found",
+            "detail": f"no user message of the session is {what} {index}'s prompt",
         }
         trajectory = _with_parse_issue(trajectory, issue)
     return trajectory

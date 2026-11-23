@@ -24,7 +24,7 @@ from ale.core.capability import (
     solver_saves,
     unmet,
 )
-from ale.core.config import DockerProviderConfig, RunConfig, SlurmProviderConfig
+from ale.core.config import DockerProviderConfig, RunConfig, RunTimeouts, SlurmProviderConfig
 from ale.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     Provider,
@@ -148,15 +148,26 @@ _Image = Literal["solver", "verifier", "validation"]
 _Planned = tuple[SandboxRole, str, SandboxNeeds, _Image]
 
 
-def _sandboxes(task: Task, *, snapshot: bool, solver: bool) -> Iterator[_Planned]:
+def _sandboxes(
+    task: Task, *, snapshot: bool, solver: bool, timeouts: RunTimeouts
+) -> Iterator[_Planned]:
     """Each Sandbox an episode of ``task`` starts, as the episode protocol requests it: its
     role, the agent's account in it, what it needs and which prepared image it runs. A
     verifier that boots from a snapshot its solver saves, a snapshot verifier or a
     validation round's, runs on the leaf that saved it, so the solver needs what that
     verifier needs too, and as many saves in a row as
-    :func:`~ale.core.capability.solver_saves` counts."""
+    :func:`~ale.core.capability.solver_saves` counts. Each verifier needs to be held for its
+    limit, on the leaf that saved the snapshot it boots from, or in the solver it runs in."""
     spec = task.spec
     mode = spec.verify.environment_mode
+    tests = timeouts.verification(spec)
+    rounds = timeouts.verification(spec, validation=True) if task.validations else None
+    placed_rounds = spec.validation_spec.environment_mode
+    held = [
+        tests if mode is not VerificationMode.SEPARATE else None,
+        rounds if placed_rounds is not VerificationMode.SEPARATE else None,
+    ]
+    longest = max((limit for limit in held if limit is not None), default=None)
     snapshot_verifier = (
         spec.verify.resources.as_resources()
         if mode is VerificationMode.SNAPSHOT and spec.verify.resources is not None
@@ -189,11 +200,13 @@ def _sandboxes(task: Task, *, snapshot: bool, solver: bool) -> Iterator[_Planned
                 snapshot=saves > 0 or verifier is not None,
                 saves=saves,
                 verifier=verifier,
+                duration_sec=longest,
             ),
             "solver",
         )
     if mode is VerificationMode.SNAPSHOT:
         assert verifier is not None
+        verifier = verifier.model_copy(update={"duration_sec": tests})
         yield SandboxRole.VERIFIER, spec.image.user, verifier, "verifier"
     separate: list[tuple[VerifySpec, _Image]] = (
         [(spec.verify, "verifier")] if mode is VerificationMode.SEPARATE else []
@@ -210,6 +223,7 @@ def _sandboxes(task: Task, *, snapshot: bool, solver: bool) -> Iterator[_Planned
     for placed, prepared in separate:
         image = placed.image or spec.image
         assert placed.resources is not None
+        limit = rounds if prepared == "validation" else tests
         yield (
             SandboxRole.VERIFIER,
             image.user,
@@ -219,6 +233,7 @@ def _sandboxes(task: Task, *, snapshot: bool, solver: bool) -> Iterator[_Planned
                 arch=Arch.of(spec.os),
                 network_mode=placed.network.mode,
                 resources=placed.resources.as_resources(),
+                duration_sec=limit,
             ),
             prepared,
         )
@@ -294,7 +309,11 @@ class ProviderRegistry:
         refused: list[str] = []
         watched: Counter[str] = Counter()
         for task in tasks:
-            sandboxes = list(_sandboxes(task, snapshot=snapshots, solver=solvers))
+            sandboxes = list(
+                _sandboxes(
+                    task, snapshot=snapshots, solver=solvers, timeouts=self.settings.timeouts
+                )
+            )
             groups: list[tuple[list[_Planned], Sequence[str]]]
             snapshot = task.spec.verify.environment_mode is VerificationMode.SNAPSHOT
             if snapshot and not solvers:
@@ -371,7 +390,10 @@ class ProviderRegistry:
         wanted: dict[str, list[SandboxNeeds]] = {}
         first: dict[tuple[str, frozenset[ContainerFeature]], SandboxRequest] = {}
         for task in tasks:
-            for role, user, needs, prepared in _sandboxes(task, snapshot=False, solver=solvers):
+            planned = _sandboxes(
+                task, snapshot=False, solver=solvers, timeouts=self.settings.timeouts
+            )
+            for role, user, needs, prepared in planned:
                 verifier = role is SandboxRole.VERIFIER
                 provider_id = task.verifier_provider if verifier else task.provider
                 assert provider_id is not None, "select before preflight"

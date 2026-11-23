@@ -13,10 +13,12 @@ from ale.core.sandbox import ResourceAllocation
 from ale.core.verdict import Status
 
 __all__ = [
+    "EpisodeProgress",
     "FailureInfo",
     "PhaseTiming",
     "ResultRecord",
     "SandboxOutcome",
+    "Segment",
     "ValidationFeedback",
     "ValidationRound",
 ]
@@ -40,7 +42,7 @@ class PhaseTiming(BaseModel):
     started_at: datetime
     finished_at: datetime
     duration_ms: int = Field(ge=0)
-    outcome: Literal["succeeded", "failed", "timed_out", "cancelled"]
+    outcome: Literal["succeeded", "failed", "timed_out", "cancelled", "moved"]
 
     @model_validator(mode="after")
     def _ordered(self) -> Self:
@@ -92,10 +94,6 @@ class ValidationRound(BaseModel):
     failure: FailureInfo | None = None
     feedback: ValidationFeedback | None = None
     """The text the agent was shown below the reward; none when the verifier wrote none."""
-    solver_allocation: ResourceAllocation | None = None
-    """What the solver the round booted for the agent's next turn was given, its GPUs
-    included; the RunLock records the first turn's. Calibration's validation check, which no
-    turn follows, has none."""
     started_at: datetime
     finished_at: datetime
 
@@ -111,6 +109,62 @@ class ValidationRound(BaseModel):
         elif self.failure is None or self.reward is not None or self.feedback is not None:
             raise ValueError("an unscored validation round has a failure and no score")
         return self
+
+
+class Segment(BaseModel):
+    """One solver Sandbox the agent worked in: the first, or one booted from a snapshot of the
+    one before, for the turn after a validation ``round``, or ``moved`` there because the one
+    before was to be lost before the agent's time was up."""
+
+    model_config = _STRICT
+
+    index: int = Field(ge=1)
+    began: Literal["provisioned", "round", "moved"]
+    round: int | None = Field(default=None, ge=1)
+    """The validation round whose next turn began in it."""
+    sandbox_id: str
+    allocation: ResourceAllocation
+    """What it was given, its GPUs and, where a scheduler placed it, its node included."""
+    booted_from: str | None = None
+    """The handle of the snapshot it booted from, which outlives it until the next save."""
+    started_at: datetime
+    """When it was ready."""
+    ended_at: datetime | None = None
+    """When the agent's work in it ended: its save began, or the agent's last turn ended."""
+    agent_sec: float = Field(default=0.0, ge=0)
+    """How much of the agent's time it spent in it."""
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _round_exactly_when_began_after_one(self) -> Self:
+        if (self.round is not None) != (self.began == "round"):
+            raise ValueError("a segment names its round exactly when it began after one")
+        if self.ended_at is not None and self.ended_at < self.started_at:
+            raise ValueError("ended_at precedes started_at")
+        return self
+
+
+class EpisodeProgress(BaseModel):
+    """How far an episode got, rewritten as it goes so that it outlives the process that runs
+    the episode: the agent's time and rounds, its native session and the solver Sandboxes it
+    worked in, the last of which booted from the snapshot it names."""
+
+    model_config = _STRICT
+
+    schema_version: Literal[1] = 1
+    episode_id: str
+    phase: Literal["agent", "moving", "validating", "verifying"]
+    agent_sec: float = Field(ge=0)
+    """The agent's time across all its turns."""
+    agent_used_sec: float = Field(ge=0)
+    """What of it was spent, the run going on included."""
+    rounds: int = Field(ge=0)
+    """The validation rounds the agent received."""
+    continuation: NativeContinuation | None = None
+    """The native session the agent goes on in."""
+    segments: tuple[Segment, ...] = ()
+    updated_at: datetime
 
 
 class ResultRecord(BaseModel):
@@ -131,6 +185,8 @@ class ResultRecord(BaseModel):
     from the retained solver."""
     validation_rounds: tuple[ValidationRound, ...] = ()
     """Each validation round in order; ``rewards`` are ``tests/``'s alone."""
+    segments: tuple[Segment, ...] = ()
+    """Each solver Sandbox the agent worked in, in order; none where no agent ran."""
 
     @field_validator("rewards")
     @classmethod

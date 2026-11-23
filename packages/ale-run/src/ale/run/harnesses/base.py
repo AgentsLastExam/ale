@@ -265,6 +265,21 @@ class CliHarness(AutonomousHarness):
                     return True
         return False
 
+    async def _left_session(
+        self, sandbox: Sandbox, stdout_path: str, offset: int, requested: str | None
+    ) -> str | None:
+        """The native session a run its limit cut left: the one it was given, or the one its
+        stream named before the cut, if it did."""
+        if requested is not None:
+            return requested
+        try:
+            stdout = (await sandbox.read_file(stdout_path, offset=offset)).decode(
+                "utf-8", "replace"
+            )
+            return self.read_result(stdout).session_id
+        except Exception:
+            return None
+
     async def _invoke(
         self,
         prompt: str,
@@ -311,20 +326,34 @@ class CliHarness(AutonomousHarness):
             + b"\n",
             identity=Identity.AGENT,
         )
-        result = await sandbox.exec(
-            bash_command(
-                session.home,
-                f"{{ {command.script}; }} >> {shlex.quote(stdout_path)} "
-                f"2>> {shlex.quote(stderr_path)}",
-                login=False,
-            ),
-            cwd=str(agent_path(session.start_dir)),
-            env=command.env,
-            identity=Identity.AGENT,
-            timeout_sec=timeout_sec,
-        )
+        try:
+            result = await sandbox.exec(
+                bash_command(
+                    session.home,
+                    f"{{ {command.script}; }} >> {shlex.quote(stdout_path)} "
+                    f"2>> {shlex.quote(stderr_path)}",
+                    login=False,
+                ),
+                cwd=str(agent_path(session.start_dir)),
+                env=command.env,
+                identity=Identity.AGENT,
+                timeout_sec=timeout_sec,
+            )
+        except PhaseTimeoutError as error:
+            # Raised for the run by the episode's own view of the Sandbox: still the session
+            # the cut run left, which it resumes in.
+            error.native_session_id = await self._left_session(
+                sandbox, stdout_path, stdout_offset, command.session_id
+            )
+            raise
         if result.timed_out:
-            raise PhaseTimeoutError("agent", timeout_sec)
+            raise PhaseTimeoutError(
+                "agent",
+                timeout_sec,
+                native_session_id=await self._left_session(
+                    sandbox, stdout_path, stdout_offset, command.session_id
+                ),
+            )
         stdout = (await sandbox.read_file(stdout_path, offset=stdout_offset)).decode(
             "utf-8", "replace"
         )

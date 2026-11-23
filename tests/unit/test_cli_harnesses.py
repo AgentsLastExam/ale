@@ -24,6 +24,7 @@ from ale.core.errors import (
     AgentUnsupportedError,
     ConfigError,
     NativeContinuationError,
+    PhaseTimeoutError,
     SubscriptionProviderLimitError,
 )
 from ale.core.harness import (
@@ -2460,3 +2461,21 @@ def test_an_archive_member_is_pinned_with_its_own_digest() -> None:
         )
     }
     assert release_identity(plain) != release_identity(packed)
+
+
+@pytest.mark.asyncio
+async def test_a_run_its_limit_cuts_reports_the_session_it_left() -> None:
+    """A session ALE named, or one the CLI's stream named before the cut, so the turn can
+    resume in it."""
+    sandbox = FakeSandbox()
+    sandbox.result = ExecResult(exit_code=None, timed_out=True)
+    sandbox.native_stdout = b'{"type":"thread.started","thread_id":"thread-1"}\n{"type":'
+    with pytest.raises(PhaseTimeoutError) as cut:
+        await CodexCliHarness().launch("work", sandbox, session(), timeout_sec=60)
+    assert cut.value.native_session_id == "thread-1"
+    named = FakeSandbox()
+    named.result = ExecResult(exit_code=None, timed_out=True)
+    with pytest.raises(PhaseTimeoutError) as cut:
+        await ClaudeCodeHarness().launch("work", named, session(), timeout_sec=60)
+    record = json.loads(named.files["/home/agent/.ale-harness/invocations.jsonl"].splitlines()[0])
+    assert cut.value.native_session_id == record["session_id"] is not None

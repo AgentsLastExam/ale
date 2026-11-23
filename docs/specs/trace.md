@@ -8,7 +8,7 @@ other files may carry only stable identifiers, references, or small run-level pr
 | `trajectory.json` | agent-visible messages, reasoning actually exposed, tool calls/results, images, audio, subagents | setup/verify commands, rewards, aggregate usage |
 | `trace.transport.jsonl` | Gateway calls in API-key and subscription modes (verification Judge calls marked `purpose: judge`), retries, refusals, token usage, call-to-step links | full conversation messages |
 | `trace.execution.jsonl` | framework phases, task/framework commands, output, policy, cleanup failures | agent-owned tool calls, rewards |
-| `result.json` | terminal status, all named rewards, failure, phase timings, the agent's native continuation, its validation rounds | conversation, provenance |
+| `result.json` | terminal status, all named rewards, failure, phase timings, the agent's native continuation, its validation rounds, the solver Sandboxes it worked in | conversation, provenance |
 | `verification.json` | the complete Task-authored result, including nested details | terminal status, solver trajectory, native Agent transcript |
 | `lock.json` | immutable provenance and enforced termination limits | live run state |
 
@@ -69,7 +69,10 @@ All ALE extensions live under `extra.ale`:
   convert;
 - `validation_round`: on the user step that gave the agent a validation round's result, the
   round's index, where its next turn begins; a round's prompt the parsed session lacks is a
-  `validation_round_not_found` parse issue.
+  `validation_round_not_found` parse issue;
+- `moved`: on the user step that resumed a turn a [move](episode-protocol.md#moves) cut, the
+  index of the segment it resumed in; one the parsed session lacks is a `moved_not_found`
+  parse issue.
 
 Images and audio use ATIF media parts whose `source.path` is episode-relative. Audio
 sources carry `media_type`, `path`, and optional nonnegative `duration_sec`; unknown
@@ -182,11 +185,23 @@ score, since the environment or the Task failed rather than the agent.
 The result's `validation_rounds` lists each
 [validation round](episode-protocol.md#validation-rounds) in order: its index, its status
 (`completed` when it scored, else what its failure is), its reward or none, its failure, its
-start and end, the feedback the agent was shown, by its episode-relative `path`, `digest`
-and `size_bytes`, since the text itself is that file, and the allocation of the solver it
-booted for the agent's next turn, such as its GPU devices, since every turn after the first
-runs in a new Sandbox; the RunLock keeps the first solver's. Calibration records each case's
-validation check there too, as its one entry, with no solver allocation.
+start and end, and the feedback the agent was shown, by its episode-relative `path`,
+`digest` and `size_bytes`, since the text itself is that file. Calibration records each
+case's validation check there too, as its one entry.
+
+The result's `segments` lists each solver Sandbox the agent worked in, in order, since every
+turn after a round, and every turn that [moved](episode-protocol.md#moves), goes on in a new
+one: how it began (`provisioned`, after a validation `round`, which it names, or `moved`),
+its `sandbox_id` and allocation, such as its GPU devices and node, the snapshot it booted
+from, when it was ready and when the agent's work in it ended, and the agent's time it
+spent; the RunLock keeps the first solver's allocation. Together the segments spend the
+agent's time, and the time between one's end and the next one's start, the save, a wait in a
+queue and the boot, is no one's. The agent's phase a move cut has the outcome `moved` among
+the phase timings. `progress.json`, beside the result, is a projection of the same that the
+episode rewrites as it goes, with the agent's time and rounds, the native session it goes on
+in and what the episode is doing (`agent`, `moving`, `validating` or `verifying`): at each
+segment's start and end and every 60 s while the agent runs, so that it outlives the process
+that runs the episode.
 
 `runs/<run>/ledger.db` is a rebuildable run-level projection for queued/running/current
 phase/terminal/interrupted state. It uses WAL and stores bounded failures and final reward
@@ -225,6 +240,7 @@ There is one run-level ledger row per logical episode and one current result dir
 ```text
 runs/<run>/<episode>/
   result.json                  # last attempt; only this result participates in the run
+  progress.json                # how far the same attempt got, rewritten as it goes
   lock.json                    # provenance of the same attempt
   trajectory.json              # evidence of the same attempt, when produced
   validation/1/                # each validation round's result, feedback and Judge logs

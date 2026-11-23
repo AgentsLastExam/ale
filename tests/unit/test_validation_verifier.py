@@ -18,6 +18,7 @@ from tests.support import (
 from tests.unit.test_contracts import _BLOCK, _OPEN, _PYPI, config
 from tests.unit.test_validation_rounds import _run, _task
 
+from ale.core.config import RunTimeouts
 from ale.core.errors import TaskDefinitionError
 from ale.core.sandbox import SandboxRole
 from ale.core.taskspec import NetworkMode, ValidationTable, VerificationMode
@@ -435,5 +436,7 @@ def test_a_validation_verifier_of_its_own_built_image_is_a_sandbox_to_select_and
         {"environment_mode": "separate", "environment": {"cpus": 2}},
     )
     assert task.spec.validation == task.spec.verify
-    images = [image for *_, image in _sandboxes(task, snapshot=False, solver=True)]
+    images = [
+        image for *_, image in _sandboxes(task, snapshot=False, solver=True, timeouts=RunTimeouts())
+    ]
     assert images == ["solver", "verifier", "validation"]
