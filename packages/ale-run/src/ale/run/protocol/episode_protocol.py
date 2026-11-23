@@ -474,9 +474,10 @@ def _cut(left: float | None, budget: _AgentTime) -> bool:
     return left is not None and left < budget.remaining
 
 
-def _too_brief(sandbox: Sandbox, budget: _AgentTime) -> bool:
-    """Whether too little is left of ``sandbox`` to start a run in, the agent having more."""
-    left = _left(sandbox)
+def _too_brief(sandbox: Sandbox, budget: _AgentTime, kept: float = 0.0) -> bool:
+    """Whether too little is left of ``sandbox`` to start a run in, the agent having more,
+    beside the ``kept`` seconds its verification takes after the run."""
+    left = _left(sandbox, kept)
     return left is not None and left < min(MIN_TURN_SEC, budget.remaining)
 
 
@@ -495,12 +496,13 @@ def _lasts(sandbox: Sandbox, seconds: float | None) -> bool:
     return (sandbox.deadline - datetime.now(UTC)).total_seconds() >= seconds
 
 
-def _left(sandbox: Sandbox) -> float | None:
-    """How long the agent may still work in ``sandbox`` before the episode saves it, where
-    its Provider holds it only until a deadline."""
+def _left(sandbox: Sandbox, kept: float = 0.0) -> float | None:
+    """How long the agent may still work in ``sandbox`` before the episode saves it, or
+    verifies there for the ``kept`` seconds verification takes, where its Provider holds it
+    only until a deadline."""
     if sandbox.deadline is None:
         return None
-    return (sandbox.deadline - datetime.now(UTC)).total_seconds() - MOVE_MARGIN_SEC
+    return (sandbox.deadline - datetime.now(UTC)).total_seconds() - MOVE_MARGIN_SEC - kept
 
 
 #: A handle that stands for the snapshot a solver is yet to be saved as, in a request whose
@@ -636,7 +638,7 @@ class EpisodeProtocol:
                 await self._work(task, ctx, solver, logs=logs, budget=budget)
             if self.validates:
                 await self._validation_rounds(task, ctx, solver, logs=logs, budget=budget)
-            self._segment_ends(ctx, solver, budget)
+            self._segment_ends(ctx, solver, budget, "verifying")
             handle: str | None = None
             viewed: tuple[str, ...] = ()
             try:
@@ -1148,7 +1150,8 @@ class EpisodeProtocol:
         sandbox = solver.sandbox
         budget = budget or _AgentTime(self.timeouts.agent or spec.timeouts.agent)
         asked = _Cut(prompt, continuation, ran=False)
-        if _too_brief(sandbox, budget):
+        kept = self._kept_for_verification(ctx)
+        if _too_brief(sandbox, budget, kept):
             return asked
         ctx.agent_started = True
         first = prompt is None
@@ -1159,7 +1162,7 @@ class EpisodeProtocol:
 
         harness = self.harness
         if isinstance(harness, PolicyHarness):
-            left = _left(sandbox)
+            left = _left(sandbox, kept)
             try:
                 await self._with_deadline(
                     ctx,
@@ -1228,9 +1231,9 @@ class EpisodeProtocol:
         if first:
             await self._apply_network(ctx, sandbox, spec.network, Phase.AGENT)
         # Bounded from here, as what came before took the Sandbox's time too.
-        if _too_brief(sandbox, budget):
+        if _too_brief(sandbox, budget, kept):
             return asked
-        left = _left(sandbox)
+        left = _left(sandbox, kept)
         timeout = budget.remaining if left is None else min(left, budget.remaining)
 
         variables = ctx.variables.values
@@ -1308,6 +1311,17 @@ class EpisodeProtocol:
                 await polling
         return None
 
+    def _kept_for_verification(self, ctx: EpisodeContext) -> float:
+        """What a run leaves of its Sandbox for the verification after it: a shared
+        verifier's limit, where no save comes between the run's end and ``tests/``, so that
+        ``tests/`` runs where the agent's processes still do, rather than in a solver a move
+        stopped them in."""
+        if ctx.spec.verify.environment_mode is not VerificationMode.SHARED:
+            return 0.0
+        if len(ctx.validation_rounds) < self.validations:
+            return 0.0  # a round saves the solver first, which stops every process anyway
+        return self._verify_timeout(ctx) or 0.0
+
     async def _poll_logs(
         self, ctx: EpisodeContext, logs: LogMirror | None, budget: _AgentTime, solver: _Solver
     ) -> None:
@@ -1365,9 +1379,11 @@ class EpisodeProtocol:
             if cut is None:
                 return
             if moved and not cut.ran:
+                kept = self._kept_for_verification(ctx)
                 raise ProviderCapabilityError(
                     "the solver moved to a Sandbox its Provider holds too briefly to start a "
                     f"turn in: less than {MIN_TURN_SEC:g} s before its deadline"
+                    + (f", beside the {kept:g} s its shared verification keeps" if kept else "")
                 )
             await self._move(ctx, solver, logs=logs, budget=budget)
             moved = True
@@ -1398,7 +1414,11 @@ class EpisodeProtocol:
             )
             if logs is not None:
                 await self._copy_logs(logs)
-            self._segment_ends(ctx, solver, budget, "moving")
+            if segment:
+                self._segment_ends(ctx, solver, budget, "moving")
+            else:
+                # A move for verification, after the agent's last segment ended.
+                self._record_progress(ctx, budget, "moving", solver)
             solver.saved = True
             try:
                 handle = await self._save_solver(ctx, solver.sandbox, carried="move")

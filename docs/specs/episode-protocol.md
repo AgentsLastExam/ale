@@ -340,11 +340,14 @@ unscored.
 Each verifier is held for its limit: selection gives a Sandbox that runs one, or whose
 snapshot one boots from on the same leaf, only a leaf that holds a Sandbox that long, and a
 verifier's request names its limit, so that such a Provider starts it where it lasts that
-long. A shared verifier, which runs in the solver, first moves the solver, as above, to a
-Sandbox that lasts that long, where it would not; a limit the Run leaves unlimited bounds
-nothing. A round's verifier that its Sandbox's scheduler ended, rather than its own failure,
-runs once more on the round's snapshot where that outlived it, and only that run is the
-round's. A Sandbox lost without warning, to a preemption or its node's failure, ends the
+long. A shared verifier runs in the solver, where the agent's processes still run, so the
+agent's last turn, after which no round saves the solver, leaves its Sandbox the verifier's
+limit too: its run is bounded that much sooner, and one cut there moves, so that `tests/`
+never runs in a solver a move stopped them in. Only where the Run leaves verification
+unlimited, or the turn ended too late, does the solver move first to a Sandbox that lasts
+that long. A round's verifier that its Sandbox's scheduler ended, rather than its own
+failure, runs once more on the round's snapshot where that outlived it, and only that run is
+the round's. A Sandbox lost without warning, to a preemption or its node's failure, ends the
 episode as a guest that stopped replying does, without verification, its error saying how it
 was lost; episode retries start the episode again.
 
