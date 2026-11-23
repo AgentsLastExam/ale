@@ -43,14 +43,36 @@ job's limit, and a step that asks for `--gres=gpu:0` in a GPU job sees no GPU. B
 Sandbox's step to threads: Slurm can allocate both hardware threads of a core when one CPU
 is requested.
 
-One allocation serves a solver and every Sandbox booted from its snapshots, as the
-episode boots them one at a time: a validation round's verifier and next solver, or a
-snapshot verifier, start from the node's own Podman store, with no copy and no second wait
-in the queue. It is sized for the largest of the solver and the verifier its request names,
-and holds that for its whole life; that cost was accepted for large checkpoints and rounds
-on a busy queue. A boot that does not fit beside what runs gets an allocation of its own,
-loading the snapshot from a `podman save` archive on the shared home, as does a snapshot the
-Run keeps, whose allocation ends with the episode.
+One allocation serves a solver and every Sandbox booted from its snapshots, as the episode
+boots them one at a time: a validation round's verifier and next solver, or a snapshot
+verifier, start from the node's own Podman store, with no copy and no second wait in the
+queue. It is sized for the largest of the solver and the verifier its request names, and
+holds that while the episode works there; that cost was accepted for large checkpoints and
+rounds on a busy queue. Decided: once nothing runs there and every snapshot it holds is
+written out with no Sandbox to boot from it there, as when a verifier went to an allocation
+of its own, it ends at once rather than idle until the episode ends, holding its GPUs. A
+round's next solver that could have had the rest of it waits in the queue instead, which
+spends none of the agent's time; the boot went elsewhere because the allocation was near its
+end or full anyway.
+
+Decided: an allocation mid-episode, one that boots a snapshot or a separate verifier's,
+waits in the queue for as long as Slurm keeps it pending, rather than for
+`queue_timeout_sec`: giving up there ended the episode, and for a snapshot destroyed it, the
+agent's only state, over a wait that spends none of its time.
+
+A snapshot written out, the image's `podman save` archive and each volume layer's tar, is
+not compressed. Measured on OpenRSI (`cpu_1`, 8 CPUs, Podman 4.9.3) with a solver of
+`pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel` and 2 GiB of random data written in it, 15.5
+GB: committing it took 11 to 13 s; `podman save | gzip -1` to the shared home took 378 s for
+9.8 GB, as one gzip process writes 41 MB/s, and `podman load` of that took 321 s; `pigz -1`
+on 8 threads took 89 s; uncompressed, the save took 46 s, 2 s more than to `/dev/null`, and
+the load 189 s. A move's save must fit in `drain_minutes`, which the gzipped one barely did
+at the default of 10, and the next allocation's load lengthens the move's gap; a carried
+snapshot is removed once the next save succeeds, so the space is held briefly.
+
+A boot that does not fit beside what runs gets an allocation of its own, loading the
+snapshot from a `podman save` archive on the shared home, as does a snapshot the Run keeps,
+whose allocation ends with the episode.
 
 The batch step, not ALE, starts each Sandbox's step (`srun --exact`), so ALE's own process
 ending never ends it; ALE only writes the request and reads the step's files on the shared

@@ -320,6 +320,9 @@ class SlurmProviderConfig(BaseModel):
     """What saving a solver and writing it out for the next allocation takes at most, which
     each allocation keeps before its wall time ends."""
     queue_timeout_sec: int = Field(default=900, ge=1)
+    """How long an allocation that boots no snapshot and is no separate verifier's, such as
+    an episode's first, waits in the queue. Any other comes mid-episode, behind the agent's
+    work, and waits for as long as Slurm keeps it pending, which spends none of its time."""
 
     # --- validation ---
 
