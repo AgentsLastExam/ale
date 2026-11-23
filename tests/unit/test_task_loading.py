@@ -173,6 +173,50 @@ def test_gpu_memory_is_each_sandboxs_own_and_absent_takes_whole_gpus(tmp_path: P
     assert verifier is not None and verifier.as_resources().gpu_memory_mb == 1024
 
 
+def test_nodes_are_each_sandboxs_own_and_a_snapshot_verifier_spans_no_more(
+    tmp_path: Path,
+) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    spec = load_tasks(task)[0].spec
+    # One node, the default, leaves the specification and its hash as they were.
+    assert spec.resources.nodes == 1 and "nodes" not in spec.resources.model_dump()
+    edit(
+        task, {"environment": {"gpus": 8, "nodes": 2}, "verifier": {"environment_mode": "separate"}}
+    )
+    spec = load_tasks(task)[0].spec
+    assert spec.resources.nodes == 2
+    # A separate verifier without its own table is sized as the solver; with one, by its own.
+    assert spec.verify.resources is not None and spec.verify.resources.nodes == 2
+    edit(task, {"verifier": {"environment": {"gpus": 8}}})
+    verifier = load_tasks(task)[0].spec.verify.resources
+    assert verifier is not None and verifier.nodes == 1
+    edit(task, {"verifier": {"environment": {"nodes": 4}}})
+    verifier = load_tasks(task)[0].spec.verify.resources
+    assert verifier is not None and verifier.as_resources().nodes == 4
+    # A snapshot verifier boots each node from the agent's of the same number.
+    edit(task, {"verifier": {"environment_mode": "snapshot", "environment": {"nodes": 4}}})
+    message = "spans no more nodes than"
+    with pytest.raises(TaskDefinitionError, match=message):
+        load_tasks(task)
+    assert any(message in finding.message for finding in lint_repository(task))
+    edit(task, {"verifier": {"environment": {"nodes": 2}}})
+    verifier = load_tasks(task)[0].spec.verify.resources
+    assert verifier is not None and verifier.nodes == 2
+    # So does the rounds' snapshot verifier, whatever it inherits.
+    edit(
+        task,
+        {
+            "verifier": {
+                "environment_mode": "separate",
+                "environment": {"nodes": 4},
+                "validation": {"environment_mode": "snapshot"},
+            }
+        },
+    )
+    with pytest.raises(TaskDefinitionError, match=message):
+        load_tasks(task)
+
+
 def test_container_features_are_named_from_a_closed_set_each_once(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     assert load_tasks(task)[0].spec.resources.container_features == ()

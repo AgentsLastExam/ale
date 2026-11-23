@@ -115,6 +115,8 @@ class CapabilityProfile(BaseModel):
     always holds them whole."""
     max_cpus: int | None = Field(default=None, ge=1)
     max_memory_mb: int | None = Field(default=None, ge=1)
+    max_nodes: int = Field(default=1, ge=1)
+    """How many machines one Sandbox may span, each of ``max_cpus`` and ``max_memory_mb``."""
     storage_limit: bool = False
     """Whether it holds a Sandbox that names ``storage_mb`` to it, rather than let it fill the
     Host's disk: by writable storage of that size at least, past which a write fails as on a
@@ -240,6 +242,8 @@ def unmet(profile: CapabilityProfile, needs: SandboxNeeds) -> tuple[str, ...]:
         reasons.append(
             f"network {needs.network_mode} is not one it applies ({_listed(profile.network_modes)})"
         )
+    if resources.nodes > profile.max_nodes:
+        reasons.append(f"spans {profile.max_nodes} node(s) at most, not {resources.nodes}")
     if profile.max_cpus is not None and resources.cpus > profile.max_cpus:
         reasons.append(f"{resources.cpus} CPUs exceed its {profile.max_cpus}")
     if profile.max_memory_mb is not None and resources.memory_mb > profile.max_memory_mb:

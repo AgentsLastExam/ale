@@ -271,6 +271,9 @@ class Resources(BaseModel):
     sudo: bool = False
     container_features: _ContainerFeatures = ()
     """What a container Sandbox needs beyond what every container gets."""
+    nodes: int = Field(default=1, ge=1, exclude_if=lambda value: value == 1)
+    """The machines the Sandbox spans, each with the CPUs, memory, storage and GPUs above.
+    Left out of a dump at one, so a single-node Task keeps its hash."""
 
 
 class NetworkMode(StrEnum):
@@ -482,6 +485,7 @@ class VerifierResources(BaseModel):
     gpu_types: tuple[str, ...] = ()
     gpu_memory_mb: int | None = Field(default=None, ge=1)
     container_features: _ContainerFeatures = ()
+    nodes: int = Field(default=1, ge=1, exclude_if=lambda value: value == 1)
 
     def as_resources(self) -> Resources:
         return Resources(
@@ -493,6 +497,7 @@ class VerifierResources(BaseModel):
             gpu_memory_mb=self.gpu_memory_mb,
             sudo=False,
             container_features=self.container_features,
+            nodes=self.nodes,
         )
 
 
@@ -1127,6 +1132,8 @@ class EnvironmentTable(BaseModel):
     """The device memory the Sandbox needs on each GPU; ``None`` takes whole GPUs."""
     container_features: _ContainerFeatures = ()
     """What the container needs beyond what every container gets; a VM image takes none."""
+    nodes: int = Field(default=1, ge=1, strict=True)
+    """Orbit's: the machines the agent's Sandbox spans, each of the size above."""
     env: TaskEnv = Field(default_factory=dict)
     skills_dir: str | None = Field(default=None, min_length=1)
     mcp_servers: tuple[McpServerTable, ...] = ()
@@ -1234,6 +1241,8 @@ class VerifierEnvironmentTable(BaseModel):
     gpu_types: tuple[_GpuType, ...] | None = Field(default=None, min_length=1)
     gpu_memory_mb: int | None = Field(default=None, ge=1, strict=True)
     container_features: _ContainerFeatures = ()
+    nodes: int = Field(default=1, ge=1, strict=True)
+    """Orbit's: the machines the verifier's Sandbox spans, each of the size above."""
     env: TaskEnv = Field(default_factory=dict)
     workdir: str | None = Field(default=None, min_length=1)
     """Where a verifier of its own runs ``tests/`` and ``validation/``, instead of
@@ -1598,6 +1607,18 @@ class TaskConfig(BaseModel):
                 raise ValueError(
                     f"[verifier.validation] over what it inherits from [verifier]: {reasons}"
                 ) from None
+        for table, declared in (("verifier", verifier), ("verifier.validation", rounds)):
+            if (
+                declared is not None
+                and declared.mode is VerificationMode.SNAPSHOT
+                and declared.environment is not None
+                and declared.environment.nodes > environment.nodes
+            ):
+                raise ValueError(
+                    f"[{table}.environment].nodes: a snapshot verifier boots each of its nodes "
+                    "from the agent's node of the same number, so it spans no more nodes than "
+                    "[environment].nodes"
+                )
         # The rounds' verifier as it resolves, whose GPU keys may each come from either table.
         for table, sized in (
             ("environment", environment),

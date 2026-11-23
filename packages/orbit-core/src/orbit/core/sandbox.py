@@ -455,6 +455,9 @@ class ResourceAllocation(BaseModel):
     ``runsc-nested`` under gVisor. None where the Provider has no choice."""
     node: str | None = None
     """The compute node, when known. Fleet records its Node and leaf as ``<node>/<leaf>``."""
+    nodes: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    """Every compute node of a Sandbox that spans several, ``node`` first; the CPUs and memory
+    above are each one's, and ``gpu`` holds every node's devices, its count theirs together."""
     desktop_resolution: DesktopResolution | None = None
     """The desktop's size as the guest reported it when the Provider started and checked the
     desktop; None for a sandbox whose desktop it did not start."""

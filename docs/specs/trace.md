@@ -202,11 +202,12 @@ case's validation check there too, as its one entry.
 The result's `segments` lists each solver Sandbox the agent worked in, in order, since every
 turn after a round, and every turn that [moved](episode-protocol.md#moves), goes on in a new
 one: how it began (`provisioned`, after a validation `round`, which it names, or `moved`),
-its `sandbox_id` and allocation, such as its GPU devices and node, the snapshot it booted
-from, when the agent's work could begin in it, once it booted or, the first, once setup ran,
-and when that work ended, and the agent's time it spent; the RunLock keeps the first
-solver's allocation. Together the segments spend the agent's time, and the time between
-one's end and the next one's start, the save, a wait in a queue and the boot, is no one's.
+its `sandbox_id` and allocation, such as its GPU devices and node or nodes, the snapshot it
+booted from, when the agent's work could begin in it, once it booted or, the first, once
+setup ran, and when that work ended, and the agent's time it spent; the RunLock keeps the
+first solver's allocation. Together the segments spend the agent's time, and the time
+between one's end and the next one's start, the save, a wait in a queue and the boot, is no
+one's.
 The agent's phase a move cut has the outcome `moved` among the phase timings.
 `progress.json`, beside the result, is a projection of the same that the episode rewrites as
 it goes, with the agent's time and rounds, the native session it goes on in and what the

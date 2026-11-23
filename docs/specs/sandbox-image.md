@@ -542,8 +542,9 @@ unchanged wherever a Provider serves it. A Provider is one of two classes. A
 [leaf](lexicon.md) starts and drives the Sandbox itself, locally or in an allocation, and
 declares each real combination it can start as a [capability profile](lexicon.md): kind,
 operating system, architecture, desktop, network modes, snapshots and how many it saves in a
-row, GPUs, their models and memory and how it shares them, CPU and memory limits, whether it
-holds a Sandbox to its `storage_mb`, container features, and whether it mounts
+row, GPUs, their models and memory and how it shares them, CPU and memory limits, how many
+nodes one Sandbox may span, whether it holds a Sandbox to its `storage_mb`, container
+features, and whether it mounts
 [volumes](task-authoring.md#volumes). A scheduler places Sandboxes on machines it manages,
 which start them with the leaves there, and offers what those leaves do: the Fleet those of
 the leaves its registered Nodes lend, Daytona the one of its own Sandboxes. Which leaves a
@@ -552,13 +553,14 @@ scheduler uses, and in which order, is its own configuration, never a Run's.
 A Sandbox needs its image's kind and operating system, the architecture that system implies
 (arm64 for macOS, x86-64 otherwise), its network mode (a verifier's is the verifier's, and a
 solver that serves a shared verifier needs the least open of the agent's and the verifier's,
-since it applies both), its resources (CPUs, memory, the
-storage it may write, GPUs, the models it accepts and the memory it needs on each, container
-features), snapshots, and how many in a row, when it saves or boots from one, and volume
-artifacts, when its Task has any. One rule compares needs with a profile, naming each need
-the profile misses, wherever a Provider or Node is chosen: in a Run's selection, in every
-leaf's `create`, and in the Fleet's placement, so a Sandbox is accepted or refused the same
-way wherever it is asked for. A leaf may also refuse by rules no profile states
+since it applies both), its resources (CPUs, memory, the storage it may write, GPUs, the
+models it accepts and the memory it needs on each, container features, the
+[nodes](task-authoring.md#nodes) it spans), snapshots, and how many in a row, when it saves
+or boots from one, and volume artifacts, when its Task has any. One rule compares needs with
+a profile, naming each need the profile misses, wherever a Provider or Node is chosen: in a
+Run's selection, in every leaf's `create`, and in the Fleet's placement, so a Sandbox is
+accepted or refused the same way wherever it is asked for. A leaf may also refuse by rules
+no profile states
 ([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#provider-ids-and-profiles)
 lists them); they hold wherever it runs, so selection asks them of a leaf, and of the leaves
 a scheduler would use, by the method `create` asks. A request that `create` would refuse is
