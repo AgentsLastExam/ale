@@ -1,11 +1,17 @@
-"""Rootless gVisor Sandboxes in single-node Slurm allocations, driven from a login node of
-the cluster, where Orbit runs.
+"""Rootless gVisor Sandboxes in Slurm allocations, driven from a login node of the cluster,
+where Orbit runs.
 
 A solver gets an allocation of its own, sized for it and for the verifiers its request
 names, and every Sandbox booted from one of its snapshots, or mounting views of its volumes,
-starts in that allocation while it has room, from the node's own store: a snapshot is never
+starts in that allocation while it has room, from its nodes' own stores: a snapshot is never
 copied for its episode. The allocation ends with the last Sandbox and snapshot in it. Images
 are prepared on the cluster too ([`images`](images.py)).
+
+A Sandbox that spans several nodes runs on the allocation's first nodes, one container on
+each: node 0 is where commands and files go, and every node gets the same network, its
+Gateway and egress relay, and the others on a network of their own. A snapshot keeps every
+node's disk: node ``k`` of a Sandbox booted from it starts from its node ``k``, and node ``k``
+of one viewing its volumes views its node ``k``'s.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import shutil
 from collections.abc import Sequence
 from contextlib import AsyncExitStack, suppress
@@ -112,6 +119,7 @@ def _profiles(
             gpu_models=(partition.gpu_model,) if partition.gpu_model else (),
             max_cpus=partition.max_cpus,
             max_memory_mb=_largest_memory_mb(partition),
+            max_nodes=partition.max_nodes,
             container_features=frozenset(common | {feature}),
             volumes=True,
             # An allocation's wall time, less what it keeps to drain.
@@ -164,22 +172,23 @@ def _volume_specs(
 
 
 def _size(resources: Resources) -> tuple[int, int, int]:
-    """CPUs, step memory and GPUs a Sandbox of ``resources`` holds in its allocation."""
+    """CPUs, step memory and GPUs a Sandbox of ``resources`` holds on each of its nodes."""
     return resources.cpus, step_memory_mb(resources.memory_mb), resources.gpus
 
 
-def _capacity(needs: SandboxNeeds, separate: Resources | None = None) -> tuple[int, int, int]:
+def _capacity(needs: SandboxNeeds, separate: Resources | None = None) -> tuple[int, int, int, int]:
     """The allocation that holds a Sandbox and, one at a time, each verifier booted from its
-    snapshot and the ``separate`` verifier that mounts views of its volumes."""
-    sizes = [_size(needs.resources)]
+    snapshot and the ``separate`` verifier that mounts views of its volumes: each node's
+    CPUs, step memory and GPUs, and its nodes."""
+    sizes = [(*_size(needs.resources), needs.resources.nodes)]
     verifier = needs.verifier
     while verifier is not None:
-        sizes.append(_size(verifier.resources))
+        sizes.append((*_size(verifier.resources), verifier.resources.nodes))
         verifier = verifier.verifier
     if separate is not None:
-        sizes.append(_size(separate))
-    cpus, memory_mb, gpus = zip(*sizes, strict=True)
-    return max(cpus), max(memory_mb), max(gpus)
+        sizes.append((*_size(separate), separate.nodes))
+    cpus, memory_mb, gpus, nodes = zip(*sizes, strict=True)
+    return max(cpus), max(memory_mb), max(gpus), max(nodes)
 
 
 def _handle(job: Job, index: str) -> str:
@@ -217,7 +226,8 @@ def _resolved(image: PreparedTaskImage, user: str | None = None) -> ResolvedImag
 @dataclass(eq=False)
 class _Snapshot:
     index: str
-    image: str
+    images: tuple[str, ...]
+    """Each node's commit, by its number in the Sandbox, in its store."""
     prepared_identity: str
     episode_id: str
     roles: tuple[Literal["solver", "verifier"], ...]
@@ -225,15 +235,21 @@ class _Snapshot:
     boots: int
     """The Sandboxes its episode is still to boot from it in its allocation, which keep the
     allocation: a snapshot verifier, until it boots or the allocation's deadline comes."""
-    stacks: dict[str, dict[str, object]] = field(default_factory=dict)
-    """Each volume's layers in the allocation's store, topmost first, its root's owner and
+    stacks: tuple[dict[str, dict[str, object]], ...] = ()
+    """For each node, each volume's layers in its store, topmost first, its root's owner and
     mode, and whether it is an engine's storage, by path."""
-    archive: str | None = None
-    """Below the cache, once it was written for another allocation to boot from."""
+    archives: tuple[str, ...] = ()
+    """Below the cache, each node's, once it was written for another allocation to boot
+    from."""
+
+    def layers_of(self, rank: int) -> set[str]:
+        """The layers of node ``rank``'s volumes, which its node's store holds."""
+        stacks = self.stacks[rank] if rank < len(self.stacks) else {}
+        return {str(layer) for stack in stacks.values() for layer in stack["layers"]}
 
     @property
     def layers(self) -> set[str]:
-        return {str(layer) for stack in self.stacks.values() for layer in stack["layers"]}
+        return {layer for rank in range(len(self.stacks)) for layer in self.layers_of(rank)}
 
 
 @dataclass(eq=False)
@@ -242,15 +258,19 @@ class _Chain:
 
     job: Job
     ready: JobReady
-    seed: str
-    """The image the allocation loaded, by the ID Podman gives it."""
+    seeds: tuple[str, ...]
+    """The image each node of the allocation loaded, by the ID Podman gives it."""
     cpus: int
     memory_mb: int
     gpus: int
-    running: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    """Each node's."""
+    running: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
+    """Each running Sandbox's CPUs, step memory and GPUs on each of the nodes it spans, and
+    how many it spans, from the first."""
     snapshots: dict[str, _Snapshot] = field(default_factory=dict)
     images: set[str] = field(default_factory=set)
-    """The images loaded since, a separate verifier's, by the ID Podman gives them."""
+    """The images loaded since on every node, a separate verifier's, by the ID Podman gives
+    them."""
     viewing: dict[str, set[str]] = field(default_factory=dict)
     """The layers each running Sandbox's views stack, which stay while it runs."""
     deadline: datetime | None = None
@@ -259,19 +279,31 @@ class _Chain:
     count: int = 0
     closed: bool = False
 
+    @property
+    def nodes(self) -> tuple[str, ...]:
+        return self.ready.nodes
+
     def reserve(self, resources: Resources, *, lasting: float | None = None) -> str | None:
-        """A new Sandbox's index in the allocation, if it fits beside what runs there and,
-        where it is to last ``lasting`` seconds, the allocation lasts that long."""
-        size = _size(resources)
-        used = [sum(held) for held in zip(*self.running.values(), strict=True)] or [0, 0, 0]
+        """A new Sandbox's index in the allocation, if it fits beside what runs on each of
+        the nodes it spans and, where it is to last ``lasting`` seconds, the allocation lasts
+        that long."""
+        size, count = _size(resources), resources.nodes
         capacity = (self.cpus, self.memory_mb, self.gpus)
-        if self.closed or any(u + s > c for u, s, c in zip(used, size, capacity, strict=True)):
+        if self.closed or count > len(self.nodes):
             return None
+        for node in range(count):
+            # Every Sandbox spans the allocation's first nodes.
+            used = [
+                sum(held[part] for held in self.running.values() if held[3] > node)
+                for part in range(3)
+            ]
+            if any(u + s > c for u, s, c in zip(used, size, capacity, strict=True)):
+                return None
         if lasting is not None and not self.lasts(lasting):
             return None
         self.count += 1
         index = str(self.count)
-        self.running[index] = size
+        self.running[index] = (*size, count)
         return index
 
     def lasts(self, seconds: float) -> bool:
@@ -285,7 +317,7 @@ class _Chain:
         """Nothing runs, and every snapshot left was written out and is booted from no more
         here, so the allocation holds nothing its episode still needs."""
         return not self.running and all(
-            snapshot.archive and not snapshot.boots for snapshot in self.snapshots.values()
+            snapshot.archives and not snapshot.boots for snapshot in self.snapshots.values()
         )
 
 
@@ -293,7 +325,7 @@ async def _guest(
     steps: SandboxSteps,
     ready: StepReady,
     user: str,
-    watcher: memory.GuestEvents,
+    watchers: Sequence[memory.GuestEvents],
     stack: AsyncExitStack,
 ) -> GuestClient:
     transport = JobTransport(
@@ -308,7 +340,7 @@ async def _guest(
         ),
         steps,
         ready,
-        watcher,
+        watchers,
     )
     client = GuestClient(transport)
     stack.push_async_callback(client.close)
@@ -317,46 +349,61 @@ async def _guest(
 
 
 async def _gpu_allocation(
-    client: GuestClient, ready: StepReady, resources: Resources, chain: _Chain
+    clients: Sequence[GuestClient],
+    readies: Sequence[StepReady],
+    resources: Resources,
+    chain: _Chain,
 ) -> GpuAllocation | None:
+    """Check each node's GPUs, as the step and the guest see them, and register the driver's
+    libraries there; every node's, as one allocation."""
     if not resources.gpus:
         return None
-    ids = tuple(device.id for device in ready.devices)
     expected = chain.job.partition.gpu_model
     assert expected is not None
-    for device in ready.devices:
-        if (
-            not accepts_model((expected.name,), device.model)
-            or not accepts_model(resources.gpu_types, device.model)
-            or (device.memory_total_mb or 0)
-            < max(expected.memory_mb or 0, resources.gpu_memory_mb or 0)
-        ):
-            raise ProviderCapabilityError(f"Slurm allocated an incompatible GPU: {device}")
-    code, _, err, _ = await client.exec(["ldconfig"])
-    if code:
-        raise ProviderStartError(f"could not register Slurm's GPU driver libraries: {err}")
-    code, out, err, _ = await client.exec(
-        ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"]
-    )
-    if code or set(out.split()) != set(ids) or len(set(ids)) != resources.gpus:
-        raise ProviderStartError(f"Slurm GPU allocation does not match guest devices: {out} {err}")
+    for client, ready in zip(clients, readies, strict=True):
+        ids = tuple(device.id for device in ready.devices)
+        for device in ready.devices:
+            if (
+                not accepts_model((expected.name,), device.model)
+                or not accepts_model(resources.gpu_types, device.model)
+                or (device.memory_total_mb or 0)
+                < max(expected.memory_mb or 0, resources.gpu_memory_mb or 0)
+            ):
+                raise ProviderCapabilityError(
+                    f"Slurm allocated an incompatible GPU on {ready.node}: {device}"
+                )
+        code, _, err, _ = await client.exec(["ldconfig"])
+        if code:
+            raise ProviderStartError(f"could not register Slurm's GPU driver libraries: {err}")
+        code, out, err, _ = await client.exec(
+            ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"]
+        )
+        if code or set(out.split()) != set(ids) or len(set(ids)) != resources.gpus:
+            raise ProviderStartError(
+                f"Slurm GPU allocation does not match guest devices on {ready.node}: {out} {err}"
+            )
+    devices = tuple(device for ready in readies for device in ready.devices)
+    ids = tuple(device.id for device in devices)
     return GpuAllocation(
-        requested_count=resources.gpus,
+        requested_count=resources.gpus * len(readies),
         provider_addresses=ids,
         lease_keys=ids,
-        observed_devices=ready.devices,
+        observed_devices=devices,
         runtime_identity=chain.ready.runtime,
     )
 
 
 class SlurmSandbox(TunneledSandbox):
+    """A Sandbox on one or more nodes of an allocation. Commands and files go to node 0; the
+    seal, the egress relay and the proxy variables apply on every node."""
+
     def __init__(
         self,
         provider: SlurmProvider,
         chain: _Chain,
-        steps: SandboxSteps,
+        nodes: Sequence[SandboxSteps],
+        clients: Sequence[GuestClient],
         connections: AsyncExitStack,
-        client: GuestClient,
         file_client: GuestClient,
         *,
         request: SandboxRequest,
@@ -365,9 +412,10 @@ class SlurmSandbox(TunneledSandbox):
         home: str,
         gateway: str | None,
         volumes: tuple[str, ...],
+        variables: Sequence[dict[str, str]] = (),
     ) -> None:
         super().__init__(
-            sandbox_id=f"{chain.job.id}.{steps.index}",
+            sandbox_id=f"{chain.job.id}.{nodes[0].index}",
             request=request,
             resolved_image=resolved_image,
             allocation=allocation,
@@ -376,18 +424,47 @@ class SlurmSandbox(TunneledSandbox):
         )
         self.provider = provider
         self.chain = chain
-        self.steps = steps
+        self.steps = nodes[0]
+        self.nodes = tuple(nodes)
         self.connections = connections
-        self._client, self._file_client = client, file_client
+        self._clients = tuple(clients)
+        self._client, self._file_client = clients[0], file_client
         self._local_gateway = gateway
         self._relay = None
         self._sealed = request.network.mode is not NetworkMode.OPEN
+        if len(nodes) > 1:
+            self._peers = (
+                *(f"node{rank}" for rank in range(len(nodes))),
+                worker.GROUP + "0/24",
+            )
+        #: Each node's group variables, which node 0's commands get from here and every
+        #: node's ``orbit-exec`` from its daemon.
+        self._node_variables = tuple(variables)
+        if variables:
+            self._variables = variables[0]
         self.volumes = volumes
+
+    async def _network(self, mode: str) -> None:
+        await self.chain.job.control(
+            mode, self.steps.index, nodes=[node.node for node in self.nodes]
+        )
+
+    async def _peer_variables(self, relays: Sequence[str | None]) -> None:
+        """Give each node's ``orbit-exec`` daemon what a command it runs takes, as guestd's
+        commands take it on node 0: the node's group variables and, while the Sandbox is
+        sealed, the proxy variables of its node's relay."""
+        if len(self.nodes) < 2:
+            return
+        for client, address, own in zip(self._clients, relays, self._node_variables, strict=True):
+            proxied = relay.variables(address, "127.0.0.1", self._peers) if address else {}
+            await client.write_file(worker.PEERS_ENV, json.dumps(own | proxied).encode())
 
     async def open_egress(self) -> None:
         if self._sealed:
-            await relay.stop(self._client, self.request)
-            await self.steps.network("open")
+            for client in self._clients:
+                await relay.stop(client, self.request)
+            await self._peer_variables([None] * len(self._clients))
+            await self._network("open")
             self._relay = None
             self._sealed = False
 
@@ -395,37 +472,44 @@ class SlurmSandbox(TunneledSandbox):
         if self.request.network.mode is NetworkMode.OPEN:
             return
         if not self._sealed:
-            await self.steps.network("block")
+            await self._network("block")
         self._sealed = True
-        self._relay = await relay.start(
-            self._client,
-            self.request,
-            self.allocation,
-            proxy=f"http://127.0.0.1:{PROXY_PORT}",
-            host="127.0.0.1",
-        )
+        relays = [
+            await relay.start(
+                client,
+                self.request,
+                self.allocation,
+                proxy=f"http://127.0.0.1:{PROXY_PORT}",
+                host="127.0.0.1",
+                peers=self._peers,
+            )
+            for client in self._clients
+        ]
+        self._relay = relays[0]
+        await self._peer_variables(relays)
 
     async def snapshot(
         self, *, roles: tuple[Literal["solver", "verifier"], ...], reason: str
     ) -> RetainedSandbox:
-        """Stop the Sandbox and commit its disk to its allocation's store, which it keeps for
+        """Stop the Sandbox and commit each node's disk to its node's store, which keeps it for
         the Sandboxes its episode boots from it, with its volumes' layers. A snapshot its Run
         keeps after the episode is written to the cluster's shared file system too, as the
         allocation ends then."""
         # The relay and the guest's sessions end with the container.
-        await relay.stop(self._client, self.request)
+        for client in self._clients:
+            await relay.stop(client, self.request)
         self._relay = None
         await self.connections.aclose()
-        image, stacks = await self.chain.job.save(self.steps.index)
+        saved = await self.chain.job.save(self.steps.index, nodes=len(self.nodes))
         snapshot = _Snapshot(
             index=self.steps.index,
-            image=image,
+            images=tuple(image for image, _ in saved),
             prepared_identity=self.request.prepared_image.prepared_identity,
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
             boots=int(self.request.snapshot_verifier is not None),
-            stacks=stacks,
+            stacks=tuple(stacks for _, stacks in saved),
         )
         handle = _handle(self.chain.job, self.steps.index)
         self.chain.snapshots[snapshot.index] = snapshot
@@ -467,13 +551,14 @@ class SlurmProvider(Provider):
     def _partition(
         self, needs: SandboxNeeds, *, separate: Resources | None = None
     ) -> SlurmPartition | None:
-        cpus, memory_mb, gpus = _capacity(needs, separate)
+        cpus, memory_mb, gpus, nodes = _capacity(needs, separate)
         for part in self.config.partitions:
             if (
                 bool(gpus) != bool(part.max_gpus)
                 or gpus > part.max_gpus
                 or cpus > part.max_cpus
                 or memory_mb + JOB_OVERHEAD_MB > part.max_memory_mb
+                or nodes > part.max_nodes
             ):
                 continue
             if any(not unmet(profile, needs) for profile in _profiles(part, self.config)):
@@ -483,7 +568,7 @@ class SlurmProvider(Provider):
     def refusals(self, needs: SandboxNeeds, *, user: str, role: SandboxRole) -> tuple[str, ...]:
         if self._partition(needs) is None:
             return (
-                "no configured Slurm partition serves that single-node allocation"
+                "no configured Slurm partition serves that allocation"
                 + (" with the verifier booted from its snapshot" if needs.verifier else ""),
             )
         return ()
@@ -533,6 +618,7 @@ class SlurmProvider(Provider):
     async def create(self, request: SandboxRequest) -> SlurmSandbox:
         await self.accepts(request)
         engines = _engines(request.resources)
+        count = request.resources.nodes
         candidates: tuple[str, ...] = ()
         if request.snapshot is None and request.volumes_from is None:
             resolved = _resolved(request.prepared_image, request.user)
@@ -543,18 +629,17 @@ class SlurmProvider(Provider):
                 separate = None
             chain = await self._allocate(
                 request.needs,
-                image=resolved.observed_identity,
-                archive=request.prepared_image.runtime_ref,
+                seeds=[_seed(request.prepared_image.runtime_ref, resolved.observed_identity, {})],
                 separate=separate,
                 # A separate verifier's comes mid-episode, the agent's work done.
                 patient=request.role is SandboxRole.VERIFIER,
             )
             index = chain.reserve(request.resources)
             assert index is not None, "an allocation holds the Sandbox it was sized for"
-            loaded = chain.seed
+            loaded = list(chain.seeds[:count])
             # A candidate is a volume where the image has a directory, which the step finds.
             candidates = request.volumes
-            specs = [dict(path=path, kind="fresh", copied=True) for path in engines]
+            specs = [[dict(path=path, kind="fresh", copied=True) for path in engines]] * count
         else:
             chain, index, resolved, loaded, specs = await self._boot(request, engines)
         try:
@@ -567,18 +652,20 @@ class SlurmProvider(Provider):
 
     async def _boot(
         self, request: SandboxRequest, engines: Sequence[str]
-    ) -> tuple[_Chain, str, ResolvedImage, str, list[dict[str, object]]]:
+    ) -> tuple[_Chain, str, ResolvedImage, list[str], list[list[dict[str, object]]]]:
         """Where a Sandbox booted from a snapshot, or one of another image that mounts views
         of a snapshot's volumes, runs: in the allocation that holds the snapshot while it has
         room, loading its image there if it is another's, else in one of its own that loads
-        the snapshot or that image, and the snapshot's volume layers."""
+        the snapshot or that image, and the snapshot's volume layers. Node ``k`` boots from
+        the snapshot's node ``k``, or views its volumes; a viewing node the snapshot lacks
+        views none."""
         handle = request.snapshot or request.volumes_from
         assert handle is not None
         name, index = _parse(handle)
         found = self.snapshots.get(handle)
         if found is not None:
             chain, snapshot = found
-            image, prepared, stacks = snapshot.image, snapshot.prepared_identity, snapshot.stacks
+            images, prepared, stacks = snapshot.images, snapshot.prepared_identity, snapshot.stacks
         else:
             # Written out by an earlier process, whose allocation has ended.
             try:
@@ -586,9 +673,20 @@ class SlurmProvider(Provider):
             except FileNotFoundError:
                 raise ProviderCapabilityError(f"Slurm holds no snapshot {handle}") from None
             chain, snapshot = None, None
-            image, prepared = saved["image"], saved["prepared_identity"]
-            stacks = dict(saved.get("stacks") or {})
+            try:
+                images, prepared = tuple(saved["images"]), saved["prepared_identity"]
+                stacks = tuple(dict(each) for each in saved["stacks"])
+            except (KeyError, TypeError, ValueError):
+                raise ProviderCapabilityError(
+                    f"{handle!r} was written out by an engine that records snapshots otherwise"
+                ) from None
         viewing = request.volumes_from is not None
+        count = request.resources.nodes
+        if not viewing and count > len(images):
+            raise ProviderCapabilityError(
+                f"{handle!r} keeps {len(images)} node(s), fewer than the {count} the Sandbox "
+                "booted from it spans"
+            )
         if viewing:
             resolved = _resolved(request.prepared_image, request.user)
         else:
@@ -599,14 +697,19 @@ class SlurmProvider(Provider):
             resolved = ResolvedImage(
                 kind=ImageKind.CONTAINER,
                 prepared_identity=prepared,
-                observed_identity=image,
-                observed_ref=image,
+                observed_identity=images[0],
+                observed_ref=images[0],
             )
-        specs = _volume_specs(stacks, engines, viewing=viewing)
-        needed = {str(layer) for spec in specs for layer in spec.get("layers", ())}
+        specs = [
+            _volume_specs(stacks[rank] if rank < len(stacks) else {}, engines, viewing=viewing)
+            for rank in range(count)
+        ]
+        needed = [
+            {str(layer) for spec in each for layer in spec.get("layers", ())} for each in specs
+        ]
         if chain is not None and snapshot is not None and not await chain.job.state():
-            # Slurm ended the allocation, and the store on its node with it.
-            if snapshot.archive is None:
+            # Slurm ended the allocation, and the store on its nodes with it.
+            if not snapshot.archives:
                 # Each boot from the snapshot says so. Destroying it as the episode ends finds
                 # the job gone and closes the allocation.
                 ended = await chain.job.ended()
@@ -614,7 +717,7 @@ class SlurmProvider(Provider):
                     f"Slurm ended job {chain.job.id} ({ended or 'gone'}), and with it snapshot "
                     f"{handle}, which was not written out"
                 )
-            # Written out before it ended: it boots from its archive, in one of its own.
+            # Written out before it ended: it boots from its archives, in one of its own.
             with suppress(ProviderStartError):
                 await self._close(chain)
             chain = snapshot = None
@@ -626,15 +729,19 @@ class SlurmProvider(Provider):
             booted = chain.reserve(request.resources, lasting=lasting) if served else None
             if booted is not None:
                 try:
-                    loaded = await self._load(chain, request.prepared_image) if viewing else image
+                    loaded = (
+                        [await self._load(chain, request.prepared_image)] * count
+                        if viewing
+                        else list(images[:count])
+                    )
                 except BaseException:
                     chain.running.pop(booted, None)
                     raise
                 if not viewing:
                     snapshot.boots = max(0, snapshot.boots - 1)
-                chain.viewing[booted] = needed
+                chain.viewing[booted] = set().union(*needed)
                 return chain, booted, resolved, loaded, specs
-            archive = snapshot.archive or await self.write_out(chain, snapshot)
+            archives = list(snapshot.archives or await self.write_out(chain, snapshot))
             if not viewing:
                 # It boots in an allocation of its own, so no more in this one.
                 snapshot.boots = max(0, snapshot.boots - 1)
@@ -644,32 +751,45 @@ class SlurmProvider(Provider):
             else:
                 await self._drain(chain)
         else:
-            archive = f"{SNAPSHOTS}/{name}-{index}.tar"
-        layers = {
-            layer: f"{SNAPSHOTS}/{worker.layer_archive(Path(archive).name, layer)}"
-            for layer in needed
-        }
+            archives = [_archive(name, index, rank) for rank in range(len(images))]
+        layers = [
+            {
+                layer: f"{SNAPSHOTS}/{worker.layer_archive(Path(archives[rank]).name, layer)}"
+                for layer in needed[rank]
+            }
+            for rank in range(count)
+        ]
         # Mid-episode: the snapshot holds the agent's work, and a wait in the queue spends
-        # none of its time, so it waits for as long as Slurm keeps the job pending.
+        # none of its time, so it waits for as long as Slurm keeps it pending.
         own = await self._allocate(
             request.needs,
-            image=resolved.observed_identity if viewing else image,
-            archive=request.prepared_image.runtime_ref if viewing else archive,
-            layers=layers,
+            seeds=[
+                _seed(request.prepared_image.runtime_ref, resolved.observed_identity, layers[rank])
+                if viewing
+                else _seed(archives[rank], images[rank], layers[rank])
+                for rank in range(count)
+            ],
             patient=True,
         )
         booted = own.reserve(request.resources)
         assert booted is not None, "an allocation holds the Sandbox it was sized for"
-        own.viewing[booted] = needed
-        return own, booted, resolved, own.seed, specs
+        own.viewing[booted] = set().union(*needed)
+        return own, booted, resolved, list(own.seeds[:count]), specs
 
     async def _load(self, chain: _Chain, image: PreparedTaskImage) -> str:
-        """Load an image prepared for the cluster into an allocation that runs; return the
-        ID Podman gives it."""
+        """Load an image prepared for the cluster into an allocation that runs, on each node
+        that does not hold it; return the ID Podman gives it."""
         loaded = image.prepared_identity
-        if loaded != chain.seed and loaded not in chain.images:
+        lacking = [
+            node for node, seed in zip(chain.nodes, chain.seeds, strict=True) if seed != loaded
+        ]
+        if lacking and loaded not in chain.images:
             await chain.job.control(
-                "load", image.runtime_ref, loaded.removeprefix("sha256:"), timeout=3600
+                "load",
+                image.runtime_ref,
+                loaded.removeprefix("sha256:"),
+                nodes=lacking,
+                timeout=3600,
             )
             chain.images.add(loaded)
         return loaded
@@ -678,41 +798,36 @@ class SlurmProvider(Provider):
         self,
         needs: SandboxNeeds,
         *,
-        image: str,
-        archive: str,
-        layers: dict[str, str] | None = None,
+        seeds: Sequence[dict[str, object]],
         separate: Resources | None = None,
         patient: bool = False,
     ) -> _Chain:
-        """An allocation for ``needs``, and the ``separate`` verifier, seeded with ``image``
-        from its ``archive`` below the cache: an image prepared for the cluster, or a
-        written-out snapshot, which Podman loads under its own ID, with that snapshot's
-        volume ``layers``, by name, below the cache. It waits in the queue for
-        ``queue_timeout_sec``, or, ``patient``, for as long as Slurm keeps it pending."""
+        """An allocation for ``needs``, and the ``separate`` verifier, each of whose nodes is
+        seeded with an image from its archive below the cache: an image prepared for the
+        cluster, or a node of a written-out snapshot, which Podman loads under its own ID,
+        with that node's volume layers, by name, below the cache; nodes past ``seeds`` take
+        the first. It waits in the queue for ``queue_timeout_sec``, or, ``patient``, for as
+        long as Slurm keeps it pending."""
         part = self._partition(needs, separate=separate)
         if part is None:
-            raise ProviderCapabilityError(
-                "no configured Slurm partition serves that single-node allocation"
-            )
-        cpus, memory_mb, gpus = _capacity(needs, separate)
+            raise ProviderCapabilityError("no configured Slurm partition serves that allocation")
+        cpus, memory_mb, gpus, nodes = _capacity(needs, separate)
+        each = [seeds[rank] if rank < len(seeds) else seeds[0] for rank in range(nodes)]
         job = Job(part)
         try:
-            job.stage(
-                dict(
-                    archive=archive,
-                    image=image.removeprefix("sha256:"),
-                    version=gvisor.VERSION,
-                    gpus=gpus,
-                    layers=layers or {},
-                )
-            )
+            job.stage(dict(seeds=each, version=gvisor.VERSION, gpus=gpus))
             await job.submit(
                 cpus=cpus,
                 memory_mb=memory_mb + JOB_OVERHEAD_MB,
                 gpus=gpus,
                 minutes=self.config.walltime_minutes,
+                nodes=nodes,
             )
             ready = await job.ready(None if patient else self.config.queue_timeout_sec)
+            if len(ready.nodes) != nodes:
+                raise ProviderStartError(
+                    f"Slurm job {job.id} has {len(ready.nodes)} nodes, not {nodes}"
+                )
             left = await job.time_left()
         except BaseException:
             await asyncio.shield(job.stop())
@@ -725,7 +840,7 @@ class SlurmProvider(Provider):
         return _Chain(
             job=job,
             ready=ready,
-            seed=image,
+            seeds=tuple("sha256:" + str(seed["image"]) for seed in each),
             cpus=cpus,
             memory_mb=memory_mb,
             gpus=gpus,
@@ -738,82 +853,99 @@ class SlurmProvider(Provider):
         index: str,
         request: SandboxRequest,
         resolved: ResolvedImage,
-        loaded: str,
-        volumes: list[dict[str, object]],
+        loaded: Sequence[str],
+        volumes: Sequence[list[dict[str, object]]],
         *,
         candidates: Sequence[str] = (),
     ) -> SlurmSandbox:
-        """Start a Sandbox in ``chain`` from the image Podman holds there as ``loaded``, with
-        ``volumes`` made in the allocation's store, and one of its own at each of the volume
-        ``candidates`` that is a directory in the image."""
+        """Start a Sandbox in ``chain`` on its first nodes, node ``k`` from the image Podman
+        holds there as ``loaded[k]``, with ``volumes[k]`` made in its store, and one of its own
+        at each of the volume ``candidates`` that is a directory in the image."""
         gateway, listeners, targets = tunnel_plan(request)
         resources = request.resources
+        count = resources.nodes
         env = dict(request.env)
         env[CONTAINER_VARIABLE] = str(request.desktop_resolution)
         if gateway:
             env["ORBIT_GATEWAY_URL"] = gateway
         runtime, args = _runtime(resources.container_features)
         sealed = request.network.mode is not NetworkMode.OPEN
-        steps = SandboxSteps(chain.job, index)
+        nodes = [SandboxSteps(chain.job, index, node) for node in chain.nodes[:count]]
+        spec: dict[str, object] = dict(
+            nodes=[
+                dict(image=loaded[rank].removeprefix("sha256:"), volumes=volumes[rank])
+                for rank in range(count)
+            ],
+            runtime_args=args,
+            gpus=resources.gpus,
+            cpus=resources.cpus,
+            memory_mb=step_memory_mb(resources.memory_mb),
+            shm_mb=memory.shm_mb(resources.memory_mb),
+            env=env,
+            sealed=sealed,
+            candidates=list(candidates),
+        )
+        if count > 1:
+            # Shared by the nodes' exec daemons, which run as root and as the asker.
+            spec["group"] = dict(secret=secrets.token_hex(32), python=guestd.PYTHON["linux"])
         stack = AsyncExitStack()
         try:
-            ready = await chain.job.start(
-                index,
-                dict(
-                    image=loaded.removeprefix("sha256:"),
-                    runtime_args=args,
-                    gpus=resources.gpus,
-                    cpus=resources.cpus,
-                    memory_mb=step_memory_mb(resources.memory_mb),
-                    shm_mb=memory.shm_mb(resources.memory_mb),
-                    env=env,
-                    sealed=sealed,
-                    volumes=volumes,
-                    candidates=list(candidates),
-                ),
-                timeout=START_TIMEOUT_SEC,
+            readies = await chain.job.start(index, spec, nodes=count, timeout=START_TIMEOUT_SEC)
+            if [ready.node for ready in readies] != [node.node for node in nodes]:
+                raise ProviderStartError(
+                    f"Slurm ran Sandbox {index} on {[r.node for r in readies]}, not its nodes"
+                )
+            watchers: list[memory.GuestEvents] = []
+            for node in nodes:
+                watcher = await memory.GuestEvents.start(
+                    node.step(
+                        "exec", guestd.PYTHON["linux"], "-I", "-c", memory.WATCHER, gvisor.OOM_KILLS
+                    ),
+                    counter="the Sentry",
+                )
+                stack.push_async_callback(watcher.close)
+                watchers.append(watcher)
+            clients = [
+                await _guest(node, ready, request.user, watchers, stack)
+                for node, ready in zip(nodes, readies, strict=True)
+            ]
+            file_client = await _guest(nodes[0], readies[0], request.user, watchers, stack)
+            healths = await asyncio.gather(
+                *(client.health(timeout_sec=90) for client in (*clients, file_client))
             )
-            watcher = await memory.GuestEvents.start(
-                steps.step(
-                    "exec", guestd.PYTHON["linux"], "-I", "-c", memory.WATCHER, gvisor.OOM_KILLS
-                ),
-                counter="the Sentry",
-            )
-            stack.push_async_callback(watcher.close)
-            client = await _guest(steps, ready, request.user, watcher, stack)
-            file_client = await _guest(steps, ready, request.user, watcher, stack)
-            health, _ = await asyncio.gather(
-                client.health(timeout_sec=90), file_client.health(timeout_sec=90)
-            )
-            home = str(health.get("agent_home") or "")
+            home = str(healths[0].get("agent_home") or "")
             if not home:
                 raise ProviderStartError("Slurm guestd did not report an agent home")
-            await set_and_prove_elevation(client, request, request.user)
-            gpu = await _gpu_allocation(client, ready, resources, chain)
+            for client in clients:
+                await set_and_prove_elevation(client, request, request.user)
+            gpu = await _gpu_allocation(clients, readies, resources, chain)
             desktop = None
-            if health.get("gui") and request.role is not SandboxRole.VERIFIER:
+            if healths[0].get("gui") and request.role is not SandboxRole.VERIFIER:
                 async with asyncio.timeout(120):
                     while True:
                         try:
-                            await client.screenshot()
+                            await clients[0].screenshot()
                             break
                         except MemoryExhaustedError:
                             raise
                         except (GuestUnreachableError, TimeoutError):
                             await asyncio.sleep(1)
                 desktop = await require_resolution(
-                    client, request.desktop_resolution, container=True
+                    clients[0], request.desktop_resolution, container=True
                 )
+            variables = _group_variables(readies)
             if listeners:
-                tunnel = GatewayTunnel(steps, listeners=listeners, targets=targets)
-                stack.push_async_callback(tunnel.close)
-                await tunnel.start()
+                # Every node reaches the Gateway and the egress proxy, as node 0 does.
+                for node in nodes:
+                    tunnel = GatewayTunnel(node, listeners=listeners, targets=targets)
+                    stack.push_async_callback(tunnel.close)
+                    await tunnel.start()
             sandbox = SlurmSandbox(
                 self,
                 chain,
-                steps,
+                nodes,
+                clients,
                 stack,
-                client,
                 file_client,
                 request=request,
                 resolved_image=resolved,
@@ -826,20 +958,24 @@ class SlurmProvider(Provider):
                     provider=self.name,
                     leaf=self.name,
                     runtime=runtime,
-                    node=chain.ready.node,
+                    node=readies[0].node,
+                    nodes=tuple(ready.node for ready in readies) if count > 1 else (),
                     desktop_resolution=desktop,
                 ),
                 home=home,
                 gateway=gateway,
                 volumes=(
-                    *ready.volumes,
-                    *(str(v["path"]) for v in volumes if not v.get("copied")),
+                    *readies[0].volumes,
+                    *(str(v["path"]) for v in volumes[0] if not v.get("copied")),
                 ),
+                variables=variables,
             )
             sandbox.deadline = chain.deadline
             sandbox.state = SandboxState.READY
             if sealed:
                 await sandbox.close_egress()
+            else:
+                await sandbox._peer_variables([None] * count)
             return sandbox
         except BaseException:
             await stack.aclose()
@@ -872,7 +1008,7 @@ class SlurmProvider(Provider):
         Sandbox starts there any more, so its snapshots are written out and none is to boot
         there."""
         for snapshot in chain.snapshots.values():
-            if snapshot.archive is None:
+            if not snapshot.archives:
                 await self.write_out(chain, snapshot)
             snapshot.boots = 0
         await self._end_if_idle(chain)
@@ -889,43 +1025,60 @@ class SlurmProvider(Provider):
                 extra={"orbit_data": {"job": chain.job.id, "error": str(error)}},
             )
 
-    async def write_out(self, chain: _Chain, snapshot: _Snapshot) -> str:
-        """Write a snapshot to the cluster's shared file system, from which an allocation of
-        its own loads it, and return where below the cache."""
+    async def write_out(self, chain: _Chain, snapshot: _Snapshot) -> tuple[str, ...]:
+        """Write a snapshot to the cluster's shared file system, each node's from that node at
+        once, from which an allocation of its own loads it, and return where each node's is
+        below the cache."""
         name = f"{chain.job.name}-{snapshot.index}"
-        archive = f"{SNAPSHOTS}/{name}.tar"
-        await chain.job.control(
-            "export",
-            snapshot.image.removeprefix("sha256:"),
-            archive,
-            *sorted(snapshot.layers),
-            timeout=3600,
+        archives = tuple(
+            _archive(chain.job.name, snapshot.index, rank) for rank in range(len(snapshot.images))
         )
+        # Every node's at once, each to its end before a failure is raised.
+        exported = await asyncio.gather(
+            *(
+                chain.job.control(
+                    "export",
+                    image.removeprefix("sha256:"),
+                    archives[rank],
+                    *sorted(snapshot.layers_of(rank)),
+                    nodes=(chain.nodes[rank],),
+                    timeout=3600,
+                )
+                for rank, image in enumerate(snapshot.images)
+            ),
+            return_exceptions=True,
+        )
+        if failed := next((each for each in exported if isinstance(each, BaseException)), None):
+            raise failed
         record = dict(
             handle=_handle(chain.job, snapshot.index),
-            image=snapshot.image,
+            images=list(snapshot.images),
             prepared_identity=snapshot.prepared_identity,
             episode=snapshot.episode_id,
             roles=list(snapshot.roles),
             reason=snapshot.reason,
-            stacks=snapshot.stacks,
+            stacks=list(snapshot.stacks),
         )
         write(cache() / SNAPSHOTS / f"{name}.json", json.dumps(record).encode())
-        snapshot.archive = archive
-        return archive
+        snapshot.archives = archives
+        return archives
 
     async def list_retained(self) -> list[dict[str, object]]:
         records: dict[str, dict[str, object]] = {}
         for path in sorted((cache() / SNAPSHOTS).glob("*.json")):
             try:
                 saved = json.loads(path.read_text())
-            except (OSError, ValueError):
+                record = _record(
+                    saved["handle"], saved["episode"], saved["roles"], saved["images"][0]
+                )
+            except (OSError, ValueError, KeyError, IndexError):
+                # Unreadable, or written by an engine that recorded it otherwise.
                 continue
-            records[saved["handle"]] = _record(
-                saved["handle"], saved["episode"], saved["roles"], saved["image"]
-            )
+            records[saved["handle"]] = record
         for handle, (_, snapshot) in self.snapshots.items():
-            records[handle] = _record(handle, snapshot.episode_id, snapshot.roles, snapshot.image)
+            records[handle] = _record(
+                handle, snapshot.episode_id, snapshot.roles, snapshot.images[0]
+            )
         return sorted(records.values(), key=lambda item: str(item["handle"]))
 
     async def destroy_retained(self, handle: str) -> None:
@@ -936,25 +1089,60 @@ class SlurmProvider(Provider):
             if not chain.closed:
                 try:
                     # Not forced: a Sandbox booted from the snapshot still uses its layers.
-                    await chain.job.control("rmi", snapshot.index)
+                    await chain.job.control(
+                        "rmi", snapshot.index, nodes=chain.nodes[: len(snapshot.images)]
+                    )
                 except ProviderStartError:
                     if await chain.job.state():
                         raise
-                    # Slurm ended the allocation, and the node's store with it.
+                    # Slurm ended the allocation, and its nodes' stores with it.
                     await self._close(chain)
             self.snapshots.pop(handle, None)
             chain.snapshots.pop(index, None)
             if not chain.closed:
-                # Its volumes' layers that no other snapshot and no running view stacks.
+                # Its volumes' layers that no other snapshot and no running view stacks, from
+                # the node that holds each.
                 kept = {layer for other in chain.snapshots.values() for layer in other.layers}
                 kept.update(layer for held in chain.viewing.values() for layer in held)
-                if dropped := sorted(snapshot.layers - kept):
-                    await chain.job.control("drop", *dropped, timeout=600)
+                for rank in range(len(snapshot.stacks)):
+                    if dropped := sorted(snapshot.layers_of(rank) - kept):
+                        await chain.job.control(
+                            "drop", *dropped, nodes=(chain.nodes[rank],), timeout=600
+                        )
         stem = f"{name}-{index}"
         for path in (cache() / SNAPSHOTS).glob(f"{stem}.*"):
             path.unlink(missing_ok=True)
         if found is not None:
             await self._close_if_idle(found[0])
+
+
+def _group_variables(readies: Sequence[StepReady]) -> list[dict[str, str]]:
+    """What every command on each node of a Sandbox that spans several gets, below its own
+    variables: the nodes, its own number, the nodes' interface for NCCL's and Gloo's sockets
+    and, where every node has InfiniBand, NCCL on it alone, so that a fallback to sockets is
+    an error rather than a slow job. None for one node."""
+    if len(readies) < 2:
+        return []
+    common = {
+        "ORBIT_NODES": ",".join(f"node{rank}" for rank in range(len(readies))),
+        "NCCL_SOCKET_IFNAME": worker.GROUP_INTERFACE,
+        "GLOO_SOCKET_IFNAME": worker.GROUP_INTERFACE,
+    }
+    if all(ready.hcas for ready in readies):
+        common["NCCL_NET"] = "IB"
+    return [common | {"ORBIT_NODE_RANK": str(rank)} for rank in range(len(readies))]
+
+
+def _seed(archive: str, image: str, layers: dict[str, str]) -> dict[str, object]:
+    """What a node of a new allocation loads: an image's archive below the cache, the ID
+    Podman gives the image, and volume layers' archives, by layer."""
+    return dict(archive=archive, image=image.removeprefix("sha256:"), layers=layers)
+
+
+def _archive(name: str, index: str, rank: int) -> str:
+    """Where node ``rank`` of snapshot ``index`` of job ``name`` is written out, below the
+    cache."""
+    return f"{SNAPSHOTS}/{name}-{index}.{rank}.tar"
 
 
 def _record(handle: str, episode: str, roles: Sequence[str], image: str) -> dict[str, object]:

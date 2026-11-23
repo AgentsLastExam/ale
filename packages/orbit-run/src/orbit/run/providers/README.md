@@ -5,7 +5,7 @@ Providers turn prepared Task images into Sandboxes. Orbit ships the following ba
 | Package | Backend | Prepared input |
 |---|---|---|
 | `docker/` | local Docker container, a Kata microVM per container ([Kata](#docker-on-kata-containers)), or a container on gVisor ([gVisor](#docker-on-gvisor)) | immutable OCI image identity |
-| `slurm/` | a Linux gVisor container in a single-node Slurm batch allocation, beside the Sandboxes booted from its snapshots | immutable OCI image identity |
+| `slurm/` | a Linux gVisor container on each node a Sandbox spans, in a Slurm batch allocation beside the Sandboxes booted from its snapshots | immutable OCI image identity |
 | `qemu/` | QEMU/KVM guest runner | qcow2 disk, or a chain of [layers](#disk-layers) on one |
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona/` | Daytona cloud container | immutable OCI image identity, pushed by digest |
@@ -59,13 +59,14 @@ leaves its profiles name:
 | `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models and memory nvidia-smi reports, shared by `gpu_memory_mb` and watched ([GPU memory](#gpu-memory)); none without a working nvidia-smi | yes | `raw_sockets` | — |
 | `docker:kata` | Linux containers, on the machine's architecture | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes, but not with `nested_containers` | `user_namespaces`, `fuse` and `mount`, with `raw_sockets` in one profile and `nested_containers` in another | — |
-| `slurm` | Linux x86-64 containers on configured partitions | whole GPUs of the configured partition model | 200 in a row, but not with `nested_containers` | as the two gVisor profiles above | a solver that, with the verifier booted from its snapshot, needs more than one node of a partition supplies; explicit writable storage limits |
+| `slurm` | Linux x86-64 containers on configured partitions, a Sandbox on up to a partition's `max_nodes` nodes ([Slurm nodes](#slurm-nodes)) | whole GPUs of the configured partition model, on each node | 200 in a row, but not with `nested_containers` | as the two gVisor profiles above | a solver that, with the verifier booted from its snapshot, needs more than a partition supplies; explicit writable storage limits |
 | `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
 | `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
 | `daytona` (scheduler) | Linux containers on x86-64 | Daytona's, whole | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
 | `fleet` (scheduler) | what the leaves lent by its registered Nodes that run this engine's framework start, online or not, read once per Run | as those leaves | as those leaves | as those leaves | as those leaves |
 
+Only `slurm` joins nodes into one Sandbox; every other leaf's profiles span one node.
 Every profile applies `open`, `block`, `allowlist` and `blocklist`, apart from Orchard's,
 which applies the last three only where setup's Softnet is the worker's; a macOS Sandbox refused
 for that names the setup that installs it. A Linux Task's container is x86-64, so a Docker
@@ -206,6 +207,70 @@ verification, none of the image's link, FIFO or excluded directory; a Sandbox wr
 300 MiB to its volume past a `storage_mb` of 256, stopped as `storage_exhausted`; and a
 gVisor Sandbox's Docker engine whose image, which deletes a file of its base, is still
 there and still deletes it once booted from its snapshot, where it deletes another.
+
+### Slurm nodes
+
+A Sandbox of several [nodes](../../../../../../docs/specs/task-authoring.md#nodes) runs one
+gVisor container on each, from the same image, as node 0 runs; node `k` is the allocation's
+`k`-th node. Commands and files go to node 0. Every node gets the Task's resources, its
+account's sudo, a guestd session through which the Provider checks them, the Gateway
+tunnel and, while sealed, the egress relay and the tc seal on its own slirp4netns tap, so
+every node has the network its Task asks for.
+
+The nodes share a network of their own, `10.214.0.0/24`, node `k` at `10.214.0.<k+1>` on an
+interface `peers`, with `/etc/hosts` naming each `node<k>`
+([`slurm/worker.py`](slurm/worker.py)). On each node a Podman pod that shares only its
+network namespace holds the Sandbox's namespace, with its slirp4netns tap and `peers`;
+gVisor's netstack takes both. The other end of `peers` is in a second pod's namespace, the
+router's, which only the worker enters: it reaches the node's network through pasta, which
+forwards one UDP port, and holds a WireGuard device to every other node's router, whose keys
+and endpoints the nodes exchange through the job's directory on the shared home and which
+the worker configures over generic netlink. Policy routing in the router forwards from the
+Sandbox only to the nodes' addresses through the tunnel, and from the tunnel only to the
+Sandbox, so nothing reaches the router's uplink; WireGuard takes from each peer only its one
+address. Rank-to-rank traffic over it is slow, 0.1 to 0.3 GB/s through pasta, enough to
+rendezvous and bootstrap.
+
+A node's container gets the node's verbs devices of HCAs with an active InfiniBand port, and
+none of an Ethernet one, nor `rdma_cm`, `umad` or `issm`; where it has any, it runs with
+`--rdmaproxy`, gVisor's RDMA proxy. Every container gets unlimited locked memory. InfiniBand
+traffic passes no network filter of the nodes' machines; its boundary is the fabric's
+partition, which the site sets and Orbit does not.
+
+Every command on a node, node 0's through guestd and any through `orbit-exec`, gets
+`ORBIT_NODES`, `ORBIT_NODE_RANK`, `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` naming
+`peers` and, where every node has InfiniBand, `NCCL_NET=IB`, so NCCL's fallback to sockets
+is an error rather than a slow job. A command's own variables override them. `orbit-exec`
+is a shell client of a root daemon on each node ([`guestd/peers.py`](../guestd/peers.py)),
+which takes a request through a spool directory, runs it on the named node as the account
+that asked, over the nodes' network with a secret the daemons share, and gives it the
+variables the caller exported, except those that describe a node, such as
+`ORBIT_NODE_RANK`, `HOME` and the proxy's, which the running node's daemon supplies: its
+node's group variables and, while the Sandbox is sealed, its relay's proxy variables.
+
+A snapshot commits every node to its own store. Node `k` of a Sandbox booted from it starts
+from node `k`'s commit, and node `k` of a separate verifier views node `k`'s volumes, one
+beyond the snapshot's nodes viewing none. Written out, each node writes its own archive and
+layers at once, which node `k` of the next allocation loads. The batch step holds the first
+node's store, and a step of its own every other node's, for as long as the allocation runs.
+Compute nodes need, for a Sandbox of several nodes, pasta, catatonit for Podman's pods, and
+the kernel's WireGuard module.
+
+Measured on OpenRSI (H100, Linux 6.8, Podman 4.9.3, NCCL 2.27.5, November 2026), each once,
+in gVisor containers on the network above, given their devices as patch 0012 gives them,
+against the same steps on the bare nodes:
+
+| | gVisor | Bare node |
+|---|---|---|
+| `ib_write_bw`, 1 MiB, across the two nodes | 394.6 Gb/s | 389.6 Gb/s |
+| NCCL all-reduce, 2 × 8 H100, 1 GiB | 421.7 GB/s | 442.2 GB/s |
+| NCCL all-reduce, 2 × 8 H100, 64 MiB | 213.9 GB/s | 260.3 GB/s |
+| DDP, 134M parameters, 2 × 8 H100 | 26.42 steps/s | 26.65 steps/s |
+
+In a Sandbox of two nodes that Orbit started with runsc 0.1.5, the episode of
+[`test_slurm_nodes.py`](../../../../../../tests/integration/test_slurm_nodes.py) all-reduced
+1 GiB across its 16 H100s at 412 GB/s, node 1's ranks started from node 0 through
+`orbit-exec`.
 
 ### Slurm volumes
 
@@ -836,12 +901,14 @@ the preflight's check: about 15 s with that image.
 
 Orbit runs on a login node of the cluster, where Slurm's commands work and whose home every
 compute node shares, and a Run drives that one cluster. A Sandbox not booted from a
-snapshot, a separate verifier that copies included, gets a single-node batch job of its own,
-its allocation, sized for it and for the verifiers its request names, which boot from its
-snapshot or view its [volumes](#slurm-volumes) after it. Each Sandbox runs in its allocation
-as a job step of its own, which the batch step starts with `srun --exact` and Slurm holds to
-the Sandbox's CPUs, memory and GPUs; a step that asks for no GPU sees none of the job's. The
-allocation ends once nothing its episode still needs is in it.
+snapshot, a separate verifier that copies included, gets a batch job of its own, its
+allocation, of as many alike nodes as the most it or a verifier its request names spans,
+each sized for the largest of them, which boot from its snapshot or view its
+[volumes](#slurm-volumes) after it. Each Sandbox runs in its allocation as a job step of its
+own over the allocation's first nodes it spans, one task on each, which the batch step
+starts with `srun --exact` and Slurm holds to the Sandbox's CPUs, memory and GPUs on each; a
+step that asks for no GPU sees none of the job's. The allocation ends once nothing its
+episode still needs is in it.
 
 The login node needs no container runtime: a Task's images are prepared on the cluster
 ([`slurm/images.py`](slurm/images.py)), once per key of everything that goes into them, each
@@ -883,17 +950,19 @@ max_cpus = 166
 max_memory_mb = 1593403
 gpu_model = { name = "NVIDIA H100 80GB HBM3", memory_mb = 81559 }
 max_gpus = 8
+max_nodes = 2
 ```
 
-Each entry describes a homogeneous partition's effective per-node limits for that QoS.
+Each entry describes a homogeneous partition's effective per-node limits for that QoS, and
+how many of its nodes one allocation may span (`max_nodes`, one unless it says more).
 CPU-only allocations use CPU entries; an allocation whose solver or verifier needs GPUs
 takes the first matching GPU entry, as whole cards. The provider checks each step's CPU and
 memory limits, the started image and the allocated GPU UUIDs against the devices the guest
 sees. An allocation that boots no snapshot and is no separate verifier's, such as an
 episode's first, waits in the queue for `queue_timeout_sec` at most; any other, mid-episode,
 waits for as long as Slurm keeps it pending, and says why every ten minutes. `sandbox_id` is
-the job ID and the Sandbox's index in the job; the allocation records the compute node and
-runtime.
+the job ID and the Sandbox's index in the job; the allocation records the compute node, or
+every node of a Sandbox of several, and runtime.
 
 Running jobs have a Slurm wall time even when Orbit is lost: `walltime_minutes`, within the
 QoS's limit, is each allocation's, and the solver of an episode longer than one
@@ -914,8 +983,8 @@ held since its last snapshot written out is lost, a round's snapshot and verifie
 included: a Sandbox to boot from such a snapshot fails with `AllocationEndedError`, which
 says so.
 
-A snapshot is the stopped container committed to the allocation's store on its node
-([Snapshots](#snapshots)). The verifier booted from it, a [validation
+A snapshot is the stopped container committed to the allocation's store on its node, each
+node's to its own ([Snapshots](#snapshots)). The verifier booted from it, a [validation
 round](../../../../../../docs/specs/episode-protocol.md#validation-rounds)'s, a separate
 verifier that views its volumes and the next turn's solver start there in steps of the same
 allocation while it lasts them, so nothing is copied and nothing waits in the queue again.

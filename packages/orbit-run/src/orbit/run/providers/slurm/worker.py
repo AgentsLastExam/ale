@@ -1,10 +1,18 @@
-"""A single-node Slurm allocation and the Sandboxes in it, or the job that prepares an image
-for them. Copied to the cluster, standard library only.
+"""A Slurm allocation and the Sandboxes in it, or the job that prepares an image for them.
+Copied to the cluster, standard library only.
 
-The batch step holds Podman's private namespace and store on the node and loads the image
-the allocation was seeded with. Each Sandbox the engine asks for runs as a job step of its
-own, which Slurm holds to that Sandbox's CPUs, memory and GPUs; control steps overlap it.
-A Sandbox saved as a snapshot is committed to the store, where the next one boots from it.
+On each node of the allocation, the batch step on the first and a step of its own on every
+other hold Podman's private namespace and store there and load the image that node was
+seeded with. Each Sandbox the engine asks for runs as a job step of its own over the first
+nodes it spans, one task on each, which Slurm holds to that Sandbox's CPUs, memory and GPUs
+on each; control steps overlap it. A Sandbox saved as a snapshot is committed to the store
+of each of its nodes, where the next one boots from it.
+
+The nodes of a Sandbox that spans several share a network of their own: on each node a
+router namespace, which only this worker enters, holds a WireGuard device to the other
+nodes' routers and forwards between it and the Sandbox's own namespace only the group's
+traffic, so nothing the Sandbox does to its own network reaches anything else. Each node
+gets the node's InfiniBand HCAs, which gVisor's RDMA proxy drives.
 
 A preparation job pulls a Task's image, or builds it from its context, adds the framework
 layer and saves the result to the shared cache, from which every allocation loads it.
@@ -18,12 +26,15 @@ the store, by which an overlay's options name a stack of hundreds in a page.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import fcntl
 import json
 import os
 import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -31,6 +42,25 @@ import time
 from pathlib import Path
 
 SANDBOXES = Path("sandboxes")
+#: Below the job's directory: each node's store and runtime, by the node's Slurm name.
+STORES = Path("stores")
+#: Below a Sandbox's directory: one directory for each of its nodes, by its number there,
+#: and what each node's router offers the others.
+NODES, PEERS = "nodes", "peers"
+#: The network of a Sandbox's nodes: node ``k`` is ``GROUP + str(k + 1)``. The interface
+#: that carries it in the Sandbox, the router's end of it, and the router's tunnel.
+GROUP, GROUP_INTERFACE, ROUTER_INTERFACE, TUNNEL = "10.214.0.", "peers", "peers-router", "wg0"
+#: The nodes' network's MTU: with WireGuard's 80 bytes, a jumbo frame of 9000, well within
+#: pasta's 65520; measured through pasta, 0.28 GB/s against 0.12 at the default 1420.
+GROUP_MTU = 8920
+#: Where each node's exec daemon listens on the nodes' network, and the root-only file of
+#: the variables it adds to what it runs: the node's group variables and, while the
+#: Sandbox is sealed, its egress proxy's.
+PEERS_PORT, PEERS_ENV = 7413, "/opt/orbit/peers-env.json"
+#: The client the daemon writes, which the agent runs.
+PEERS_CLIENT = "/usr/local/bin/orbit-exec"
+#: How long a node waits for the others: their routers' keys, or their stores.
+GROUP_TIMEOUT_SEC = 600
 SNAPSHOT_REPOSITORY = "localhost/orbit-snapshot"
 LOADED_REPOSITORY = "localhost/orbit-image"
 #: Below the cache: the images prepared for the cluster, each by its key.
@@ -54,6 +84,53 @@ TAR = ["tar", "--xattrs", "--xattrs-include=user.*", "--numeric-owner"]
 
 def output(*argv: str) -> str:
     return subprocess.check_output(argv, text=True).strip()
+
+
+def job_nodes() -> list[str]:
+    """The job's nodes, in the order Slurm lists them: a Sandbox of ``n`` spans the first."""
+    return output("scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]).split()
+
+
+def this_node() -> str:
+    return os.environ["SLURMD_NODENAME"]
+
+
+def node_store() -> dict[str, str]:
+    """This node's store and runtime, which the step that holds them recorded."""
+    return json.loads(Path(STORES / f"{this_node()}.json").read_text())
+
+
+def appeared(path: Path) -> bool:
+    """Whether ``path``, which another node may have just made, exists: as an NFS client
+    trusts a cached listing of a directory, its directory is listed first."""
+    try:
+        os.listdir(path.parent)
+    except OSError:
+        return False
+    return path.exists()
+
+
+def node_address() -> str:
+    """The address Slurm reaches this node at, which the other nodes reach it at too."""
+    shown = output("scontrol", "show", "node", "-o", this_node())
+    fields = dict(part.partition("=")[::2] for part in shown.split() if "=" in part)
+    return socket.gethostbyname(fields.get("NodeAddr") or this_node())
+
+
+def infiniband(root: Path = Path("/sys/class/infiniband")) -> list[str]:
+    """The node's verbs devices of HCAs with an active InfiniBand port: never an Ethernet
+    one, whose RoCE traffic would leave by the node's own network."""
+    found = []
+    for hca in sorted(root.glob("*")):
+        if any(
+            read(port / "link_layer") == "InfiniBand" and read(port / "state").endswith("ACTIVE")
+            for port in (hca / "ports").glob("*")
+        ):
+            found.extend(
+                "/dev/infiniband/" + verbs.name
+                for verbs in sorted((hca / "device" / "infiniband_verbs").glob("uverbs*"))
+            )
+    return found
 
 
 def write(path: Path | str, value: object) -> None:
@@ -264,13 +341,17 @@ def load_layers(command: list[str], directory: str, layers: dict[str, str]) -> N
 
 
 def network(command: list[str], name: str, *, sealed: bool) -> None:
+    """Seal or open the network namespace of the container ``name``, which holds a Sandbox
+    or, for one of several nodes, its pod's: drop or pass every packet of its slirp4netns
+    tap, outside gVisor. The group's interface, whose router passes only the group's
+    traffic, stays as it is."""
     namespace = output(*command, "inspect", "-f", "{{.NetworkSettings.SandboxKey}}", name)
     net = [*command, "unshare", "nsenter", "--net=" + namespace]
     # Slirp4netns gives this container one tap. gVisor has taken its routes into netstack.
     interfaces = [
         link["ifname"]
         for link in json.loads(output(*net, "ip", "-j", "link"))
-        if link["ifname"] != "lo"
+        if link["ifname"] not in ("lo", GROUP_INTERFACE)
     ]
     if len(interfaces) != 1:
         raise RuntimeError(f"expected one private network interface, found {interfaces}")
@@ -304,6 +385,228 @@ def network(command: list[str], name: str, *, sealed: bool) -> None:
         for q in json.loads(output(*tc, "-j", "qdisc", "show", "dev", interface))
     ):
         subprocess.run([*tc, "qdisc", "del", "dev", interface, "clsact"], check=True)
+
+
+#: X25519's prime, for a WireGuard key pair (RFC 7748).
+_P = 2**255 - 19
+
+
+def public_key(private: bytes) -> bytes:
+    """The X25519 public key of a private one, as WireGuard derives it."""
+    clamped = bytearray(private)
+    clamped[0] &= 248
+    clamped[31] = (clamped[31] & 127) | 64
+    scalar = int.from_bytes(clamped, "little")
+    x2, z2, x3, z3, swap = 1, 0, 9, 1, 0
+    for bit in (scalar >> t & 1 for t in reversed(range(255))):
+        if swap ^ bit:
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = bit
+        a, b, c, d = x2 + z2, x2 - z2, x3 + z3, x3 - z3
+        aa, bb, da, cb = a * a, b * b, d * a, c * b
+        e = aa - bb
+        x3, z3 = (da + cb) ** 2 % _P, 9 * (da - cb) ** 2 % _P
+        x2, z2 = aa * bb % _P, e * (aa + 121665 * e) % _P
+    if swap:
+        x2, z2 = x3, z3
+    return (x2 * pow(z2, _P - 2, _P) % _P).to_bytes(32, "little")
+
+
+def _attribute(kind: int, payload: bytes, *, nested: bool = False) -> bytes:
+    data = struct.pack("=HH", 4 + len(payload), kind | (0x8000 if nested else 0)) + payload
+    return data + b"\0" * (-len(data) % 4)
+
+
+def _netlink(
+    sock: socket.socket, family: int, command: int, payload: bytes, sequence: int
+) -> bytes:
+    """One generic netlink request, acknowledged: its reply, if it has one, read up to its
+    acknowledgement, so that the next request reads its own; or the error it got."""
+    body = struct.pack("=BBH", command, 1, 0) + payload
+    # NLM_F_REQUEST | NLM_F_ACK
+    sock.send(struct.pack("=IHHII", 16 + len(body), family, 5, sequence, 0) + body)
+    answer = b""
+    while True:
+        data, offset = sock.recv(65536), 0
+        while offset + 16 <= len(data):
+            length, kind, _, seen = struct.unpack_from("=IHHI", data, offset)
+            message = data[offset : offset + length]
+            offset += (length + 3) & ~3
+            if seen != sequence:
+                continue
+            if kind != 2:  # NLMSG_ERROR, which is also how the acknowledgement comes
+                answer = message
+                continue
+            (code,) = struct.unpack_from("=i", message, 16)
+            if code:
+                raise OSError(-code, f"netlink: {os.strerror(-code)}")
+            return answer
+
+
+def wireguard(config: dict[str, object]) -> None:
+    """In the router's network namespace: give its WireGuard device its key and port, and the
+    other nodes as its peers, each by its router's key and endpoint and the one address it may
+    send from. Over generic netlink, as the nodes have no ``wg``."""
+    peers = b"".join(
+        _attribute(
+            number,
+            _attribute(1, bytes.fromhex(str(peer["key"])))  # WGPEER_A_PUBLIC_KEY
+            + _attribute(
+                4,  # WGPEER_A_ENDPOINT, a sockaddr_in
+                struct.pack("=H", socket.AF_INET)
+                + struct.pack("!H", int(peer["port"]))
+                + socket.inet_aton(str(peer["host"]))
+                + bytes(8),
+            )
+            + _attribute(5, struct.pack("=H", 25))  # WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL
+            + _attribute(
+                9,  # WGPEER_A_ALLOWEDIPS
+                _attribute(
+                    0,
+                    _attribute(1, struct.pack("=H", socket.AF_INET))
+                    + _attribute(2, socket.inet_aton(str(peer["address"])))
+                    + _attribute(3, struct.pack("=B", 32)),
+                    nested=True,
+                ),
+                nested=True,
+            ),
+            nested=True,
+        )
+        for number, peer in enumerate(config["peers"])  # type: ignore[arg-type]
+    )
+    payload = (
+        _attribute(2, TUNNEL.encode() + b"\0")  # WGDEVICE_A_IFNAME
+        + _attribute(3, bytes.fromhex(str(config["private"])))  # WGDEVICE_A_PRIVATE_KEY
+        + _attribute(6, struct.pack("=H", int(config["port"])))  # type: ignore[arg-type]
+        + _attribute(5, struct.pack("=I", 1))  # WGDEVICE_F_REPLACE_PEERS
+        + _attribute(8, peers, nested=True)  # WGDEVICE_A_PEERS
+    )
+    with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 16) as sock:  # NETLINK_GENERIC
+        sock.bind((0, 0))
+        # CTRL_CMD_GETFAMILY of the controller (GENL_ID_CTRL), by CTRL_ATTR_FAMILY_NAME.
+        reply = _netlink(sock, 0x10, 3, _attribute(2, b"wireguard\0"), 1)
+        offset, family = 20, 0
+        while offset < len(reply):
+            length, kind = struct.unpack_from("=HH", reply, offset)
+            if kind == 1:  # CTRL_ATTR_FAMILY_ID
+                (family,) = struct.unpack_from("=H", reply, offset + 4)
+            offset += (length + 3) & ~3
+        if not family:
+            raise RuntimeError("the node's kernel has no WireGuard")
+        _netlink(sock, family, 1, payload, 2)  # WG_CMD_SET_DEVICE
+
+
+def free_udp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("", 0))
+        return int(probe.getsockname()[1])
+
+
+def infra_pid(command: list[str], pod: str) -> int:
+    infra = output(*command, "pod", "inspect", "-f", "{{.InfraContainerID}}", pod)
+    return int(output(*command, "inspect", "-f", "{{.State.Pid}}", infra))
+
+
+def group_up(command: list[str], box: Path, index: str, rank: int, count: int, shm_mb: int) -> str:
+    """Give node ``rank`` of the Sandbox ``index`` its share of the group's network, once
+    every node offers its router's key and endpoint, and return the pod whose network
+    namespace the Sandbox joins: one that holds its slirp4netns tap, as a single node's
+    Sandbox has, and the group's interface, whose other end is in the router's namespace.
+    A container in a pod gets the pod's ``/dev/shm``, whatever its own ``--shm-size``, so
+    the pod has the Sandbox's ``shm_mb``."""
+    router, pod = f"router-{index}", f"group-{index}"
+    for _ in range(5):
+        # The router's uplink, which forwards WireGuard's port from the node.
+        port = free_udp_port()
+        created = subprocess.run(
+            [*command, "pod", "create", "--name", router, "--share", "net",
+             "--network", "pasta", "--publish", f"{port}:{port}/udp"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False,
+        )  # fmt: skip
+        if (
+            not created.returncode
+            and not subprocess.run(
+                [*command, "pod", "start", router], stdout=subprocess.DEVNULL, check=False
+            ).returncode
+        ):
+            break
+        subprocess.run([*command, "pod", "rm", "-f", router], capture_output=True, check=False)
+    else:
+        raise RuntimeError(f"could not start the group's router: {created.stderr.strip()}")
+    subprocess.run(
+        [*command, "pod", "create", "--name", pod, "--share", "net", f"--shm-size={shm_mb}m",
+         "--network", "slirp4netns:allow_host_loopback=false",
+         *(f"--add-host=node{k}:{GROUP}{k + 1}" for k in range(count))],
+        check=True, stdout=subprocess.DEVNULL,
+    )  # fmt: skip
+    subprocess.run([*command, "pod", "start", pod], check=True, stdout=subprocess.DEVNULL)
+    private = os.urandom(32)
+    offers = box / PEERS
+    offers.mkdir(exist_ok=True)
+    write(
+        offers / f"{rank}.json", dict(host=node_address(), port=port, key=public_key(private).hex())
+    )
+    deadline = time.monotonic() + GROUP_TIMEOUT_SEC
+    while not all(appeared(offers / f"{k}.json") for k in range(count)):
+        if time.monotonic() > deadline:
+            raise RuntimeError("the Sandbox's other nodes did not offer their routers")
+        time.sleep(0.5)
+    config = dict(
+        router=infra_pid(command, router),
+        sandbox=infra_pid(command, pod),
+        rank=rank,
+        port=port,
+        private=private.hex(),
+        peers=[
+            dict(json.loads((offers / f"{k}.json").read_text()), address=f"{GROUP}{k + 1}")
+            for k in range(count)
+            if k != rank
+        ],
+    )
+    # The private key goes by a pipe, never by a command line another account can read.
+    subprocess.run(
+        [*command, "unshare", "python3", "-I", __file__, "group"],
+        input=json.dumps(config).encode(),
+        check=True,
+    )
+    return pod
+
+
+def group(config: dict[str, object]) -> None:
+    """In Podman's namespace: the router's tunnel to the other nodes, the link between the
+    router and the Sandbox's namespace, and the router's forwarding, by policy routing
+    alone: from the Sandbox only to the group's addresses through the tunnel, from the tunnel
+    only to the Sandbox; nothing to the router's uplink."""
+    router = ["nsenter", "-t", str(config["router"]), "-n"]
+    sandbox = ["nsenter", "-t", str(config["sandbox"]), "-n"]
+    own = f"{GROUP}{int(config['rank']) + 1}"  # type: ignore[call-overload]
+    mtu = str(GROUP_MTU)
+
+    def run(*argv: str, given: bytes | None = None) -> None:
+        subprocess.run(argv, input=given, check=True)
+
+    run(*router, "ip", "link", "add", TUNNEL, "type", "wireguard")
+    run(*router, "python3", "-I", __file__, "wireguard", given=json.dumps(config).encode())
+    run(*router, "ip", "link", "add", ROUTER_INTERFACE, "type", "veth",
+        "peer", "name", GROUP_INTERFACE, "netns", str(config["sandbox"]))  # fmt: skip
+    run(*sandbox, "ip", "address", "add", own + "/24", "dev", GROUP_INTERFACE)
+    run(*sandbox, "ip", "link", "set", GROUP_INTERFACE, "mtu", mtu, "up")
+    for device in (ROUTER_INTERFACE, TUNNEL):
+        run(*router, "ip", "link", "set", device, "mtu", mtu, "up")
+    # Neither of the router's interfaces has an address its routes reach back through, which
+    # a node's strict or loose reverse-path filter, inherited, would take as spoofing.
+    run(*router, "sh", "-c", "echo 1 >/proc/sys/net/ipv4/ip_forward && "
+        f"echo 1 >/proc/sys/net/ipv4/conf/{ROUTER_INTERFACE}/proxy_arp && "
+        "for c in all default " + ROUTER_INTERFACE + " " + TUNNEL + "; do "
+        "echo 0 >/proc/sys/net/ipv4/conf/$c/rp_filter; done")  # fmt: skip
+    for table, route in (
+        ("100", [GROUP + "0/24", "dev", TUNNEL]),
+        ("101", [own, "dev", ROUTER_INTERFACE]),
+    ):
+        run(*router, "ip", "route", "add", *route, "table", table)
+        run(*router, "ip", "route", "add", "unreachable", "default", "table", table)
+    run(*router, "ip", "rule", "add", "iif", ROUTER_INTERFACE, "lookup", "100", "pref", "100")
+    run(*router, "ip", "rule", "add", "iif", TUNNEL, "lookup", "101", "pref", "101")
 
 
 def own_cgroup() -> Path:
@@ -359,13 +662,20 @@ def runtime_binary(command: list[str], version: str) -> Path:
     return runtime / "runsc"
 
 
-def launch(index: str, request: dict[str, object], *, gpus: bool) -> subprocess.Popen[bytes]:
-    """Run one Sandbox as a step of its own, which Slurm holds to its resources."""
+def launch(
+    index: str, request: dict[str, object], nodes: list[str], *, gpus: bool
+) -> subprocess.Popen[bytes]:
+    """Run one Sandbox as a step of its own over the first of ``nodes`` it spans, one task
+    on each, which Slurm holds to its resources there; one task failing ends them all."""
+    count = len(request["nodes"])  # type: ignore[arg-type]
     args = [
         "srun",
         "--exact",
-        "--nodes=1",
-        "--ntasks=1",
+        f"--nodes={count}",
+        f"--ntasks={count}",
+        "--ntasks-per-node=1",
+        "--nodelist=" + ",".join(nodes[:count]),
+        "--kill-on-bad-exit=1",
         f"--cpus-per-task={request['cpus']}",
         f"--mem={request['memory_mb']}M",
         "--cpu-bind=threads",
@@ -419,6 +729,23 @@ def stale_stores(scratch: Path) -> list[Path]:
     return stale
 
 
+def empty_stores(scratch: Path) -> list[Path]:
+    """This account's empty store directories some minutes old on this node: one can come
+    back after a node's hold step removed its store, naming no job, while a store in use
+    names its job as soon as it is made."""
+    found = []
+    for store in scratch.glob(STORE_PREFIX + "*"):
+        with contextlib.suppress(OSError):
+            made = store.stat()
+            if (
+                made.st_uid == os.getuid()
+                and time.time() - made.st_mtime > 600
+                and not any(store.iterdir())
+            ):
+                found.append(store)
+    return found
+
+
 def release(command: list[str], directory: str) -> None:
     """Remove a store and every mount Podman made below it."""
     subprocess.run(
@@ -453,6 +780,9 @@ def hold_namespace(command: list[str], scratch: Path) -> None:
             [*command, "unshare", "rm", "-rf", "--one-file-system", "--", str(stale)],
             check=False,
         )
+    for empty in empty_stores(scratch):
+        with contextlib.suppress(OSError):
+            empty.rmdir()
 
 
 def clean(command: list[str], directory: str) -> None:
@@ -532,42 +862,71 @@ def prepare() -> None:
         clean(command, directory)
 
 
+def set_up(command: list[str], directory: str, spec: dict[str, object], rank: int) -> str:
+    """Load node ``rank``'s seed into its store, and record the store and the runtime there
+    for the node's steps; the runtime's version."""
+    seed = spec["seeds"][rank]  # type: ignore[index]
+    load(command, seed["archive"], seed["image"])
+    load_layers(command, directory, seed["layers"])
+    runsc = str(runtime_binary(command, str(spec["version"])))
+    version = output(runsc, "--version").splitlines()[0]
+    if not version.endswith("+orbit." + str(spec["version"])):
+        raise RuntimeError(f"unexpected gVisor build {version} on {this_node()}")
+    if spec["gpus"]:
+        supported = output(runsc, "nvproxy", "list-supported-drivers").split()
+        for driver in {str(device["driver_version"]) for device in devices()}:
+            if driver not in supported:
+                raise RuntimeError(
+                    f"the NVIDIA driver {driver} of {this_node()} is not one gVisor {version} "
+                    "supports; its nvproxy lists them with list-supported-drivers"
+                )
+    STORES.mkdir(exist_ok=True)
+    write(STORES / f"{this_node()}.json", dict(directory=directory, runsc=runsc))
+    return version
+
+
 def supervise() -> None:
     spec = json.loads(Path("allocation.json").read_text())
+    nodes = job_nodes()
     directory, command, scratch = store()
     steps: dict[str, subprocess.Popen[bytes]] = {}
+    holders: subprocess.Popen[bytes] | None = None
     try:
         hold_namespace(command, scratch)
-        load(command, spec["archive"], spec["image"])
-        load_layers(command, directory, spec.get("layers") or {})
-        runsc = str(runtime_binary(command, spec["version"]))
-        version = output(runsc, "--version").splitlines()[0]
-        if not version.endswith("+orbit." + spec["version"]):
-            raise RuntimeError(f"unexpected gVisor build {version}")
-        if spec["gpus"]:
-            supported = output(runsc, "nvproxy", "list-supported-drivers").split()
-            for driver in {str(device["driver_version"]) for device in devices()}:
-                if driver not in supported:
-                    raise RuntimeError(
-                        f"the node's NVIDIA driver {driver} is not one gVisor {version} "
-                        "supports; its nvproxy lists them with list-supported-drivers"
-                    )
+        if len(nodes) > 1:
+            # Every other node's store, held by a step there for as long as this one runs,
+            # which loads its seed as this node loads its own.
+            with open("hold.log", "wb") as log:
+                holders = subprocess.Popen(
+                    ["srun", "--overlap", f"--nodes={len(nodes) - 1}",
+                     f"--ntasks={len(nodes) - 1}", "--ntasks-per-node=1",
+                     "--nodelist=" + ",".join(nodes[1:]), "--kill-on-bad-exit=1",
+                     "python3", "-I", __file__, "hold"],
+                    stdout=log, stderr=subprocess.STDOUT,
+                )  # fmt: skip
+        version = set_up(command, directory, spec, 0)
+        while not all(appeared(STORES / f"{node}.json") for node in nodes[1:]):
+            assert holders is not None
+            if holders.poll() is not None or read("error"):
+                raise RuntimeError(
+                    read("error") or "a node's store failed: " + read("hold.log")[-2000:]
+                )
+            time.sleep(0.5)
         SANDBOXES.mkdir(exist_ok=True)
-        write(
-            "ready",
-            dict(directory=directory, runsc=runsc, runtime=version, node=os.uname().nodename),
-        )
+        write("ready", dict(runtime=version, node=nodes[0], nodes=nodes))
         while not read("stop"):
             for request in sorted(SANDBOXES.glob("*/request.json")):
                 index = request.parent.name
                 if index not in steps and not (request.parent / "done").exists():
                     steps[index] = launch(
-                        index, json.loads(request.read_text()), gpus=bool(spec["gpus"])
+                        index, json.loads(request.read_text()), nodes, gpus=bool(spec["gpus"])
                     )
             for index, step in list(steps.items()):
                 if (code := step.poll()) is not None:
                     write(SANDBOXES / index / "done", code)
                     del steps[index]
+            if holders is not None and holders.poll() is not None:
+                raise RuntimeError("a node's store ended: " + read("hold.log")[-2000:])
             time.sleep(0.5)
     finally:
         # The Host stops the allocation once its Sandboxes are gone; any left now end with
@@ -581,16 +940,59 @@ def supervise() -> None:
                 step.kill()
                 step.wait()
             write(SANDBOXES / index / "done", step.returncode)
+        if holders is not None and not read("stop"):
+            # Each removes its node's store once the job is stopped or released: a signal
+            # would not let it, as srun turns SIGTERM into SIGKILL for its tasks.
+            write("release", "1")
         # The batch step outlives each Sandbox's step, including an OOM that kills every
         # process there. Keep the job's counters before the allocation goes away.
         Path("memory").write_text((job_cgroup() / "memory.events").read_text())
+        try:
+            clean(command, directory)
+        finally:
+            if holders is not None:
+                try:
+                    holders.wait(timeout=540)
+                except subprocess.TimeoutExpired:
+                    holders.kill()
+                    holders.wait()
+
+
+def hold() -> None:
+    """Hold a node's store for as long as the allocation runs, other than the first's, which
+    the batch step holds."""
+    spec = json.loads(Path("allocation.json").read_text())
+    directory, command, scratch = store()
+    try:
+        hold_namespace(command, scratch)
+        set_up(command, directory, spec, job_nodes().index(this_node()))
+        # Written on other machines: the directory is listed first (see appeared). The job's
+        # stop is there from the start, empty until the Host stops it.
+        while not (appeared(Path("stop")) and read("stop")) and not appeared(Path("release")):
+            time.sleep(1)
+    finally:
         clean(command, directory)
 
 
 def start(index: str) -> None:
+    """Run node ``SLURM_PROCID`` of the Sandbox ``index``: its share of the group's network
+    where it spans several nodes, its volumes, its container and, there, the daemon its
+    peers' ``orbit-exec`` reaches; then hold it until it is saved or destroyed."""
     box = SANDBOXES / index
+    rank = int(os.environ["SLURM_PROCID"])
+    own = box / NODES / str(rank)
+    deadline = time.monotonic() + GROUP_TIMEOUT_SEC
+    while not appeared(box / "request.json"):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"{this_node()} sees no request for Sandbox {index}")
+        time.sleep(0.5)
     spec = json.loads((box / "request.json").read_text())
-    ready = json.loads(Path("ready").read_text())
+    node, count = spec["nodes"][rank], len(spec["nodes"])
+    own.mkdir(parents=True, exist_ok=True)
+    if job_nodes()[rank] != this_node():
+        # Every control step finds a node's part of the Sandbox by the node's place in the job.
+        raise RuntimeError(f"node {rank} of Sandbox {index} runs on {this_node()}")
+    stored = node_store()
     limit = limit_cgroup()
     if (
         int((limit / "memory.max").read_text()) != spec["memory_mb"] << 20
@@ -598,38 +1000,53 @@ def start(index: str) -> None:
         or len(os.sched_getaffinity(0)) != spec["cpus"]
     ):
         raise RuntimeError(
-            "Slurm did not enforce the requested CPU, memory and zero-swap allocation"
+            f"Slurm did not enforce the requested CPU, memory and zero-swap allocation on "
+            f"{this_node()}"
         )
-    command = podman(ready["directory"])
+    command = podman(stored["directory"])
     name = container(index)
     gpus = devices() if spec["gpus"] else []
     if len(gpus) != spec["gpus"]:
-        raise RuntimeError(f"received {len(gpus)} GPUs, requested {spec['gpus']}")
+        raise RuntimeError(f"{this_node()} gave {len(gpus)} GPUs, requested {spec['gpus']}")
     mounts: list[dict[str, object]] = []
     kept: set[str] = set()
+    pods: list[str] = []
     flags = [
         *command,
         "run",
         "-d",
         "--name",
         name,
-        "--network=slirp4netns:allow_host_loopback=false",
         "--http-proxy=false",
         "--runtime",
-        ready["runsc"],
+        stored["runsc"],
         "--runtime-flag=ignore-cgroups",
         "--runtime-flag=enclosing-memory-cgroup=" + str(limit),
         "--oom-score-adj=500",
         f"--shm-size={spec['shm_mb']}m",
         *spec["runtime_args"],
     ]
+    env = dict(spec["env"])
     if gpus:
         flags += ["--runtime-flag=nvproxy", "-e", "NVIDIA_VISIBLE_DEVICES=void"]
         for gpu in gpus:
             flags.extend(["--device", "nvidia.com/gpu=" + str(gpu["id"])])
-    for key, value in spec["env"].items():
-        flags.extend(["--env", f"{key}={value}"])
     try:
+        sealing, hcas = name, []
+        if count == 1:
+            flags.append("--network=slirp4netns:allow_host_loopback=false")
+        else:
+            pods = [f"router-{index}", f"group-{index}"]
+            pod = group_up(command, box, index, rank, count, spec["shm_mb"])
+            sealing = output(*command, "pod", "inspect", "-f", "{{.InfraContainerID}}", pod)
+            hcas = infiniband()
+            flags += ["--pod", pod, f"--hostname=node{rank}", "--ulimit=memlock=-1:-1"]
+            for device in hcas:
+                flags.extend(["--device", device])
+            if hcas:
+                flags.append("--runtime-flag=rdmaproxy")
+        for key, value in env.items():
+            flags.extend(["--env", f"{key}={value}"])
         # A candidate is a volume only where the image has a directory.
         candidates = spec.get("candidates") or []
         found = (
@@ -637,8 +1054,8 @@ def start(index: str) -> None:
                 in_namespace(
                     command,
                     "directories",
-                    ready["directory"],
-                    spec["image"],
+                    stored["directory"],
+                    node["image"],
                     json.dumps(candidates),
                 )
             )
@@ -647,52 +1064,67 @@ def start(index: str) -> None:
         )
         arguments, mounts = mount_volumes(
             command,
-            ready["directory"],
-            index,
-            [dict(path=path, kind="fresh") for path in found] + (spec.get("volumes") or []),
+            stored["directory"],
+            f"{index}.{rank}",
+            [dict(path=path, kind="fresh") for path in found] + node["volumes"],
         )
-        subprocess.run([*flags, *arguments, spec["image"]], check=True, stdout=subprocess.DEVNULL)
-        if output(*command, "inspect", "--format", "{{.Image}}", name) != spec["image"]:
+        subprocess.run([*flags, *arguments, node["image"]], check=True, stdout=subprocess.DEVNULL)
+        if output(*command, "inspect", "--format", "{{.Image}}", name) != node["image"]:
             raise RuntimeError("Podman started a different image")
         if spec["sealed"]:
-            network(command, name, sealed=True)
+            network(command, sealing, sealed=True)
+        runtime_flags = [
+            flag for flag in spec["runtime_args"] if flag.startswith("--runtime-flag=")
+        ]
         conmon = int(output(*command, "inspect", "--format", "{{.State.ConmonPid}}", name))
+        if count > 1:
+            if not alive(conmon):
+                raise RuntimeError(f"the sandbox image command exited on {this_node()}")
+            serve(command, runtime_flags, name, spec["group"], rank, count)
         write(
-            box / "ready",
+            own / "ready",
             dict(
                 container=name,
-                runtime_flags=[
-                    flag for flag in spec["runtime_args"] if flag.startswith("--runtime-flag=")
-                ],
-                image=spec["image"],
+                network=sealing,
+                runtime_flags=runtime_flags,
+                image=node["image"],
                 devices=gpus,
                 step=os.environ["SLURM_STEP_ID"],
                 volumes=found,
+                node=this_node(),
+                hcas=hcas,
             ),
         )
         while True:
-            order = read(box / "stop")
+            # The Host writes it on another machine: the directory is listed first.
+            order = read(box / "stop") if appeared(box / "stop") else ""
             if order == "save":
-                kept = save(command, ready["directory"], name, index, box, mounts)
+                kept = save(command, stored["directory"], name, own, mounts)
                 return
             if order:
                 return
             if not alive(conmon):
-                raise RuntimeError("the sandbox image command exited")
+                raise RuntimeError(f"the sandbox image command exited on {this_node()}")
             time.sleep(1)
     finally:
-        (box / "memory").write_text((limit / "memory.events").read_text())
+        (own / "memory").write_text((limit / "memory.events").read_text())
         subprocess.run(
             [*command, "rm", "-f", "-v", "-t", "1", name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if pods:
+            subprocess.run(
+                [*command, "pod", "rm", "-f", "-t", "1", *pods],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         if mounts:
             # Its views and the layers no snapshot of it keeps go with it.
             in_namespace(
                 command,
                 "volumes",
-                ready["directory"],
+                stored["directory"],
                 json.dumps(
                     [["unmount", m["layer"]] for m in mounts if m["lowers"]]
                     + [["remove", m["layer"]] for m in mounts if m["layer"] not in kept]
@@ -700,19 +1132,60 @@ def start(index: str) -> None:
             )
 
 
+def serve(
+    command: list[str],
+    runtime_flags: list[str],
+    name: str,
+    group: dict[str, str],
+    rank: int,
+    count: int,
+) -> None:
+    """Start, as root in node ``rank``'s container, the daemon that runs what the Sandbox's
+    ``orbit-exec`` asks of a node, there or from another node, as the asking account, and
+    wait until it serves: it writes the client once it listens, so a client a snapshot kept
+    goes first. Its secret, which every node's daemon shares, goes by the environment, not a
+    command line."""
+    run = [*command, *runtime_flags, "exec"]
+    removed = subprocess.run(
+        [*run, "--user", "0", name, "rm", "-f", PEERS_CLIENT], capture_output=True, text=True
+    )
+    if removed.returncode:
+        raise RuntimeError(
+            f"could not prepare the exec daemon on {this_node()}: {removed.stderr.strip()}"
+        )
+    subprocess.run(
+        [*run, "-d", "--user", "0", "--env", "ORBIT_PEERS_SECRET", name,
+         group["python"], "-I", "/opt/orbit/guestd/peers.py", "serve",
+         "--spool", "/run/orbit-exec", "--client", PEERS_CLIENT, "--env-file", PEERS_ENV,
+         "--listen", f"{GROUP}{rank + 1}:{PEERS_PORT}",
+         "--peers", ",".join(f"node{k}={GROUP}{k + 1}:{PEERS_PORT}" for k in range(count))],
+        env={**os.environ, "ORBIT_PEERS_SECRET": group["secret"]},
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )  # fmt: skip
+    deadline = time.monotonic() + 60
+    while subprocess.run(
+        [*run, "--user", "0", name, "test", "-e", PEERS_CLIENT], check=False
+    ).returncode:
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"the exec daemon of {this_node()} did not start")
+        time.sleep(0.5)
+
+
 def save(
     command: list[str],
     directory: str,
     name: str,
-    index: str,
-    box: Path,
+    own: Path,
     mounts: list[dict[str, object]],
 ) -> set[str]:
-    """Stop the Sandbox and commit its disk to the allocation's store, and record each
+    """Stop a node of the Sandbox and commit its disk to the node's store, and record each
     volume's stack: the layer that holds its writes on what it viewed. Return the layers the
     snapshot keeps."""
     subprocess.run([*command, "stop", "-t", "30", name], check=True, stdout=subprocess.DEVNULL)
-    image = output(*command, "commit", "-q", name, f"{SNAPSHOT_REPOSITORY}:{index}")
+    # By the Sandbox's index alone, which its handle names on every node.
+    tag = f"{SNAPSHOT_REPOSITORY}:{own.parent.parent.name}"
+    image = output(*command, "commit", "-q", name, tag)
     stacks = {
         str(m["path"]): dict(
             layers=[m["layer"], *m["lowers"]],
@@ -730,7 +1203,7 @@ def save(
             directory,
             json.dumps([["unmount", m["layer"]] for m in mounts if m["lowers"]]),
         )
-    write(box / "saved", dict(image=image.removeprefix("sha256:"), stacks=stacks))
+    write(own / "saved", dict(image=image.removeprefix("sha256:"), stacks=stacks))
     return {str(m["layer"]) for m in mounts}
 
 
@@ -775,12 +1248,24 @@ def main() -> None:
                 write("error", str(exc))
             raise
         return
+    if mode == "hold":
+        try:
+            hold()
+        except Exception as exc:
+            if not Path("ready").exists():
+                write("error", f"{this_node()}: {exc}")
+            raise
+        return
     if mode == "prepare":
         try:
             prepare()
         except Exception as exc:
             write("error", str(exc))
             raise
+        return
+    if mode in ("group", "wireguard"):
+        # Their input holds a private key, which goes by a pipe, never by a command line.
+        (group if mode == "group" else wireguard)(json.loads(sys.stdin.read()))
         return
     if mode == "volumes":
         volumes(args[0], json.loads(args[1]))
@@ -805,12 +1290,15 @@ def main() -> None:
             write(SANDBOXES / args[0] / "error", str(exc))
             raise
         return
-    ready = json.loads(Path("ready").read_text())
-    command = podman(ready["directory"])
+    stored = node_store()
+    command = podman(stored["directory"])
+    if mode in ("block", "open", "exec"):
+        # This node's part of the Sandbox: a Sandbox spans the job's first nodes.
+        rank = job_nodes().index(this_node())
+        box = json.loads((SANDBOXES / args[0] / NODES / str(rank) / "ready").read_text())
     if mode in ("block", "open"):
-        network(command, container(args[0]), sealed=mode == "block")
+        network(command, box["network"], sealed=mode == "block")
     elif mode == "exec":
-        box = json.loads((SANDBOXES / args[0] / "ready").read_text())
         os.execvp(
             command[0],
             [
@@ -835,12 +1323,12 @@ def main() -> None:
             stdout=subprocess.DEVNULL,
         )
     elif mode == "export":
-        export(command, ready["directory"], args[0], args[1], args[2:])
+        export(command, stored["directory"], args[0], args[1], args[2:])
     elif mode == "load":
         load(command, args[0], args[1])
     elif mode == "drop":
         in_namespace(
-            command, "volumes", ready["directory"], json.dumps([["remove", a] for a in args])
+            command, "volumes", stored["directory"], json.dumps([["remove", a] for a in args])
         )
     else:
         raise ValueError(mode)

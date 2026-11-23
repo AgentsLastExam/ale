@@ -86,6 +86,15 @@ longer holds what the agent or the framework left running in it
 ([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#restricted-networking)).
 A Mac without that filter refuses restricted Tasks before provisioning.
 
+A Sandbox that spans several [nodes](task-authoring.md#nodes) keeps these guarantees on
+every node and adds one way out of its own: its nodes reach one another on a network that
+reaches nothing else, sealed or not. Its rules live outside the agent's reach on every node,
+so root in a node, even one that may change its own network for nested containers, still
+reaches only the other nodes. A faster fabric the nodes share, such as InfiniBand, passes
+no network filter of their machines; its boundary is the fabric's own isolation, which the
+Provider states
+([Slurm](../../packages/orbit-run/src/orbit/run/providers/README.md#slurm-nodes)).
+
 `open` is a deliberate escape hatch: an ordinary bridge with normal egress. A Task must
 declare it for its agent, while a verifier is open unless the Task seals it;
 the RunLock records both policies, `sandbox.network` and `verification.network`.

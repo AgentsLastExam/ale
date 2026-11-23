@@ -137,3 +137,69 @@ Docker, Podman's default capability set omits capabilities the inner Docker expe
 
 The Slurm step carrying the Gateway tunnel needs unbuffered binary I/O. Normal step
 output can wait for a newline in a protocol whose first frame contains none.
+
+## Sandboxes of several nodes
+
+Decided: a Sandbox of several nodes runs under gVisor, as one of a single node does, with
+gVisor's RDMA proxy (`--rdmaproxy`), not under a runtime that shares the node's kernel. On
+OpenRSI's H100 nodes (November 2026) gVisor kept up with the bare nodes on InfiniBand
+([README](../README.md#slurm-nodes) gives the figures), and so did crun: `ib_write_bw` of
+1 MiB across the two nodes reached 385.9 Gb/s under crun, against 389.6 bare. Docker nested
+in a gVisor Sandbox ran containers on the nodes' network, and could not under crun, under
+runc or in its rootless mode alike: Slurm's cgroups are read-only to it
+(`mkdir /sys/fs/cgroup/docker: read-only file system`). Without `--rdmaproxy`, NCCL in
+gVisor falls back to TCP sockets.
+
+Rootless Podman cannot make device nodes, so it turns `--device /dev/infiniband/uverbsN`
+into a bind mount, while the RDMA proxy registers only the devices the OCI spec lists in
+`linux.devices`; the Sandbox then saw no device ("Function not implemented"). Orbit's gVisor
+patch 0012 takes such a bind mount as the device under `--rdmaproxy`. Its patch 0011
+backports upstream's acceptance of mlx5's data-direct calls, without which NCCL falls back
+to TCP in images whose rdma-core is newer. A node gives a Sandbox only the HCAs whose port
+is InfiniBand: OpenRSI's `mlx5_0` is the Ethernet NIC of the node's own network, through
+which RoCE traffic would leave past every filter. `rdma_cm` is not needed, and `umad` and
+`issm` are root's on the node. OpenRSI's InfiniBand ports are full members of partition
+`0x43df` and limited members of the default one; without `umad` a node cannot list the
+partition's other members.
+
+Decided: the nodes' network is a router namespace on each node, which the Sandbox never
+enters, rather than a WireGuard device in the Sandbox's own namespace. A nested-containers
+Sandbox's root holds `NET_ADMIN` there; measured: such a root that routed everything through
+its interface to the other nodes still reached only them, the rest refused by the router.
+The router forwards by policy routing alone, so the nodes need nothing past iproute2 for it,
+and the WireGuard device takes from each peer only that peer's address. The nodes have no
+`wg`, so the worker sets the device's key and peers over generic netlink and derives each
+public key with X25519 itself. Neither the router's private key nor the exec daemons'
+secret is ever on a command line: other accounts' jobs share a node, and any account reads
+`/proc/<pid>/cmdline`. Each node writes its router's key and endpoint below the Sandbox's
+directory, and the others read them after listing the directory, as for every file another
+machine writes there.
+
+Measured: runsc refuses to join a pod's UTS namespace ("joining UTS namespace … is not
+supported"), so the pods share only their network namespace and each container sets its own
+hostname. A container in a pod gets the pod's `/dev/shm`, 64 MiB unless the pod names
+another size, and not its own `--shm-size`, under crun and runsc alike; with that, NCCL's
+ranks failed to make their segments ("No space left on device"), so the Sandbox's pod is
+made with the Sandbox's size. pasta gives the router namespace a copy of the node's address,
+so two routers on one node could not reach each other through it; a Sandbox's nodes are
+always distinct.
+
+Decided: the nodes' variables (`ORBIT_NODES`, `ORBIT_NODE_RANK`, NCCL's and Gloo's) are
+given to every command, by the Host to node 0's and by each node's exec daemon to what it
+runs, never set on the container: `podman commit` keeps a container's environment, so a
+Sandbox of one node, or on nodes without InfiniBand, booted from the snapshot would inherit
+`NCCL_NET=IB` and an interface it lacks.
+
+Decided: an agent starts processes on another node through `orbit-exec`, a POSIX shell
+client of a root daemon on each node, rather than through SSH or a Python client: most
+images have no sshd, the agent's account cannot run the framework's own Python, and an
+image need not have one of its own. It takes `ssh`'s form, so `mpirun`, `pdsh` and the like
+take it as their remote shell, and it runs as the account that asked, so an agent without
+sudo gains nothing on another node. Unlike `ssh` it passes on what its caller exported,
+since the Task's variables reach a command on node 0 only through guestd.
+
+A hold step removes its node's store once the job is stopped or, when the batch step fails,
+released by a file it polls: srun turns a SIGTERM into SIGKILL for its tasks, which would
+leave the store. Measured: after each of six such removals, the store's directory came back
+empty, naming no job; a job starting on the node removes the empty ones of this account
+older than ten minutes.

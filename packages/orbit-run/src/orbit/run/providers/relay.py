@@ -13,6 +13,7 @@ what the policy of the phase that runs admits.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from urllib.parse import quote
 
 from orbit.core.errors import GuestUnreachableError, ProviderStartError
@@ -29,8 +30,10 @@ async def start(
     *,
     proxy: str,
     host: str,
+    peers: Sequence[str] = (),
 ) -> str | None:
-    """Relay the Sandbox to ``proxy``, the Host proxy as the guest reaches it at ``host``.
+    """Relay the Sandbox to ``proxy``, the Host proxy as the guest reaches it at ``host``;
+    ``peers``, the other nodes of a Sandbox that spans several, are reached directly.
 
     Returns the relay's address, or None when the Sandbox has no proxy to reach.
     """
@@ -40,7 +43,7 @@ async def start(
         proxy = proxy.replace("://", f"://{quote(request.proxy_token, safe='')}:@", 1)
     try:
         return await client.egress_relay(
-            proxy, bypass=_bypass(host), desktop=allocation.desktop_resolution is not None
+            proxy, bypass=_bypass(host, peers), desktop=allocation.desktop_resolution is not None
         )
     except (GuestUnreachableError, TimeoutError) as error:
         raise ProviderStartError(f"could not start the egress relay: {error}") from error
@@ -64,7 +67,7 @@ async def stop(client: GuestClient, request: SandboxRequest) -> None:
         )
 
 
-def variables(relay: str, host: str) -> dict[str, str]:
+def variables(relay: str, host: str, peers: Sequence[str] = ()) -> dict[str, str]:
     """The proxy variables of every command while the Sandbox is sealed."""
     proxy = f"http://{relay}"
     return {
@@ -72,10 +75,11 @@ def variables(relay: str, host: str) -> dict[str, str]:
         "HTTPS_PROXY": proxy,
         "http_proxy": proxy,
         "https_proxy": proxy,
-        "NO_PROXY": ",".join(_bypass(host)),
+        "NO_PROXY": ",".join(_bypass(host, peers)),
     }
 
 
-def _bypass(host: str) -> list[str]:
-    """The Host's own address, which the Gateway is reached at, and the guest's loopback."""
-    return list(dict.fromkeys([host, "localhost", "127.0.0.1"]))
+def _bypass(host: str, peers: Sequence[str] = ()) -> list[str]:
+    """The Host's own address, which the Gateway is reached at, the guest's loopback and the
+    Sandbox's other nodes."""
+    return list(dict.fromkeys([host, "localhost", "127.0.0.1", *peers]))
