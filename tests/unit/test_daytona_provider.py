@@ -342,7 +342,7 @@ def test_every_sandbox_of_a_long_named_task_gets_its_own_name() -> None:
     )
     first = _sandbox_name(f"{episode}-1a2b3c")
     second = _sandbox_name(f"{episode}-4d5e6f")
-    assert first == "orbit-grounded-intelligence-ini-photo-oracle-fcda5c5a-1a2b3c"
+    assert first == "orbit-grounded-intelligence-i-photo-oracle-fcda5c5a-1a2b3c"
     assert second != first
     assert len(first) <= 60 and len(second) <= 60
 

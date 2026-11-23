@@ -95,10 +95,10 @@ async def test_copies_declared_files_and_directories_at_their_home_relative_path
     assert sorted(
         path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file()
     ) == [
-        ".orbit-harness/stderr.log",
-        ".orbit-harness/stdout.log",
         ".codex-orbit/sessions/2026/rollout-a.jsonl",
         ".codex-orbit/sessions/2026/subagents/child.jsonl",
+        ".orbit-harness/stderr.log",
+        ".orbit-harness/stdout.log",
     ]
     assert not logs.incomplete
 
