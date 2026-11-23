@@ -98,7 +98,10 @@ An agent run that ends early, by a timeout, a limit, a failure or a refusal, mov
 evidence capture and verification, as in Harbor, because what it left is still its work. The
 Episode's status stays what stopped the agent, and `rewards` holds the score. If capture or
 verification then fails, that status stands without a score. An agent phase that never reached
-its run, or a guest that stopped replying, ends the Episode without verification.
+its run, or a guest that stopped replying, ends the Episode without verification. So does a
+run whose program fails while the model provider fails the agent's calls, as the Gateway
+saw ([Transport trace](trace.md#transport-trace)): the provider stopped it, not the agent,
+so the Episode ends `env_error` (`ModelProviderError`) and nothing scores it.
 
 A Sandbox lost to memory or storage ends the Episode at once, without verification, unless
 what stopped the agent before stands as above: lost after an OOM kill in it, at any time
@@ -337,11 +340,14 @@ unscored.
 Each verifier is held for its limit: selection gives a Sandbox that runs one, or whose
 snapshot one boots from on the same leaf, only a leaf that holds a Sandbox that long, and a
 verifier's request names its limit, so that such a Provider starts it where it lasts that
-long. A shared verifier, which runs in the solver, first moves the solver, as above, to a
-Sandbox that lasts that long, where it would not; a limit the Run leaves unlimited bounds
-nothing. A round's verifier that its Sandbox's scheduler ended, rather than its own failure,
-runs once more on the round's snapshot where that outlived it, and only that run is the
-round's. A Sandbox lost without warning, to a preemption or its node's failure, ends the
+long. A shared verifier runs in the solver, where the agent's processes still run, so the
+agent's last turn, after which no round saves the solver, leaves its Sandbox the verifier's
+limit too: its run is bounded that much sooner, and one cut there moves, so that `tests/`
+never runs in a solver a move stopped them in. Only where the Run leaves verification
+unlimited, or the turn ended too late, does the solver move first to a Sandbox that lasts
+that long. A round's verifier that its Sandbox's scheduler ended, rather than its own
+failure, runs once more on the round's snapshot where that outlived it, and only that run is
+the round's. A Sandbox lost without warning, to a preemption or its node's failure, ends the
 episode as a guest that stopped replying does, without verification, its error saying how it
 was lost; episode retries start the episode again.
 

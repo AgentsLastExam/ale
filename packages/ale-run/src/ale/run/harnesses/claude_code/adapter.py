@@ -29,9 +29,8 @@ from .settings import ClaudeCodeSettings
 DEFAULT_CLI_VERSION = "2.1.227"
 UPSTREAM_IDLE_TIMEOUT_SEC = 600
 #: Error signatures worth naming, so a failure is attributed rather than lumped into
-#: "the agent exited non-zero".
+#: "the agent exited non-zero". A model provider's failures are the Gateway's to name.
 ERROR_PATTERNS: tuple[tuple[str, type[Exception]], ...] = (
-    ("rate_limit", AgentError),
     ("I can't help", AgentRefusalError),
     ("I cannot help", AgentRefusalError),
 )

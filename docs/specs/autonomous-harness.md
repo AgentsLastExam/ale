@@ -306,7 +306,11 @@ Adapters do not parse Gateway refusals. The Gateway session records the first li
 refused a call, and the episode protocol attributes an agent phase that then fails,
 whatever error the agent program reported, to that limit: the episode ends
 `budget_exceeded` with a `gateway` termination. Refusals carry `x-should-retry: false` so
-SDKs stop retrying them. Adapters classify only their native limits.
+SDKs stop retrying them. Nor do adapters classify a model provider's failures, such as a
+rate limit or an exhausted quota: the Gateway records how the provider failed each call,
+and an agent phase whose program fails while the provider fails its calls ends `env_error`
+([Episode protocol](episode-protocol.md#agent-or-oracle)). Adapters classify only their
+native limits.
 
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and
 Gemini `generateContent` for API-key mode; each dialect's routes and request handling

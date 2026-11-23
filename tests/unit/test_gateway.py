@@ -12,8 +12,10 @@ from pathlib import Path
 
 import pytest
 from aiohttp import ClientSession, web
+from pydantic import ValidationError
 
-from ale.core.trace import read_jsonl
+from ale.core.trace import TransportCall, read_jsonl
+from ale.run.gateway import anthropic, server
 from ale.run.gateway.anthropic import (
     extract_usage,
     refusal_body,
@@ -50,6 +52,8 @@ class Upstream:
         self.seen_max_tokens: list[int] = []
         self.required_authorization = ""
         self.statuses: list[int] = []
+        self.error_body: dict[str, object] = {"type": "error"}
+        self.error_headers: dict[str, str] = {}
         self.runner: web.AppRunner | None = None
         self.url = ""
 
@@ -85,7 +89,9 @@ class Upstream:
             return web.json_response({"type": "error"}, status=401)
         status = self.statuses.pop(0) if self.statuses else self.status
         if status != 200:
-            return web.json_response({"type": "error"}, status=status, headers={"retry-after": "0"})
+            return web.json_response(
+                self.error_body, status=status, headers={"retry-after": "0", **self.error_headers}
+            )
         if payload.get("stream"):
             return await self._stream(request, payload)
         body = {
@@ -315,7 +321,8 @@ class TestCredentialIsolation:
             await gateway.stop()
             await upstream.stop()
 
-    async def test_subscription_retries_one_transient_rate_limit(self) -> None:
+    @pytest.mark.usefixtures("quick_retries")
+    async def test_a_subscription_rides_out_a_rate_limit_as_any_upstream(self) -> None:
         upstream = Upstream()
         await upstream.start()
         upstream.statuses = [429, 200]
@@ -456,23 +463,30 @@ class TestLimits:
         assert upstream.seen_max_tokens == [100]
         assert upstream.count_calls == 0
 
-    async def test_failed_forwarded_call_counts_toward_model_call_limit(self, stack) -> None:
+    async def test_a_call_the_provider_failed_does_not_count_toward_the_limit(self, stack) -> None:
+        """A failed call gave the agent nothing: an outage must not spend its model calls."""
         gateway, upstream, session, _ = stack
+        gateway.outage_retry_sec = 0.0
         session.limits = Limits(max_model_calls=1)
         upstream.status = 529
 
         first, _ = await call(gateway, session)
         upstream.status = 200
-        second, body = await call(
+        second, _ = await call(
             gateway,
             session,
             messages=[{"role": "user", "content": "retry differently"}],
         )
+        third, body = await call(
+            gateway,
+            session,
+            messages=[{"role": "user", "content": "and once more"}],
+        )
 
-        assert first == 529
-        assert second == 429
+        assert (first, second, third) == (529, 200, 429)
         assert body["error"]["ale"]["limit"] == "max_model_calls"
-        assert upstream.calls == 1
+        assert session.usage.model_calls == 1
+        assert upstream.calls == 2
 
     async def test_concurrent_calls_cannot_oversubscribe(self, stack) -> None:
         gateway, upstream, session, _ = stack
@@ -514,6 +528,7 @@ class TestRetryIdempotency:
     async def test_a_retry_after_a_provider_error_is_forwarded(self, stack) -> None:
         """A 503 must not be replayed to the client's retries of the same request."""
         gateway, upstream, session, _ = stack
+        gateway.outage_retry_sec = 0.0  # the client's retries, not the Gateway's
         upstream.statuses = [503]
 
         first_status, _ = await call(gateway, session)
@@ -527,6 +542,7 @@ class TestRetryIdempotency:
 
     async def test_a_streamed_retry_after_a_provider_error_is_forwarded(self, stack) -> None:
         gateway, upstream, session, _ = stack
+        gateway.outage_retry_sec = 0.0  # the client's retries, not the Gateway's
         upstream.statuses = [529]
 
         # The mock upstream only emits a real event stream for a 200; a non-200 body is
@@ -552,6 +568,7 @@ class TestRetryIdempotency:
 
     async def test_a_provider_rate_limit_is_not_replayed(self, stack) -> None:
         gateway, upstream, session, _ = stack
+        gateway.outage_retry_sec = 0.0  # the client's retries, not the Gateway's
         upstream.statuses = [429]
 
         assert (await call(gateway, session))[0] == 429
@@ -741,3 +758,259 @@ async def test_model_catalog_lists_only_the_imposed_model(stack, path: str) -> N
             assert anonymous.status == 401
     assert catalog == {"object": "list", "data": [{"id": "claude-opus-4-8", "object": "model"}]}
     assert upstream.calls == 0
+
+
+@pytest.fixture
+def quick_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hundredths of a second between the Gateway's tries, where a provider waits seconds."""
+    monkeypatch.setattr(server, "_RETRY_WAITS", (0.01, 0.02, 0.04, 0.08, 0.16, 0.32))
+
+
+def outcomes(trace) -> list[tuple[str, int | None, str | None]]:  # type: ignore[no-untyped-def]
+    return [
+        (record["disposition"], record.get("upstream_status"), record.get("upstream_error"))
+        for record in read_jsonl(trace.path).records
+        if record["kind"] == "call"
+    ]
+
+
+@pytest.mark.usefixtures("quick_retries")
+class TestProviderFailures:
+    async def test_a_failing_provider_is_tried_again_before_the_client_sees_it(self, stack) -> None:
+        gateway, upstream, session, trace = stack
+        upstream.statuses = [529, 503]
+
+        status, _ = await call(gateway, session)
+
+        assert status == 200
+        assert upstream.calls == 3
+        assert outcomes(trace) == [
+            ("failed", 529, "overloaded"),
+            ("failed", 503, "server_error"),
+            ("forwarded", None, None),
+        ]
+        # Each try is a call of its own.
+        assert len({record["call_id"] for record in read_jsonl(trace.path).records}) == 3
+        assert session.failure is None
+        assert session.usage.model_calls == 1
+
+    async def test_a_stream_is_tried_again_before_it_begins(self, stack) -> None:
+        gateway, upstream, session, _ = stack
+        upstream.statuses = [429]
+
+        status, chunks = await stream_call(gateway, session)
+
+        assert status == 200
+        assert b"message_stop" in b"".join(chunk for _, chunk in chunks)
+        assert upstream.calls == 2
+
+    async def test_a_failure_longer_than_the_window_reaches_the_client(self, stack) -> None:
+        gateway, upstream, session, trace = stack
+        gateway.outage_retry_sec = 0.2
+        upstream.status = 529
+
+        status, _ = await call(gateway, session)
+
+        assert status == 529
+        assert upstream.calls > 2
+        assert session.failure is not None and session.failure.kind == "overloaded"
+        assert session.usage.model_calls == 0
+        # Once the failure's window is spent, the next call's failure reaches the client at
+        # once.
+        await asyncio.sleep(0.2)
+        tried = upstream.calls
+        status, _ = await call(gateway, session, messages=[{"role": "user", "content": "two"}])
+        assert (status, upstream.calls) == (529, tried + 1)
+        # An answered call ends the failure.
+        upstream.status = 200
+        status, _ = await call(gateway, session, messages=[{"role": "user", "content": "three"}])
+        assert status == 200
+        assert session.failure is None
+        assert outcomes(trace)[-1] == ("forwarded", None, None)
+
+    async def test_the_providers_own_wait_is_kept(self, stack) -> None:
+        gateway, upstream, session, _ = stack
+        upstream.statuses = [429]
+        upstream.error_headers = {"retry-after": "0.3"}
+        started = asyncio.get_running_loop().time()
+
+        status, _ = await call(gateway, session)
+
+        assert status == 200
+        assert asyncio.get_running_loop().time() - started >= 0.3
+
+    async def test_a_quota_is_not_tried_again(self, stack) -> None:
+        gateway, upstream, session, trace = stack
+        upstream.statuses = [429]
+        upstream.error_headers = {"anthropic-ratelimit-unified-status": "rejected"}
+
+        status, _ = await call(gateway, session)
+
+        assert (status, upstream.calls) == (429, 1)
+        assert session.failure is not None and session.failure.kind == "quota"
+        assert outcomes(trace) == [("failed", 429, "quota")]
+
+    async def test_a_request_the_provider_rejects_is_the_clients_and_ends_a_failure(
+        self, stack
+    ) -> None:
+        gateway, upstream, session, trace = stack
+        gateway.outage_retry_sec = 0.0
+        upstream.statuses = [529, 400]
+
+        assert (await call(gateway, session))[0] == 529
+        assert session.failure is not None
+        second = await call(gateway, session, messages=[{"role": "user", "content": "bad"}])
+
+        assert second[0] == 400
+        assert upstream.calls == 2
+        assert session.failure is None
+        assert outcomes(trace) == [("failed", 529, "overloaded"), ("failed", 400, None)]
+        # The provider answered the request it refused: that counts, the failure does not.
+        assert session.usage.model_calls == 1
+
+    async def test_a_failure_within_the_window_never_reaches_the_client(self, stack) -> None:
+        """The last wait is cut to what is left of the window, so a failure that lifts before
+        the window ends is ridden out whole."""
+        gateway, upstream, session, _ = stack
+        gateway.outage_retry_sec = 0.6
+        began = asyncio.get_running_loop().time()
+        upstream.status = 529
+
+        async def lift() -> None:
+            await asyncio.sleep(0.45)
+            upstream.status = 200
+
+        lifting = asyncio.create_task(lift())
+        status, _ = await call(gateway, session)
+        await lifting
+
+        assert status == 200
+        assert 0.45 <= asyncio.get_running_loop().time() - began < 0.6 + 0.2
+
+    async def test_a_provider_named_wait_is_honoured_in_milliseconds(self, stack) -> None:
+        gateway, upstream, session, _ = stack
+        upstream.statuses = [503]
+        upstream.error_headers = {"retry-after-ms": "250"}
+        began = asyncio.get_running_loop().time()
+
+        assert (await call(gateway, session))[0] == 200
+        assert asyncio.get_running_loop().time() - began >= 0.25
+
+    async def test_a_call_nobody_waits_for_any_more_is_not_tried_again(self, stack) -> None:
+        """A Judge tries again itself, under its own deadline; a suspended session's turn is
+        over."""
+        gateway, upstream, session, _ = stack
+        upstream.status = 529
+        session.purpose = "judge"
+        assert (await call(gateway, session))[0] == 529
+        assert upstream.calls == 1
+        session.purpose = "agent"
+
+        async def end_turn() -> None:
+            await asyncio.sleep(0.05)
+            session.suspended = True
+
+        began = asyncio.get_running_loop().time()
+        ending = asyncio.create_task(end_turn())
+        status, _ = await call(gateway, session, messages=[{"role": "user", "content": "two"}])
+        await ending
+        assert status == 529
+        # Given up once the turn ended, well within the window.
+        assert asyncio.get_running_loop().time() - began < 1.0
+
+    async def test_a_provider_not_reached_is_tried_again_then_fails_the_call(
+        self, tmp_path: Path
+    ) -> None:
+        upstream = Upstream()
+        url = await upstream.start()
+        await upstream.stop()  # nothing listens there now
+        gateway = Gateway(api_key=REAL_KEY, upstream=url, host="127.0.0.1", outage_retry_sec=0.1)
+        await gateway.start()
+        trace = EpisodeRecording(tmp_path).transport
+        session = gateway.open_session(
+            GatewaySession(episode_id="ep-1", model="claude-opus-4-8"), trace
+        )
+        try:
+            status, _ = await call_text(gateway, session)
+        finally:
+            await gateway.stop()
+
+        assert status == 500
+        tried = outcomes(trace)
+        assert len(tried) > 1
+        assert set(tried) == {("failed", None, "unreachable")}
+        assert session.failure is not None and session.failure.kind == "unreachable"
+        assert session.usage.model_calls == 0
+
+    async def test_a_stream_the_provider_fails_in_is_failed_and_its_tokens_count(
+        self, stack
+    ) -> None:
+        gateway, upstream, session, trace = stack
+        upstream.in_band_errors = 1
+
+        status, chunks = await stream_call(gateway, session)
+
+        assert status == 200
+        assert b"overloaded_error" in b"".join(chunk for _, chunk in chunks)
+        assert outcomes(trace) == [("failed", 200, "overloaded")]
+        assert read_jsonl(trace.path).records[0]["input_tokens"] == upstream.counted_input
+        assert session.usage.model_calls == 0
+        assert session.usage.input_tokens == upstream.counted_input
+        assert session.failure is not None and session.failure.kind == "overloaded"
+
+
+async def call_text(gateway: Gateway, session: GatewaySession) -> tuple[int, str]:
+    async with (
+        ClientSession() as client,
+        client.post(
+            f"{gateway.base_url}/v1/messages",
+            json={"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+            headers={"authorization": f"Bearer {session.token}"},
+        ) as response,
+    ):
+        return response.status, await response.text()
+
+
+@pytest.mark.parametrize(
+    ("error", "headers", "quota"),
+    [
+        ({"type": "error", "error": {"type": "billing_error", "message": "x"}}, {}, True),
+        (
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Your credit balance is too low to access the Anthropic API.",
+                },
+            },
+            {},
+            True,
+        ),
+        (
+            {"type": "error", "error": {"type": "rate_limit_error"}},
+            {"anthropic-ratelimit-unified-status": "rejected"},
+            True,
+        ),
+        (
+            {"type": "error", "error": {"type": "rate_limit_error"}},
+            {
+                "anthropic-ratelimit-unified-status": "rejected",
+                "anthropic-ratelimit-unified-overage-status": "allowed",
+            },
+            False,
+        ),
+        ({"type": "error", "error": {"type": "rate_limit_error"}}, {}, False),
+        ({"type": "error", "error": {"type": "overloaded_error"}}, {}, False),
+    ],
+)
+def test_anthropic_names_the_accounts_own_limits(
+    error: dict, headers: dict[str, str], quota: bool
+) -> None:
+    assert anthropic.quota(error, headers) is quota
+
+
+def test_only_a_failed_call_says_how_the_provider_failed_it() -> None:
+    call = dict(episode_id="e", call_id="c", model="m", request_digest="sha256:d")
+    assert TransportCall(**call, disposition="failed", upstream_error="overloaded")
+    with pytest.raises(ValidationError, match="upstream_error is valid only for failed calls"):
+        TransportCall(**call, disposition="forwarded", upstream_error="overloaded")

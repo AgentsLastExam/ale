@@ -185,6 +185,9 @@ class EpisodeContext:
     current_phase: Phase | None = None
     limit_refusal: Callable[[], LimitTermination | None] | None = None
     """Reports the Gateway limit that refused one of this episode's model calls, if any."""
+    model_provider_failure: Callable[[], str | None] | None = None
+    """Describes how the model provider is failing the agent's calls, as the Gateway saw: from
+    a call it failed until it answers one; ``None`` while it answers them."""
     open_agent_session: Callable[[bool], None] | None = None
     """Opens (``True``) or suspends (``False``) the agent's Gateway session. It is open from
     its creation through the agent's first turn, then only while a turn runs, and a policy

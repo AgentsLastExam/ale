@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +26,10 @@ from ale.core.config import RunConfig, SandboxRetentionConfig
 from ale.core.errors import (
     AgentError,
     AgentUnsupportedError,
+    BudgetExceededError,
     ConfigError,
+    GuestUnreachableError,
+    ModelProviderError,
     PhaseTimeoutError,
     ProviderStartError,
     TaskDefinitionError,
@@ -35,8 +39,10 @@ from ale.core.errors import (
 from ale.core.harness import (
     AgentRun,
     AutonomousHarness,
+    HarnessSession,
     ResumeSupport,
 )
+from ale.core.lock import LimitTermination
 from ale.core.result import ResultRecord
 from ale.core.sandbox import ExecResult, PreparedTaskImage, SandboxRequest, SandboxRole
 from ale.core.task import Stage
@@ -45,9 +51,11 @@ from ale.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
 from ale.core.verdict import Status
 from ale.run.cli.tasks import _retained_source_episodes
 from ale.run.episode import check_retention, run_episode
+from ale.run.gateway.server import Gateway
 from ale.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
 from ale.run.harnesses.claude_code import ClaudeCodeHarness
 from ale.run.lint import lint_repository
+from ale.run.protocol import episode_protocol
 from ale.run.protocol.episode_protocol import EpisodeProtocol, validation_rounds
 from ale.run.provenance import ProvenanceInputs
 from ale.run.scaffold import scaffold_task
@@ -245,6 +253,111 @@ async def test_a_turn_that_did_not_end_normally_is_the_last(
     assert [stage for stage, _ in verifiers.runs][-1] == "/opt/ale/tests"
     assert provider.snapshots == {}
     assert all(sandbox.destroyed for sandbox in provider.sandboxes)
+
+
+class ProviderFailingHarness(TurnsHarness):
+    """Fails its turn ``failing`` as a CLI does once the provider kept failing its calls: the
+    Gateway saw the provider overloaded, and the program says so in its own words."""
+
+    def __init__(self, gateway: Gateway, failing: int) -> None:
+        super().__init__()
+        self.gateway = gateway
+        self.failing = failing
+
+    async def _turn(
+        self, prompt: str, sandbox: Any, session: HarnessSession, timeout_sec: float
+    ) -> AgentRun:
+        if len(self.prompts) + 1 < self.failing:
+            return await super()._turn(prompt, sandbox, session, timeout_sec)
+        self.prompts.append(prompt)
+        live = self.gateway.sessions.resolve(session.token)
+        assert live is not None
+        live.upstream_failed("overloaded", 529, asyncio.get_running_loop().time())
+        raise AgentError("claude-code exited 1: API Error: 529 Overloaded")
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_program_fails_while_the_provider_fails_ends_unscored(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    """A provider that failed the agent's calls stopped it, not the agent: nothing scores
+    that, so neither another round nor tests/ runs."""
+    gateway = Gateway(api_key="key", upstream="http://127.0.0.1:9", host="127.0.0.1")
+    provider, harness = RoundsProvider(), ProviderFailingHarness(gateway, failing=2)
+    result = await _run(
+        tmp_path, provider, _task(tmp_path, rounds=3), harness, episode={"gateway": gateway}
+    )
+
+    assert result.verdict.status is Status.ENV_ERROR
+    failure = result.record.failure
+    assert failure is not None and failure.error_type == "ModelProviderError"
+    assert failure.phase == "agent"
+    assert "overloaded (HTTP 529)" in failure.message
+    assert "API Error: 529 Overloaded" in failure.message
+    assert result.record.rewards is None
+    assert [stage for stage, _ in verifiers.runs] == ["/opt/ale/validation"]
+    assert all(sandbox.destroyed for sandbox in provider.sandboxes)
+
+
+class EarlierFailureHarness(TurnsHarness):
+    """Ends its first turn normally after the provider failed the turn's last call, then
+    fails its second for a reason of its own, before any call."""
+
+    def __init__(self, gateway: Gateway) -> None:
+        super().__init__()
+        self.gateway = gateway
+
+    async def _turn(
+        self, prompt: str, sandbox: Any, session: HarnessSession, timeout_sec: float
+    ) -> AgentRun:
+        if not self.prompts:
+            run = await super()._turn(prompt, sandbox, session, timeout_sec)
+            live = self.gateway.sessions.resolve(session.token)
+            assert live is not None
+            live.upstream_failed("overloaded", 529, asyncio.get_running_loop().time())
+            return run
+        self.prompts.append(prompt)
+        raise AgentError("claude-code exited 1: a bug of its own")
+
+
+@pytest.mark.asyncio
+async def test_a_turn_answers_for_its_own_runs_calls_only(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    """A failure the provider ended an earlier turn's calls with is not what stopped a later
+    turn's program: that is the agent's, and it is verified."""
+    gateway = Gateway(api_key="key", upstream="http://127.0.0.1:9", host="127.0.0.1")
+    provider, harness = RoundsProvider(), EarlierFailureHarness(gateway)
+    result = await _run(
+        tmp_path, provider, _task(tmp_path, rounds=2), harness, episode={"gateway": gateway}
+    )
+
+    assert result.verdict.status is Status.AGENT_ERROR, result.verdict.failure
+    assert [stage for stage, _ in verifiers.runs][-1] == "/opt/ale/tests"
+
+
+def test_only_the_programs_own_failure_is_put_down_to_a_failing_provider() -> None:
+    ctx: Any = SimpleNamespace(limit_refusal=None, model_provider_failure=lambda: "overloaded")
+    provider = pytest.raises(ModelProviderError, match="overloaded; claude-code exited 1")
+    with provider, episode_protocol._attributed(ctx):
+        raise AgentError("claude-code exited 1")
+    # A Sandbox lost is not the provider's doing, whatever it was failing meanwhile.
+    with pytest.raises(GuestUnreachableError), episode_protocol._attributed(ctx):
+        raise GuestUnreachableError("the guest stopped replying")
+    # A limit the Gateway refused a call for comes first.
+    ctx.limit_refusal = lambda: LimitTermination(
+        layer="gateway",
+        name="max_model_calls",
+        configured_value=3,
+        observed_value=4,
+        reason="the Gateway refused a model call",
+    )
+    with pytest.raises(BudgetExceededError), episode_protocol._attributed(ctx):
+        raise AgentError("claude-code exited 1")
+    ctx.limit_refusal, ctx.model_provider_failure = None, lambda: None
+    with pytest.raises(AgentError) as caught, episode_protocol._attributed(ctx):
+        raise AgentError("claude-code exited 1")
+    assert type(caught.value) is AgentError
 
 
 @pytest.mark.asyncio

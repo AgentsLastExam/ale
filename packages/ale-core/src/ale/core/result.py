@@ -128,7 +128,7 @@ class Segment(BaseModel):
     booted_from: str | None = None
     """The handle of the snapshot it booted from, which outlives it until the next save."""
     started_at: datetime
-    """When it was ready."""
+    """When the agent's work could begin in it: once it booted, the first once setup ran."""
     ended_at: datetime | None = None
     """When the agent's work in it ended: its save began, or the agent's last turn ended."""
     agent_sec: float = Field(default=0.0, ge=0)

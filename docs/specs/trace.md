@@ -109,18 +109,29 @@ Only the Gateway writes `trace.transport.jsonl`. Every complete line has
   `cache_write_tokens` say how many of them the provider's prompt cache served or stored.
   A refused call's `refusal_limit` names the ceiling, the request policy
   (`web_tools`, `unsupported_method`) that refused it, or `session_suspended` for a call
-  made while its session was closed, as the agent's is between turns;
+  made while its session was closed, as the agent's is between turns. A failed call's
+  `upstream_status` and `upstream_error` say how the model provider failed it:
+  `overloaded`, `rate_limited`, `server_error`, `unreachable` or `quota`, the account's own
+  limit; a 4xx that refuses the request itself has no `upstream_error`;
 - `replay`: the original call ID, request digest, replay reason, and `charged=false`, since
   a replay counts toward neither usage nor limits;
 - `trajectory_link`: call ID, trajectory ID, and ATIF step ID.
 
-Retries are never counted twice. Only a successful provider response (2xx) or a Gateway refusal is replayed
-to a retry of the same request; after a provider error (5xx, or a provider 429) the retry is forwarded
-and recorded as a new `call`. A streamed 2xx response counts as successful only when it reached its
-dialect's terminal event, listed in the [Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md),
-without an in-band error; an interrupted or failed stream is forwarded again on retry. Failed and refused calls remain visible. Default records
-contain digests and accounting metadata, not provider request/response bodies or a second
-copy of the conversation.
+Retries are never counted twice. Only a successful provider response (2xx) or a Gateway
+refusal is replayed to a retry of the same request; after a provider error the retry is
+forwarded and recorded as a new `call`. A streamed 2xx response is successful only when it
+reached its dialect's terminal event, listed in the
+[Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md), without an in-band
+error; an interrupted or failed stream is recorded `failed` and forwarded again on retry.
+The Gateway itself sends an agent's call the provider failed again, for at most a minute
+of the provider's failure and before anything reached the client, and records each try as
+a failed `call`
+([Gateway README](../../packages/ale-run/src/ale/run/gateway/README.md#provider-failures)).
+A call the provider failed does not count toward `max_model_calls`, as it gave the agent
+nothing; one it answered does, a refusal of the request included, and every call's tokens
+count. Failed and refused calls remain visible. Default records contain digests and
+accounting metadata, not provider request/response bodies or a second copy of the
+conversation.
 
 Subscription traffic takes the same path:
 Claude Code, Codex CLI, and Grok Build send every model call to the Gateway, which only
@@ -193,15 +204,16 @@ The result's `segments` lists each solver Sandbox the agent worked in, in order,
 turn after a round, and every turn that [moved](episode-protocol.md#moves), goes on in a new
 one: how it began (`provisioned`, after a validation `round`, which it names, or `moved`),
 its `sandbox_id` and allocation, such as its GPU devices and node, the snapshot it booted
-from, when it was ready and when the agent's work in it ended, and the agent's time it
-spent; the RunLock keeps the first solver's allocation. Together the segments spend the
-agent's time, and the time between one's end and the next one's start, the save, a wait in a
-queue and the boot, is no one's. The agent's phase a move cut has the outcome `moved` among
-the phase timings. `progress.json`, beside the result, is a projection of the same that the
-episode rewrites as it goes, with the agent's time and rounds, the native session it goes on
-in and what the episode is doing (`agent`, `moving`, `validating` or `verifying`): at each
-segment's start and end and every 60 s while the agent runs, so that it outlives the process
-that runs the episode.
+from, when the agent's work could begin in it, once it booted or, the first, once setup ran,
+and when that work ended, and the agent's time it spent; the RunLock keeps the first
+solver's allocation. Together the segments spend the agent's time, and the time between
+one's end and the next one's start, the save, a wait in a queue and the boot, is no one's.
+The agent's phase a move cut has the outcome `moved` among the phase timings.
+`progress.json`, beside the result, is a projection of the same that the episode rewrites as
+it goes, with the agent's time and rounds, the native session it goes on in and what the
+episode is doing (`agent`, `moving`, `validating` or `verifying`): at each segment's start
+and end and every 60 s while the agent runs, so that it outlives the process that runs the
+episode.
 
 `runs/<run>/ledger.db` is a rebuildable run-level projection for queued/running/current
 phase/terminal/interrupted state. It uses WAL and stores bounded failures and final reward

@@ -26,7 +26,8 @@ from tests.support import WorkingCliHarness, edit_task_config, provider_registry
 pytestmark = [pytest.mark.integration, pytest.mark.needs_slurm]
 
 #: Twelve minutes of the agent's work, a line every ten seconds, in allocations of ten
-#: minutes, two of which drain: each holds about five of them.
+#: minutes, two of which drain: each run there ends 120 s before the drain and, as the only
+#: turn is the last, keeps the verifier's minute too, so each holds about four of them.
 LINES, EVERY = 72, 10
 VERIFY = f"""\
 import os
@@ -57,7 +58,7 @@ def _task(root: Path) -> Path:
         {
             "environment": {"cpus": 1, "memory_mb": 1024},
             "agent": {"timeout_sec": 1800},
-            "verifier": {"timeout_sec": 300},
+            "verifier": {"timeout_sec": 60},
         },
     )
     (root / "tests" / "test.sh").write_text(

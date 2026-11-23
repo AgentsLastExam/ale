@@ -739,16 +739,13 @@ def export(
 ) -> None:
     """Write a snapshot to the shared file system, from which another allocation loads it:
     its image, and each of its volumes' ``layers`` beside it, ``<destination
-    stem>.<layer>.tar``, uncompressed, as a volume's output often is already."""
+    stem>.<layer>.tar``. Neither is compressed, as one gzip process is the slowest part:
+    see this Provider's AGENTS.md."""
     path = Path.cwd().parent / destination
     path.parent.mkdir(mode=0o700, exist_ok=True)
     temporary = path.with_name(path.name + ".part")
     with temporary.open("wb") as file:
-        saver = subprocess.Popen([*command, "save", image], stdout=subprocess.PIPE)
-        assert saver.stdout is not None
-        gzip = subprocess.run(["gzip", "-1"], stdin=saver.stdout, stdout=file, check=False)
-        saver.stdout.close()
-        if saver.wait() or gzip.returncode:
+        if subprocess.run([*command, "save", image], stdout=file, check=False).returncode:
             temporary.unlink()
             raise RuntimeError(f"could not export {image}")
     for layer in layers:
@@ -765,7 +762,7 @@ def export(
 
 def layer_archive(image_archive: str, layer: str) -> str:
     """The name of a written-out snapshot's layer, beside its image's archive."""
-    return f"{image_archive.removesuffix('.tar.gz')}.{layer}.tar"
+    return f"{image_archive.removesuffix('.tar')}.{layer}.tar"
 
 
 def main() -> None:

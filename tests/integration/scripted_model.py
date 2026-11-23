@@ -47,11 +47,16 @@ class ScriptedModel:
     script: tuple[Step, ...] = ()
     #: Whether a call names a namespaced tool ``<namespace>.<tool>``, as Meta's API does.
     dotted_namespaces: bool = False
+    #: What a request gets instead of an answer, as a failing provider would answer it: an
+    #: HTTP status and the provider's error body; ``None`` answers it.
+    fail: Callable[[], tuple[int, dict[str, Any]] | None] | None = None
+    #: How many requests ``fail`` failed.
+    failed: int = 0
     requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     _runner: web.AppRunner | None = None
 
     async def start(self) -> str:
-        app = web.Application(client_max_size=64 * 1024 * 1024)
+        app = web.Application(client_max_size=64 * 1024 * 1024, middlewares=[self._failing])
         app.router.add_post("/v1/chat/completions", self._chat)
         app.router.add_post("/v1/responses", self._responses)
         app.router.add_post("/v1/messages", self._messages)
@@ -66,6 +71,15 @@ class ScriptedModel:
     async def stop(self) -> None:
         if self._runner is not None:
             await self._runner.cleanup()
+
+    @web.middleware
+    async def _failing(self, request: web.Request, handler: Any) -> web.StreamResponse:
+        failure = self.fail() if self.fail is not None else None
+        if failure is None:
+            return await handler(request)
+        self.failed += 1
+        status, error = failure
+        return web.json_response(error, status=status)
 
     # --- the script ---
 

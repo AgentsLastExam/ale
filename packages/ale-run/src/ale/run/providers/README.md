@@ -841,7 +841,7 @@ its allocation, sized for it and for the verifiers its request names, which boot
 snapshot or view its [volumes](#slurm-volumes) after it. Each Sandbox runs in its allocation
 as a job step of its own, which the batch step starts with `srun --exact` and Slurm holds to
 the Sandbox's CPUs, memory and GPUs; a step that asks for no GPU sees none of the job's. The
-allocation ends with the last Sandbox and snapshot in it.
+allocation ends once nothing its episode still needs is in it.
 
 The login node needs no container runtime: a Task's images are prepared on the cluster
 ([`slurm/images.py`](slurm/images.py)), once per key of everything that goes into them, each
@@ -889,9 +889,11 @@ Each entry describes a homogeneous partition's effective per-node limits for tha
 CPU-only allocations use CPU entries; an allocation whose solver or verifier needs GPUs
 takes the first matching GPU entry, as whole cards. The provider checks each step's CPU and
 memory limits, the started image and the allocated GPU UUIDs against the devices the guest
-sees. Pending jobs have a queue deadline, under which the allocation of a solver that moves
-waits too. `sandbox_id` is the job ID and the Sandbox's index in the job; the allocation
-records the compute node and runtime.
+sees. An allocation that boots no snapshot and is no separate verifier's, such as an
+episode's first, waits in the queue for `queue_timeout_sec` at most; any other, mid-episode,
+waits for as long as Slurm keeps it pending, and says why every ten minutes. `sandbox_id` is
+the job ID and the Sandbox's index in the job; the allocation records the compute node and
+runtime.
 
 Running jobs have a Slurm wall time even when ALE is lost: `walltime_minutes`, within the
 QoS's limit, is each allocation's, and the solver of an episode longer than one
@@ -903,12 +905,14 @@ each profile holds a Sandbox for `walltime_minutes` less `drain_minutes` at most
 whose verifier's limit is longer is refused before anything is prepared. A Sandbox booted
 from a snapshot starts in a running allocation only while that lasts the time its request
 names, a verifier's limit, or five minutes for a solver; otherwise the snapshot is written
-out and the Sandbox gets an allocation of its own, which waits in the queue as any does, and
-an allocation whose deadline has come ends then, rather than at its wall time, its snapshots
-written out. Where Slurm ends an allocation itself, at its wall time, for a job of a QoS
-that preempts it, or as its node fails, the Sandbox's error says which (`sacct`), and what
-the allocation held since its last snapshot written out is lost, a round's snapshot and
-verifier in it included.
+out and the Sandbox gets an allocation of its own. The one it leaves ends then, rather than
+at its wall time, once its deadline has come, its snapshots written out, or once nothing
+runs there and every snapshot it holds is written out with no Sandbox to boot from it there.
+Where Slurm ends an allocation itself, at its wall time, for a job of a QoS that preempts
+it, or as its node fails, the Sandbox's error says which (`sacct`), and what the allocation
+held since its last snapshot written out is lost, a round's snapshot and verifier in it
+included: a Sandbox to boot from such a snapshot fails with `AllocationEndedError`, which
+says so.
 
 A snapshot is the stopped container committed to the allocation's store on its node
 ([Snapshots](#snapshots)). The verifier booted from it, a [validation

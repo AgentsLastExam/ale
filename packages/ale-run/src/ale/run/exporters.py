@@ -303,6 +303,7 @@ def _prime_call(record: dict[str, Any], node: int | None) -> dict[str, Any]:
         error = {
             "type": "GatewayRefusal" if record.get("disposition") == "refused" else "ProviderError",
             "message": record.get("refusal_limit")
+            or record.get("upstream_error")
             or f"upstream status {record.get('upstream_status')}",
             "status_code": record.get("upstream_status"),
         }

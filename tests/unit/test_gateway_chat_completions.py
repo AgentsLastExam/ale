@@ -7,7 +7,12 @@ import pytest
 from aiohttp import ClientSession, web
 
 from ale.core.trace import read_jsonl
-from ale.run.gateway.openai_chat_completions import stream_completed, usage_from_stream
+from ale.run.gateway.openai_chat_completions import (
+    quota,
+    stream_completed,
+    stream_error,
+    usage_from_stream,
+)
 from ale.run.gateway.server import Gateway
 from ale.run.gateway.session import CallUsage, GatewaySession, Limits
 from ale.run.recording import EpisodeRecording
@@ -226,3 +231,15 @@ def test_only_a_stream_ending_in_done_without_error_completed() -> None:
     assert stream_completed([chunk, done])
     assert not stream_completed([chunk])
     assert not stream_completed([chunk, error, done])
+
+
+def test_a_quota_and_an_in_band_error_are_named() -> None:
+    assert quota({"error": {"code": "insufficient_quota"}}, {})
+    assert not quota({"error": {"code": "rate_limit_exceeded"}}, {})
+    events = [
+        b'data: {"choices": []}\n\n',
+        b'data: {"error": {"message": "overloaded"}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    assert stream_error(events) == {"error": {"message": "overloaded"}}
+    assert stream_error([b"data: [DONE]\n\n"]) is None

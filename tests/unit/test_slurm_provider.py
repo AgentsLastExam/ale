@@ -3,12 +3,13 @@
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from ale.core.capability import SandboxNeeds
 from ale.core.config import RunConfig
-from ale.core.errors import ProviderCapabilityError, ProviderStartError
+from ale.core.errors import AllocationEndedError, ProviderCapabilityError, ProviderStartError
 from ale.core.sandbox import (
     ImageKind,
     PreparedTaskImage,
@@ -180,6 +181,16 @@ def test_the_largest_sandbox_a_profile_declares_fits_its_partition():
 PREPARED, OTHER, SAVED = ("sha256:" + digit * 64 for digit in "123")
 
 
+@pytest.fixture(autouse=True)
+def running_jobs(monkeypatch):
+    """Every job Slurm is asked about runs, unless a test says otherwise."""
+
+    async def state(job):
+        return "RUNNING"
+
+    monkeypatch.setattr(Job, "state", state)
+
+
 def chain(cpus=4, memory_mb=8192, gpus=2):
     job = Job(provider().config.partitions[1])
     return _Chain(
@@ -216,7 +227,7 @@ def test_an_allocation_is_kept_while_its_episode_needs_a_snapshot_in_it():
     )
     held.snapshots["1"] = snapshot
     assert not held.idle  # only here: nothing wrote it out
-    snapshot.archive = "snapshots/x.tar.gz"
+    snapshot.archive = "snapshots/x.tar"
     assert not held.idle  # its verifier boots from it here still
     snapshot.boots = 0
     assert held.idle
@@ -253,10 +264,11 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
 
     async def write_out(chain, saved):
         written.append(saved)
-        saved.archive = "snapshots/out.tar.gz"
+        saved.archive = "snapshots/out.tar"
         return saved.archive
 
-    async def allocate(needs, *, image, archive, layers=None):
+    async def allocate(needs, *, image, archive, layers=None, patient=False):
+        assert patient, "a boot from a snapshot waits in the queue for as long as it takes"
         allocated.append((image, archive, layers))
         return chain(cpus=8, memory_mb=step_memory_mb(8192), gpus=1)
 
@@ -307,7 +319,7 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
     assert (booted, seed, specs) == (held, OTHER, view) and loaded == [(held, OTHER)]
     booted, index, _, _, _ = await slurm._boot(request(Resources(cpus=8, gpus=1)), ())
     assert booted is not held and written == [snapshot]
-    assert allocated == [(SAVED, "snapshots/out.tar.gz", {"x.1.0": "snapshots/out.x.1.0.tar"})]
+    assert allocated == [(SAVED, "snapshots/out.tar", {"x.1.0": "snapshots/out.x.1.0.tar"})]
     # A viewer that does not fit either loads its own image in an allocation of its own.
     viewer = viewer.model_copy(update={"resources": Resources(cpus=8, gpus=1)})
     await slurm._boot(viewer, ())
@@ -449,13 +461,14 @@ async def test_a_solver_moves_from_an_allocation_at_its_deadline_which_then_ends
     stopped, allocated = [], []
 
     async def write_out(chain, saved):
-        saved.archive = "snapshots/out.tar.gz"
+        saved.archive = "snapshots/out.tar"
         return saved.archive
 
     async def stop(job):
         stopped.append(job.name)
 
-    async def allocate(needs, *, image, archive, layers=None):
+    async def allocate(needs, *, image, archive, layers=None, patient=False):
+        assert patient, "a boot from a snapshot waits in the queue for as long as it takes"
         allocated.append((image, archive))
         return chain(cpus=2, memory_mb=step_memory_mb(4096), gpus=1)
 
@@ -478,7 +491,7 @@ async def test_a_solver_moves_from_an_allocation_at_its_deadline_which_then_ends
         network=NetworkPolicy(mode=NetworkMode.BLOCK),
     )
     booted, *_ = await slurm._boot(request, ())
-    assert booted is not held and allocated == [(SAVED, "snapshots/out.tar.gz")]
+    assert booted is not held and allocated == [(SAVED, "snapshots/out.tar")]
     assert held.closed and stopped == [held.job.name] and handle not in slurm.snapshots
 
 
@@ -500,13 +513,14 @@ def _booting(slurm, monkeypatch):
     allocated, stopped = [], []
 
     async def write_out(chain, saved):
-        saved.archive = "snapshots/out.tar.gz"
+        saved.archive = "snapshots/out.tar"
         return saved.archive
 
     async def stop(job, **_):
         stopped.append(job.name)
 
-    async def allocate(needs, *, image, archive, layers=None):
+    async def allocate(needs, *, image, archive, layers=None, patient=False):
+        assert patient, "a boot from a snapshot waits in the queue for as long as it takes"
         allocated.append((image, archive))
         return chain(cpus=2, memory_mb=step_memory_mb(4096), gpus=1)
 
@@ -552,9 +566,9 @@ async def test_a_sandbox_boots_in_a_running_allocation_only_if_it_lasts_the_time
     assert booted is held and not allocated
     held.running.clear()
     booted, *_ = await slurm._boot(_snapshot_request(handle, duration_sec=900), ())
-    assert booted is not held and allocated == [(SAVED, "snapshots/out.tar.gz")]
-    # It still lasts: it is kept for what may boot there yet.
-    assert not held.closed
+    assert booted is not held and allocated == [(SAVED, "snapshots/out.tar")]
+    # Nothing runs there and its snapshot is written out: it ends, rather than idle.
+    assert held.closed
 
 
 @pytest.mark.asyncio
@@ -571,7 +585,7 @@ async def test_an_allocation_whose_deadline_came_ends_though_a_verifier_was_to_b
     slurm.snapshots[handle] = (held, snapshot)
     allocated, stopped = _booting(slurm, monkeypatch)
     booted, *_ = await slurm._boot(_snapshot_request(handle), ())
-    assert booted is not held and allocated == [(SAVED, "snapshots/out.tar.gz")]
+    assert booted is not held and allocated == [(SAVED, "snapshots/out.tar")]
     assert held.closed and stopped == [held.job.name] and snapshot.boots == 0
     assert handle not in slurm.snapshots
 
@@ -588,7 +602,7 @@ async def test_a_snapshot_of_an_allocation_slurm_ended_is_destroyed_with_its_fil
     slurm.snapshots[handle] = (held, snapshot)
     files = tmp_path / CACHE / "snapshots"
     files.mkdir(parents=True)
-    for name in ("tar.gz", "json", "x.1.0.tar"):
+    for name in ("tar", "json", "x.1.0.tar"):
         (files / f"{held.job.name}-1.{name}").write_text("")
     stopped = []
 
@@ -646,7 +660,10 @@ async def test_an_allocations_deadline_is_slurms_own_count_less_its_drain(monkey
     async def nothing(job, *args, **_):
         return None
 
+    waited = []
+
     async def ready(job, timeout):
+        waited.append(timeout)
         return JobReady(runtime="runsc", node="n")
 
     async def left(job):
@@ -662,3 +679,121 @@ async def test_an_allocations_deadline_is_slurms_own_count_less_its_drain(monkey
     assert held.deadline is not None
     assert before + timedelta(seconds=3600) - drain <= held.deadline
     assert held.deadline <= datetime.now(UTC) + timedelta(seconds=3600) - drain
+    # A first allocation waits in the queue so long; one mid-episode as long as Slurm keeps it.
+    await slurm._allocate(needs(Resources(cpus=2)), image=SAVED, archive="x.tar", patient=True)
+    assert waited == [slurm.config.queue_timeout_sec, None]
+
+
+@pytest.mark.asyncio
+async def test_an_allocation_that_ends_once_its_snapshot_boots_elsewhere(monkeypatch):
+    """A snapshot verifier that gets an allocation of its own leaves the solver's with
+    nothing to hold: it ends then, not with the episode. One where a Sandbox still runs
+    stays."""
+    slurm = provider()
+    held = chain(cpus=2, memory_mb=step_memory_mb(4096), gpus=1)
+    snapshot = _saved(held, boots=1)
+    handle = _handle(held.job, "1")
+    slurm.snapshots[handle] = (held, snapshot)
+    _, stopped = _booting(slurm, monkeypatch)
+    held.deadline = datetime.now(UTC) + timedelta(seconds=600)
+    # A verifier whose limit the allocation does not last.
+    larger = _snapshot_request(handle, duration_sec=900)
+    held.running["2"] = (1, step_memory_mb(512), 0)
+    await slurm._boot(larger, ())
+    assert snapshot.boots == 0 and not held.closed and not stopped
+    held.running.clear()
+    await slurm._boot(larger, ())
+    assert held.closed and stopped == [held.job.name]
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_lost_with_its_allocation_is_reported_as_that(monkeypatch):
+    """A round's verifier that lost its allocation runs again on the round's snapshot, but
+    that snapshot was in the node's store only: the second try says so."""
+    slurm = provider()
+    held = chain(cpus=2, memory_mb=step_memory_mb(4096), gpus=1)
+    _saved(held)
+    handle = _handle(held.job, "1")
+    slurm.snapshots[handle] = (held, held.snapshots["1"])
+    allocated, stopped = _booting(slurm, monkeypatch)
+
+    async def gone(job):
+        return ""
+
+    async def ended(job):
+        return "PREEMPTED"
+
+    monkeypatch.setattr(Job, "state", gone)
+    monkeypatch.setattr(Job, "ended", ended)
+    for _ in range(2):  # the round's verifier again, then the next turn's solver
+        with pytest.raises(AllocationEndedError, match=r"\(PREEMPTED\).*not written out"):
+            await slurm._boot(_snapshot_request(handle), ())
+    assert not allocated and not stopped
+
+
+@pytest.mark.asyncio
+async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
+    tmp_path, monkeypatch, caplog
+):
+    """A boot from a snapshot waits in the queue past ``queue_timeout_sec``, saying why now
+    and then; any other gives up at it."""
+    from ale.run.providers.slurm import job as job_module
+
+    monkeypatch.setattr(job_module, "cache", lambda: tmp_path)
+    monkeypatch.setattr(job_module, "QUEUE_NOTICE_SEC", 0)
+    clock = [0.0]
+    states = ["PENDING"] * 5 + ["RUNNING"]
+
+    async def tick(seconds):
+        clock[0] += 400  # far past any queue deadline between two looks
+
+    async def state(job):
+        if len(states) == 1 and job.directory.is_dir():
+            (job.directory / "ready").write_text(
+                JobReady(runtime="runsc", node="n").model_dump_json()
+            )
+        return states.pop(0) if len(states) > 1 else states[0]
+
+    async def reason(job):
+        return "Resources"
+
+    # The job module's own clock and sleep, which nothing else in the test shares.
+    loop = SimpleNamespace(time=lambda: clock[0])
+    monkeypatch.setattr(
+        job_module, "asyncio", SimpleNamespace(sleep=tick, get_running_loop=lambda: loop)
+    )
+    monkeypatch.setattr(Job, "state", state)
+    monkeypatch.setattr(Job, "pending_reason", reason)
+    job = Job(provider().config.partitions[0])
+    job.directory.mkdir()
+    with caplog.at_level("INFO", logger="ale.execution"):
+        ready = await job.ready(None)
+    assert ready.node == "n"
+    assert any(
+        record.getMessage() == "a Slurm job still waits in the queue" for record in caplog.records
+    )
+    states[:] = ["PENDING"] * 5
+    with pytest.raises(ProviderStartError, match="during queueing"):
+        await Job(provider().config.partitions[0]).ready(900)
+
+
+@pytest.mark.asyncio
+async def test_a_written_out_snapshot_of_an_allocation_slurm_ended_boots_from_its_archive(
+    monkeypatch,
+):
+    """Its store went with the allocation, but the archive on the shared home did not."""
+    slurm = provider()
+    held = chain(cpus=2, memory_mb=step_memory_mb(4096), gpus=1)
+    snapshot = _saved(held)
+    snapshot.archive = "snapshots/out.tar"
+    handle = _handle(held.job, "1")
+    slurm.snapshots[handle] = (held, snapshot)
+    allocated, stopped = _booting(slurm, monkeypatch)
+
+    async def gone(job):
+        return ""
+
+    monkeypatch.setattr(Job, "state", gone)
+    booted, *_ = await slurm._boot(_snapshot_request(handle), ())
+    assert booted is not held and held.closed and stopped == [held.job.name]
+    assert allocated == [(SAVED, f"snapshots/{held.job.name}-1.tar")]

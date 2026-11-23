@@ -8,7 +8,7 @@ writes the Transport Trace.
 | Module | Responsibility |
 |---|---|
 | `server.py` | HTTP server, session authorization and upstream forwarding |
-| `session.py` | episode sessions (model sessions, the Gateway's, and egress sessions, the proxy's), usage and limit state |
+| `session.py` | episode sessions (model sessions, the Gateway's, and egress sessions, the proxy's), usage, limit and provider failure state |
 | `anthropic.py` | Anthropic Messages normalization |
 | `gemini.py` | Gemini `generateContent` normalization and request policy |
 | `openai_responses.py` | OpenAI Responses normalization |
@@ -22,6 +22,47 @@ by [`../../../../../../docs/guides/subscription-auth.md`](../../../../../../docs
 The trust and logging contract is normative in
 [`../../../../../../docs/specs/security.md`](../../../../../../docs/specs/security.md)
 and [`../../../../../../docs/specs/trace.md`](../../../../../../docs/specs/trace.md).
+
+## Provider failures
+
+A call the model provider failed is classified from its status, its error and, for
+Anthropic, its headers, as the call's `upstream_error` in the Transport Trace:
+
+| `upstream_error` | Failure |
+|---|---|
+| `overloaded` | 529, or an error that names overload or capacity |
+| `rate_limited` | another 429, or an error that names a rate limit |
+| `server_error` | another 5xx, or another error inside a 2xx stream |
+| `unreachable` | the provider not reached, or its stream cut off before its end |
+| `quota` | the account's own limit, as below |
+
+Another 4xx is the provider's refusal of the request itself: it has no `upstream_error`,
+and the provider answered it.
+
+What each dialect reads as a quota:
+
+- `anthropic`: a `billing_error`, a credit balance too low, or a subscription's usage limit,
+  `anthropic-ratelimit-unified-status: rejected` with no overage allowed;
+- `openai-responses` and `openai-chat-completions`: the code or type `insufficient_quota`,
+  or ChatGPT's `usage_limit_reached` and `usage_not_included`;
+- `gemini`: a `QuotaFailure` whose quota is a daily one; a per-minute one is a rate limit.
+
+From the first call the provider fails until it answers one, the Gateway sends an agent's
+failed call again before any byte of it reached the client: after 1, 2, 4, 8, 16 and 32 s,
+or after what `retry-after-ms` or `retry-after` names where that is longer, each wait cut to
+what is left of the minute from that first failure (`OUTAGE_RETRY_SEC`). Each try is a
+failed call of its own in the trace. It is not tried again for a quota, which does not lift
+within a minute, a wait the provider names past the minute, a client that went away or a
+turn that ended; nor is a Judge's call, which its Judge tries again under its own deadline.
+Past the minute a failure reaches the client as the provider sent it, with its body and
+content type alone, so that the CLI gives up after its own retries rather than waiting out
+an outage. CLIs retry very differently, which is why the Gateway's minute is the same for
+all of them; the Codex and Claude Code READMEs state theirs. A stream the provider began
+cannot be sent again: it is recorded `failed` and its client retries it. A subscription
+token the provider rejects is refreshed once and the call sent again.
+
+The session keeps the failure in progress until the provider answers a call, and the
+episode protocol reads it when the agent's program stops.
 
 ## Dialects
 
@@ -84,7 +125,7 @@ forwarded without the tool so that the trace shows it.
 - **Methods.** `generateContent`, `streamGenerateContent` and `countTokens` are forwarded,
   each on the run's model. A stream must ask for `alt=sse`, the only stream form whose
   usage the Gateway reads. `countTokens` is recorded as a call with zero tokens and counts
-  toward `max_model_calls` like any forwarded call. Every other method is refused with a
+  toward `max_model_calls` like any answered call. Every other method is refused with a
   Google error and recorded as `unsupported_method`:
   - `cachedContents` and files would store state with Google;
   - `embedContent` would run a model other than the run's;

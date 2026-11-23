@@ -11,11 +11,11 @@ from typer.testing import CliRunner
 
 from ale.core.config import AgentConfig, load_run_config
 from ale.core.errors import (
+    AgentError,
     SubscriptionAuthenticationError,
     SubscriptionCompatibilityError,
     SubscriptionEntitlementError,
     SubscriptionProfileError,
-    SubscriptionProviderLimitError,
     SubscriptionUnavailableError,
 )
 from ale.core.lock import AuthenticationProvenance
@@ -176,7 +176,8 @@ def test_subscription_is_explicitly_unsupported_for_other_harnesses() -> None:
         ("401 Unauthorized: login required", SubscriptionAuthenticationError),
         ("error: unexpected argument --print", SubscriptionCompatibilityError),
         ("The requested model is not available for this account", SubscriptionEntitlementError),
-        ("429 rate limit: weekly quota reached", SubscriptionProviderLimitError),
+        # The Gateway, which saw the provider's response, decides a provider failure.
+        ("429 rate limit: weekly quota reached", AgentError),
     ],
 )
 def test_provider_failures_are_typed_without_api_fallback(

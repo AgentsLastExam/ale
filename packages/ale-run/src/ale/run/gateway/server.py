@@ -22,15 +22,15 @@ import contextlib
 import json
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout, web
 
 from ale.core.episode import EventSink
 from ale.core.errors import ConfigError
-from ale.core.trace import TransportCall, TransportReplay
+from ale.core.trace import TransportCall, TransportReplay, UpstreamError
 from ale.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
 from ale.run.gateway.session import (
     CallUsage,
@@ -39,6 +39,7 @@ from ale.run.gateway.session import (
     LimitReached,
     SessionRegistry,
     Upstream,
+    UpstreamFailure,
 )
 from ale.run.recording import Redactor
 from ale.run.subscription import SubscriptionCredential
@@ -61,6 +62,16 @@ _REQUEST_TIMEOUT = ClientTimeout(total=1800)
 #: recorded response changing. Well under every known default; ``None`` disables it.
 SSE_KEEPALIVE_SEC = 15.0
 _SSE_KEEPALIVE = b": keep-alive\n\n"
+
+#: How long the Gateway sends a call again while the model provider fails an agent
+#: session's calls, overloaded, limiting their rate, failing or not reached, counted from the
+#: first call it failed until it answers one. A minute absorbs a burst of rate limits or an
+#: overloaded moment, which some CLIs do not retry at all; a longer failure reaches the
+#: client as the provider sent it, so that its program gives up soon rather than waiting out
+#: an outage.
+OUTAGE_RETRY_SEC = 60.0
+#: The waits between the Gateway's tries of one call, where the provider names none.
+_RETRY_WAITS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 
 #: Hop-by-hop and auth headers never forwarded upstream: the gateway supplies its own.
 _STRIP = frozenset(
@@ -110,6 +121,7 @@ class Gateway:
         host: str = "0.0.0.0",
         port: int = 0,
         sse_keepalive_sec: float | None = SSE_KEEPALIVE_SEC,
+        outage_retry_sec: float = OUTAGE_RETRY_SEC,
     ) -> None:
         if subscription is not None:
             upstream = subscription.upstream
@@ -125,6 +137,7 @@ class Gateway:
         self.host = host
         self.port = port
         self.sse_keepalive_sec = sse_keepalive_sec
+        self.outage_retry_sec = outage_retry_sec
         self.sessions = SessionRegistry()
         self._traces: dict[str, EventSink] = {}
         self._app = self._build_app()
@@ -357,8 +370,46 @@ class Gateway:
 
         committed = False
         try:
-            upstream = await self._post(request, payload, session, path)
+            upstream, failure = await self._post(request, payload, session, path)
             try:
+                if not 200 <= upstream.status < 300:
+                    # The provider's failure, or its refusal of the request, streamed or not,
+                    # as it sent it. A failed call is still recorded: that is the difference
+                    # between "the agent stalled" and "the provider was returning 529s for
+                    # eleven minutes". It is never replayed: the client's retry of the same
+                    # request is forwarded. A refusal counts as a call; a failure does not.
+                    raw = await upstream.read()
+                    self._retain_payload(session, call_id, None, raw)
+                    self._record(
+                        session,
+                        call_id=call_id,
+                        request_digest=_request_digest(payload, path),
+                        disposition="failed",
+                        upstream_status=upstream.status,
+                        upstream_error=failure,
+                        latency_ms=_elapsed_ms(started),
+                        response_digest=GatewaySession.digest(raw) if raw else None,
+                        provider_response_id=_response_id(_json_object(raw)),
+                    )
+                    await session.commit(reservation, answered=failure is None)
+                    committed = True
+                    session.finish(
+                        key,
+                        {
+                            "status": upstream.status,
+                            "body": raw,
+                            "streaming": False,
+                            "call_id": call_id,
+                        },
+                        replayable=False,
+                    )
+                    return web.Response(
+                        body=raw,
+                        status=upstream.status,
+                        headers={
+                            "content-type": upstream.headers.get("content-type", "application/json")
+                        },
+                    )
                 if streaming:
                     response = await self._stream(
                         request,
@@ -376,7 +427,7 @@ class Gateway:
 
                 raw = await upstream.read()
                 self._retain_payload(session, call_id, None, raw)
-                parsed = json.loads(raw or b"{}") if upstream.status == 200 else {}
+                parsed = _json_object(raw)
                 await self._account(
                     session,
                     parsed,
@@ -397,7 +448,7 @@ class Gateway:
                     "streaming": False,
                     "call_id": call_id,
                 }
-                session.finish(key, cached, replayable=_replayable(upstream.status))
+                session.finish(key, cached)
                 return web.Response(
                     body=raw,
                     status=upstream.status,
@@ -405,16 +456,22 @@ class Gateway:
                 )
             finally:
                 upstream.release()
-        except BaseException:
+        except BaseException as error:
             if not committed:
+                # Not reached, or cut off in its stream: the provider's failure, which the
+                # session records; any other is the client's, such as a cancellation.
+                unreached = isinstance(error, (ClientError, TimeoutError))
+                if unreached:
+                    session.upstream_failed("unreachable", None, asyncio.get_running_loop().time())
                 self._record(
                     session,
                     call_id=call_id,
                     request_digest=_request_digest(payload, path),
                     disposition="failed",
+                    upstream_error="unreachable" if unreached else None,
                     latency_ms=_elapsed_ms(started),
                 )
-                await session.commit(reservation)
+                await session.commit(reservation, answered=False)
             raise
 
     async def _stream(
@@ -437,10 +494,13 @@ class Gateway:
             status=upstream.status,
             headers={"content-type": upstream.headers.get("content-type", "text/event-stream")},
         )
-        await response.prepare(request)
-
         chunks: list[bytes] = []
         downstream_open = True
+        try:
+            await response.prepare(request)
+        except ConnectionResetError:
+            # The client went away, not the provider: its answer is still read and counted.
+            downstream_open = False
         # Antigravity CLI rejects an SSE comment as an invalid chunk and fails the turn
         # without retrying, so a Gemini stream carries the provider's bytes and nothing else.
         keepalive = None if self._dialect_name(session) == "gemini" else self.sse_keepalive_sec
@@ -489,8 +549,7 @@ class Gateway:
                 "streaming": True,
                 "call_id": call_id,
             },
-            replayable=_replayable(upstream.status)
-            and self._dialect(session).stream_completed(chunks),
+            replayable=self._dialect(session).stream_completed(chunks),
         )
         return response
 
@@ -595,48 +654,117 @@ class Gateway:
         provider_response_id: str | None = None,
         path: str | None = None,
     ) -> None:
-        request_digest = _request_digest(payload, path)
-        if status != 200:
-            # A failed call is still a call. Recording it costs one line and is the
-            # difference between "the agent stalled" and "the provider was returning
-            # 529s for eleven minutes" — the same evidence, opposite conclusions.
-            self._record(
-                session,
-                call_id=call_id,
-                request_digest=request_digest,
-                disposition="failed",
-                upstream_status=status,
-                latency_ms=latency_ms,
-                response_digest=GatewaySession.digest(response_body) if response_body else None,
-                provider_response_id=provider_response_id,
-            )
-            await session.commit(reservation)
-            return
+        """Record and count a call the provider took: answered, or failed inside the stream
+        it began, whose tokens count but whose call does not."""
         self._retain_exact_tokens(session, call_id, payload, parsed)
+        dialect = self._dialect(session)
+        failure: UpstreamError | None = None
         if streamed is not None:
-            usage, stop_reason = self._dialect(session).usage_from_stream(streamed)
+            usage, stop_reason = dialect.usage_from_stream(streamed)
+            if not dialect.stream_completed(streamed):
+                failure = self._stream_failure(session, streamed)
         else:
-            usage, stop_reason = self._dialect(session).extract_usage(parsed)
+            usage, stop_reason = dialect.extract_usage(parsed)
+        if failure is None:
+            session.upstream_answered()
+        else:
+            reached = None if failure == "unreachable" else status
+            session.upstream_failed(failure, reached, asyncio.get_running_loop().time())
         self._record(
             session,
             call_id=call_id,
-            request_digest=request_digest,
-            disposition="forwarded",
+            request_digest=_request_digest(payload, path),
+            disposition="forwarded" if failure is None else "failed",
             response_digest=GatewaySession.digest(response_body) if response_body else None,
             provider_response_id=provider_response_id,
             usage=usage,
             stop_reason=stop_reason,
+            upstream_status=None if failure is None else status,
+            upstream_error=failure,
             latency_ms=latency_ms,
         )
-        await session.commit(reservation, usage)
+        await session.commit(reservation, usage, answered=failure is None)
 
-    async def _post(  # type: ignore[no-untyped-def]
+    def _stream_failure(self, session: GatewaySession, chunks: list[bytes]) -> UpstreamError:
+        """How the provider failed a stream it began: by the error it sent in it, or, cut off
+        before its end, as not reached."""
+        dialect = self._dialect(session)
+        error = dialect.stream_error(chunks)
+        if error is None:
+            return "unreachable"
+        kind = _failure_kind(200, error, dialect.quota(error, {}))
+        assert kind is not None, "a provider's error inside a 2xx stream is its failure"
+        return kind
+
+    async def _post(
         self,
         request: web.Request,
         payload: dict[str, Any],
         session: GatewaySession,
         path: str | None = None,
-    ):
+    ) -> tuple[ClientResponse, UpstreamError | None]:
+        """Send one call upstream, and again while the model provider fails the session's
+        calls, for up to ``outage_retry_sec`` from its first failure and before anything
+        reached the client. Return the provider's answer, or its last failure, read, and how
+        it failed; raise where it was not reached."""
+        loop = asyncio.get_running_loop()
+        refreshed = False
+        tries = 0
+        while True:
+            started = loop.time()
+            try:
+                upstream = await self._send(request, payload, session, path)
+            except (ClientError, TimeoutError):
+                failed = session.upstream_failed("unreachable", None, loop.time())
+                wait = self._retry_wait(session, request, failed, {}, tries)
+                if wait is None:
+                    raise
+            else:
+                if 200 <= upstream.status < 300:
+                    return upstream, None
+                if (
+                    upstream.status == 401
+                    and not refreshed
+                    and session.upstream is None
+                    and self.subscription is not None
+                ):
+                    # The Gateway's own credential, which only it can refresh.
+                    refreshed = True
+                    if await self.subscription.refresh():
+                        upstream.release()
+                        continue
+                error = _json_object(await upstream.read())
+                kind = _failure_kind(
+                    upstream.status, error, self._dialect(session).quota(error, upstream.headers)
+                )
+                if kind is None:
+                    # The request's own failure, such as an invalid one: the provider answered.
+                    session.upstream_answered()
+                    return upstream, None
+                failed = session.upstream_failed(kind, upstream.status, loop.time())
+                wait = self._retry_wait(session, request, failed, upstream.headers, tries)
+                if wait is None:
+                    return upstream, kind
+                upstream.release()
+            self._record(
+                session,
+                call_id=f"call_{uuid.uuid4().hex}",
+                request_digest=_request_digest(payload, path),
+                disposition="failed",
+                upstream_status=failed.status,
+                upstream_error=failed.kind,
+                latency_ms=_elapsed_ms(started),
+            )
+            tries += 1
+            await asyncio.sleep(wait)
+
+    async def _send(
+        self,
+        request: web.Request,
+        payload: dict[str, Any],
+        session: GatewaySession,
+        path: str | None,
+    ) -> ClientResponse:
         assert self._client is not None
         if session.upstream is not None:
             return await self._client.post(
@@ -644,28 +772,39 @@ class Gateway:
                 json=payload,
                 headers=self._own_headers(request, session.upstream),
             )
-        for attempt in range(2):
-            upstream = await self._client.post(
-                f"{self.upstream}{path or self.upstream_path or REQUEST_PATHS[self.dialect]}",
-                json=payload,
-                headers=await self._upstream_headers(request),
-            )
-            if attempt or self.subscription is None:
-                return upstream
-            delay = 0.0
-            retry = upstream.status == 401 and await self.subscription.refresh()
-            if upstream.status == 429:
-                try:
-                    delay = max(0.0, min(float(upstream.headers.get("retry-after", "1")), 5.0))
-                except ValueError:
-                    delay = 1.0
-                retry = True
-            if not retry:
-                return upstream
-            upstream.release()
-            if delay:
-                await asyncio.sleep(delay)
-        raise AssertionError("subscription retry loop did not return")
+        return await self._client.post(
+            f"{self.upstream}{path or self.upstream_path or REQUEST_PATHS[self.dialect]}",
+            json=payload,
+            headers=await self._upstream_headers(request),
+        )
+
+    def _retry_wait(
+        self,
+        session: GatewaySession,
+        request: web.Request,
+        failure: UpstreamFailure,
+        headers: Mapping[str, str],
+        tries: int,
+    ) -> float | None:
+        """How long to wait before sending a call again, ``tries`` sends after its first:
+        the next backoff, or longer where the provider names longer, cut to what is left of
+        the failure's ``outage_retry_sec``. ``None`` gives the failure to the client: a
+        quota, which does not lift by waiting; a wait the provider names past that window;
+        the window spent; a Judge's call, which its Judge tries again itself, under its own
+        deadline; and a call nobody waits for any more, its client gone or its turn over."""
+        left = failure.since + self.outage_retry_sec - asyncio.get_running_loop().time()
+        named = _retry_after(headers)
+        if (
+            failure.kind == "quota"
+            or left <= 0
+            or (named is not None and named > left)
+            or session.purpose == "judge"
+            or session.suspended
+            or request.transport is None
+            or request.transport.is_closing()
+        ):
+            return None
+        return min(max(_RETRY_WAITS[min(tries, len(_RETRY_WAITS) - 1)], named or 0.0), left)
 
     async def _upstream_headers(self, request: web.Request) -> dict[str, str]:
         headers = {
@@ -735,6 +874,7 @@ class Gateway:
         stop_reason: str | None = None,
         refused: str | None = None,
         upstream_status: int | None = None,
+        upstream_error: UpstreamError | None = None,
         latency_ms: int = 0,
     ) -> None:
         trace = self._traces.get(session.token)
@@ -756,6 +896,7 @@ class Gateway:
                 disposition=disposition or ("refused" if refused is not None else "forwarded"),  # type: ignore[arg-type]
                 refusal_limit=refused,
                 upstream_status=upstream_status,
+                upstream_error=upstream_error,
                 latency_ms=latency_ms,
                 purpose=session.purpose,
             )
@@ -888,13 +1029,43 @@ async def _iter_chunks(
                 await task
 
 
-def _replayable(status: int) -> bool:
-    """Only a successful provider response is replayed to a retry of the same request.
-
-    Replaying an error (a 5xx, or a 429 from the provider) would answer every retry the
-    client makes with the first failure and never reach the provider again.
+def _failure_kind(status: int, error: dict[str, Any], quota: bool) -> UpstreamError | None:
+    """How the provider failed a call that got ``status``, a 2xx one in its stream, with
+    ``error``; ``None`` for a request it refused as the client's fault, such as an invalid one.
     """
-    return 200 <= status < 300
+    if quota:
+        return "quota"
+    if 300 <= status < 500 and status != 429:
+        return None
+    text = json.dumps(error).lower()
+    if status == 529 or "overload" in text or "capacity" in text:
+        return "overloaded"
+    if status == 429 or "rate_limit" in text:
+        return "rate_limited"
+    return "server_error"
+
+
+def _retry_after(headers: Mapping[str, str]) -> float | None:
+    """The wait a failure names in ``retry-after-ms`` or ``retry-after`` (seconds), if any;
+    a date is left to the backoff."""
+    for name, seconds in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        value = headers.get(name)
+        if value is None:
+            continue
+        try:
+            return max(float(value) * seconds, 0.0)
+        except ValueError:
+            continue
+    return None
+
+
+def _json_object(raw: bytes) -> dict[str, Any]:
+    """A body's JSON object, or an empty one for anything else, such as a proxy's HTML page."""
+    try:
+        value = json.loads(raw or b"{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _elapsed_ms(started: float) -> int:

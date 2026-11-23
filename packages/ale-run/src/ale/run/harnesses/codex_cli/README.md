@@ -55,3 +55,10 @@ the Task's network is `open`, otherwise `"disabled"`. A model Codex drives throu
 Responses Lite, such as `gpt-5.6-luna`, gets no hosted search even then: Codex's search for
 it, `web__run` inside `exec`, posts to the provider's `/alpha/search`, which the Gateway
 does not serve, so ALE does not offer it.
+
+To a provider configured by URL, as the Gateway is, Codex 0.146.0 sends a request again
+only for a 5xx or a failed connection: four times, from 200 ms doubling, inside up to six
+tries of the stream, which give up within about 30 s. It does not try a 429 again, nor a
+503 that names the model overloaded, and reads no `retry-after`. The Gateway's own retries
+cover the first minute of a provider failure
+([Gateway README](../../gateway/README.md#provider-failures)).

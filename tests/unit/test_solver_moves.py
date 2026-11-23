@@ -29,6 +29,7 @@ from tests.support import (
 )
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
+from ale.core.config import RunTimeouts
 from ale.core.errors import AllocationEndedError, PhaseTimeoutError
 from ale.core.harness import AgentRun, HarnessSession
 from ale.core.sandbox import ExecResult, PreparedTaskImage, SandboxRequest, SandboxRole
@@ -52,11 +53,17 @@ IMAGE = PreparedTaskImage(
 )
 
 
+#: What the last turn keeps of its Sandbox for a shared verifier, which this module's tests
+#: of moves do without: its limit is minutes, their Sandboxes last seconds.
+KEEPS = EpisodeProtocol._kept_for_verification
+
+
 @pytest.fixture(autouse=True)
 def margins(monkeypatch: pytest.MonkeyPatch) -> None:
     """Seconds where an episode has minutes."""
     monkeypatch.setattr(episode_protocol, "MOVE_MARGIN_SEC", 0.0)
     monkeypatch.setattr(episode_protocol, "MIN_TURN_SEC", 0.05)
+    monkeypatch.setattr(EpisodeProtocol, "_kept_for_verification", lambda self, ctx: 0.0)
 
 
 class DeadlineProvider(RoundsProvider):
@@ -128,7 +135,11 @@ def _task(tmp_path: Path, rounds: int = 0, **options: Any) -> ManifestTask:
 
 
 async def _run(
-    tmp_path: Path, provider: RoundsProvider, task: ManifestTask, harness: TurnsHarness
+    tmp_path: Path,
+    provider: RoundsProvider,
+    task: ManifestTask,
+    harness: TurnsHarness,
+    timeouts: RunTimeouts | None = None,
 ) -> Any:
     lock = make_lock()
     rounds = task.spec.validation_rounds
@@ -136,7 +147,7 @@ async def _run(
         provider.run_dir = tmp_path / "runs"
     return await run_episode(
         task,
-        EpisodeProtocol(harness, validation_rounds=rounds),
+        EpisodeProtocol(harness, validation_rounds=rounds, timeouts=timeouts),
         provider_registry(provider),
         run_dir=tmp_path / "runs",
         provenance=ProvenanceInputs(
@@ -318,6 +329,54 @@ async def test_a_shared_verifier_that_would_not_last_moves_its_solver_where_it_d
     assert tested == [solvers[1].sandbox_id]
     assert solvers[1].request.duration_sec == task.spec.timeouts.verify
     assert [item.began for item in result.record.segments] == ["provisioned"]
+    # As the solver moved for its verifier, the episode's progress said so.
+    assert provider.progress[-1]["phase"] == "moving"
+
+
+@pytest.mark.asyncio
+async def test_the_last_turn_keeps_its_sandbox_for_a_shared_verifier(
+    tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tests/ runs in the solver, where the agent's processes still run: the last turn's
+    runs end the verifier's limit before the Sandbox's deadline, so the run cut there moves,
+    and tests/ runs where the turn ended, in no solver a move stopped them in."""
+    monkeypatch.setattr(EpisodeProtocol, "_kept_for_verification", KEEPS)
+    provider, harness = DeadlineProvider(0.8), WorkHarness(0.7)
+    task = _task(tmp_path)
+    result = await _run(tmp_path, provider, task, harness, RunTimeouts(verify=0.3))
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    # Each run had its Sandbox's 0.8 s less the 0.3 s kept, so the work took two of them.
+    assert harness.timeouts[0] == pytest.approx(0.5, abs=0.05)
+    assert [item.began for item in result.record.segments] == ["provisioned", "moved"]
+    tested = [sandbox for stage, sandbox in verifiers.runs if stage == "/opt/ale/tests"]
+    solvers = _solvers(provider)
+    assert len(solvers) == 2 and tested == [solvers[1].sandbox_id]
+    assert solvers[1].request.duration_sec is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "rounds", "timeouts"),
+    [("snapshot", 0, [0.8]), ("separate", 0, [0.8]), ("shared", 1, [0.8, 0.5])],
+)
+async def test_only_the_last_turn_before_tests_in_the_solver_keeps_its_sandbox(
+    tmp_path: Path,
+    verifiers: Verifiers,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    rounds: int,
+    timeouts: list[float],
+) -> None:
+    """A verifier of its own boots from a save, and a turn a round follows is saved for the
+    round, which stops every process anyway: neither keeps time for verification."""
+    monkeypatch.setattr(EpisodeProtocol, "_kept_for_verification", KEEPS)
+    provider, harness = DeadlineProvider(0.8), WorkHarness(*[0.05] * (rounds + 1))
+    task = _task(tmp_path, rounds=rounds, mode=mode)
+    result = await _run(tmp_path, provider, task, harness, RunTimeouts(verify=0.3))
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert harness.timeouts == pytest.approx(timeouts, abs=0.05)
 
 
 @pytest.mark.asyncio

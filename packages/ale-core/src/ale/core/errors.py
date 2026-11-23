@@ -27,6 +27,7 @@ __all__ = [
     "HarnessLimitError",
     "IncompleteTrainingDataError",
     "MemoryExhaustedError",
+    "ModelProviderError",
     "NativeContinuationError",
     "OutputStreamError",
     "PhaseTimeoutError",
@@ -42,7 +43,6 @@ __all__ = [
     "SubscriptionCompatibilityError",
     "SubscriptionEntitlementError",
     "SubscriptionProfileError",
-    "SubscriptionProviderLimitError",
     "SubscriptionUnavailableError",
     "TaskDefinitionError",
     "TaskError",
@@ -165,8 +165,10 @@ class SubscriptionEntitlementError(EnvironmentError_):
     """The subscription account cannot use the requested model or capability."""
 
 
-class SubscriptionProviderLimitError(EnvironmentError_):
-    """The native provider refused work because of an account-owned limit."""
+class ModelProviderError(EnvironmentError_):
+    """The model provider was failing the agent's calls, as the Gateway saw, when its program
+    gave up: overloaded, limiting their rate, failing, not reached, or refusing them for the
+    account's quota. Not the agent's result: nothing scores it."""
 
 
 # --- Agent ------------------------------------------------------------------------

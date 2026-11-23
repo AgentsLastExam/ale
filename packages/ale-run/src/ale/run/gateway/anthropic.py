@@ -8,6 +8,7 @@ server.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from ale.run.gateway.session import CallUsage
@@ -15,8 +16,10 @@ from ale.run.gateway.session import CallUsage
 __all__ = [
     "extract_usage",
     "policy_body",
+    "quota",
     "refusal_body",
     "stream_completed",
+    "stream_error",
     "usage_from_stream",
     "web_tools",
 ]
@@ -108,6 +111,36 @@ def stream_completed(events: list[bytes]) -> bool:
             return False
         completed = completed or event.get("type") == "message_stop"
     return completed
+
+
+def stream_error(events: list[bytes]) -> dict[str, Any] | None:
+    """The in-band ``error`` event a stream failed with, if it did."""
+    for line in b"".join(events).splitlines():
+        if not line.startswith(b"data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip() or b"{}")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "error":
+            return event
+    return None
+
+
+def quota(error: dict[str, Any], headers: Mapping[str, str]) -> bool:
+    """Whether the provider failed a call for the account's own limit, which lifts in hours
+    rather than within a retry: no credit left, or a subscription's usage limit reached with
+    no overage to draw on."""
+    detail = error.get("error") if isinstance(error.get("error"), dict) else error
+    if (
+        detail.get("type") == "billing_error"
+        or "credit balance is too low" in str(detail.get("message", "")).lower()
+    ):
+        return True
+    return (
+        headers.get("anthropic-ratelimit-unified-status") == "rejected"
+        and headers.get("anthropic-ratelimit-unified-overage-status", "rejected") == "rejected"
+    )
 
 
 def web_tools(payload: dict[str, Any]) -> list[str]:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -35,6 +36,8 @@ ENDED = {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "DEADLINE"}
 #: the cluster, each by its key.
 SNAPSHOTS = "snapshots"
 IMAGES = "images"
+#: How often a job still waiting in the queue says so, with Slurm's reason.
+QUEUE_NOTICE_SEC = 600
 
 
 def cache() -> Path:
@@ -170,11 +173,14 @@ class Job:
         if not self.id.isdecimal():
             raise ProviderStartError(f"sbatch returned an invalid job id: {out!r}")
 
-    async def ready(self, queue_timeout: int) -> JobReady:
+    async def ready(self, queue_timeout: int | None) -> JobReady:
+        """Wait for the batch step to be ready: ``queue_timeout`` seconds in the queue, or
+        as long as Slurm keeps the job pending where that is ``None``, then 1800 s to start."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + queue_timeout
+        deadline = None if queue_timeout is None else loop.time() + queue_timeout
         started = False
-        while loop.time() < deadline:
+        noticed = loop.time()
+        while deadline is None or loop.time() < deadline:
             if error := read(self.directory / "error"):
                 raise ProviderStartError(f"Slurm job {self.id} could not start: {error}")
             if ready := read(self.directory / "ready"):
@@ -183,6 +189,12 @@ class Job:
             if state in {"RUNNING", "CONFIGURING"} and not started:
                 started = True
                 deadline = loop.time() + 1800
+            if state == "PENDING" and loop.time() - noticed >= QUEUE_NOTICE_SEC:
+                noticed = loop.time()
+                logging.getLogger("ale.execution").info(
+                    "a Slurm job still waits in the queue",
+                    extra={"ale_data": {"job": self.id, "reason": await self.pending_reason()}},
+                )
             if state not in {"PENDING", "RUNNING", "CONFIGURING"}:
                 raise ProviderStartError(
                     f"Slurm job {self.id} ended before readiness ({state or 'gone'}): "
@@ -298,6 +310,10 @@ class Job:
                 await slurm("scancel", "--me", f"--name={self.name}")
             await asyncio.sleep(2)
         raise ProviderStartError(f"Slurm did not release job {self.name}")
+
+    async def pending_reason(self) -> str:
+        """Why Slurm keeps the job pending, such as ``Resources`` or ``Priority``."""
+        return await slurm("squeue", "-h", "-j", self.id, "-o", "%r")
 
     async def time_left(self) -> int | None:
         """How many seconds Slurm still holds the running job for; None without a limit."""

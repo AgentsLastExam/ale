@@ -15,7 +15,7 @@ import json
 import logging
 import shutil
 from collections.abc import Sequence
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +24,7 @@ from typing import Literal
 from ale.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model, unmet
 from ale.core.config import SlurmPartition, SlurmProviderConfig
 from ale.core.errors import (
+    AllocationEndedError,
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderCapabilityError,
@@ -545,6 +546,8 @@ class SlurmProvider(Provider):
                 image=resolved.observed_identity,
                 archive=request.prepared_image.runtime_ref,
                 separate=separate,
+                # A separate verifier's comes mid-episode, the agent's work done.
+                patient=request.role is SandboxRole.VERIFIER,
             )
             index = chain.reserve(request.resources)
             assert index is not None, "an allocation holds the Sandbox it was sized for"
@@ -601,6 +604,20 @@ class SlurmProvider(Provider):
             )
         specs = _volume_specs(stacks, engines, viewing=viewing)
         needed = {str(layer) for spec in specs for layer in spec.get("layers", ())}
+        if chain is not None and snapshot is not None and not await chain.job.state():
+            # Slurm ended the allocation, and the store on its node with it.
+            if snapshot.archive is None:
+                # Each boot from the snapshot says so. Destroying it as the episode ends finds
+                # the job gone and closes the allocation.
+                ended = await chain.job.ended()
+                raise AllocationEndedError(
+                    f"Slurm ended job {chain.job.id} ({ended or 'gone'}), and with it snapshot "
+                    f"{handle}, which was not written out"
+                )
+            # Written out before it ended: it boots from its archive, in one of its own.
+            with suppress(ProviderStartError):
+                await self._close(chain)
+            chain = snapshot = None
         if chain is not None and snapshot is not None:
             served = any(
                 not unmet(p, request.needs) for p in _profiles(chain.job.partition, self.config)
@@ -618,19 +635,28 @@ class SlurmProvider(Provider):
                 chain.viewing[booted] = needed
                 return chain, booted, resolved, loaded, specs
             archive = snapshot.archive or await self.write_out(chain, snapshot)
-            if not chain.lasts(MIN_LEFT_SEC):
+            if not viewing:
+                # It boots in an allocation of its own, so no more in this one.
+                snapshot.boots = max(0, snapshot.boots - 1)
+            if chain.lasts(MIN_LEFT_SEC):
+                # Rather than idle until the episode ends, it ends once nothing needs it.
+                await self._end_if_idle(chain)
+            else:
                 await self._drain(chain)
         else:
-            archive = f"{SNAPSHOTS}/{name}-{index}.tar.gz"
+            archive = f"{SNAPSHOTS}/{name}-{index}.tar"
         layers = {
             layer: f"{SNAPSHOTS}/{worker.layer_archive(Path(archive).name, layer)}"
             for layer in needed
         }
+        # Mid-episode: the snapshot holds the agent's work, and a wait in the queue spends
+        # none of its time, so it waits for as long as Slurm keeps the job pending.
         own = await self._allocate(
             request.needs,
             image=resolved.observed_identity if viewing else image,
             archive=request.prepared_image.runtime_ref if viewing else archive,
             layers=layers,
+            patient=True,
         )
         booted = own.reserve(request.resources)
         assert booted is not None, "an allocation holds the Sandbox it was sized for"
@@ -656,11 +682,13 @@ class SlurmProvider(Provider):
         archive: str,
         layers: dict[str, str] | None = None,
         separate: Resources | None = None,
+        patient: bool = False,
     ) -> _Chain:
         """An allocation for ``needs``, and the ``separate`` verifier, seeded with ``image``
         from its ``archive`` below the cache: an image prepared for the cluster, or a
         written-out snapshot, which Podman loads under its own ID, with that snapshot's
-        volume ``layers``, by name, below the cache."""
+        volume ``layers``, by name, below the cache. It waits in the queue for
+        ``queue_timeout_sec``, or, ``patient``, for as long as Slurm keeps it pending."""
         part = self._partition(needs, separate=separate)
         if part is None:
             raise ProviderCapabilityError(
@@ -684,7 +712,7 @@ class SlurmProvider(Provider):
                 gpus=gpus,
                 minutes=self.config.walltime_minutes,
             )
-            ready = await job.ready(self.config.queue_timeout_sec)
+            ready = await job.ready(None if patient else self.config.queue_timeout_sec)
             left = await job.time_left()
         except BaseException:
             await asyncio.shield(job.stop())
@@ -842,16 +870,22 @@ class SlurmProvider(Provider):
     async def _drain(self, chain: _Chain) -> None:
         """End an allocation whose deadline has come once what it holds goes on elsewhere: no
         Sandbox starts there any more, so its snapshots are written out and none is to boot
-        there. Its end failing fails nothing that goes on; Slurm ends it at its wall time."""
+        there."""
         for snapshot in chain.snapshots.values():
             if snapshot.archive is None:
                 await self.write_out(chain, snapshot)
             snapshot.boots = 0
+        await self._end_if_idle(chain)
+
+    async def _end_if_idle(self, chain: _Chain) -> None:
+        """End the allocation if it now holds nothing its episode still needs there. A failed
+        end is logged rather than raised: nothing that goes on needs it, and Slurm ends it at
+        its wall time."""
         try:
             await self._close_if_idle(chain)
         except ProviderStartError as error:
             logging.getLogger("ale.execution").warning(
-                "a drained Slurm allocation did not end; it ends at its wall time",
+                "a Slurm allocation nothing needs did not end; it ends at its wall time",
                 extra={"ale_data": {"job": chain.job.id, "error": str(error)}},
             )
 
@@ -859,7 +893,7 @@ class SlurmProvider(Provider):
         """Write a snapshot to the cluster's shared file system, from which an allocation of
         its own loads it, and return where below the cache."""
         name = f"{chain.job.name}-{snapshot.index}"
-        archive = f"{SNAPSHOTS}/{name}.tar.gz"
+        archive = f"{SNAPSHOTS}/{name}.tar"
         await chain.job.control(
             "export",
             snapshot.image.removeprefix("sha256:"),
