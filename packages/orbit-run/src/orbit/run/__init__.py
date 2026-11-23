@@ -14,7 +14,7 @@ IMAGE_REGISTRY = "ghcr.io/agentslastexam"
 
 #: The current version of each Linux base. A base carries no part of the framework, so it
 #: has its own version, raised when the base itself changes.
-BASES = {"container-ubuntu22-base": "0.1.1", "vm-ubuntu24-base": "0.2.0"}
+BASES = {"container-ubuntu22-base": "0.1.1", "vm-ubuntu24-base": "0.2.1"}
 
 #: The ``docker run`` arguments of every helper container Orbit starts, such as a runner,
 #: builder or network helper: runc, which Docker always registers. The Host's default

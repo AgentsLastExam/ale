@@ -14,7 +14,7 @@ a base works too:
 ```toml
 [environment]
 os = "windows"
-image = "ghcr.io/agentslastexam/vm-windows10-base:0.1.3"
+image = "ghcr.io/agentslastexam/vm-windows10-base:0.1.4"
 ```
 
 Keep software materials under `environment/assets/softwares/editor_1/` and deployment

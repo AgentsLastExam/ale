@@ -462,7 +462,7 @@ provides `environment/build.sh`:
 
 ```toml
 [environment]
-image = "ghcr.io/agentslastexam/vm-ubuntu24-base:0.2.0"
+image = "ghcr.io/agentslastexam/vm-ubuntu24-base:0.2.1"
 ```
 
 ```bash
@@ -478,7 +478,7 @@ A Windows Task provides `environment/build.ps1`; its base includes WinGet and Ch
 ```toml
 [environment]
 os = "windows"
-image = "ghcr.io/agentslastexam/vm-windows10-base:0.1.3"
+image = "ghcr.io/agentslastexam/vm-windows10-base:0.1.4"
 ```
 
 ```powershell

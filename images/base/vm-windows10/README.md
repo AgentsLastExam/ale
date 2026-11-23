@@ -48,8 +48,8 @@ warm pool. Publish the resulting disk under a new version after `docker login gh
 describes how it travels.
 
 ```bash
-uv run orbit vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.3
-uv run orbit vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.3 output.qcow2
+uv run orbit vm-image push output.qcow2 ghcr.io/agentslastexam/vm-windows10-base:0.1.4
+uv run orbit vm-image pull ghcr.io/agentslastexam/vm-windows10-base:0.1.4 output.qcow2
 ```
 
 A GUI base is not qualified by an oracle-only Task. Before publication, run a real visual
