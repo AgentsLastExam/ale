@@ -448,10 +448,10 @@ Sandbox's configuration or a Host command line, so container and VM, Linux, Wind
 macOS receive them the same way.
 
 A variable is a credential when its name, or the name it refers to, contains `KEY`, `SECRET`,
-`TOKEN` (not `TOKENS`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `orbit lint` fails a credential
-written as a literal or with a non-empty default; it is written `${NAME}` and its value lives
-in the `.env`. Credential values from the `.env` are redacted from every record of the
-episode (see [Trace](trace.md)), except values that are only digits or a boolean word, which
+`TOKEN` (not `TOKENS` or `TOKENIZER`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `orbit lint` fails a
+credential written as a literal or with a non-empty default; it is written `${NAME}` and its
+value lives in the `.env`. Credential values from the `.env` are redacted from every record of
+the episode (see [Trace](trace.md)), except values that are only digits or a boolean word, which
 cannot be told apart from ordinary output. Artifacts are the agent's output and are copied
 exactly. The RunLock records each variable's table, name and source (literal, `.env` or
 default), never its value.

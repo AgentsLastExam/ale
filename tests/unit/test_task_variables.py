@@ -301,6 +301,7 @@ def test_lint_refuses_written_credentials_and_explains_embedded_references(
         "GOOD_TOKEN": "${GOOD_TOKEN}",
         "OPTIONAL_TOKEN": "${OPTIONAL_TOKEN:-}",
         "MAX_TOKENS": "4096",
+        "TOKENIZERS_PARALLELISM": "false",
         "HEADER": "Bearer ${GOOD_TOKEN}",
     }
     task = _task(
