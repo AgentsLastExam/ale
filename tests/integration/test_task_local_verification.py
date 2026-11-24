@@ -339,9 +339,11 @@ async def test_separate_verifier_restores_file_and_directory_to_exact_paths(
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": 1.0}
+    # The directory is a volume the verifier views from the solver's snapshot, which is
+    # released after it.
     assert [outcome.roles for outcome in result.record.sandboxes] == [
-        ("solver",),
         ("verifier",),
+        ("solver",),
     ]
     snapshot = result.run_dir / "artifacts/snapshot.json"
     if collect:

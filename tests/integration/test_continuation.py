@@ -127,7 +127,7 @@ async def _kept_stages(
         network=task.spec.network,
         user=task.spec.image.user,
     )
-    sandbox = await _attach_retained(handle, request, lock, registry)
+    sandbox = await _attach_retained(handle, request, lock=lock, providers=registry)
     try:
         if task.spec.os is OperatingSystem.WINDOWS:
             # The base's stage directories stay, empty.

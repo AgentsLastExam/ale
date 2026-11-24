@@ -39,10 +39,17 @@ PROMPT = "Unique prompt: 多行\n'quoted' $HOME `cmd`"
 
 
 class PathSandbox:
-    """Answers only what command preparation may ask: the agent's PATH."""
+    """Answers what command preparation may ask, the agent's PATH, and keeps what it writes:
+    a launcher the command line runs."""
+
+    def __init__(self) -> None:
+        self.written: dict[str, bytes] = {}
 
     async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
         return ExecResult(exit_code=0, stdout="/usr/bin:/bin")
+
+    async def write_file(self, path: str, data: bytes, **kwargs: object) -> None:
+        self.written[path] = data
 
 
 def session(**updates: object) -> HarnessSession:
@@ -108,15 +115,18 @@ async def test_prompt_arrives_as_a_file_and_resume_asks_for_its_exact_session(
     harness: CliHarness, native_session_id: str | None
 ) -> None:
     prompt_path = f"/home/user/{PROMPT_PATH}"
+    sandbox = PathSandbox()
     command = await harness.prepare_command(
         prompt_path,
-        PathSandbox(),  # type: ignore[arg-type]
+        sandbox,  # type: ignore[arg-type]
         session(),
         native_session_id=native_session_id,
     )
     assert prompt_path in command.script
     assert PROMPT not in command.script and PROMPT not in command.env.values()
     assert "token" not in command.script
+    for data in sandbox.written.values():
+        assert PROMPT.encode() not in data and b"token" not in data
     tokens = command.script.split()
     assert not {"--continue", "--last", "-c"} & set(tokens)
     if native_session_id is not None:

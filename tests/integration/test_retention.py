@@ -140,11 +140,12 @@ def context(root: Path, policy: LoggingPolicy, run: AgentRun | None):
         session=SimpleNamespace(model="model", token="episode-token"),
         secrets=("episode-token",),
         agent_version="1",
-        spec=SimpleNamespace(instruction="instruction"),
+        spec=SimpleNamespace(instruction="instruction", validation_visible=False),
         agent_run=run,
         logging_policy=policy,
         trajectory_written=False,
         validation_prompts={},
+        move_prompts={},
     )
 
 

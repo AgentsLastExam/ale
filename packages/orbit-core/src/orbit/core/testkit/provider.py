@@ -132,6 +132,9 @@ for target in sys.argv[1:]:
 """
 
 
+#: A directory of every image of the system that the framework may write, as a volume
+#: candidate: macOS's own volume is read-only, and it has no ``/srv``.
+_VOLUME = {OperatingSystem.LINUX: "/srv", OperatingSystem.MACOS: "/Users/Shared"}
 #: A container image to run inside a Sandbox, pinned so the check stays the same.
 _BUSYBOX = "busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 #: What Tasks do with a container engine, once it runs: a container deletes a file of its
@@ -757,29 +760,35 @@ class ProviderConformance:
                     desktop_resolution=DesktopResolution(width=1366, height=768),
                 ),
             ]
-            booted = await asyncio.gather(
-                *(self.provider.create(item) for item in requests), return_exceptions=True
-            )
-            forks = [fork for fork in booted if isinstance(fork, Sandbox)]
-            try:
-                for fork, request in zip(booted, requests, strict=True):
-                    if isinstance(fork, BaseException):
-                        raise fork
-                    assert await fork.read_file(kept) == b"kept"
-                    if request.role is not SandboxRole.VERIFIER:
-                        # Verification runs as root; nothing is promised of a verifier's
-                        # agent account.
-                        assert await _elevates(fork) is request.sudo
-                    assert fork.allocation.desktop_resolution in (None, request.desktop_resolution)
-                    assert fork.request.role is request.role
-                    assert (fork.allocation.cpus, fork.allocation.memory_mb) == (
-                        request.resources.cpus,
-                        request.resources.memory_mb,
-                    )
-                    assert fork.allocation.network_mode is request.network.mode
-            finally:
-                for fork in forks:
-                    await fork.destroy()
+            # The agents' two at once, then the verifier's: a Mac runs no more than two macOS
+            # VMs, and a third would wait for room the first two hold.
+            for group in (requests[:2], requests[2:]):
+                booted = await asyncio.gather(
+                    *(self.provider.create(item) for item in group), return_exceptions=True
+                )
+                forks = [fork for fork in booted if isinstance(fork, Sandbox)]
+                try:
+                    for fork, request in zip(booted, group, strict=True):
+                        if isinstance(fork, BaseException):
+                            raise fork
+                        assert await fork.read_file(kept) == b"kept"
+                        if request.role is not SandboxRole.VERIFIER:
+                            # Verification runs as root; nothing is promised of a verifier's
+                            # agent account.
+                            assert await _elevates(fork) is request.sudo
+                        assert fork.allocation.desktop_resolution in (
+                            None,
+                            request.desktop_resolution,
+                        )
+                        assert fork.request.role is request.role
+                        assert (fork.allocation.cpus, fork.allocation.memory_mb) == (
+                            request.resources.cpus,
+                            request.resources.memory_mb,
+                        )
+                        assert fork.allocation.network_mode is request.network.mode
+                finally:
+                    for fork in forks:
+                        await fork.destroy()
         finally:
             await self.provider.destroy_retained(retained.handle)
         listed = {record["handle"] for record in await self.provider.list_retained()}
@@ -791,7 +800,7 @@ class ProviderConformance:
         image: its snapshot keeps it, and a Sandbox booted from the snapshot, or one of its
         own image that mounts the snapshot's volumes, sees it through a view of its own,
         whose writes reach no other Sandbox. One that mounts none leaves them on the disk."""
-        path, absent = "/srv", "/orbit-conformance-absent"
+        path, absent = _VOLUME[(await self.request()).os], "/orbit-conformance-absent"
         kept = f"{path}/kept.txt"
         mounts = any(profile.volumes for profile in await self.provider.profiles())
         saves = any(profile.snapshot for profile in await self.provider.profiles())

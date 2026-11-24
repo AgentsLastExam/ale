@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from orbit.core.config import RunConfig
+from orbit.core.errors import ProviderCapabilityError
 from orbit.core.lock import TaskSource
 from orbit.core.verdict import Status
 from orbit.run.episode import run_episode
@@ -61,7 +62,7 @@ async def run_one(task_root: Path, run_dir: Path):  # type: ignore[no-untyped-de
         return await run_episode(
             task,
             EpisodeProtocol(OracleHarness()),
-            provider_registry(DaytonaProvider()),
+            provider_registry(DaytonaProvider(), only=True),
             run_dir=run_dir,
             collect_artifacts=True,
             proxy_url=proxy.url if task.spec.network.allowed_hosts else "",
@@ -232,8 +233,6 @@ async def test_a_gpu_task_runs_on_the_gpu_its_lock_records(
 async def test_a_task_that_asks_for_a_fraction_of_a_gib_is_refused_not_rounded(
     tmp_path: Path, write_repo: Callable[..., Path]
 ) -> None:
-    result = await run_one(write_repo(tmp_path / "repo"), tmp_path / "runs")  # asks for 512 MB
-
-    assert result.verdict.status is Status.ENV_ERROR
-    assert result.verdict.failure is not None
-    assert "whole number of GiB" in result.verdict.failure.message
+    # Asks for 512 MB: refused when Providers are selected, before anything is started.
+    with pytest.raises(ProviderCapabilityError, match="whole number of GiB"):
+        await run_one(write_repo(tmp_path / "repo"), tmp_path / "runs")

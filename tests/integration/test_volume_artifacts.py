@@ -169,7 +169,7 @@ async def test_an_agent_works_in_a_volume_of_a_linux_vm(
     provider = QemuProvider(overlay_dir=tmp_path / "qemu", snapshot_dir=tmp_path / "snapshots")
     result = await _episode(tmp_path, mode, validation, provider, vm=True)
     _check(result, mode, validation)
-    assert await provider.list_retained() == []
+    assert not await _kept(provider, result)
 
 
 #: Windows keeps no FIFO and the agent's own profile cannot be a verifier's view, so the
@@ -234,8 +234,8 @@ async def test_an_agent_works_in_a_volume_of_a_windows_vm(
     (root / "environment/build.ps1").write_text(
         f"New-Item -ItemType Directory -Force -Path '{WINDOWS_VOLUME}' | Out-Null\n"
     )
-    (root / "calibration/solution").mkdir(parents=True)
-    (root / "calibration/solution/solve.ps1").write_text("exit 0\n")
+    (root / "solution").mkdir()
+    (root / "solution/solve.ps1").write_text("exit 0\n")
     for stage in ("tests", "validation"):
         (root / stage).mkdir(exist_ok=True)
         (root / stage / "test.ps1").write_text(WINDOWS_TEST)
@@ -259,7 +259,13 @@ async def test_an_agent_works_in_a_volume_of_a_windows_vm(
     assert json.loads((result.run_dir / "verification.json").read_text())["leaked"] is False
     # Nothing was copied: every separate verifier viewed the solver's disk.
     assert not (result.run_dir / "artifacts").exists()
-    assert await provider.list_retained() == []
+    assert not await _kept(provider, result)
+
+
+async def _kept(provider: Provider, result: EpisodeResult) -> list[dict[str, object]]:
+    """What ``provider`` keeps of the episode: its listing is of the Host, where other
+    episodes may keep Sandboxes of their own."""
+    return [item for item in await provider.list_retained() if item["episode"] == result.episode_id]
 
 
 async def _episode(
