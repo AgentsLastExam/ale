@@ -289,7 +289,8 @@ class DockerProviderConfig(BaseModel):
 
 
 class SlurmPartition(BaseModel):
-    """One single-node allocation the cluster Orbit runs on offers."""
+    """The allocations a partition of the cluster Orbit runs on offers, of up to
+    ``max_nodes`` alike nodes, each limited as below."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -299,6 +300,8 @@ class SlurmPartition(BaseModel):
     max_memory_mb: int = Field(ge=1)
     gpu_model: GpuModel | None = None
     max_gpus: int = Field(default=0, ge=0)
+    max_nodes: int = Field(default=1, ge=1)
+    """How many of its nodes one allocation, and one Sandbox, may span."""
 
     # --- validation ---
 
@@ -313,7 +316,7 @@ class SlurmProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     partitions: tuple[SlurmPartition, ...] = ()
-    """In preference order. One Sandbox fits on one node of one partition."""
+    """In preference order. One Sandbox fits on up to ``max_nodes`` nodes of one partition."""
     walltime_minutes: int = Field(default=180, ge=1)
     """Each allocation's wall time, within its QoS's limit."""
     drain_minutes: int = Field(default=10, ge=1)

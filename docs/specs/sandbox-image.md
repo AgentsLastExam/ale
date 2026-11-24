@@ -542,8 +542,9 @@ unchanged wherever a Provider serves it. A Provider is one of two classes. A
 [leaf](lexicon.md) starts and drives the Sandbox itself, locally or in an allocation, and
 declares each real combination it can start as a [capability profile](lexicon.md): kind,
 operating system, architecture, desktop, network modes, snapshots and how many it saves in a
-row, GPUs, their models and memory and how it shares them, CPU and memory limits, whether it
-holds a Sandbox to its `storage_mb`, container features, and whether it mounts
+row, GPUs, their models and memory and how it shares them, CPU and memory limits, how many
+nodes one Sandbox may span, whether it holds a Sandbox to its `storage_mb`, container
+features, and whether it mounts
 [volumes](task-authoring.md#volumes). A scheduler places Sandboxes on machines it manages,
 which start them with the leaves there, and offers what those leaves do: the Fleet those of
 the leaves its registered Nodes lend, Daytona the one of its own Sandboxes. Which leaves a
@@ -552,13 +553,14 @@ scheduler uses, and in which order, is its own configuration, never a Run's.
 A Sandbox needs its image's kind and operating system, the architecture that system implies
 (arm64 for macOS, x86-64 otherwise), its network mode (a verifier's is the verifier's, and a
 solver that serves a shared verifier needs the least open of the agent's and the verifier's,
-since it applies both), its resources (CPUs, memory, the
-storage it may write, GPUs, the models it accepts and the memory it needs on each, container
-features), snapshots, and how many in a row, when it saves or boots from one, and volume
-artifacts, when its Task has any. One rule compares needs with a profile, naming each need
-the profile misses, wherever a Provider or Node is chosen: in a Run's selection, in every
-leaf's `create`, and in the Fleet's placement, so a Sandbox is accepted or refused the same
-way wherever it is asked for. A leaf may also refuse by rules no profile states
+since it applies both), its resources (CPUs, memory, the storage it may write, GPUs, the
+models it accepts and the memory it needs on each, container features, the
+[nodes](task-authoring.md#nodes) it spans), snapshots, and how many in a row, when it saves
+or boots from one, and volume artifacts, when its Task has any. One rule compares needs with
+a profile, naming each need the profile misses, wherever a Provider or Node is chosen: in a
+Run's selection, in every leaf's `create`, and in the Fleet's placement, so a Sandbox is
+accepted or refused the same way wherever it is asked for. A leaf may also refuse by rules
+no profile states
 ([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#provider-ids-and-profiles)
 lists them); they hold wherever it runs, so selection asks them of a leaf, and of the leaves
 a scheduler would use, by the method `create` asks. A request that `create` would refuse is
@@ -638,6 +640,7 @@ Task content (the engine).
 | A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/orbit-run/src/orbit/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
 | A snapshot holds the disk, any number of Sandboxes boot from it, each with its own request's role and resources, its `storage_mb` counting what the snapshot holds, and it is listed and destroyed through its Provider, never under a Sandbox booted from it; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | A Provider that holds a Sandbox only until a set time declares the longest it holds one (`max_duration_sec`), gives each the latest time to begin saving it (`deadline`), starts one whose request names a `duration_sec` only where it lasts that long, and explains a Sandbox its scheduler ended with `AllocationEndedError` ([Moves](episode-protocol.md#moves)) | Provider in `create`; the Run's selection | Slurm's unit tests and `tests/integration/test_slurm_segments.py` |
+| A Sandbox that spans several nodes is one Sandbox: its commands and files are node 0's, every node gets its image, account, resources and network policy, and the nodes reach one another, and nothing else, on a network of their own, sealed or not, a fabric they share reaching no further than [Security](security.md#1-a-sandbox-has-only-declared-ways-out) says; a snapshot keeps every node's disk: node `k` of a Sandbox booted from it starts from its node `k`, and node `k` of one viewing its volumes views its node `k`'s | Provider, outside the agent's reach | `tests/integration/test_slurm_nodes.py` |
 | A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |
 | A desktop has the Run's resolution, whatever the image would use, and the RunLock records it | Provider in `create`: set at every start, then checked | `test_a_declared_desktop_can_actually_be_used`, `test_a_desktop_takes_the_runs_resolution` |
 | No platform service inside the sandbox gives the agent more than its account | Provider check in `create` | `test_the_agent_cannot_reach_the_platform_daemon` |

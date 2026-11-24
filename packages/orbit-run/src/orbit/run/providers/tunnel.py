@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
+from types import MappingProxyType
 from typing import Protocol
 from urllib.parse import SplitResult, urlsplit
 
@@ -173,6 +174,11 @@ class TunneledSandbox(Sandbox):
     _local_gateway: str | None
     _sealed: bool
     _relay: str | None
+    #: The other nodes of a Sandbox that spans several, which no proxy stands between.
+    _peers: tuple[str, ...] = ()
+    #: What every command gets, below the proxy's variables and the caller's: a Sandbox's
+    #: own facts that no snapshot of it may keep, as a commit keeps the container's.
+    _variables: Mapping[str, str] = MappingProxyType({})
 
     def _as(self, identity: Identity) -> str | None:
         return self.agent_user if identity is Identity.AGENT else None
@@ -192,8 +198,13 @@ class TunneledSandbox(Sandbox):
         identity: Identity = Identity.FRAMEWORK,
         output_sink: ExecOutputSink | None = None,
     ) -> ExecResult:
-        if self._sealed and self._relay:
-            env = relay.variables(self._relay, "127.0.0.1") | (env or {})
+        if self._variables or (self._sealed and self._relay):
+            proxied = (
+                relay.variables(self._relay, "127.0.0.1", self._peers)
+                if (self._sealed and self._relay)
+                else {}
+            )
+            env = {**self._variables, **proxied, **(env or {})}
         loop = asyncio.get_running_loop()
         started = loop.time()
         exit_code, stdout, stderr, timed_out = await self._client.exec(

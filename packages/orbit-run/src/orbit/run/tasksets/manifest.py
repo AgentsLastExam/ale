@@ -458,6 +458,7 @@ def _spec(config: TaskConfig, folder: TaskFolder, name: TaskId) -> TaskSpec:
             "gpu_memory_mb": config.environment.gpu_memory_mb,
             "sudo": config.agent_sudo,
             "container_features": config.environment.container_features,
+            "nodes": config.environment.nodes,
         },
         network=config.agent_network,
         workdir=config.agent.workdir or config.environment.workdir,
@@ -627,6 +628,7 @@ def _verification(
         gpu_types=sized.gpu_types or (),
         gpu_memory_mb=sized.gpu_memory_mb,
         container_features=sized.container_features,
+        nodes=sized.nodes,
     )
     return VerifySpec(
         environment_mode=mode,

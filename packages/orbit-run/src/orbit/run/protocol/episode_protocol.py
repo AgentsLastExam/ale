@@ -529,6 +529,7 @@ def _separate_verifier(spec: TaskSpec, validations: int) -> Resources | None:
             "cpus": max(size.cpus for size in sizes),
             "memory_mb": max(size.memory_mb for size in sizes),
             "gpus": max(size.gpus for size in sizes),
+            "nodes": max(size.nodes for size in sizes),
         }
     )
 

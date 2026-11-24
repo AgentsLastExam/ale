@@ -101,6 +101,7 @@ gpus = 0                                    # GPU count, not indices; default 0
 # gpu_types = ["RTX-PRO-6000", "L40S"]      # models any of which will do; default any
 # gpu_memory_mb = 8192                      # Orbit; MiB needed on each GPU; default whole GPUs
 container_features = []                     # Orbit; such as ["perf", "mount"]; default none
+# nodes = 2                                 # Orbit; machines of this size; default 1
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}", REGION = "eu" }  # see Variables
 skills_dir = "/skills"                      # absolute; the Task's Skills in the image
 
@@ -140,6 +141,7 @@ gpus = 0                                    # default 0
 # gpu_types = ["H100"]                      # default any
 # gpu_memory_mb = 4096                      # Orbit; default whole GPUs
 container_features = []                     # Orbit; default none
+# nodes = 1                                 # Orbit; default 1
 env = {}                                    # replaces [environment].env
 
 [verifier.validation]                       # Orbit; the rounds' verifier; default [verifier]
@@ -347,6 +349,41 @@ it fails as on a full GPU, or loses the process that went past it, as on a memor
 ([Sandbox image](sandbox-image.md#gpu-memory)). Frameworks that size their memory pool from
 what the GPU reports must be configured to stay within it, since a Sandbox still sees the
 whole GPU.
+
+### Nodes
+
+`nodes` is how many machines the Sandbox spans, each with the CPUs, memory, storage and
+GPUs above, for work that one machine cannot hold, such as training across sixteen GPUs.
+The agent works on node 0, where its commands and files are; every node runs the same image
+under the same account, sudo and network policy, and its disk is its own, so data one node
+needs on another is copied there or fetched there. The nodes are named `node0` to
+`node<N-1>`, which is also each one's hostname, and reach one another on a network of
+their own that reaches nothing else, whatever the Task's network; a job's ranks rendezvous
+and exchange data there, or over a faster fabric the Provider gives them, such as
+InfiniBand. `ORBIT_NODES` lists the names and `ORBIT_NODE_RANK` is each node's number.
+
+On every node, `orbit-exec NODE COMMAND [ARG...]` runs a command on another node as the
+account that runs it, as `ssh` would: its arguments joined by spaces and run by `sh` there,
+in the same directory, or its home where that is missing there, with its input, output and
+exit status. Unlike `ssh`, the command also gets the variables its caller exported, the
+Task's among them, apart from those that describe a node, such as `ORBIT_NODE_RANK` and
+`HOME`, which are the other node's. A distributed launcher takes it as its remote shell, so
+the agent starts `torchrun` on each node, or `mpirun` with
+`--mca plm_rsh_agent orbit-exec`, without a scheduler or its credentials:
+
+```bash
+orbit-exec node1 torchrun --nnodes=2 --nproc-per-node=8 --rdzv-backend=c10d \
+    --rdzv-endpoint=node0:29400 train.py &
+torchrun --nnodes=2 --nproc-per-node=8 --rdzv-backend=c10d \
+    --rdzv-endpoint=node0:29400 train.py
+```
+
+A verifier's `nodes` is its own, one unless its table names more; a verifier without a
+table spans the agent's. A snapshot verifier boots each of its nodes from the agent's node
+of the same number, so it spans no more nodes than the agent. Only some Providers join
+machines into one Sandbox
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#provider-ids-and-profiles));
+the others refuse a Task that names more than one node before anything starts.
 
 ### Container features
 

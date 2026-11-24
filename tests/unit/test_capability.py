@@ -68,6 +68,16 @@ class TestUnmet:
         )
         assert unmet(PROFILE, served) == ()
 
+    def test_a_sandbox_spans_more_than_one_node_only_where_a_profile_says_so(self) -> None:
+        spanning = needs(resources=Resources(nodes=2))
+        assert unmet(PROFILE, spanning) == ("spans 1 node(s) at most, not 2",)
+        assert unmet(PROFILE.model_copy(update={"max_nodes": 2}), spanning) == ()
+        # The verifier booted from its snapshot is held to it too.
+        verified = needs(verifier=spanning)
+        assert unmet(PROFILE, verified) == (
+            "the verifier booted from its snapshot: spans 1 node(s) at most, not 2",
+        )
+
     @pytest.mark.parametrize(
         ("asked", "reason"),
         [
