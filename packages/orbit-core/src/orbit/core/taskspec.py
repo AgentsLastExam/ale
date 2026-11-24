@@ -590,8 +590,9 @@ def _valid_env(env: dict[str, str]) -> dict[str, str]:
 #: A Harbor ``env`` table: names to literals or whole-value ``${NAME}`` references.
 TaskEnv = Annotated[dict[str, str], AfterValidator(_valid_env)]
 
-#: A name that marks a credential, as Harbor recognizes one; ``MAX_TOKENS`` is a count.
-_CREDENTIAL_NAME = re.compile(r"KEY|SECRET|TOKEN(?!S)|PASSWORD|CREDENTIAL|AUTH", re.IGNORECASE)
+#: A name that marks a credential, as Harbor recognizes one; ``MAX_TOKENS`` is a count and
+#: ``TOKENIZERS_PARALLELISM``, of Hugging Face's tokenizers, a switch.
+_CREDENTIAL_NAME = re.compile(r"KEY|SECRET|TOKEN(?!S|IZE)|PASSWORD|CREDENTIAL|AUTH", re.IGNORECASE)
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 #: The one shape a credential header takes: an optional scheme, then only references.
 _CREDENTIAL_HEADER = re.compile(
