@@ -71,12 +71,12 @@ at the default of 10, and the next allocation's load lengthens the move's gap; a
 snapshot is removed once the next save succeeds, so the space is held briefly.
 
 A boot that does not fit beside what runs gets an allocation of its own, loading the
-snapshot from a `podman save` archive on the shared home, as does a snapshot the Run keeps,
+snapshot from a `podman save` archive in the cache, as does a snapshot the Run keeps,
 whose allocation ends with the episode.
 
 The batch step, not Orbit, starts each Sandbox's step (`srun --exact`), so Orbit's own
-process ending never ends it; Orbit only writes the request and reads the step's files on
-the shared home. With `--ignore-cgroups` alone, one allocating process could take down the
+process ending never ends it; Orbit only writes the request and reads the step's files in
+the cache. With `--ignore-cgroups` alone, one allocating process could take down the
 entire Sentry, so the runtime reads the nearest cgroup above the step that has a
 `memory.max`, without joining or modifying it. The batch step holds Podman's pause namespace
 through cleanup. Each job needs private XDG, graph, run and temporary directories so

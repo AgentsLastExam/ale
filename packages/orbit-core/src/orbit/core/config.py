@@ -302,6 +302,8 @@ class SlurmPartition(BaseModel):
     max_gpus: int = Field(default=0, ge=0)
     max_nodes: int = Field(default=1, ge=1)
     """How many of its nodes one allocation, and one Sandbox, may span."""
+    constraint: str | None = Field(default=None, min_length=1)
+    """The node features its jobs ask for (``sbatch --constraint``)."""
 
     # --- validation ---
 
@@ -317,6 +319,17 @@ class SlurmProviderConfig(BaseModel):
 
     partitions: tuple[SlurmPartition, ...] = ()
     """In preference order. One Sandbox fits on up to ``max_nodes`` nodes of one partition."""
+    account: str | None = Field(default=None, min_length=1)
+    """The account jobs are charged to (``sbatch --account``), where the cluster asks for one."""
+    shared_fs_dir: str = Field(default="~/.cache/orbit/slurm", min_length=1)
+    """Orbit's directory on the cluster's shared file system, at the same path on the login
+    node and every compute node: the images prepared for the cluster, each allocation's
+    files, snapshots written out, and the shared directories of Sandboxes of several nodes,
+    so one on a large shared file system rather than a home with a small quota."""
+    node_local_dir: str | None = Field(default=None, min_length=1)
+    """Where on each compute node's own disk an allocation keeps its Podman store, which
+    holds its images and what its Sandboxes write, expanded on the node: by default
+    ``$SLURM_TMPDIR``, else ``/tmp``."""
     walltime_minutes: int = Field(default=180, ge=1)
     """Each allocation's wall time, within its QoS's limit."""
     drain_minutes: int = Field(default=10, ge=1)

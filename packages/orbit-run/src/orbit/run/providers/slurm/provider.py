@@ -202,10 +202,12 @@ def _parse(handle: str) -> tuple[str, str]:
     return name, index
 
 
-def _resolved(image: PreparedTaskImage, user: str | None = None) -> ResolvedImage:
+def _resolved(
+    config: SlurmProviderConfig, image: PreparedTaskImage, user: str | None = None
+) -> ResolvedImage:
     """An image prepared on the cluster, which the cache holds as it was prepared, with the
     framework for ``user`` where one is asked for."""
-    record = images.recorded(image) if image.kind is ImageKind.CONTAINER else None
+    record = images.recorded(config, image) if image.kind is ImageKind.CONTAINER else None
     if record is None:
         raise ProviderCapabilityError(
             f"Slurm's cache holds no image {image.prepared_identity} prepared for the cluster"
@@ -583,7 +585,7 @@ class SlurmProvider(Provider):
             if shutil.which(command) is None:
                 raise ProviderStartError(
                     f"Slurm's {command} is not installed here: Orbit runs on a login node of "
-                    "the cluster, whose home its compute nodes share"
+                    "the cluster, which shares its cache with the compute nodes"
                 )
         for part in dict.fromkeys(partitions):
             await slurm("scontrol", "show", "partition", part.name, "-o")
@@ -607,7 +609,7 @@ class SlurmProvider(Provider):
                 )
             )
             return prepared
-        _resolved(image)
+        _resolved(self.config, image)
         return image
 
     async def prepare_recipe(self, recipe: Recipe) -> tuple[PreparedTaskImage, bool]:
@@ -621,7 +623,7 @@ class SlurmProvider(Provider):
         count = request.resources.nodes
         candidates: tuple[str, ...] = ()
         if request.snapshot is None and request.volumes_from is None:
-            resolved = _resolved(request.prepared_image, request.user)
+            resolved = _resolved(self.config, request.prepared_image, request.user)
             # Room for the separate verifier only where a partition has it: nothing requires
             # it to boot here.
             separate = request.separate_verifier
@@ -669,7 +671,9 @@ class SlurmProvider(Provider):
         else:
             # Written out by an earlier process, whose allocation has ended.
             try:
-                saved = json.loads((cache() / SNAPSHOTS / f"{name}-{index}.json").read_text())
+                saved = json.loads(
+                    (cache(self.config) / SNAPSHOTS / f"{name}-{index}.json").read_text()
+                )
             except FileNotFoundError:
                 raise ProviderCapabilityError(f"Slurm holds no snapshot {handle}") from None
             chain, snapshot = None, None
@@ -688,7 +692,7 @@ class SlurmProvider(Provider):
                 "booted from it spans"
             )
         if viewing:
-            resolved = _resolved(request.prepared_image, request.user)
+            resolved = _resolved(self.config, request.prepared_image, request.user)
         else:
             if prepared != request.prepared_image.prepared_identity:
                 raise ProviderCapabilityError(
@@ -813,7 +817,7 @@ class SlurmProvider(Provider):
             raise ProviderCapabilityError("no configured Slurm partition serves that allocation")
         cpus, memory_mb, gpus, nodes = _capacity(needs, separate)
         each = [seeds[rank] if rank < len(seeds) else seeds[0] for rank in range(nodes)]
-        job = Job(part)
+        job = Job(self.config, part)
         try:
             job.stage(dict(seeds=each, version=gvisor.VERSION, build=gvisor.BUILD_ID, gpus=gpus))
             await job.submit(
@@ -1059,13 +1063,13 @@ class SlurmProvider(Provider):
             reason=snapshot.reason,
             stacks=list(snapshot.stacks),
         )
-        write(cache() / SNAPSHOTS / f"{name}.json", json.dumps(record).encode())
+        write(cache(self.config) / SNAPSHOTS / f"{name}.json", json.dumps(record).encode())
         snapshot.archives = archives
         return archives
 
     async def list_retained(self) -> list[dict[str, object]]:
         records: dict[str, dict[str, object]] = {}
-        for path in sorted((cache() / SNAPSHOTS).glob("*.json")):
+        for path in sorted((cache(self.config) / SNAPSHOTS).glob("*.json")):
             try:
                 saved = json.loads(path.read_text())
                 record = _record(
@@ -1110,7 +1114,7 @@ class SlurmProvider(Provider):
                             "drop", *dropped, nodes=(chain.nodes[rank],), timeout=600
                         )
         stem = f"{name}-{index}"
-        for path in (cache() / SNAPSHOTS).glob(f"{stem}.*"):
+        for path in (cache(self.config) / SNAPSHOTS).glob(f"{stem}.*"):
             path.unlink(missing_ok=True)
         if found is not None:
             await self._close_if_idle(found[0])

@@ -65,7 +65,7 @@ SNAPSHOT_REPOSITORY = "localhost/orbit-snapshot"
 LOADED_REPOSITORY = "localhost/orbit-image"
 #: Below the cache: the images prepared for the cluster, each by its key.
 IMAGES = "images"
-#: Each allocation's Podman store on its node, below ``$SLURM_TMPDIR`` or ``/tmp``.
+#: Each allocation's Podman store on its node, below its configured directory.
 STORE_PREFIX = "orbit-slurm-"
 #: In each store, the ID of the job it belongs to.
 OWNER = "job"
@@ -718,11 +718,11 @@ def load(command: list[str], archive: str, image: str) -> None:
     subprocess.run([*command, "tag", image, f"{LOADED_REPOSITORY}:{image[:12]}"], check=True)
 
 
-def stale_stores(scratch: Path) -> list[Path]:
+def stale_stores(node_local_dir: Path) -> list[Path]:
     """The stores on this node of this account's jobs that have ended: one that Slurm
     killed, at its wall time or by preemption, or whose node went down, cleaned up nothing."""
     stale = []
-    for store in scratch.glob(STORE_PREFIX + "*"):
+    for store in node_local_dir.glob(STORE_PREFIX + "*"):
         job = read(store / OWNER)
         if (
             not job.isdecimal()
@@ -739,12 +739,12 @@ def stale_stores(scratch: Path) -> list[Path]:
     return stale
 
 
-def empty_stores(scratch: Path) -> list[Path]:
+def empty_stores(node_local_dir: Path) -> list[Path]:
     """This account's empty store directories some minutes old on this node: one can come
     back after a node's hold step removed its store, naming no job, while a store in use
     names its job as soon as it is made."""
     found = []
-    for store in scratch.glob(STORE_PREFIX + "*"):
+    for store in node_local_dir.glob(STORE_PREFIX + "*"):
         with contextlib.suppress(OSError):
             made = store.stat()
             if (
@@ -769,28 +769,31 @@ def terminated(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
-def store() -> tuple[str, list[str], Path]:
-    """This job's own Podman store on its node, and the command that uses it; the stores of
-    this account's jobs that ended on the node are removed first."""
-    scratch = Path(os.getenv("SLURM_TMPDIR") or "/tmp")
-    directory = tempfile.mkdtemp(prefix=STORE_PREFIX, dir=scratch)
+def store(spec: dict[str, object]) -> tuple[str, list[str], Path]:
+    """This job's own Podman store on its node, below the directory its configuration names,
+    else ``$SLURM_TMPDIR``, else ``/tmp``, and the command that uses it; the stores of this
+    account's jobs that ended on the node are removed first."""
+    named = os.path.expanduser(os.path.expandvars(str(spec.get("node_local_dir") or "")))
+    node_local_dir = Path(named or os.getenv("SLURM_TMPDIR") or "/tmp")
+    node_local_dir.mkdir(parents=True, exist_ok=True)
+    directory = tempfile.mkdtemp(prefix=STORE_PREFIX, dir=node_local_dir)
     (Path(directory) / OWNER).write_text(os.environ["SLURM_JOB_ID"])
     # Slurm signals the batch step before it kills it, as a job is cancelled or preempted:
     # clean up then too.
     signal.signal(signal.SIGTERM, terminated)
-    return directory, podman(directory), scratch
+    return directory, podman(directory), node_local_dir
 
 
-def hold_namespace(command: list[str], scratch: Path) -> None:
+def hold_namespace(command: list[str], node_local_dir: Path) -> None:
     """Keep the private rootless user namespace alive until the batch step finishes cleanup,
     including when Slurm kills every Sandbox's step, and remove the stale stores."""
     subprocess.run([*command, "unshare", "true"], check=True)
-    for stale in stale_stores(scratch):
+    for stale in stale_stores(node_local_dir):
         subprocess.run(
             [*command, "unshare", "rm", "-rf", "--one-file-system", "--", str(stale)],
             check=False,
         )
-    for empty in empty_stores(scratch):
+    for empty in empty_stores(node_local_dir):
         with contextlib.suppress(OSError):
             empty.rmdir()
 
@@ -810,12 +813,12 @@ def prepare() -> None:
     prepared in ``prepared``, or in ``error`` which step failed and why."""
     recipe = json.loads(Path("recipe.json").read_text())
     framework = recipe["framework"]
-    directory, command, scratch = store()
+    directory, command, node_local_dir = store(recipe)
     archive = Path.cwd().parent / IMAGES / f"{recipe['key']}.tar.gz"
     part = archive.with_name(f"{archive.name}.{os.environ['SLURM_JOB_ID']}.part")
     step = "pull"
     try:
-        hold_namespace(command, scratch)
+        hold_namespace(command, node_local_dir)
         reference = recipe.get("reference")
         if reference:
             subprocess.run(
@@ -902,11 +905,11 @@ def set_up(command: list[str], directory: str, spec: dict[str, object], rank: in
 def supervise() -> None:
     spec = json.loads(Path("allocation.json").read_text())
     nodes = job_nodes()
-    directory, command, scratch = store()
+    directory, command, node_local_dir = store(spec)
     steps: dict[str, subprocess.Popen[bytes]] = {}
     holders: subprocess.Popen[bytes] | None = None
     try:
-        hold_namespace(command, scratch)
+        hold_namespace(command, node_local_dir)
         if len(nodes) > 1:
             # Every other node's store, held by a step there for as long as this one runs,
             # which loads its seed as this node loads its own.
@@ -976,9 +979,9 @@ def hold() -> None:
     """Hold a node's store for as long as the allocation runs, other than the first's, which
     the batch step holds."""
     spec = json.loads(Path("allocation.json").read_text())
-    directory, command, scratch = store()
+    directory, command, node_local_dir = store(spec)
     try:
-        hold_namespace(command, scratch)
+        hold_namespace(command, node_local_dir)
         set_up(command, directory, spec, job_nodes().index(this_node()))
         # Written on other machines: the directory is listed first (see appeared). The job's
         # stop is there from the start, empty until the Host stops it.

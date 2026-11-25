@@ -24,7 +24,7 @@ from orbit.run.oci import Reference, api, qualified
 from orbit.run.providers import ProviderRegistry
 from orbit.run.providers.docker import gvisor
 from orbit.run.providers.slurm import images, worker
-from orbit.run.providers.slurm.job import CACHE, Job, JobReady
+from orbit.run.providers.slurm.job import Job, JobReady
 from orbit.run.providers.slurm.job import seconds as job_seconds
 from orbit.run.providers.slurm.provider import (
     JOB_OVERHEAD_MB,
@@ -38,6 +38,9 @@ from orbit.run.providers.slurm.provider import (
     _volume_specs,
     step_memory_mb,
 )
+
+#: Orbit's directory on the cluster by default, below the home.
+CACHE = ".cache/orbit/slurm"
 
 
 def provider(max_nodes=1):
@@ -197,7 +200,7 @@ def running_jobs(monkeypatch):
 
 
 def chain(cpus=4, memory_mb=8192, gpus=2, nodes=1):
-    job = Job(provider(max_nodes=nodes).config.partitions[1])
+    job = Job(provider(max_nodes=nodes).config, provider(max_nodes=nodes).config.partitions[1])
     names = tuple(f"n{rank}" for rank in range(nodes))
     return _Chain(
         job=job,
@@ -286,7 +289,7 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
     monkeypatch.setattr(slurm, "_allocate", allocate)
     monkeypatch.setattr(slurm, "_load", load)
     # Both images were prepared for the cluster.
-    monkeypatch.setattr(images, "recorded", lambda image: {"user": "user"})
+    monkeypatch.setattr(images, "recorded", lambda config, image: {"user": "user"})
     image = PreparedTaskImage(
         kind=ImageKind.CONTAINER,
         source="external-ref",
@@ -389,7 +392,7 @@ async def test_a_reference_pinned_by_digest_needs_no_registry():
 async def test_an_image_is_prepared_on_the_cluster_once_per_key(tmp_path, monkeypatch):
     """The cache keeps what a preparation job saved; one whose archive is gone is prepared
     again."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     prepared = []
 
     async def run_job(config, recipe):
@@ -404,11 +407,13 @@ async def test_an_image_is_prepared_on_the_cluster_once_per_key(tmp_path, monkey
     )
     first, reused = await images.prepare(config, recipe)
     assert not reused and first.prepared_identity == OTHER
-    assert first.runtime_ref == images.archive(PREPARED) and images.recorded(first)
+    assert first.runtime_ref == images.archive(PREPARED) and images.recorded(
+        provider().config, first
+    )
     again, reused = await images.prepare(config, recipe)
     assert reused and again == first and prepared == [PREPARED]
     (tmp_path / CACHE / first.runtime_ref).unlink()
-    assert not images.recorded(first)
+    assert not images.recorded(provider().config, first)
     _, reused = await images.prepare(config, recipe)
     assert not reused and prepared == [PREPARED, PREPARED]
     # Images are prepared where no GPU is held.
@@ -604,7 +609,7 @@ async def test_an_allocation_whose_deadline_came_ends_though_a_verifier_was_to_b
 async def test_a_snapshot_of_an_allocation_slurm_ended_is_destroyed_with_its_files(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     slurm = provider()
     held = chain()
     snapshot = _saved(held)
@@ -758,7 +763,7 @@ async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
     and then; any other gives up at it."""
     from orbit.run.providers.slurm import job as job_module
 
-    monkeypatch.setattr(job_module, "cache", lambda: tmp_path)
+    monkeypatch.setattr(job_module, "cache", lambda config: tmp_path)
     monkeypatch.setattr(job_module, "QUEUE_NOTICE_SEC", 0)
     clock = [0.0]
     states = ["PENDING"] * 5 + ["RUNNING"]
@@ -783,7 +788,7 @@ async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
     )
     monkeypatch.setattr(Job, "state", state)
     monkeypatch.setattr(Job, "pending_reason", reason)
-    job = Job(provider().config.partitions[0])
+    job = Job(provider().config, provider().config.partitions[0])
     job.directory.mkdir()
     with caplog.at_level("INFO", logger="orbit.execution"):
         ready = await job.ready(None)
@@ -793,14 +798,14 @@ async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
     )
     states[:] = ["PENDING"] * 5
     with pytest.raises(ProviderStartError, match="during queueing"):
-        await Job(provider().config.partitions[0]).ready(900)
+        await Job(provider().config, provider().config.partitions[0]).ready(900)
 
 
 @pytest.mark.asyncio
 async def test_a_written_out_snapshot_of_an_allocation_slurm_ended_boots_from_its_archive(
     monkeypatch,
 ):
-    """Its store went with the allocation, but the archive on the shared home did not."""
+    """Its store went with the allocation, but the archive in the cache did not."""
     slurm = provider()
     held = chain(cpus=2, memory_mb=step_memory_mb(4096), gpus=1)
     snapshot = _saved(held)
@@ -878,7 +883,7 @@ async def test_each_node_of_a_sandbox_boots_from_the_same_node_of_its_snapshot(m
     snapshot = _group_snapshot(held)
     handle = _handle(held.job, "1")
     slurm.snapshots[handle] = (held, snapshot)
-    monkeypatch.setattr(images, "recorded", lambda image: {"user": "user"})
+    monkeypatch.setattr(images, "recorded", lambda config, image: {"user": "user"})
 
     async def load(chain, image):
         return image.prepared_identity
@@ -912,7 +917,7 @@ async def test_each_node_of_a_sandbox_boots_from_the_same_node_of_its_snapshot(m
 
 @pytest.mark.asyncio
 async def test_each_node_writes_its_own_part_of_a_snapshot_out(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / CACHE / "snapshots").mkdir(parents=True)
     slurm = provider(max_nodes=2)
     held = chain(nodes=2)
@@ -1083,7 +1088,7 @@ def test_a_job_sweeps_only_empty_store_directories_some_minutes_old(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_snapshot_record_of_another_form_is_left_out_of_the_listing(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     files = tmp_path / CACHE / "snapshots"
     files.mkdir(parents=True)
     (files / "orbit-old-1.json").write_text(
@@ -1092,3 +1097,49 @@ async def test_a_snapshot_record_of_another_form_is_left_out_of_the_listing(tmp_
     assert await provider().list_retained() == []
     with pytest.raises(ProviderCapabilityError, match="records snapshots otherwise"):
         await provider()._boot(_snapshot_request("slurm:orbit-old/1"), ())
+
+
+@pytest.mark.asyncio
+async def test_a_job_goes_to_the_account_and_the_partitions_constraint(monkeypatch, tmp_path):
+    from orbit.core.config import SlurmPartition, SlurmProviderConfig
+    from orbit.run.providers.slurm import job as job_module
+
+    submitted = []
+
+    async def slurm(*argv, **_):
+        submitted.append(argv)
+        return "4242;cluster"
+
+    monkeypatch.setattr(job_module, "slurm", slurm)
+    part = SlurmPartition(name="gpu", qos="short", max_cpus=8, max_memory_mb=8192, constraint="ib")
+    config = SlurmProviderConfig(
+        partitions=(part,), account="project-a", shared_fs_dir=str(tmp_path), node_local_dir="/l/$U"
+    )
+    job = Job(config, part)
+    job.stage({"seeds": []})
+    assert json.loads((job.directory / "allocation.json").read_text())["node_local_dir"] == "/l/$U"
+    await job.submit(cpus=2, memory_mb=1024, gpus=0, minutes=10)
+    command = submitted[0][-1]
+    assert "--account=project-a" in command and "--constraint=ib" in command
+    assert "--qos=short" in command and job.id == "4242"
+    bare = part.model_copy(update={"constraint": None})
+    plain = Job(SlurmProviderConfig(partitions=(bare,), shared_fs_dir=str(tmp_path)), bare)
+    plain.stage({"seeds": []})
+    submitted.clear()
+    await plain.submit(cpus=2, memory_mb=1024, gpus=0, minutes=10)
+    assert "--account" not in submitted[0][-1] and "--constraint" not in submitted[0][-1]
+
+
+def test_a_node_keeps_its_stores_where_the_configuration_names_expanded_there(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SLURM_JOB_ID", "7")
+    monkeypatch.setenv("PLACE", str(tmp_path / "local"))
+    monkeypatch.setattr(worker.signal, "signal", lambda *_: None)
+    directory, _, scratch = worker.store({"node_local_dir": "$PLACE/stores"})
+    assert scratch == tmp_path / "local/stores" and Path(directory).parent == scratch
+    assert (Path(directory) / worker.OWNER).read_text() == "7"
+    monkeypatch.setenv("SLURM_TMPDIR", str(tmp_path / "slurm"))
+    (tmp_path / "slurm").mkdir()
+    _, _, default = worker.store({"node_local_dir": None})
+    assert default == tmp_path / "slurm"

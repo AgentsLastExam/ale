@@ -1,5 +1,5 @@
-"""Slurm episodes, run on a login node of an explicitly configured cluster, whose home its
-compute nodes share; no Docker is needed there."""
+"""Slurm episodes, run on a login node of an explicitly configured cluster, which shares
+Orbit's cache with its compute nodes; no Docker is needed there."""
 
 from __future__ import annotations
 

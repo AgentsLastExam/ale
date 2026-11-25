@@ -144,7 +144,7 @@ async def test_an_episode_longer_than_its_allocation_completes_across_allocation
         ["squeue", "-h", "--me", "-o", "%j"], capture_output=True, text=True, check=True
     ).stdout.split()
     assert not {job.name for job in jobs} & set(listed)
-    assert not [job for job in jobs if (cache() / job.name).exists()]
+    assert not [job for job in jobs if (cache(provider.config) / job.name).exists()]
     summary = {
         "segments": [
             {

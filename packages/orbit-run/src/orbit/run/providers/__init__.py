@@ -517,20 +517,20 @@ async def _watching(provider: Provider, needs: SandboxNeeds) -> list[str]:
     )
 
 
-def provider_named(name: str) -> Provider:
+def provider_named(name: str, slurm: SlurmProviderConfig | None = None) -> Provider:
     """A default-configured Provider, for work on sandboxes it retained earlier.
 
     Retained handles name the Provider that made a sandbox; that name, not the current run
     configuration, decides who can list or destroy it. The Fleet is the one whose control
-    plane ``$ORBIT_FLEET_URL`` names.
+    plane ``$ORBIT_FLEET_URL`` names; Slurm's, the cache ``slurm`` names.
     """
     if name == "docker":
         return leaf("docker:runc")
     if name in {"firecracker", "qemu", "orchard"}:
         return leaf(name)
     if name == "slurm":
-        # Its snapshots are listed from the cache below the home, whatever the partitions.
-        return leaf("slurm")
+        # Its snapshots are listed from its cache, whatever the partitions.
+        return leaf("slurm", slurm=slurm)
     if name == "daytona":
         from orbit.run.providers.daytona import DaytonaProvider
 

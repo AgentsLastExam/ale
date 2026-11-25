@@ -1,5 +1,5 @@
-"""Slurm conformance, run on a login node of an explicitly configured cluster, whose home
-its compute nodes share."""
+"""Slurm conformance, run on a login node of an explicitly configured cluster, which shares
+Orbit's cache with its compute nodes."""
 
 from __future__ import annotations
 

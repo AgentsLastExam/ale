@@ -1,5 +1,5 @@
 """Submit and drive one batch job, and the Sandboxes in it, from the machine Orbit runs on: a
-login node of the cluster, whose home every compute node shares."""
+login node of the cluster, which shares Orbit's cache with every compute node."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from orbit.core.config import SlurmPartition
+from orbit.core.config import SlurmPartition, SlurmProviderConfig
 from orbit.core.errors import (
     AllocationEndedError,
     GuestUnreachableError,
@@ -28,12 +28,10 @@ from orbit.run.process import run
 from orbit.run.providers.memory import GuestEvents
 from orbit.run.transport import StdioTransport
 
-#: Below the account's home, which the login node and every compute node share.
-CACHE = ".cache/orbit/slurm"
 #: How Slurm records a job it ended itself: at its wall time, for a job of higher
 #: priority, or as its node failed.
 ENDED = {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "DEADLINE"}
-#: Below :data:`CACHE`: snapshots another allocation boots from, and the images prepared for
+#: Below :func:`cache`: snapshots another allocation boots from, and the images prepared for
 #: the cluster, each by its key.
 SNAPSHOTS = "snapshots"
 IMAGES = "images"
@@ -41,8 +39,9 @@ IMAGES = "images"
 QUEUE_NOTICE_SEC = 600
 
 
-def cache() -> Path:
-    return Path.home() / CACHE
+def cache(config: SlurmProviderConfig) -> Path:
+    """Orbit's directory on the cluster's shared file system."""
+    return Path(config.shared_fs_dir).expanduser()
 
 
 async def slurm(*argv: str, timeout: float = 60) -> str:
@@ -127,10 +126,11 @@ class Job:
     """One batch job of one or more alike nodes, whose batch step runs each Sandbox started
     in it as a step of its own over the first nodes it spans."""
 
-    def __init__(self, partition: SlurmPartition) -> None:
+    def __init__(self, config: SlurmProviderConfig, partition: SlurmPartition) -> None:
+        self.config = config
         self.partition = partition
         self.name = "orbit-" + uuid.uuid4().hex
-        self.directory = cache() / self.name
+        self.directory = cache(config) / self.name
         self.id = ""
 
     @property
@@ -138,11 +138,13 @@ class Job:
         return self.id or self.name
 
     def stage(self, spec: dict[str, object], *, name: str = "allocation.json") -> None:
-        """Give the job its directory, the worker and the worker's input, as ``name``."""
-        cache().mkdir(mode=0o700, parents=True, exist_ok=True)
+        """Give the job its directory, the worker and the worker's input, as ``name``, with
+        where its nodes keep their stores."""
+        cache(self.config).mkdir(mode=0o700, parents=True, exist_ok=True)
         self.directory.mkdir(mode=0o700)
         (self.directory / "stop").touch()
         shutil.copyfile(Path(__file__).with_name("worker.py"), self.directory / "worker.py")
+        spec = {**spec, "node_local_dir": self.config.node_local_dir}
         write(self.directory / name, json.dumps(spec).encode())
 
     async def submit(
@@ -173,6 +175,10 @@ class Job:
         ]
         if self.partition.qos:
             args.append("--qos=" + self.partition.qos)
+        if self.config.account:
+            args.append("--account=" + self.config.account)
+        if self.partition.constraint:
+            args.append("--constraint=" + self.partition.constraint)
         if gpus:
             args.append(f"--gres=gpu:{gpus}")
         args.append(f"--wrap=exec python3 -I worker.py {command}")
