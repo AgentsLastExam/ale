@@ -31,10 +31,11 @@ from orbit.run.transport import StdioTransport
 #: How Slurm records a job it ended itself: at its wall time, for a job of higher
 #: priority, or as its node failed.
 ENDED = {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "DEADLINE"}
-#: Below :func:`cache`: snapshots another allocation boots from, and the images prepared for
-#: the cluster, each by its key.
+#: Below :func:`cache`: snapshots another allocation boots from, the images prepared for
+#: the cluster, each by its key, and Sandboxes' shared directories.
 SNAPSHOTS = "snapshots"
 IMAGES = "images"
+SHARED = "shared"
 #: How often a job still waiting in the queue says so, with Slurm's reason.
 QUEUE_NOTICE_SEC = 600
 

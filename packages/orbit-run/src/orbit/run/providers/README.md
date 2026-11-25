@@ -237,16 +237,38 @@ none of an Ethernet one, nor `rdma_cm`, `umad` or `issm`; where it has any, it r
 traffic passes no network filter of the nodes' machines; its boundary is the fabric's
 partition, which the site sets and Orbit does not.
 
-Every command on a node, node 0's through guestd and any through `orbit-exec`, gets
-`ORBIT_NODES`, `ORBIT_NODE_RANK`, `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` naming
-`peers` and, where every node has InfiniBand, `NCCL_NET=IB`, so NCCL's fallback to sockets
-is an error rather than a slow job. A command's own variables override them. `orbit-exec`
-is a shell client of a root daemon on each node ([`guestd/peers.py`](../guestd/peers.py)),
-which takes a request through a spool directory, runs it on the named node as the account
-that asked, over the nodes' network with a secret the daemons share, and gives it the
-variables the caller exported, except those that describe a node, such as
-`ORBIT_NODE_RANK`, `HOME` and the proxy's, which the running node's daemon supplies: its
-node's group variables and, while the Sandbox is sealed, its relay's proxy variables.
+Every command on a node, node 0's through guestd and every ssh session, gets `ORBIT_NODES`,
+`ORBIT_NODE_RANK`, `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` naming `peers` and, where
+every node has InfiniBand, `NCCL_NET=IB`, so NCCL's fallback to sockets is an error rather
+than a slow job. A command's own variables override them.
+
+The nodes reach one another with ssh, as nodes of a cluster do. The framework layer of a
+Task one of whose Sandboxes spans several nodes adds Orbit's static OpenSSH, from
+[`orbit-multinode-ssh`](../../../../../../images/framework/multinode-ssh/Dockerfile), at
+`/opt/orbit-ssh`, and every node runs it; a node whose image lacks it fails as it starts,
+naming the cause. As the Sandbox starts, its node 0 makes new ed25519 keys, and guestd runs
+[`guestd/nodes.py`](../guestd/nodes.py) as root on every node, the keys by its environment:
+it starts sshd on the node's address on `peers`, gives root and the agent account a key at
+`~/.ssh/id_ed25519`, which only the account's own public key matches on every node, puts the
+nodes' host key in `/etc/ssh/ssh_known_hosts`, where any OpenSSH client looks, and links
+`ssh`, `scp` and `sftp` into `/usr/local/bin` where the image has none. A session gets,
+above what sshd sets for the account, the variables of the container's first process, the
+image's and the Task's, then its node's group variables and, while the Sandbox is sealed,
+its relay's proxy variables: sshd takes them in one `SetEnv`, which `nodes.py` writes again,
+and sshd rereads, as the Sandbox is sealed or opened. A Sandbox of one node booted from a
+snapshot of several has no `node1`, and no sshd runs there.
+
+`/shared` is a directory of the Sandbox below the cache, on the cluster's shared file
+system, which every node mounts there. The job's account owns every file in it on the host,
+as an NFS server lets it own files for itself alone, and gVisor's `--shared-mount` ([patch
+0013](../../../../../../images/runtimes/gvisor/README.md)) shows each as the agent account's
+in the Sandbox, and shows what another node added at once. A Sandbox of several nodes gets
+one of its own, and its snapshot keeps it as it is: a verifier booted from the snapshot, or
+a separate one viewing its volumes, mounts it read-only on every node, and any other Sandbox
+booted from the snapshot, the next turn's solver, a moved one or a fork, a copy of its own,
+which node 0 makes with 32 files at once, preserving modes, times, links and hard links. A
+directory goes once no running Sandbox and no snapshot, this process's or one written out,
+names it.
 
 A snapshot commits every node to its own store. Node `k` of a Sandbox booted from it starts
 from node `k`'s commit, and node `k` of a separate verifier views node `k`'s volumes, one
@@ -267,10 +289,20 @@ against the same steps on the bare nodes:
 | NCCL all-reduce, 2 × 8 H100, 64 MiB | 213.9 GB/s | 260.3 GB/s |
 | DDP, 134M parameters, 2 × 8 H100 | 26.42 steps/s | 26.65 steps/s |
 
-In a Sandbox of two nodes that Orbit started with runsc 0.1.5, the episode of
+In a Sandbox of two nodes that Orbit started, the episode of
 [`test_slurm_nodes.py`](../../../../../../tests/integration/test_slurm_nodes.py) all-reduced
-1 GiB across its 16 H100s at 412 GB/s, node 1's ranks started from node 0 through
-`orbit-exec`.
+1 GiB across 16 H100s at 412 GB/s, and, its node 1's ranks started from node 0 over ssh,
+across 2 × 2 H100s at 129 GB/s.
+
+A container that Docker, nested in a Sandbox of several nodes, starts reaches the node's
+GPUs and InfiniBand as the Sandbox does when it is given their devices (`--device
+/dev/nvidia<k>`, `/dev/nvidiactl`, `/dev/nvidia-uvm` and `/dev/infiniband/uverbs<k>`), the
+driver's libraries (`libcuda.so.*` and `libnvidia-*.so.*` from `/usr/lib/x86_64-linux-gnu`),
+the host network and the Sandbox's own `/sys` (`-v /sys:/sys:ro`): the `/sys` Docker mounts
+lists no InfiniBand device and no PCI bus, and NCCL, finding no place for the HCA, fails
+(`Could not find NET with id 0`). Measured once, two such containers on two nodes of two
+H100s each trained with DDP over InfiniBand with GPUDirect RDMA and all-reduced 1 GiB at
+130.8 GB/s, against 131.2 GB/s from the Sandboxes themselves.
 
 ### Slurm volumes
 
@@ -922,12 +954,14 @@ with Podman, whose Buildah 1.33 refuses what only BuildKit reads, such as a here
 `RUN`. A private registry's credentials are those `~/.docker/config.json` saves, which both
 the pin and Podman read, so for one the compute nodes share the account's home. The job adds
 the framework layer for the account the Task's image declares, or `user` for an image a
-caller names by reference alone, as the conformance suite does, and saves the result,
-compressed, to `images` in the cache, from which each allocation loads it into its own
-Podman store on its node; only the Task's own build failing there is the Task's error.
-Compute nodes need what [Compute nodes](#slurm-compute-nodes) lists. The first allocation of
-an engine pulls the gVisor build `docker:gvisor` runs, with its OpenSSH, from GHCR into the
-cache, once for all nodes, as `runtime-<version>.<build>`, and refuses another build of the
+caller names by reference alone, as the conformance suite does. The layer of a Task one of
+whose Sandboxes spans several nodes copies the nodes' OpenSSH from its GHCR image, and so
+does that of an image named alone, as no Task says how many nodes it spans. The job saves
+the result, compressed, to `images` in the cache, from which each allocation loads it into
+its own Podman store on its node; only the Task's own build failing there is the Task's
+error. Compute nodes need what [Compute nodes](#slurm-compute-nodes) lists. The first
+allocation of an engine pulls the gVisor build `docker:gvisor` runs from GHCR into the
+cache, once for all nodes, as `gvisor-<version>.<build>`, and refuses another build of the
 version. Tasks run without the login home, agent socket or Slurm credentials.
 
 ```toml

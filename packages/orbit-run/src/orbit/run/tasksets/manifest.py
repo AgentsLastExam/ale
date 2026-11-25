@@ -534,6 +534,7 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
             kind=ImageKind.CONTAINER,
             user=user,
             keep_alive=config.harbor,
+            multinode=_multinode(config),
             build_timeout_sec=timeout,
         )
     if folder.build_script(operating_system) is not None:
@@ -551,8 +552,19 @@ def _solver_image(config: TaskConfig, folder: TaskFolder) -> ImageSpec:
         ref=image,
         user=user,
         keep_alive=config.harbor and kind is not ImageKind.VM,
+        multinode=_multinode(config) and kind is not ImageKind.VM,
         build_timeout_sec=timeout,
     )
+
+
+def _multinode(config: TaskConfig) -> bool:
+    """Whether one of the Task's Sandboxes spans several nodes, so that its container images
+    carry the nodes' OpenSSH."""
+    verifier = config.verifier
+    tables = [config.environment, verifier.environment]
+    if verifier.validation is not None:
+        tables.append(verifier.validation.environment)
+    return any(table is not None and table.nodes > 1 for table in tables)
 
 
 def _named_kind(image: str, operating_system: OperatingSystem) -> ImageKind | None:
@@ -609,6 +621,7 @@ def _verification(
             kind=ImageKind.CONTAINER,
             user=user,
             keep_alive=config.harbor,
+            multinode=_multinode(config),
             build_timeout_sec=sized.build_timeout_sec,
         )
     elif named is not None:
@@ -618,6 +631,7 @@ def _verification(
             ref=named,
             user=user,
             keep_alive=config.harbor and kind is not ImageKind.VM,
+            multinode=_multinode(config) and kind is not ImageKind.VM,
         )
 
     resources = VerifierResources(

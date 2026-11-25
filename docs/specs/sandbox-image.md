@@ -34,6 +34,9 @@ of the Task's own build or the image it names (the framework layer):
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
   Windows that also starts Cua Driver in the agent's session; a macOS VM has none, since
   the Orchard Provider starts guestd through Orchard's exec for each connection;
+- for a container image of a Task one of whose Sandboxes spans several nodes, a static
+  OpenSSH at `/opt/orbit-ssh`, which every node's sshd and the agent's `ssh` between the
+  nodes run, so that no image needs one of its own;
 - a check that the agent account exists, failing preparation if it does not;
 - sudo, installed with the image's package manager when the image lacks it, so that any
   sandbox can be granted elevation; the grant itself is never part of the image
@@ -138,7 +141,9 @@ Repository sources are separated by responsibility:
   its root filesystem once per version, so initramfs, boot and partition assembly are never
   a Task's code; it also installs the framework into Linux and Windows disks and discards a
   VM build's free space;
-- `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM.
+- `images/runtimes/qemu-runner/` hosts prepared qcow2 disks under QEMU/KVM;
+- `images/framework/` holds what the framework layer copies from an image of its own, such
+  as the nodes' OpenSSH.
 
 ## Versions
 
@@ -149,8 +154,9 @@ The gVisor runtime is the one exception while Orbit is in development: it stays 
 version, a build id tells its builds apart, and each engine names the build it runs and
 refuses another, so a republished build changes nothing behind an engine's back.
 
-The VM builder and the QEMU runner run the engine's own logic, so they are published under
-the engine's version, such as `0.2.0`; an engine runs exactly those of its own version, and
+The VM builder and the QEMU runner run the engine's own logic, and the framework's own
+images are part of the framework layer, so they are published under the engine's version,
+such as `0.2.0`; an engine runs exactly those of its own version, and
 a changed one ships with the next engine version. A base carries no part of the framework,
 so nothing in it depends on the engine: each base has its own version, raised when the base
 itself changes, and any engine runs any version of it. A container runtime that Orbit builds
@@ -643,7 +649,7 @@ Task content (the engine).
 | A Provider that can names each Sandbox by a `handle`, by which another process on the same machine drives it again (`reattach`) or destroys it (`discard`) after the creating process is gone, whatever its retention ([which Providers do, and how](../../packages/orbit-run/src/orbit/run/providers/README.md#reattaching-by-handle)) | Provider | `test_a_sandbox_is_driven_again_by_its_handle` |
 | A snapshot holds the disk, any number of Sandboxes boot from it, each with its own request's role and resources, its `storage_mb` counting what the snapshot holds, and it is listed and destroyed through its Provider, never under a Sandbox booted from it; a Provider without snapshots refuses them before provisioning | Provider | `test_a_snapshot_boots_new_sandboxes_with_its_files` |
 | A Provider that holds a Sandbox only until a set time declares the longest it holds one (`max_duration_sec`), gives each the latest time to begin saving it (`deadline`), starts one whose request names a `duration_sec` only where it lasts that long, and explains a Sandbox its scheduler ended with `AllocationEndedError` ([Moves](episode-protocol.md#moves)) | Provider in `create`; the Run's selection | Slurm's unit tests and `tests/integration/test_slurm_segments.py` |
-| A Sandbox that spans several nodes is one Sandbox: its commands and files are node 0's, every node gets its image, account, resources and network policy, and the nodes reach one another, and nothing else, on a network of their own, sealed or not, a fabric they share reaching no further than [Security](security.md#1-a-sandbox-has-only-declared-ways-out) says; a snapshot keeps every node's disk: node `k` of a Sandbox booted from it starts from its node `k`, and node `k` of one viewing its volumes views its node `k`'s | Provider, outside the agent's reach | `tests/integration/test_slurm_nodes.py` |
+| A Sandbox that spans several nodes is one Sandbox: its commands and files are node 0's, every node gets its image, account, resources and network policy, and the nodes reach one another, and nothing else, on a network of their own, sealed or not, a fabric they share reaching no further than [Security](security.md#1-a-sandbox-has-only-declared-ways-out) says; `ssh` reaches every node from every node, for root and the agent alone, and `/shared` is one directory every node sees; a snapshot keeps every node's disk and `/shared`, which a verifier booted from it or viewing its volumes sees read-only and any other Sandbox booted from it copies: node `k` of a Sandbox booted from it starts from its node `k`, and node `k` of one viewing its volumes views its node `k`'s | Provider, outside the agent's reach | `tests/integration/test_slurm_nodes.py` |
 | A declared desktop can be captured and driven | Provider and image | `test_a_declared_desktop_can_actually_be_used`, `test_a_declared_desktop_accepts_input` |
 | A desktop has the Run's resolution, whatever the image would use, and the RunLock records it | Provider in `create`: set at every start, then checked | `test_a_declared_desktop_can_actually_be_used`, `test_a_desktop_takes_the_runs_resolution` |
 | No platform service inside the sandbox gives the agent more than its account | Provider check in `create` | `test_the_agent_cannot_reach_the_platform_daemon` |

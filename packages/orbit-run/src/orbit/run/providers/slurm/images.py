@@ -56,6 +56,7 @@ class Recipe:
     source_identity: str | None = None
     user: str = "user"
     keep_alive: bool = False
+    multinode: bool = False
     timeout_sec: float = 3600.0
 
 
@@ -71,7 +72,13 @@ async def pin(reference: str) -> str:
 
 
 def key(
-    source: str, *, reference: str | None, context: str | None, user: str, keep_alive: bool
+    source: str,
+    *,
+    reference: str | None,
+    context: str | None,
+    user: str,
+    keep_alive: bool,
+    multinode: bool,
 ) -> str:
     """The key of an image prepared from a pinned ``reference``, or a build context whose
     identity is ``context``, with the framework for ``user``: everything that goes into it."""
@@ -80,7 +87,7 @@ def key(
             "source": source,
             "reference": reference,
             "context": context,
-            "framework": framework_identity(user=user, vm=False),
+            "framework": framework_identity(user=user, vm=False, multinode=multinode),
             # Only when set, so every other image keeps its key.
             **({"command": KEEP_ALIVE} if keep_alive else {}),
         }
@@ -147,7 +154,9 @@ async def prepare(config: SlurmProviderConfig, recipe: Recipe) -> tuple[Prepared
 async def _prepare(config: SlurmProviderConfig, recipe: Recipe) -> dict[str, object]:
     """Run the job that prepares ``recipe``; what it prepared."""
     part = build_partition(config)
-    body, tail_lines = container_framework(user=recipe.user, keep_alive=recipe.keep_alive)
+    body, tail_lines = container_framework(
+        user=recipe.user, keep_alive=recipe.keep_alive, multinode=recipe.multinode
+    )
     context, python = await asyncio.to_thread(_framework, config, recipe.user)
     job = Job(config, part)
     try:

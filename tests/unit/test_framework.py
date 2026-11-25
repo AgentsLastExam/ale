@@ -14,13 +14,15 @@ from tests.support import FakeQemuImg, write_qcow2
 from orbit.core.errors import ProviderStartError, TaskDefinitionError
 from orbit.core.sandbox import PreparedTaskImage
 from orbit.core.taskspec import OperatingSystem
-from orbit.run import framework, guestd
+from orbit.run import __version__, framework, guestd
 from orbit.run.framework import (
     KEEP_ALIVE,
     LABEL,
     MARKER,
     MATERIALIZER_IMAGE,
+    MULTINODE_SSH_IMAGE,
     WINDOWS_MARKER,
+    container_framework,
     frame_disk,
     framed_disk,
     framework_identity,
@@ -61,6 +63,21 @@ def test_the_layer_identity_follows_everything_it_is_built_from(
     assert framework_identity(user="user", vm=True) != base
     monkeypatch.setattr(framework, "_SETUP", "true\n")
     assert framework_identity(user="user", vm=False) != base
+
+
+def test_only_a_multinode_task_s_layer_adds_the_nodes_openssh() -> None:
+    plain = framework_identity(user="user", vm=False)
+    assert framework_identity(user="user", vm=False, multinode=False) == plain
+    multinode = framework_identity(user="user", vm=False, multinode=True)
+    assert multinode != plain
+    assert f"ghcr.io/agentslastexam/orbit-multinode-ssh:{__version__}" == MULTINODE_SSH_IMAGE
+    body, tail = container_framework(user="user", keep_alive=False, multinode=True)
+    # Where the agent's ssh runs too, not root's /opt/orbit.
+    assert f"COPY --from={MULTINODE_SSH_IMAGE} /openssh/ /opt/orbit-ssh/" in body
+    assert tail[-1] == f"LABEL {LABEL}={json.dumps(multinode)}"
+    body, tail = container_framework(user="user", keep_alive=False)
+    assert not any("multinode" in line for line in body)
+    assert tail[-1] == f"LABEL {LABEL}={json.dumps(plain)}"
 
 
 @pytest.mark.asyncio

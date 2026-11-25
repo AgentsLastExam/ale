@@ -1,6 +1,8 @@
 """Slurm selection must find one feasible allocation of alike compute nodes."""
 
 import json
+import os
+import stat
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1033,29 +1035,41 @@ async def test_a_command_gets_the_nodes_variables_below_the_proxys_and_its_own()
 
 
 @pytest.mark.asyncio
-async def test_each_nodes_daemon_gets_its_variables_and_its_relays_while_sealed():
+async def test_each_nodes_sshd_gets_its_variables_and_its_relays_while_sealed():
+    from orbit.run.guestd import nodes
     from orbit.run.providers.slurm.provider import SlurmSandbox
 
-    written = {}
+    joined = {}
 
     class Client:
         def __init__(self, name):
             self.name = name
 
-        async def write_file(self, path, data):
-            written[(self.name, path)] = json.loads(data)
+        async def exec(self, argv, env):
+            assert argv[-1] == "join"
+            joined[self.name] = json.loads(env[nodes.VARIABLE])
+            return 0, "", "", False
 
     fake = SimpleNamespace(
         nodes=("n0", "n1"),
         _clients=(Client("n0"), Client("n1")),
         _node_variables=({"ORBIT_NODE_RANK": "0"}, {"ORBIT_NODE_RANK": "1"}),
         _peers=("node0", "node1"),
+        request=SimpleNamespace(user="agent"),
+        keys={"host": ["private", "ssh-ed25519 AAAA orbit-host"]},
     )
-    await SlurmSandbox._peer_variables(fake, ["127.0.0.1:1", "127.0.0.1:2"])
-    sealed = written[("n1", worker.PEERS_ENV)]
-    assert sealed["ORBIT_NODE_RANK"] == "1" and sealed["HTTP_PROXY"] == "http://127.0.0.1:2"
-    await SlurmSandbox._peer_variables(fake, [None, None])
-    assert written[("n1", worker.PEERS_ENV)] == {"ORBIT_NODE_RANK": "1"}
+    await SlurmSandbox.join(fake, ["127.0.0.1:1", "127.0.0.1:2"])
+    sealed = joined["n1"]
+    assert (sealed["rank"], sealed["names"], sealed["addresses"]) == (
+        1,
+        ["node0", "node1"],
+        ["10.214.0.1", "10.214.0.2"],
+    )
+    assert sealed["account"] == "agent" and sealed["keys"] == fake.keys
+    assert sealed["variables"]["ORBIT_NODE_RANK"] == "1"
+    assert sealed["variables"]["HTTP_PROXY"] == "http://127.0.0.1:2"
+    await SlurmSandbox.join(fake, [None, None])
+    assert joined["n1"]["variables"] == {"ORBIT_NODE_RANK": "1"}
 
 
 def test_a_node_gives_only_its_hcas_whose_infiniband_port_is_active(tmp_path):
@@ -1097,6 +1111,56 @@ async def test_a_snapshot_record_of_another_form_is_left_out_of_the_listing(tmp_
     assert await provider().list_retained() == []
     with pytest.raises(ProviderCapabilityError, match="records snapshots otherwise"):
         await provider()._boot(_snapshot_request("slurm:orbit-old/1"), ())
+
+
+#: Root reads and changes every mode, which these show the account's copy and removal handle.
+_AS_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the modes these check")
+
+
+@_AS_ROOT
+def test_a_shared_directory_is_copied_whole_its_links_modes_and_times_too(tmp_path):
+    source = tmp_path / "source"
+    (source / "pkg/sub").mkdir(parents=True)
+    (source / "pkg/m.py").write_text("x = 1\n")
+    (source / "pkg/m.py").chmod(0o640)
+    os.utime(source / "pkg/m.py", ns=(1_000_000_000, 2_000_000_000))
+    (source / "run.sh").write_text("#!/bin/sh\n")
+    (source / "run.sh").chmod(0o755)
+    (source / "pkg/link").symlink_to("m.py")
+    os.link(source / "pkg/m.py", source / "pkg/sub/hard.py")
+    os.mkfifo(source / "pipe", 0o600)
+    (source / "secret").write_text("kept")
+    (source / "secret").chmod(0)
+    (source / "pkg/sub").chmod(0o500)
+    destination = tmp_path / "copy"
+    worker.copy_tree(str(source), str(destination))
+    assert (destination / "pkg/m.py").read_text() == "x = 1\n"
+    assert stat.S_IMODE((destination / "pkg/m.py").stat().st_mode) == 0o640
+    assert (destination / "pkg/m.py").stat().st_mtime_ns == 2_000_000_000
+    assert stat.S_IMODE((destination / "run.sh").stat().st_mode) == 0o755
+    assert os.readlink(destination / "pkg/link") == "m.py"
+    assert (destination / "pkg/m.py").stat().st_ino == (
+        destination / "pkg/sub/hard.py"
+    ).stat().st_ino
+    assert stat.S_ISFIFO((destination / "pipe").lstat().st_mode)
+    assert stat.S_IMODE((destination / "secret").stat().st_mode) == 0
+    assert stat.S_IMODE((source / "secret").stat().st_mode) == 0
+    assert stat.S_IMODE((destination / "pkg/sub").stat().st_mode) == 0o500
+    worker.remove_tree(str(destination))
+    worker.remove_tree(str(source))
+    assert not destination.exists() and not source.exists()
+    worker.remove_tree(str(source))  # nothing left to remove
+
+
+@_AS_ROOT
+def test_a_shared_directory_its_owner_may_not_list_is_removed_too(tmp_path):
+    root = tmp_path / "shared"
+    (root / "locked/inner").mkdir(parents=True)
+    (root / "locked/inner/f").write_text("x")
+    (root / "locked/inner").chmod(0)
+    (root / "locked").chmod(0)
+    worker.remove_tree(str(root))
+    assert not root.exists()
 
 
 @pytest.mark.asyncio

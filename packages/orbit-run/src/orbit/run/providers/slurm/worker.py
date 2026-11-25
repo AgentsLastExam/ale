@@ -12,7 +12,8 @@ The nodes of a Sandbox that spans several share a network of their own: on each 
 router namespace, which only this worker enters, holds a WireGuard device to the other
 nodes' routers and forwards between it and the Sandbox's own namespace only the group's
 traffic, so nothing the Sandbox does to its own network reaches anything else. Each node
-gets the node's InfiniBand HCAs, which gVisor's RDMA proxy drives.
+gets the node's InfiniBand HCAs, which gVisor's RDMA proxy drives, and the Sandbox's shared
+directory, a directory of the shared file system at ``/shared``.
 
 A preparation job pulls a Task's image, or builds it from its context, adds the framework
 layer and saves the result to the shared cache, from which every allocation loads it.
@@ -31,6 +32,7 @@ import csv
 import fcntl
 import json
 import os
+import shutil
 import signal
 import socket
 import stat
@@ -39,6 +41,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SANDBOXES = Path("sandboxes")
@@ -53,12 +57,11 @@ GROUP, GROUP_INTERFACE, ROUTER_INTERFACE, TUNNEL = "10.214.0.", "peers", "peers-
 #: The nodes' network's MTU: with WireGuard's 80 bytes, a jumbo frame of 9000, well within
 #: pasta's 65520; measured through pasta, 0.28 GB/s against 0.12 at the default 1420.
 GROUP_MTU = 8920
-#: Where each node's exec daemon listens on the nodes' network, and the root-only file of
-#: the variables it adds to what it runs: the node's group variables and, while the
-#: Sandbox is sealed, its egress proxy's.
-PEERS_PORT, PEERS_ENV = 7413, "/opt/orbit/peers-env.json"
-#: The client the daemon writes, which the agent runs.
-PEERS_CLIENT = "/usr/local/bin/orbit-exec"
+#: Where every node of a Sandbox that spans several mounts its shared directory.
+SHARED = "/shared"
+#: How many files of the shared file system a copy, a removal or a measurement handles at
+#: once: each waits for the server.
+FILES_AT_ONCE = 32
 #: How long a node waits for the others: their routers' keys, or their stores.
 GROUP_TIMEOUT_SEC = 600
 SNAPSHOT_REPOSITORY = "localhost/orbit-snapshot"
@@ -264,6 +267,162 @@ def directories_in(root: str, paths: list[str]) -> list[str]:
         else:
             found.append(path)
     return found
+
+
+def account(directory: str, image: str, user: str) -> str:
+    """In Podman's namespace: ``user``'s uid and gid in ``image``, read from its own
+    ``/etc/passwd``."""
+    command = podman(directory)
+    root = output(*command, "image", "mount", image)
+    try:
+        passwd = Path(root, "etc", "passwd")
+        if not directories_in(root, ["/etc"]) or passwd.is_symlink():
+            raise RuntimeError("the image's /etc/passwd is no file of its own")
+        for line in passwd.read_text().splitlines():
+            fields = line.split(":")
+            if len(fields) > 3 and fields[0] == user:
+                return f"{fields[2]}:{fields[3]}"
+    finally:
+        subprocess.run(
+            [*command, "image", "unmount", image], check=False, stdout=subprocess.DEVNULL
+        )
+    raise RuntimeError(f"the image has no account {user}")
+
+
+def listing(
+    root: Path, pool: ThreadPoolExecutor, *, restore: bool = True
+) -> list[tuple[Path, os.stat_result]]:
+    """Every entry below ``root`` and its own status, breadth-first, many directories listed
+    at once, on ``root``'s file system alone: no link is followed, and an entry that goes
+    meanwhile is left out. A directory its owner may not list or search is opened for the
+    walk and, with ``restore``, given its mode back after it."""
+    device = os.lstat(root).st_dev
+    opened: list[tuple[Path, int]] = []
+
+    def entries(directory: Path) -> list[tuple[Path, os.stat_result]]:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            found = []
+            for entry in os.scandir(descriptor):
+                with contextlib.suppress(FileNotFoundError):
+                    found.append((directory / entry.name, entry.stat(follow_symlinks=False)))
+            return found
+        finally:
+            os.close(descriptor)
+
+    def scan(directory: Path) -> list[tuple[Path, os.stat_result]]:
+        try:
+            return entries(directory)
+        except PermissionError:
+            # A directory, as no link opens without O_NOFOLLOW failing otherwise.
+            mode = os.lstat(directory).st_mode
+            os.chmod(directory, mode | stat.S_IRWXU)
+            opened.append((directory, stat.S_IMODE(mode)))
+            return entries(directory)
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+
+    found: list[tuple[Path, os.stat_result]] = []
+    pending = [pool.submit(scan, root)]
+    try:
+        while pending:
+            level, pending = pending, []
+            for future in level:
+                for path, status in future.result():
+                    found.append((path, status))
+                    if stat.S_ISDIR(status.st_mode) and status.st_dev == device:
+                        pending.append(pool.submit(scan, path))
+    finally:
+        for directory, mode in reversed(opened) if restore else ():
+            with contextlib.suppress(FileNotFoundError):
+                os.chmod(directory, mode)
+    return found
+
+
+def copy_tree(source: str, destination: str) -> None:
+    """Copy a Sandbox's shared directory, on the shared file system, whole: modes, times,
+    links and hard links, as the account that owns every file there. On a network file
+    system each file waits for the server, so many go at once."""
+    src, dst = Path(source), Path(destination)
+    with ThreadPoolExecutor(FILES_AT_ONCE) as pool:
+        entries = listing(src, pool)
+        dst.mkdir(mode=0o700)
+        directories = [(path, status) for path, status in entries if stat.S_ISDIR(status.st_mode)]
+        depth = {path: len(path.relative_to(src).parts) for path, _ in directories}
+        for level in sorted(set(depth.values())):
+            list(pool.map(lambda path: (dst / path.relative_to(src)).mkdir(),
+                          [path for path in depth if depth[path] == level]))  # fmt: skip
+        first: dict[tuple[int, int], Path] = {}
+        linked: list[tuple[Path, Path]] = []
+        placed: list[tuple[Path, os.stat_result]] = []
+        for path, status in entries:
+            if stat.S_ISREG(status.st_mode) and status.st_nlink > 1:
+                key = (status.st_dev, status.st_ino)
+                if key in first:
+                    linked.append((first[key], path))
+                    continue
+                first[key] = path
+            if not stat.S_ISDIR(status.st_mode):
+                placed.append((path, status))
+
+        def place(item: tuple[Path, os.stat_result]) -> None:
+            path, status = item
+            target = dst / path.relative_to(src)
+            if stat.S_ISREG(status.st_mode):
+                try:
+                    shutil.copyfile(path, target)
+                except PermissionError:
+                    os.chmod(path, status.st_mode | stat.S_IRUSR)
+                    shutil.copyfile(path, target)
+                    os.chmod(path, status.st_mode)
+                os.chmod(target, stat.S_IMODE(status.st_mode))
+            elif stat.S_ISLNK(status.st_mode):
+                os.symlink(os.readlink(path), target)
+            elif stat.S_ISFIFO(status.st_mode):
+                os.mkfifo(target, stat.S_IMODE(status.st_mode))
+            else:
+                return  # A socket or device, which only lives with its process or node.
+            os.utime(target, ns=(status.st_atime_ns, status.st_mtime_ns), follow_symlinks=False)
+
+        list(pool.map(place, placed))
+        for existing, path in linked:
+            os.link(dst / existing.relative_to(src), dst / path.relative_to(src))
+        for path, status in sorted(directories, key=lambda item: -depth[item[0]]):
+            target = dst / path.relative_to(src)
+            os.chmod(target, stat.S_IMODE(status.st_mode))
+            os.utime(target, ns=(status.st_atime_ns, status.st_mtime_ns))
+        root = os.stat(src)
+        os.chmod(dst, stat.S_IMODE(root.st_mode))
+
+
+def remove_tree(path: str) -> None:
+    """Remove a directory of the shared file system whole, many files at once."""
+    root = Path(path)
+    if not root.exists():
+        return
+
+    def gone(remove: Callable[[Path], object], each: Path) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            remove(each)
+
+    with ThreadPoolExecutor(FILES_AT_ONCE) as pool:
+        entries = listing(root, pool, restore=False)
+        # Each directory's entries go only where its owner may change it.
+        locked = [
+            (path, status.st_mode)
+            for path, status in [(root, root.stat()), *entries]
+            if stat.S_ISDIR(status.st_mode) and status.st_mode & stat.S_IRWXU != stat.S_IRWXU
+        ]
+        list(pool.map(lambda item: os.chmod(item[0], item[1] | stat.S_IRWXU), locked))
+        files = [path for path, status in entries if not stat.S_ISDIR(status.st_mode)]
+        list(pool.map(lambda each: gone(Path.unlink, each), files))
+        depth: dict[int, list[Path]] = {}
+        for each, status in entries:
+            if stat.S_ISDIR(status.st_mode):
+                depth.setdefault(len(each.relative_to(root).parts), []).append(each)
+        for level in sorted(depth, reverse=True):
+            list(pool.map(lambda each: gone(os.rmdir, each), depth[level]))
+    gone(os.rmdir, root)
 
 
 def volumes(directory: str, operations: list[list[object]]) -> None:
@@ -992,9 +1151,9 @@ def hold() -> None:
 
 
 def start(index: str) -> None:
-    """Run node ``SLURM_PROCID`` of the Sandbox ``index``: its share of the group's network
-    where it spans several nodes, its volumes, its container and, there, the daemon its
-    peers' ``orbit-exec`` reaches; then hold it until it is saved or destroyed."""
+    """Run node ``SLURM_PROCID`` of the Sandbox ``index``: its share of the group's network,
+    OpenSSH and the shared directory where it has several nodes or that directory, its
+    volumes and its container; then hold it until it is saved or destroyed."""
     box = SANDBOXES / index
     rank = int(os.environ["SLURM_PROCID"])
     own = box / NODES / str(rank)
@@ -1064,6 +1223,19 @@ def start(index: str) -> None:
                 flags.append("--runtime-flag=rdmaproxy")
         for key, value in env.items():
             flags.extend(["--env", f"{key}={value}"])
+        shared: list[str] = []
+        if spec.get("shared"):
+            # Every file there is the Sandbox's account's, whoever made it; on the host, the
+            # job's account owns them all, as the shared file system lets it.
+            given = dict(spec["shared"])  # type: ignore[call-overload]
+            shared = [str(Path.cwd().parent / str(given["path"]))]
+            owner = in_namespace(
+                command, "account", stored["directory"], node["image"], str(given["account"])
+            )
+            flags += [
+                f"--volume={shared[0]}:{SHARED}" + (":ro" if given["readonly"] else ""),
+                f"--runtime-flag=shared-mount={SHARED}={owner}",
+            ]
         # A candidate is a volume only where the image has a directory.
         candidates = spec.get("candidates") or []
         found = (
@@ -1091,13 +1263,11 @@ def start(index: str) -> None:
         if spec["sealed"]:
             network(command, sealing, sealed=True)
         runtime_flags = [
-            flag for flag in spec["runtime_args"] if flag.startswith("--runtime-flag=")
+            flag
+            for flag in (*spec["runtime_args"], *flags)  # type: ignore[misc]
+            if str(flag).startswith("--runtime-flag=")
         ]
         conmon = int(output(*command, "inspect", "--format", "{{.State.ConmonPid}}", name))
-        if count > 1:
-            if not alive(conmon):
-                raise RuntimeError(f"the sandbox image command exited on {this_node()}")
-            serve(command, runtime_flags, name, spec["group"], rank, count)
         write(
             own / "ready",
             dict(
@@ -1147,46 +1317,6 @@ def start(index: str) -> None:
                     + [["remove", m["layer"]] for m in mounts if m["layer"] not in kept]
                 ),
             )
-
-
-def serve(
-    command: list[str],
-    runtime_flags: list[str],
-    name: str,
-    group: dict[str, str],
-    rank: int,
-    count: int,
-) -> None:
-    """Start, as root in node ``rank``'s container, the daemon that runs what the Sandbox's
-    ``orbit-exec`` asks of a node, there or from another node, as the asking account, and
-    wait until it serves: it writes the client once it listens, so a client a snapshot kept
-    goes first. Its secret, which every node's daemon shares, goes by the environment, not a
-    command line."""
-    run = [*command, *runtime_flags, "exec"]
-    removed = subprocess.run(
-        [*run, "--user", "0", name, "rm", "-f", PEERS_CLIENT], capture_output=True, text=True
-    )
-    if removed.returncode:
-        raise RuntimeError(
-            f"could not prepare the exec daemon on {this_node()}: {removed.stderr.strip()}"
-        )
-    subprocess.run(
-        [*run, "-d", "--user", "0", "--env", "ORBIT_PEERS_SECRET", name,
-         group["python"], "-I", "/opt/orbit/guestd/peers.py", "serve",
-         "--spool", "/run/orbit-exec", "--client", PEERS_CLIENT, "--env-file", PEERS_ENV,
-         "--listen", f"{GROUP}{rank + 1}:{PEERS_PORT}",
-         "--peers", ",".join(f"node{k}={GROUP}{k + 1}:{PEERS_PORT}" for k in range(count))],
-        env={**os.environ, "ORBIT_PEERS_SECRET": group["secret"]},
-        check=True,
-        stdout=subprocess.DEVNULL,
-    )  # fmt: skip
-    deadline = time.monotonic() + 60
-    while subprocess.run(
-        [*run, "--user", "0", name, "test", "-e", PEERS_CLIENT], check=False
-    ).returncode:
-        if time.monotonic() > deadline:
-            raise RuntimeError(f"the exec daemon of {this_node()} did not start")
-        time.sleep(0.5)
 
 
 def save(
@@ -1289,6 +1419,14 @@ def main() -> None:
         return
     if mode == "directories":
         print(json.dumps(directories(args[0], args[1], json.loads(args[2]))))
+        return
+    if mode == "account":
+        print(account(args[0], args[1], args[2]))
+        return
+        return
+    if mode == "copy":
+        # A Sandbox's shared directory, below the cache, from a snapshot's.
+        copy_tree(str(Path.cwd().parent / args[0]), str(Path.cwd().parent / args[1]))
         return
     if mode == "release":
         directory = Path(args[0]).resolve()

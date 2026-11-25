@@ -217,6 +217,30 @@ def test_nodes_are_each_sandboxs_own_and_a_snapshot_verifier_spans_no_more(
         load_tasks(task)
 
 
+def test_a_task_one_of_whose_sandboxes_spans_several_nodes_carries_their_openssh(
+    tmp_path: Path,
+) -> None:
+    task = scaffold_task(tmp_path / "demo")
+    spec = load_tasks(task)[0].spec
+    # Written only when set, so a Task of one node keeps its identity.
+    assert not spec.image.multinode and "multinode" not in spec.image.model_dump()
+    edit(task, {"environment": {"nodes": 2}})
+    assert load_tasks(task)[0].spec.image.multinode
+    # A separate verifier of its own image that spans several: both of the Task's images.
+    edit(
+        task,
+        {
+            "environment": {"nodes": 1},
+            "verifier": {
+                "environment_mode": "separate",
+                "environment": {"image": "python:3.12", "nodes": 2},
+            },
+        },
+    )
+    spec = load_tasks(task)[0].spec
+    assert spec.image.multinode and spec.verify.image is not None and spec.verify.image.multinode
+
+
 def test_container_features_are_named_from_a_closed_set_each_once(tmp_path: Path) -> None:
     task = scaffold_task(tmp_path / "demo")
     assert load_tasks(task)[0].spec.resources.container_features == ()

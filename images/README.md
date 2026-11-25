@@ -13,6 +13,8 @@ runtimes/
 ├── qemu-runner/         container that runs a prepared qcow2 with QEMU/KVM
 ├── firecracker-runner/  container that runs a container Task as a Firecracker microVM
 └── gvisor/              Orbit's patched gVisor runsc, a container runtime for Docker
+framework/
+└── multinode-ssh/       static OpenSSH for the nodes of a Sandbox of several
 ```
 
 Task repositories extend or reference only entries under `base/`. The VM bases are disks:
@@ -32,8 +34,8 @@ The image contract and identity rules are defined in
 
 Every image but the gVisor runtime, which
 [its README](runtimes/gvisor/README.md#the-image) covers, is published once per version
-and never overwritten. The builder and runner
-run the engine's own logic, so they share the engine's version
+and never overwritten. The builder and runners run the engine's own logic, and
+`framework/` holds pieces of the framework layer, so they share the engine's version
 (`packages/orbit-run/pyproject.toml`) and a changed one ships with the next engine version.
 A base carries no part of the framework and has its own version: the Linux bases' are in
 `BASES` in `packages/orbit-run/src/orbit/run/__init__.py`, the Windows base's in its README.
