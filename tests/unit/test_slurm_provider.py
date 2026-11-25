@@ -15,6 +15,7 @@ from orbit.core.config import RunConfig
 from orbit.core.errors import AllocationEndedError, ProviderCapabilityError, ProviderStartError
 from orbit.core.sandbox import (
     ImageKind,
+    ImageRef,
     PreparedTaskImage,
     SandboxRequest,
     SandboxRole,
@@ -31,6 +32,7 @@ from orbit.run.providers.slurm.job import seconds as job_seconds
 from orbit.run.providers.slurm.provider import (
     JOB_OVERHEAD_MB,
     MAX_SAVES,
+    SlurmProvider,
     _capacity,
     _Chain,
     _handle,
@@ -80,7 +82,7 @@ def provider(max_nodes=1):
         (Resources(gpus=2, gpu_memory_mb=100000), False),
         (Resources(cpus=8, gpus=1, gpu_types=("H100",)), False),
         (Resources(gpus=3), False),
-        (Resources(storage_mb=1000), False),
+        (Resources(storage_mb=1000), True),
         (Resources(container_features=("nested_containers", "raw_sockets")), False),
         (Resources(container_features=("nested_containers", "mount", "fuse")), True),
         (Resources(nodes=2), False),
@@ -1163,6 +1165,32 @@ def test_a_shared_directory_its_owner_may_not_list_is_removed_too(tmp_path):
     assert not root.exists()
 
 
+def test_what_a_node_wrote_counts_each_files_blocks_once(tmp_path):
+    with open(tmp_path / "a", "wb") as file:
+        file.write(os.urandom(1 << 20))
+        os.fsync(file.fileno())  # so that a file system that allocates lazily has its blocks
+    os.link(tmp_path / "a", tmp_path / "b")
+    with open(tmp_path / "sparse", "wb") as file:
+        file.truncate(1 << 30)
+    counted = worker.usage([str(tmp_path), str(tmp_path / "missing")])
+    assert (1 << 20) <= counted < (1 << 20) + (64 << 10)
+
+
+def test_a_sandbox_far_below_its_storage_is_measured_rarely_and_near_it_often():
+    from orbit.run.providers import storage
+
+    assert storage.interval(0) == storage.interval(-5) == storage.MIN_SEC
+    assert storage.interval(10 << 30) == storage.MIN_SEC
+    assert storage.interval(100 << 30) == 50.0
+    assert storage.interval(10 << 40) == storage.MAX_SEC
+    schedule = storage.measure_schedule(4096)
+    assert schedule["storage_mb"] == 4096
+    for headroom in (0, 100 << 30, 10 << 40):
+        assert worker.interval(schedule, headroom) == storage.interval(headroom)
+    # Two nodes write what node 0 counts: twice as soon.
+    assert worker.interval(storage.measure_schedule(4096, writers=2), 100 << 30) == 25.0
+
+
 @pytest.mark.asyncio
 async def test_a_job_goes_to_the_account_and_the_partitions_constraint(monkeypatch, tmp_path):
     from orbit.core.config import SlurmPartition, SlurmProviderConfig
@@ -1207,3 +1235,93 @@ def test_a_node_keeps_its_stores_where_the_configuration_names_expanded_there(
     (tmp_path / "slurm").mkdir()
     _, _, default = worker.store({"node_local_dir": None})
     assert default == tmp_path / "slurm"
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_a_node_stopped_past_its_storage_says_so(tmp_path):
+    from orbit.core.errors import GuestUnreachableError, StorageExhaustedError
+    from orbit.run.providers.slurm.job import JobTransport
+
+    box = tmp_path / "sandboxes" / "3" / "nodes" / "1"
+    box.mkdir(parents=True)
+    (box / "storage").write_text(json.dumps(dict(written_mb=4102, storage_mb=4096)))
+
+    async def ended():
+        return ""
+
+    async def settled(seconds):
+        return None
+
+    job = SimpleNamespace(id="9", directory=tmp_path, ended=ended)
+    watcher = SimpleNamespace(settled=settled, oom_killed=lambda: "")
+    transport = JobTransport(["true"], SimpleNamespace(job=job, index="3"), None, [watcher] * 2)
+    explained = await transport.explain(GuestUnreachableError("lost"))
+    assert isinstance(explained, StorageExhaustedError)
+    assert str(explained) == (
+        "Orbit's storage watch stopped the Sandbox: node 1 wrote 4102 MiB over its image, past "
+        "the 4096 MiB its Task declares"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_shared_directory_stays_while_a_snapshot_written_out_names_it(tmp_path):
+    from orbit.core.config import SlurmProviderConfig
+    from orbit.run.providers.slurm import SlurmProvider
+
+    slurm = SlurmProvider(SlurmProviderConfig(shared_fs_dir=str(tmp_path)))
+    (tmp_path / "shared" / "orbit-a-1").mkdir(parents=True)
+    (tmp_path / "shared" / "orbit-a-1" / "f").write_text("kept")
+    (tmp_path / "snapshots").mkdir()
+    record = tmp_path / "snapshots" / "orbit-a-1.json"
+    record.write_text(json.dumps(dict(shared="shared/orbit-a-1", written=[5, 7])))
+    assert slurm._snapshot_state("slurm:orbit-a/1") == ("shared/orbit-a-1", (5, 7))
+    slurm.shared_users["shared/orbit-a-1"] = 1
+    record.unlink()
+    await slurm.release_shared("shared/orbit-a-1")
+    assert (tmp_path / "shared" / "orbit-a-1" / "f").exists()  # a Sandbox still uses it
+    slurm.shared_users["shared/orbit-a-1"] = 0
+    record.write_text(json.dumps(dict(shared="shared/orbit-a-1")))
+    await slurm.release_shared("shared/orbit-a-1")
+    assert (tmp_path / "shared" / "orbit-a-1").exists()  # the written-out snapshot keeps it
+    record.unlink()
+    await slurm.release_shared("shared/orbit-a-1")
+    assert not (tmp_path / "shared" / "orbit-a-1").exists()
+    assert slurm._snapshot_state("slurm:orbit-a/1") == (None, ())
+
+
+@_AS_ROOT
+def test_a_walk_follows_no_link_and_gives_an_unsearchable_directory_its_mode_back(tmp_path):
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "big").write_bytes(b"x" * (1 << 20))
+    root = tmp_path / "shared"
+    (root / "hidden").mkdir(parents=True)
+    (root / "hidden" / "f").write_bytes(b"y" * 8192)
+    (root / "hidden").chmod(0o644)  # listable, not searchable
+    (root / "away").symlink_to(tmp_path / "outside")
+    counted = worker.usage([str(root)])
+    assert 8192 <= counted < (1 << 20)
+    assert stat.S_IMODE((root / "hidden").stat().st_mode) == 0o644
+    worker.remove_tree(str(root))
+    assert not root.exists() and (tmp_path / "outside" / "big").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_image_named_without_a_task_carries_the_nodes_openssh(monkeypatch):
+    """No Task says whether a Sandbox of a bare reference spans several nodes."""
+    asked = []
+
+    async def pin(reference):
+        return reference + "@sha256:" + "a" * 64
+
+    async def prepare_recipe(self, recipe):
+        asked.append(recipe)
+        return "prepared", False
+
+    monkeypatch.setattr(images, "pin", pin)
+    monkeypatch.setattr(SlurmProvider, "prepare_recipe", prepare_recipe)
+    await provider().prepare_image(ImageRef(kind=ImageKind.CONTAINER, reference="base:1"))
+    (recipe,) = asked
+    assert recipe.multinode
+    shape = dict(reference=recipe.reference, context=None, user=recipe.user, keep_alive=False)
+    assert recipe.key == images.key("external-ref", **shape, multinode=True)
+    assert recipe.key != images.key("external-ref", **shape, multinode=False)

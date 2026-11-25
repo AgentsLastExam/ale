@@ -425,6 +425,41 @@ def remove_tree(path: str) -> None:
     gone(os.rmdir, root)
 
 
+def usage(paths: list[str]) -> int:
+    """The disk the files below ``paths`` take, in bytes, each file once: its blocks, as
+    ``du`` counts them."""
+    seen: set[tuple[int, int]] = set()
+    total = 0
+    with ThreadPoolExecutor(FILES_AT_ONCE) as pool:
+        for path in paths:
+            # Orbit's own path, which may name a Podman volume through a link of the store.
+            real = Path(os.path.realpath(path))
+            try:
+                top = os.lstat(real)
+            except FileNotFoundError:
+                continue
+            entries = [(real, top), *(listing(real, pool) if stat.S_ISDIR(top.st_mode) else [])]
+            for _, status in entries:
+                key = (status.st_dev, status.st_ino)
+                if key not in seen:
+                    seen.add(key)
+                    total += status.st_blocks * 512
+    return total
+
+
+def measure(command: list[str], paths: list[str]) -> int:
+    """What the files below ``paths`` take, read in Podman's namespace, where every owner's
+    files are readable."""
+    return int(in_namespace(command, "measure", json.dumps(paths))) if paths else 0
+
+
+def interval(schedule: dict[str, float], headroom: int) -> float:
+    """How long until the next measurement of a Sandbox with ``headroom`` bytes left below
+    its limit: as long as it takes to write them at the fastest rate a disk takes, within
+    bounds, so that one far below its limit is rarely measured (``providers/storage.py``)."""
+    return min(max(headroom / schedule["rate"], schedule["min_sec"]), schedule["max_sec"])
+
+
 def volumes(directory: str, operations: list[list[object]]) -> None:
     """In Podman's namespace: copy a layer, mount a view whose root gets its stack's owner
     and mode, unmount one, or remove a layer."""
@@ -1151,9 +1186,10 @@ def hold() -> None:
 
 
 def start(index: str) -> None:
-    """Run node ``SLURM_PROCID`` of the Sandbox ``index``: its share of the group's network,
-    OpenSSH and the shared directory where it has several nodes or that directory, its
-    volumes and its container; then hold it until it is saved or destroyed."""
+    """Run node ``SLURM_PROCID`` of the Sandbox ``index``: its share of the group's network
+    and the shared directory where it has several nodes or that directory, its volumes and
+    its container; then hold it until it is saved or destroyed, measuring what
+    it writes where it is held to ``storage_mb``."""
     box = SANDBOXES / index
     rank = int(os.environ["SLURM_PROCID"])
     own = box / NODES / str(rank)
@@ -1236,6 +1272,8 @@ def start(index: str) -> None:
                 f"--volume={shared[0]}:{SHARED}" + (":ro" if given["readonly"] else ""),
                 f"--runtime-flag=shared-mount={SHARED}={owner}",
             ]
+        # What node 0 counts of it, for each node.
+        counted = shared if rank == 0 and (spec.get("shared") or {}).get("counted") else []
         # A candidate is a volume only where the image has a directory.
         candidates = spec.get("candidates") or []
         found = (
@@ -1268,6 +1306,21 @@ def start(index: str) -> None:
             if str(flag).startswith("--runtime-flag=")
         ]
         conmon = int(output(*command, "inspect", "--format", "{{.State.ConmonPid}}", name))
+        upper = output(*command, "inspect", "--format", "{{.GraphDriver.Data.UpperDir}}", name)
+        if spec.get("storage") and not os.path.isdir(upper):
+            raise RuntimeError(
+                f"Podman's store on {this_node()} keeps no layer to measure: {upper}"
+            )
+        layers = [f"{stored['directory']}/{LINKS}/{m['layer']}" for m in mounts]
+        # What it has written: what the snapshot it booted from holds, its writable layer and
+        # what its volumes gained, Podman's filled from the image and copies as it started.
+        carried_bytes = int(node.get("written") or 0) - measure(command, layers)
+
+        def written() -> int:
+            return carried_bytes + measure(command, [upper, *layers])
+
+        schedule = spec.get("storage")
+        due = time.monotonic()
         write(
             own / "ready",
             dict(
@@ -1286,12 +1339,22 @@ def start(index: str) -> None:
             # The Host writes it on another machine: the directory is listed first.
             order = read(box / "stop") if appeared(box / "stop") else ""
             if order == "save":
-                kept = save(command, stored["directory"], name, own, mounts)
+                kept = save(command, stored["directory"], name, own, mounts, written)
                 return
             if order:
                 return
             if not alive(conmon):
                 raise RuntimeError(f"the sandbox image command exited on {this_node()}")
+            if schedule and time.monotonic() >= due:
+                total = written() + measure(command, counted)
+                limit_bytes = int(schedule["storage_mb"]) << 20  # type: ignore[index]
+                if total > limit_bytes:
+                    exceeded = dict(written_mb=total >> 20, storage_mb=limit_bytes >> 20)
+                    write(own / "storage", exceeded)
+                    subprocess.run([*command, "kill", name], check=False, capture_output=True)
+                    # A step that fails ends on every node.
+                    raise SystemExit(f"node {rank} wrote {total >> 20} MiB, past storage_mb")
+                due = time.monotonic() + interval(schedule, limit_bytes - total)  # type: ignore[arg-type]
             time.sleep(1)
     finally:
         (own / "memory").write_text((limit / "memory.events").read_text())
@@ -1325,10 +1388,11 @@ def save(
     name: str,
     own: Path,
     mounts: list[dict[str, object]],
+    written: Callable[[], int],
 ) -> set[str]:
     """Stop a node of the Sandbox and commit its disk to the node's store, and record each
-    volume's stack: the layer that holds its writes on what it viewed. Return the layers the
-    snapshot keeps."""
+    volume's stack, the layer that holds its writes on what it viewed, and what the node
+    has written. Return the layers the snapshot keeps."""
     subprocess.run([*command, "stop", "-t", "30", name], check=True, stdout=subprocess.DEVNULL)
     # By the Sandbox's index alone, which its handle names on every node.
     tag = f"{SNAPSHOT_REPOSITORY}:{own.parent.parent.name}"
@@ -1350,7 +1414,9 @@ def save(
             directory,
             json.dumps([["unmount", m["layer"]] for m in mounts if m["lowers"]]),
         )
-    write(own / "saved", dict(image=image.removeprefix("sha256:"), stacks=stacks))
+    write(
+        own / "saved", dict(image=image.removeprefix("sha256:"), stacks=stacks, written=written())
+    )
     return {str(m["layer"]) for m in mounts}
 
 
@@ -1423,6 +1489,8 @@ def main() -> None:
     if mode == "account":
         print(account(args[0], args[1], args[2]))
         return
+    if mode == "measure":
+        print(usage(json.loads(args[0])))
         return
     if mode == "copy":
         # A Sandbox's shared directory, below the cache, from a snapshot's.

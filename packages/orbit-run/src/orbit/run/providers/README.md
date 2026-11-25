@@ -59,26 +59,26 @@ leaves its profiles name:
 | `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models and memory nvidia-smi reports, shared by `gpu_memory_mb` and watched ([GPU memory](#gpu-memory)); none without a working nvidia-smi | yes | `raw_sockets` | — |
 | `docker:kata` | Linux containers, on the machine's architecture | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes | `user_namespaces`, `fuse` and `mount`, with `raw_sockets` in one profile and `nested_containers` in another | — |
-| `slurm` | Linux x86-64 containers on configured partitions, a Sandbox on up to a partition's `max_nodes` nodes ([Slurm nodes](#slurm-nodes)) | whole GPUs of the configured partition model, on each node | 200 in a row | as the two gVisor profiles above | a solver that, with the verifier booted from its snapshot, needs more than a partition supplies; explicit writable storage limits |
+| `slurm` | Linux x86-64 containers on configured partitions, a Sandbox on up to a partition's `max_nodes` nodes ([Slurm nodes](#slurm-nodes)) | whole GPUs of the configured partition model, on each node | 200 in a row | as the two gVisor profiles above | a solver that, with the verifier booted from its snapshot, needs more than a partition supplies |
 | `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
 | `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
 | `daytona` (scheduler) | Linux containers on x86-64 | Daytona's, whole | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
 | `fleet` (scheduler) | what the leaves lent by its registered Nodes that run this engine's framework start, online or not, read once per Run | as those leaves | as those leaves | as those leaves | as those leaves |
 
-Only `slurm` joins nodes into one Sandbox; every other leaf's profiles span one node.
-Every profile applies `open`, `block`, `allowlist` and `blocklist`, apart from Orchard's,
-which applies the last three only where setup's Softnet is the worker's; a macOS Sandbox refused
+Only `slurm` joins nodes into one Sandbox; every other leaf's profiles span one node. Every
+profile applies `open`, `block`, `allowlist` and `blocklist`, apart from Orchard's, which
+applies the last three only where setup's Softnet is the worker's; a macOS Sandbox refused
 for that names the setup that installs it. A Linux Task's container is x86-64, so a Docker
 leaf on an arm64 machine serves none. A Docker leaf reads its GPUs' models and memory once,
 from nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose GPUs it does
 not accept or have the memory it needs on each. A Sandbox that names `storage_mb` goes only
 to a leaf that holds it to that: under QEMU, Firecracker, Orchard and Daytona by a disk of
-its own, at least that size, as each one's section says, and under Docker by measuring what
-it writes and ending it past the limit, but in `docker:gvisor`'s profile for
-`nested_containers` ([Docker writable storage](#docker-writable-storage)). A Node's profiles
-are its leaves', each limited to the CPUs and memory the Node lends in all. A Node lends
-Docker under any of its runtimes, QEMU and Orchard, but not Firecracker.
+its own, at least that size, as each one's section says, and under Docker and Slurm by
+measuring what it writes and ending it past the limit ([Docker writable
+storage](#docker-writable-storage), [Slurm](#slurm)). A Node's profiles are its leaves',
+each limited to the CPUs and memory the Node lends in all. A Node lends Docker under any of
+its runtimes, QEMU and Orchard, but not Firecracker.
 
 `docker:runc` shares the Host's kernel with its Sandboxes, so a kernel exploit in one
 reaches the Host. `docker:kata` and `firecracker` give each Sandbox a VM's kernel and attach
@@ -166,6 +166,7 @@ How each counts what a snapshot holds against the `storage_mb` of a Sandbox boot
 | QEMU | The overlay is the larger of the snapshot's virtual size and `storage_mb` plus its overhead, and the guest's root filesystem already holds what the solver wrote |
 | Firecracker | `snapshot.json` records `written_mb`, the writable disk's use as the guest's `df /` showed it before shutdown plus what the snapshot it booted from held; a microVM booted from it gets a writable disk of `storage_mb` less that, plus the overhead, and one whose `storage_mb` that already fills is refused before it boots, as the Task's error. Each save stacks one more layer, of eight at most, so the profile saves eight in a row (`max_saves`), and a Sandbox whose snapshot's layers and [planned saves](../../../../../../docs/specs/sandbox-image.md#provider-selection) together would exceed eight is refused before it boots |
 | Orchard | The clone is the snapshot's disk, at least `storage_mb`, with the solver's files on it |
+| Slurm | Each node's step measures, once the container has stopped, what the node holds over the image, its writable layer and its volumes' layers, plus what the snapshot it booted from held there, and the snapshot records it, written out too; a Sandbox booted from it counts that on each node, and on node 0 its `/shared` copy whole, a verifier booted from it the snapshot's own `/shared` |
 
 ## Volumes
 
@@ -178,7 +179,7 @@ of every artifact, as of any other.
 | Provider | A volume | What a snapshot keeps of it | A separate verifier's view | `storage_mb` |
 |---|---|---|---|---|
 | Docker | a named volume of its own, which Docker fills from the image | its top layer, in a stack of layers | an overlay volume of the stack under a layer of its own | counted by a helper that measures the volumes ([below](#docker-volumes)) |
-| Slurm | a Podman volume in the allocation's store, which Podman fills from the image | its top layer, in a stack of layers in the store | an overlay of the stack under a layer of its own, in the solver's allocation ([below](#slurm-volumes)) | not held |
+| Slurm | a Podman volume in the allocation's store, which Podman fills from the image | its top layer, in a stack of layers in the store | an overlay of the stack under a layer of its own, in the solver's allocation ([below](#slurm-volumes)) | counted with the writable layer by the step on its node |
 | Firecracker | an overlay of the image's directory and of each layer's, under a layer on the writable disk | the writable disk, with the root | the snapshot's disks attached read-only, and the same overlay under a layer of its own | counted with the writable disk |
 | QEMU, Linux | an overlay of the disk's own directory under `/opt/orbit/volumes/<hash>` on the disk | the disk | the snapshot's disk attached read-only once the guest is up, and an overlay of what it holds there under a layer of its own | counted with the disk |
 | QEMU, Windows | the directory on the disk, which stays one | the disk | a junction to it on a copy-on-write overlay of the snapshot's disk, attached once the guest is up | counted with the disk |
@@ -1049,7 +1050,21 @@ those written out in the cache, each with `--config` naming the Run configuratio
 sets another `shared_fs_dir`. A chain of 200 commits, each booted from the one before,
 over a one-layer image was measured, so each profile saves 200 in a row; a container
 engine's storage is volumes, which a snapshot keeps as layers beside its commit. Slurm keeps
-no running Sandbox and limits no writable storage.
+no running Sandbox.
+
+A Sandbox that names `storage_mb` is held to it on each of its nodes by its step there,
+outside the Sandbox, as a Docker leaf holds one ([Docker writable
+storage](#docker-writable-storage)): in Podman's namespace it measures the blocks its
+writable layer and its volumes take below the store, less what its volumes held as it
+started, plus what the snapshot it booted from held on that node, and on node 0 its shared
+directory too, unless it only views another Sandbox's volumes; once that passes `storage_mb`
+it kills the container, records the sizes and fails, which ends the Sandbox on every node,
+and the Sandbox's calls raise `StorageExhaustedError` (`Orbit's storage watch stopped the
+Sandbox: node 1 wrote 4102 MiB over its image, past the 4096 MiB its Task declares`). It
+measures as often as the room left asks ([`storage.py`](storage.py)), counting every node of
+the Sandbox as a writer of what it measures, as each writes the shared directory. A
+measurement took 0.02 s of a new Sandbox and 0.14 s with 100,000 files of 1 KiB, on a node's
+ext4 disk, and 0.32 s of a shared directory of 20,000 files (OpenRSI, November 2026).
 
 `srun --overlap --unbuffered` from the login node opens guestd's command and file sessions,
 a watcher of the Sentry's OOM kills and a tunnel, which carries the Run's Gateway, on the

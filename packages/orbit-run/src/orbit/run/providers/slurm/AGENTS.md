@@ -230,6 +230,11 @@ rather than the snapshot's own, so a snapshot stays what every Sandbox booted fr
 failed move's retry, start from; a verifier gets it read-only, so that nothing it writes
 reaches the agent's next turn.
 
+Decided: a Sandbox that names `storage_mb` is measured by its own step on each node, which
+holds its store and so reads it at the disk's speed, rather than by the Host, which would
+reach the store only through Slurm steps. How often follows the room left
+(`providers/storage.py`), as measuring a Sandbox of many files every 5 s far below a large
+limit costs a walk for nothing.
 
 A hold step removes its node's store once the job is stopped or, when the batch step fails,
 released by a file it polls: srun turns a SIGTERM into SIGKILL for its tasks, which would

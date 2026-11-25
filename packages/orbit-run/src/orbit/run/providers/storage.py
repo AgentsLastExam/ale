@@ -10,11 +10,11 @@ near a large one, is measured every :data:`MIN_SEC`.
 
 from __future__ import annotations
 
-__all__ = ["MAX_SEC", "MIN_SEC", "RATE", "interval", "watch"]
+__all__ = ["MAX_SEC", "MIN_SEC", "WRITE_RATE", "interval", "measure_schedule"]
 
 #: The fastest a Sandbox writes to a disk, in bytes a second: measured, one writing with
 #: ``dd`` reached bursts of 2 GiB a second on an NVMe disk (Providers README).
-RATE = 2 << 30
+WRITE_RATE = 2 << 30
 #: The bounds: at most one walk every 5 s, and nothing it holds unseen for over 5 minutes.
 MIN_SEC = 5.0
 MAX_SEC = 300.0
@@ -22,10 +22,11 @@ MAX_SEC = 300.0
 
 def interval(headroom: int) -> float:
     """Seconds until the next measurement of a Sandbox ``headroom`` bytes below its limit."""
-    return min(max(headroom / RATE, MIN_SEC), MAX_SEC)
+    return min(max(headroom / WRITE_RATE, MIN_SEC), MAX_SEC)
 
 
-def watch(storage_mb: int) -> dict[str, float]:
+def measure_schedule(storage_mb: int, writers: int = 1) -> dict[str, float]:
     """What a Provider's measurer elsewhere, which cannot import this module, computes
-    :func:`interval` from."""
-    return dict(storage_mb=storage_mb, rate=RATE, min_sec=MIN_SEC, max_sec=MAX_SEC)
+    :func:`interval` from, where ``writers`` machines write to what it measures, as every
+    node of a Sandbox of several writes the shared directory its node 0 counts."""
+    return dict(storage_mb=storage_mb, rate=WRITE_RATE * writers, min_sec=MIN_SEC, max_sec=MAX_SEC)

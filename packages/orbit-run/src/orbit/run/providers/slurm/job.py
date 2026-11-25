@@ -22,6 +22,7 @@ from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderStartError,
+    StorageExhaustedError,
 )
 from orbit.core.sandbox import GpuDevice
 from orbit.run.process import run
@@ -261,10 +262,10 @@ class Job:
 
     async def save(
         self, index: str, *, nodes: int, timeout: int = 1800
-    ) -> list[tuple[str, dict[str, dict[str, object]]]]:
+    ) -> list[tuple[str, dict[str, dict[str, object]], int]]:
         """Stop a Sandbox and commit the disk of each of its ``nodes`` to that node's store;
-        return, for each by its number, the image and each volume's stack of layers, by
-        path."""
+        return, for each by its number, the image, each volume's stack of layers, by path,
+        and what the node holds over its image, in bytes."""
         box = self.directory / "sandboxes" / index
         (box / "stop").write_text("save")
         deadline = asyncio.get_running_loop().time() + timeout
@@ -273,7 +274,11 @@ class Job:
             if all(saved):
                 records = [json.loads(each) for each in saved]
                 return [
-                    ("sha256:" + str(record["image"]), dict(record.get("stacks") or {}))
+                    (
+                        "sha256:" + str(record["image"]),
+                        dict(record.get("stacks") or {}),
+                        int(record.get("written") or 0),
+                    )
                     for record in records
                 ]
             if error := read(box / "error"):
@@ -427,10 +432,20 @@ class JobTransport(StdioTransport):
                     f"Slurm ended job {job.id} ({ended}): what the Sandbox held since its "
                     "last save written out is lost"
                 )
+        box = job.directory / "sandboxes" / self.steps.index
+        for rank in range(len(self.watchers)):
+            if found := read(box / "nodes" / str(rank) / "storage"):
+                past = json.loads(found)
+                message = (
+                    f"Orbit's storage watch stopped the Sandbox: node {rank} wrote "
+                    f"{past['written_mb']} MiB over its image, past the {past['storage_mb']} MiB "
+                    "its Task declares"
+                )
+                logging.getLogger("orbit.execution").warning(message)
+                return StorageExhaustedError(message)
         for watcher in self.watchers:
             if counted := watcher.oom_killed():
                 return MemoryExhaustedError(f"Slurm job {job.id}: {counted} ({error})")
-        box = job.directory / "sandboxes" / self.steps.index
         counters = [box / "nodes" / str(rank) / "memory" for rank in range(len(self.watchers))]
         with contextlib.suppress(ProviderStartError):
             for _ in range(5):

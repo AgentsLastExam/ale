@@ -54,7 +54,7 @@ from orbit.core.sandbox import (
 from orbit.core.taskspec import ContainerFeature, NetworkMode, OperatingSystem, Resources
 from orbit.run import guestd
 from orbit.run.guestd import nodes as ssh
-from orbit.run.providers import memory, relay
+from orbit.run.providers import memory, relay, storage
 from orbit.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from orbit.run.providers.docker import gvisor
 from orbit.run.providers.privileges import set_and_prove_elevation
@@ -127,6 +127,7 @@ def _profiles(
             max_nodes=partition.max_nodes,
             container_features=frozenset(common | {feature}),
             volumes=True,
+            storage_limit=True,
             # An allocation's wall time, less what it keeps to drain.
             max_duration_sec=(config.walltime_minutes - config.drain_minutes) * 60,
         )
@@ -248,6 +249,9 @@ class _Snapshot:
     archives: tuple[str, ...] = ()
     """Below the cache, each node's, once it was written for another allocation to boot
     from."""
+    written: tuple[int, ...] = ()
+    """What each node held over its image as it was saved, in bytes, its volumes' too, which
+    the ``storage_mb`` of a Sandbox booted from it counts."""
     shared: str | None = None
     """The Sandbox's shared directory, below the cache, which no one changes any more."""
 
@@ -534,13 +538,14 @@ class SlurmSandbox(TunneledSandbox):
         saved = await self.chain.job.save(self.steps.index, nodes=len(self.nodes))
         snapshot = _Snapshot(
             index=self.steps.index,
-            images=tuple(image for image, _ in saved),
+            images=tuple(image for image, _, _ in saved),
             prepared_identity=self.request.prepared_image.prepared_identity,
             episode_id=self.request.episode_id,
             roles=roles,
             reason=reason,
             boots=int(self.request.snapshot_verifier is not None),
-            stacks=tuple(stacks for _, stacks in saved),
+            stacks=tuple(stacks for _, stacks, _ in saved),
+            written=tuple(written for _, _, written in saved),
             shared=self.shared,
         )
         handle = _handle(self.chain.job, self.steps.index)
@@ -568,7 +573,7 @@ class SlurmSandbox(TunneledSandbox):
             finally:
                 if self.shared is not None:
                     shared, self.shared = self.shared, None
-                    self.provider.sharing[shared] -= 1
+                    self.provider.shared_users[shared] -= 1
                     await self.provider.release_shared(shared)
         self.state = SandboxState.DESTROYED
 
@@ -581,7 +586,7 @@ class SlurmProvider(Provider):
         #: The snapshots this process saved, by handle, with the allocation that holds them.
         self.snapshots: dict[str, tuple[_Chain, _Snapshot]] = {}
         #: How many running Sandboxes use each shared directory, below the cache.
-        self.sharing: dict[str, int] = {}
+        self.shared_users: dict[str, int] = {}
 
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
         return tuple(
@@ -668,6 +673,7 @@ class SlurmProvider(Provider):
         count = request.resources.nodes
         candidates: tuple[str, ...] = ()
         shared: str | None = None
+        written: tuple[int, ...] = ()
         if request.snapshot is None and request.volumes_from is None:
             resolved = _resolved(self.config, request.prepared_image, request.user)
             # Room for the separate verifier only where a partition has it: nothing requires
@@ -690,7 +696,9 @@ class SlurmProvider(Provider):
             specs = [[dict(path=path, kind="fresh", copied=True) for path in engines]] * count
         else:
             # Before the boot, which may end the allocation that holds the snapshot.
-            shared = self._held(request.snapshot or request.volumes_from)
+            shared, written = self._snapshot_state(request.snapshot or request.volumes_from)
+            if request.snapshot is None:
+                written = ()
             chain, index, resolved, loaded, specs = await self._boot(request, engines)
         readonly = shared is not None
         try:
@@ -714,30 +722,31 @@ class SlurmProvider(Provider):
                 specs,
                 candidates=candidates,
                 shared=(shared, readonly) if shared is not None else None,
+                written=written,
             )
         except BaseException:
             await asyncio.shield(self.release(chain, index))
             await asyncio.shield(self.release_shared(shared))
             raise
 
-    def _held(self, handle: str) -> str | None:
-        """The shared directory a snapshot keeps."""
+    def _snapshot_state(self, handle: str) -> tuple[str | None, tuple[int, ...]]:
+        """The shared directory a snapshot keeps, and what each of its nodes held."""
         found = self.snapshots.get(handle)
         if found is not None:
-            return found[1].shared
+            return found[1].shared, found[1].written
         name, index = _parse(handle)
         try:
             saved = json.loads(
                 (cache(self.config) / SNAPSHOTS / f"{name}-{index}.json").read_text()
             )
-            return str(saved["shared"]) if saved.get("shared") else None
-        except (OSError, ValueError, AttributeError):
-            return None  # Its boot says why.
+            return saved.get("shared"), tuple(int(each) for each in saved.get("written") or ())
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None, ()  # Its boot says why.
 
     async def release_shared(self, path: str | None) -> None:
         """Remove a shared directory, below the cache, once no running Sandbox uses it and no
         snapshot keeps it, this process's or one written out."""
-        if path is None or self.sharing.get(path):
+        if path is None or self.shared_users.get(path):
             return
         if any(snapshot.shared == path for _, snapshot in self.snapshots.values()):
             return
@@ -957,11 +966,13 @@ class SlurmProvider(Provider):
         *,
         candidates: Sequence[str] = (),
         shared: tuple[str, bool] | None = None,
+        written: Sequence[int] = (),
     ) -> SlurmSandbox:
         """Start a Sandbox in ``chain`` on its first nodes, node ``k`` from the image Podman
         holds there as ``loaded[k]``, with ``volumes[k]`` made in its store, one of its own at
-        each of the volume ``candidates`` that is a directory in the image, and the ``shared``
-        directory below the cache, read-only or not."""
+        each of the volume ``candidates`` that is a directory in the image, the ``shared``
+        directory below the cache, read-only or not, and what the snapshot it boots from held
+        on each node, ``written[k]``."""
         gateway, listeners, targets = tunnel_plan(request)
         resources = request.resources
         count = resources.nodes
@@ -974,7 +985,11 @@ class SlurmProvider(Provider):
         nodes = [SandboxSteps(chain.job, index, node) for node in chain.nodes[:count]]
         spec: dict[str, object] = dict(
             nodes=[
-                dict(image=loaded[rank].removeprefix("sha256:"), volumes=volumes[rank])
+                dict(
+                    image=loaded[rank].removeprefix("sha256:"),
+                    volumes=volumes[rank],
+                    written=written[rank] if rank < len(written) else 0,
+                )
                 for rank in range(count)
             ],
             runtime_args=args,
@@ -987,7 +1002,16 @@ class SlurmProvider(Provider):
             candidates=list(candidates),
         )
         if shared is not None:
-            spec["shared"] = dict(path=shared[0], readonly=shared[1], account=request.user)
+            # A Sandbox that views another's volumes holds none of the shared directory it
+            # sees, as it holds none of theirs.
+            spec["shared"] = dict(
+                path=shared[0],
+                readonly=shared[1],
+                account=request.user,
+                counted=request.volumes_from is None,
+            )
+        if resources.storage_mb is not None:
+            spec["storage"] = storage.measure_schedule(resources.storage_mb, writers=count)
         stack = AsyncExitStack()
         try:
             readies = await chain.job.start(index, spec, nodes=count, timeout=START_TIMEOUT_SEC)
@@ -1052,6 +1076,7 @@ class SlurmProvider(Provider):
                 allocation=ResourceAllocation(
                     cpus=resources.cpus,
                     memory_mb=resources.memory_mb,
+                    storage_mb=resources.storage_mb,
                     gpu=gpu,
                     sudo=request.sudo,
                     network_mode=request.network.mode,
@@ -1080,7 +1105,7 @@ class SlurmProvider(Provider):
                 await sandbox.join([None] * count)
             if shared is not None:
                 sandbox.shared = shared[0]
-                self.sharing[shared[0]] = self.sharing.get(shared[0], 0) + 1
+                self.shared_users[shared[0]] = self.shared_users.get(shared[0], 0) + 1
             return sandbox
         except BaseException:
             await stack.aclose()
@@ -1167,6 +1192,7 @@ class SlurmProvider(Provider):
             roles=list(snapshot.roles),
             reason=snapshot.reason,
             stacks=list(snapshot.stacks),
+            written=list(snapshot.written),
             shared=snapshot.shared,
         )
         write(cache(self.config) / SNAPSHOTS / f"{name}.json", json.dumps(record).encode())
@@ -1193,7 +1219,7 @@ class SlurmProvider(Provider):
 
     async def destroy_retained(self, handle: str) -> None:
         name, index = _parse(handle)
-        shared = self._held(handle)
+        shared, _ = self._snapshot_state(handle)
         found = self.snapshots.get(handle)
         if found is not None:
             chain, snapshot = found
