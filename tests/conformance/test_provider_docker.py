@@ -18,8 +18,8 @@ from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Re
 from orbit.core.testkit import NESTED_CHECKS, ProviderConformance
 from orbit.run import guestd
 from orbit.run.framework import framework_identity
-from orbit.run.providers import missing_features
-from orbit.run.providers.docker import gvisor, kata, storage
+from orbit.run.providers import missing_features, storage
+from orbit.run.providers.docker import gvisor, kata
 from orbit.run.providers.docker.provider import (
     DockerProvider,
     DockerSandbox,
@@ -55,7 +55,7 @@ class TestDockerProvider(ProviderConformance):
     framework = framework_identity(user="user", vm=False)
     missing_features = staticmethod(missing_features)
     #: A measurement after the write, and its kill, on a loaded Host.
-    storage_sec = storage.WATCH_SEC + 15
+    storage_sec = storage.MIN_SEC + 15
 
 
 @pytest.mark.needs_kvm

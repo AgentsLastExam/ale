@@ -18,15 +18,11 @@ from collections.abc import Awaitable, Callable
 
 from orbit.core.errors import ProviderStartError
 from orbit.run.process import run
+from orbit.run.providers import storage
 
-__all__ = ["WATCH_SEC", "Watch", "written"]
+__all__ = ["Watch", "written"]
 
 _log = logging.getLogger(__name__)
-
-#: How often a watched Sandbox is measured. A measurement walks its writable layer, about a
-#: second of the daemons' CPU per 100,000 files, and meanwhile a Sandbox writes past its
-#: limit at up to the disk's speed ([Providers README](../README.md)).
-WATCH_SEC = 5.0
 
 
 async def written(container: str) -> int | None:
@@ -44,8 +40,9 @@ async def written(container: str) -> int | None:
 
 
 class Watch:
-    """Measures what one Sandbox has written every :data:`WATCH_SEC` until it passes
-    ``limit_mb``, then has it act, once, with the bytes measured.
+    """Measures what one Sandbox has written, as often as the room it has left asks
+    (``providers/storage.py``), until it passes ``limit_mb``, then has it act, once, with
+    the bytes measured.
 
     A task of its own per Sandbox, so that a layer of many files, slow to measure, delays no
     other Sandbox's measurement.
@@ -78,8 +75,9 @@ class Watch:
         """Measure until it passes its limit or is gone, warning once when measurements
         start to fail and once when they work again."""
         failing = False
+        size = 0
         while True:
-            await asyncio.sleep(WATCH_SEC)
+            await asyncio.sleep(storage.interval((self.limit_mb << 20) - self.base - size))
             try:
                 size = await written(self.container)
                 if size is not None and self._volumes is not None:

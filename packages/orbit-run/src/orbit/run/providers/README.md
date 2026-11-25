@@ -725,7 +725,8 @@ store, a fresh Docker 29's default, which accepts `--storage-opt size` and ignor
 under rootless Docker, whose `overlay2` refuses it; only the classic `overlay2` driver on
 xfs mounted with `pquota`, rootful, enforces one. So a Docker leaf holds a Sandbox that
 names `storage_mb` to it as Kubernetes holds a Pod to its `ephemeral-storage`
-([`docker/storage.py`](docker/storage.py)): every 5 s while a Run or a Node drives it, the
+([`docker/storage.py`](docker/storage.py)): while a Run or a Node drives it, as often as the
+room it has left asks ([`storage.py`](storage.py)), the
 leaf reads what the Sandbox has written over its image, `SizeRw` of
 `docker container inspect --size`, which the daemon counts on the Host, outside the
 Sandbox's reach. Once that passes `storage_mb` MiB the leaf kills the container and logs, in

@@ -47,6 +47,7 @@ from orbit.core.sandbox import (
 from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from orbit.run import guestd, iptables
 from orbit.run.providers import memory
+from orbit.run.providers import storage as storage_rule
 from orbit.run.providers.docker import (
     gpu_sharing,
     gvisor,
@@ -1843,7 +1844,8 @@ def _measured(
         return left.pop(0) if len(left) > 1 else left[0]
 
     monkeypatch.setattr(storage, "run", run)
-    monkeypatch.setattr(storage, "WATCH_SEC", 0.0)
+    monkeypatch.setattr(storage_rule, "MIN_SEC", 0.0)
+    monkeypatch.setattr(storage_rule, "MAX_SEC", 0.0)
     return asked
 
 
@@ -1977,6 +1979,33 @@ async def test_the_storage_watch_measures_only_while_a_sandbox_is_driven(
     ]
     assert ("kill", sandbox.container) not in calls
     await sandbox._release()
+
+
+async def test_the_storage_watch_measures_as_often_as_the_room_left_asks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each wait before a measurement follows the room the Sandbox has left below its limit,
+    what the snapshot it booted from holds counted; the measurement past it acts once."""
+    gib = 1 << 30
+    _measured(
+        monkeypatch, (0, f"{30 * gib}\n", ""), (0, f"{89 * gib}\n", ""), (0, f"{95 * gib}\n", "")
+    )
+    headrooms: list[int] = []
+
+    def interval(headroom: int) -> float:
+        headrooms.append(headroom)
+        return 0.0
+
+    monkeypatch.setattr(storage_rule, "interval", interval)
+    acted: list[int] = []
+
+    async def act(size: int) -> None:
+        acted.append(size)
+
+    watch = storage.Watch("c", 100 * 1024, act, base=10 * gib)
+    await _until(lambda: watch._task.done())
+    assert headrooms == [90 * gib, 60 * gib, gib]
+    assert acted == [105 * gib]
 
 
 async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
