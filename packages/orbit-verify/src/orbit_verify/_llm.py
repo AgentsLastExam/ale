@@ -15,12 +15,13 @@ import urllib.request
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
 from ._io import (
     ConfigurationError,
     EvidenceError,
+    JudgeContextError,
     JudgeError,
     digest,
     endpoint_identity,
@@ -51,6 +52,26 @@ _ANTHROPIC_MAX_TOKENS = 128_000
 _EFFORTS = {"low", "medium", "high"}
 _STARTED = time.monotonic()
 _max_output: dict[tuple[str, str], int] = {}
+
+
+#: How each protocol, a gateway before it and each Agent Judge CLI say that a request is
+#: larger than the model accepts: OpenAI by code, Anthropic, Gemini and gateways in words.
+_TOO_LARGE = re.compile(
+    r"context_length_exceeded|string_above_max_length|request_too_large|prompt is too long"
+    r"|exceeds the context window|input token count.{0,40}exceeds the maximum"
+    r"|ran out of room in the model's context window",
+    re.IGNORECASE,
+)
+
+
+def too_large(text: str) -> bool:
+    """Whether a provider's or CLI's failure says the request exceeded what the model
+    accepts, which no retry of the same request changes."""
+    return _TOO_LARGE.search(text) is not None
+
+
+class _TooLarge(RuntimeError):
+    """The provider refused the request as larger than its model accepts."""
 
 
 class _Transient(Exception):
@@ -185,6 +206,17 @@ def run(
                     error=last_error,
                 )
             )
+            if isinstance(exc, _TooLarge):
+                failure = sanitize(f"the LLM Judge's input is larger than its model accepts: {exc}")
+                invocation = JudgeInvocation(
+                    id=invocation_id,
+                    kind="llm",
+                    name=name,
+                    status="failed",
+                    attempts=tuple(attempts),
+                    failure=failure,
+                )
+                raise JudgeContextError(failure, invocation) from exc
             if isinstance(exc, _Transient):
                 transient += 1
                 if not _wait_to_retry(transient, exc.retry_after):
@@ -357,6 +389,9 @@ def _post(
     except urllib.error.HTTPError as exc:
         body = redact(exc.read().decode("utf-8", errors="replace"), secrets)
         message = f"provider returned HTTP {exc.code}: {body[:500]}"
+        # Before the retryable statuses: a gateway may report an oversized request as 502.
+        if exc.code == 413 or too_large(body):
+            raise _TooLarge(message) from exc
         if exc.code in _RETRYABLE_STATUS:
             raise _Transient(message, _retry_after(exc.headers)) from exc
         if protocol == "anthropic" and exc.code == 400 and "max_tokens" in body:
@@ -398,7 +433,7 @@ def _read_stream(protocol: str, lines: Iterable[bytes]) -> dict[str, Any]:
         for event in _events(lines):
             kind = event.get("type")
             if kind == "error":
-                raise _Transient(f"provider stream failed: {json.dumps(event.get('error'))[:500]}")
+                _stream_error(event.get("error"))
             if kind == "message_start":
                 started = event.get("message") or {}
                 message["id"] = started.get("id")
@@ -422,7 +457,7 @@ def _read_stream(protocol: str, lines: Iterable[bytes]) -> dict[str, Any]:
         text, refusal, usage, finish, identifier = [], [], None, None, None
         for event in _events(lines):
             if event.get("error"):
-                raise _Transient(f"provider stream failed: {json.dumps(event['error'])[:500]}")
+                _stream_error(event["error"])
             identifier = event.get("id") or identifier
             usage = event.get("usage") or usage
             for choice in event.get("choices") or ():
@@ -443,13 +478,24 @@ def _read_stream(protocol: str, lines: Iterable[bytes]) -> dict[str, Any]:
     for event in _events(lines):
         kind = event.get("type")
         if kind == "error":
-            raise _Transient(f"provider stream failed: {json.dumps(event)[:500]}")
+            _stream_error(event)
         if kind == "response.failed":
-            error = (event.get("response") or {}).get("error")
-            raise _Transient(f"provider response failed: {json.dumps(error)[:500]}")
+            _stream_error((event.get("response") or {}).get("error"))
         if kind in {"response.completed", "response.incomplete"}:
             return dict(event.get("response") or {})
     raise _Transient("provider stream ended before the response completed")
+
+
+def _stream_error(error: object) -> NoReturn:
+    """Raise what an error inside a stream means: a request too large for the model or
+    otherwise rejected fails at once, anything else, such as an overload, is retried."""
+    detail = json.dumps(error, ensure_ascii=False)
+    message = f"provider stream failed: {detail[:500]}"
+    if too_large(detail):
+        raise _TooLarge(message)
+    if "invalid_request_error" in detail:
+        raise RuntimeError(message)
+    raise _Transient(message)
 
 
 def _retry_after(headers: object) -> float | None:

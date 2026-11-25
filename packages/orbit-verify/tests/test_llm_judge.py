@@ -691,6 +691,96 @@ def test_a_rejected_request_fails_at_once(monkeypatch) -> None:  # type: ignore[
     assert caught.value.invocation.attempts[0].outcome == "failed"
 
 
+#: How each protocol, or a gateway before it, refuses a request larger than the model
+#: accepts, in the shapes they answered an oversized request with.
+TOO_LARGE = {
+    "responses-stream": lambda: Stream(
+        {"type": "response.created", "response": {"status": "in_progress"}},
+        {
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "context_length_exceeded",
+                    "message": "Your input exceeds the context window of this model.",
+                },
+            },
+        },
+    ),
+    "responses-string": lambda: http_error(
+        400, '{"error":{"code":"string_above_max_length","type":"invalid_request_error"}}'
+    ),
+    "gateway-502": lambda: http_error(
+        502,
+        '{"error":{"message":"Your input exceeds the context window of this model.",'
+        '"type":"upstream_error"}}',
+    ),
+    "anthropic": lambda: http_error(
+        400,
+        '{"type":"error","error":{"type":"invalid_request_error",'
+        '"message":"prompt is too long: 11699574 tokens > 1000000 maximum"}}',
+    ),
+    "gemini": lambda: http_error(
+        400,
+        '[{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"The input token count '
+        'exceeds the maximum number of tokens allowed (1048576); input token count: 1295058."}}]',
+    ),
+    "request-size": lambda: http_error(413, "<html>Request Entity Too Large</html>"),
+}
+
+
+@pytest.mark.parametrize("refusal", TOO_LARGE)
+def test_an_input_too_large_for_the_model_fails_at_once_as_a_context_error(
+    monkeypatch, refusal
+) -> None:  # type: ignore[no-untyped-def]
+    from orbit_verify import JudgeContextError
+
+    monkeypatch.setenv("JUDGE_KEY", "secret")
+    monkeypatch.setenv("ORBIT_VERIFY_DEADLINE_SECONDS", "3600")
+    calls = []
+
+    def open_(request, timeout):  # type: ignore[no-untyped-def]
+        calls.append(request)
+        answer = TOO_LARGE[refusal]()
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
+    monkeypatch.setattr(_llm.time, "sleep", lambda _: pytest.fail("no retry may wait"))
+    with pytest.raises(JudgeContextError, match="larger than its model accepts") as caught:
+        call()
+    assert len(calls) == 1
+    assert [attempt.outcome for attempt in caught.value.invocation.attempts] == ["failed"]
+
+
+@pytest.mark.parametrize(
+    ("event", "retried"),
+    [
+        ({"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}}, False),
+        ({"type": "response.failed", "response": {"error": {"code": "server_error"}}}, True),
+    ],
+    ids=["rejected", "server-error"],
+)
+def test_a_stream_that_fails_is_retried_unless_the_provider_rejected_the_request(
+    monkeypatch, event, retried
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("JUDGE_KEY", "secret")
+    monkeypatch.setattr(_llm.time, "sleep", lambda _: None)
+    answers = iter(
+        [Stream(event), Response({"output_text": '{"choice":"yes","reasoning":"Done."}'})]
+    )
+    monkeypatch.setattr(_llm.urllib.request, "urlopen", lambda *_a, **_k: next(answers))
+    if retried:
+        _, invocation = call()
+        assert [attempt.outcome for attempt in invocation.attempts] == ["failed", "completed"]
+    else:
+        with pytest.raises(JudgeError, match="invalid_request_error") as caught:
+            call()
+        assert len(caught.value.invocation.attempts) == 1
+
+
 def test_retries_stop_when_verification_budget_is_spent(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("JUDGE_KEY", "secret")
     monkeypatch.setenv("ORBIT_VERIFY_DEADLINE_SECONDS", "40")

@@ -16,6 +16,7 @@ from . import _agents, _llm, checks
 from ._io import (
     ConfigurationError,
     EvidenceError,
+    JudgeContextError,
     JudgeError,
     VerificationError,
     atomic_json,
@@ -41,6 +42,7 @@ __all__ = [
     "EvidenceError",
     "EvidenceReference",
     "JudgeAttempt",
+    "JudgeContextError",
     "JudgeError",
     "JudgeInvocation",
     "Trajectory",

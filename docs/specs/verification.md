@@ -213,13 +213,26 @@ budget: the engine passes the seconds left in the verify phase as
 `ORBIT_VERIFY_DEADLINE_SECONDS`, and a Judge stops retrying 30 seconds before it so that the
 failure is recorded rather than killed. Without that budget, as when an author runs
 `verify.py` directly, a transient failure gets three further attempts instead. Any other
-provider rejection fails at once. An
+provider rejection fails at once, a stream that ends rejecting the request included. An
 invalid or refused response gets at most three further attempts; invalid verdicts receive a
 schema-repair prompt that names the error, and a verdict wrapped in a Markdown JSON fence
 is accepted. Agent Judge runs each CLI attempt with no timeout but that remaining budget,
 retries CLI failures and timeouts with the same evidence in a fresh native session, and
 repairs invalid verdicts in the existing session. Missing credentials and native session
 identity mismatches stop immediately. Unhandled Judge failures fail verification rather than becoming a score.
+
+A request larger than the Judge's model accepts fails at once, without a retry, as
+`JudgeContextError`, a `JudgeError`, however its protocol, a gateway before it or an Agent
+Judge's CLI reports it, since the same request would be refused again. Orbit condenses no
+input itself, as only the Task knows which parts matter. Task code may catch the error and
+ask again with less, or give the input to an Agent Judge as a file:
+
+```python
+try:
+    review = judge("llm", "process", prompt=prompt + json.dumps(steps))
+except JudgeContextError:
+    review = judge("llm", "process", prompt=prompt + json.dumps(steps[-200:]))
+```
 
 ### Preflight
 

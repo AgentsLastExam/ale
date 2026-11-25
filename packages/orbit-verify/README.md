@@ -20,7 +20,10 @@ Task code may write `reward.json` directly without this package. The program mus
 successfully for Orbit to accept it. Judge logs are independent.
 
 `load_trajectory()` returns the agent's trajectory for Task code to condense and give a
-Judge as any other input.
+Judge as any other input. A request larger than the Judge's model accepts raises
+`JudgeContextError`. A Gemini endpoint refuses a request whose input alone exceeds the
+account's per-minute input-token quota as rate limiting, HTTP 429, which a Judge retries
+until verification's budget runs out.
 
 The package imports neither `orbit.core` nor `orbit.run`. Orbit stages its pinned
 pure-Python JSON Schema library alongside it. See

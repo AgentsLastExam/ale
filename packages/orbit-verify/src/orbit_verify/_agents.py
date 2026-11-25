@@ -14,7 +14,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import _llm
-from ._io import JudgeError, digest, endpoint_identity, read_text_evidence, redact, sanitize
+from ._io import (
+    JudgeContextError,
+    JudgeError,
+    digest,
+    endpoint_identity,
+    read_text_evidence,
+    redact,
+    sanitize,
+)
 from ._journal import journal
 from ._json import response_object
 from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation
@@ -234,6 +242,26 @@ def run(
                     repair_error,
                 )
             )
+            if _llm.too_large(repair_error):
+                # Its own compaction aside, the CLI met an input its model refuses, which a
+                # fresh session would send again.
+                failure = sanitize(
+                    f"the Agent Judge's input is larger than its model accepts: {repair_error}",
+                    (secret,),
+                )
+                raise JudgeContextError(
+                    failure,
+                    JudgeInvocation(
+                        id=invocation_id,
+                        kind="agent",
+                        name=name,
+                        adapter=adapter,  # type: ignore[arg-type]
+                        adapter_version=version,
+                        status="failed",
+                        attempts=tuple(attempts),
+                        failure=failure,
+                    ),
+                )
             session_id = None
             repair = False
             failures += 1

@@ -235,6 +235,39 @@ def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
     assert [item["kind"] for item in evidence["files"]] == ["file", "reference"]
 
 
+def test_an_agent_judge_whose_model_refuses_its_input_fails_at_once(
+    monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
+) -> None:
+    from orbit_verify import JudgeContextError
+
+    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
+    runs = []
+
+    def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
+        if "--version" in argv:
+            return completed("codex 1.2.3\n")
+        runs.append(argv)
+        failed = {
+            "type": "turn.failed",
+            "error": {
+                "message": "Codex ran out of room in the model's context window. Start a new "
+                "thread or clear earlier history before retrying."
+            },
+        }
+        return completed(
+            json.dumps({"type": "thread.started", "thread_id": "t"}) + "\n" + json.dumps(failed),
+            returncode=1,
+        )
+
+    monkeypatch.setattr(_agents.subprocess, "run", execute)
+    with pytest.raises(JudgeContextError, match="larger than its model accepts") as caught:
+        judge("agent", "content", prompt="Check the artifact.")
+    assert len(runs) == 1
+    assert [attempt.outcome for attempt in caught.value.invocation.attempts] == ["failed"]
+    events = [json.loads(line) for line in agent_env["log"].read_text().splitlines()]
+    assert events[-1]["event"] == "failed"
+
+
 @pytest.mark.parametrize("unreadable", ["missing", "invalid_utf8"])
 def test_configured_instruction_cannot_be_silently_omitted(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path], unreadable: str

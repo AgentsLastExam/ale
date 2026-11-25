@@ -38,6 +38,11 @@ class JudgeError(VerificationError):
         self.invocation = invocation
 
 
+class JudgeContextError(JudgeError):
+    """A Judge's input is larger than its model accepts; Task code may give it less and ask
+    again, or give the input to an Agent Judge as a file."""
+
+
 def atomic_json(path: str | os.PathLike[str], payload: dict[str, Any]) -> None:
     text = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     atomic_text(path, text + "\n")
