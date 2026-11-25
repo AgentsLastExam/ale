@@ -22,7 +22,7 @@ from tests.support import TraceSink
 
 import orbit.run
 import orbit.run.providers.docker.provider as docker_provider
-from orbit.core.capability import GpuHold, GpuModel
+from orbit.core.capability import CpuHold, GpuHold, GpuModel
 from orbit.core.config import ProviderId
 from orbit.core.errors import (
     GuestUnreachableError,
@@ -372,6 +372,7 @@ def _sandbox() -> DockerSandbox:
     sandbox.agent_user = "user"
     sandbox.allocation = ResourceAllocation(
         cpus=1,
+        cpu_hold=CpuHold.SHARED,
         memory_mb=1024,
         sudo=False,
         network_mode=NetworkMode.BLOCK,
@@ -1614,6 +1615,7 @@ async def test_a_reattached_sandbox_is_sealed_as_its_container_was_left(
     wanted = request(network=network, proxy_url="http://0.0.0.0:9443")
     allocation = ResourceAllocation(
         cpus=1,
+        cpu_hold=CpuHold.SHARED,
         memory_mb=1024,
         sudo=False,
         network_mode=mode,
@@ -1660,6 +1662,7 @@ async def test_a_container_that_records_no_network_mode_is_not_reattached(
     monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
     allocation = ResourceAllocation(
         cpus=1, memory_mb=1024, sudo=False, network_mode=NetworkMode.BLOCK,
+        cpu_hold=CpuHold.SHARED,
         provider="docker:runc", leaf="docker:runc",
     )  # fmt: skip
     image = ResolvedImage(
@@ -2456,7 +2459,7 @@ async def test_a_gvisor_sandbox_gets_its_gpus_as_a_runc_one_does(
         "orbit.run.providers.docker.provider.resolve_prepared_container_image", resolved
     )
     monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
-    provider = DockerProvider(runtime="gvisor", gpu_lock_dir=tmp_path)
+    provider = DockerProvider(runtime="gvisor", lock_dir=tmp_path)
     monkeypatch.setattr(provider, "check_image", no_problems)
     monkeypatch.setattr(provider, "_framed", framed)
     with pytest.raises(ProviderCapabilityError, match="stopped after the flags were read"):
@@ -2509,7 +2512,7 @@ async def test_a_sandbox_whose_gpus_cannot_be_leased_leaves_no_network_behind(
         "orbit.run.providers.docker.provider.resolve_prepared_container_image", resolved
     )
     monkeypatch.setattr(DockerProvider, "_host_gpus", host_gpus)
-    provider = DockerProvider(runtime=runtime, gpu_lock_dir=tmp_path)
+    provider = DockerProvider(runtime=runtime, lock_dir=tmp_path)
     monkeypatch.setattr(provider, "check_image", no_problems)
     monkeypatch.setattr(provider, "_framed", framed)
     with pytest.raises(ProviderCapabilityError, match="GPUs"):

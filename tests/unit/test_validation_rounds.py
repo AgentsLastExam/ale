@@ -1671,13 +1671,13 @@ async def test_validation_places_the_rounds_of_tests_where_there_is_no_validatio
         tmp_path,
         rounds=1,
         validation_dir=False,
-        validation={"environment_mode": "separate", "environment": {"cpus": 3, "workdir": "grade"}},
+        validation={"environment_mode": "separate", "environment": {"cpus": 4, "workdir": "grade"}},
     )
     result = await _run(tmp_path, provider, task, TurnsHarness())
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert [(item.index, item.reward) for item in result.record.validation_rounds] == [(1, 0.5)]
     (validator,) = provider.booted(SandboxRole.VERIFIER)
-    assert (validator.snapshot, validator.resources.cpus) == (None, 3)
+    assert (validator.snapshot, validator.resources.cpus) == (None, 4)
     assert runs == [
         (SandboxRole.VERIFIER, "/home/user/grade", ["bash", "/opt/orbit/tests/test.sh"]),
         (SandboxRole.SHARED, "/opt/orbit/tests", ["bash", "test.sh"]),

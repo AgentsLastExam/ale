@@ -573,6 +573,40 @@ samples/s in a 16 GiB Sandbox (8 GiB of `/dev/shm`) and 2745 in a 4 GiB one (2 G
 - Passed under Kata too, which ignores it, so that every runtime starts from one argument
   list.
 
+## Kata and CPUs
+
+**Problem.** A Kata Sandbox of `cpus = 4` counted 5 CPUs (`nproc`, `os.cpu_count()`, its
+vCPUs), and one started with `--cpuset-cpus` ran its VM on other Host CPUs than those it was
+given (November 2026, Kata 4.3.1 runtime-rs with QEMU, rootful Docker 29.1.3 with the
+systemd cgroup driver, a 112-thread Host).
+
+**Context.** With `static_sandbox_resource_mgmt`, Kata sizes its VM before boot at the
+container's CPU quota, or its cpuset's count without one, plus `overhead_vcpus`, 0.2 in its
+shipped configuration, rounded up: `--cpus 4` gave 5 vCPUs, `--cpus 3.8` and `--cpus 3.5`
+gave 4, and `--cpus 0.8` 1, with the guest container's `cpu.max` at that quota. It never
+resizes the VM afterwards, and `docker update --cpus 4` then sets the guest container's
+`cpu.max` to `400000 100000` with 4 vCPUs. The annotations `…hypervisor.default_vcpus` and
+`io.katacontainers.config_path` had no effect through Docker; `default_vcpus` applies only
+to a container with no limits at all. Kata creates the sandbox's systemd scope on the Host
+itself and writes its `AllowedCPUs` with the bytes of the CPU mask reversed: `44-47` became
+`4-7`, `10,20,30,40` became `0,22,28,34`, and `0,56` stayed `0,56`, on the scope's
+`cpuset.cpus` and on every Kata process; `docker update --cpuset-cpus` did not change it. The
+scope's `cpu.max` stays `max`, so on the Host the VM is held only by its vCPU count. runc and
+runsc applied the same cpusets exactly.
+
+**Solution.** A Kata Sandbox starts with `--cpus` half a CPU below its `cpus`, which Kata
+rounds to `cpus` vCPUs whatever overhead below half it adds, and `docker update --cpus`
+gives it its whole quota once it runs; the Provider checks that the guest counts `cpus`
+CPUs. It is not pinned: its allocation records `shared`.
+
+**Decisions.**
+- Not pinned rather than pinned to a mask reversed in advance: the reversal depends on the
+  mask's length in bytes, so no cpuset of every shape survives it, and a future Kata that
+  fixes it would turn the workaround into the same bug.
+- Kata's shipped configuration stays as it is: a configuration of our own with
+  `overhead_vcpus = 0` would be one more file each Host installs, for what the half-CPU start
+  already gives.
+
 ## guestd's replies under gVisor
 
 **Problem.** A screenshot of 1.1 MB never arrived from a gVisor sandbox whose image set

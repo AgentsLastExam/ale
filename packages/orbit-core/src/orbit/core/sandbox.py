@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from orbit.core.capability import (
     Arch,
     CapabilityProfile,
+    CpuHold,
     GpuHold,
     SandboxNeeds,
     closest,
@@ -438,6 +439,10 @@ class ResourceAllocation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     cpus: int = Field(ge=1)
+    cpu_hold: CpuHold
+    host_cpus: tuple[tuple[int, ...], ...] = Field(default=(), exclude_if=lambda value: not value)
+    """The Host CPUs it is pinned to, ``cpus`` of them, as each Host numbers them, on each of
+    its nodes, in the order of ``nodes``; empty where it is pinned to none."""
     memory_mb: int = Field(ge=1)
     storage_mb: int | None = Field(default=None, ge=1)
     gpu: GpuAllocation | None = None

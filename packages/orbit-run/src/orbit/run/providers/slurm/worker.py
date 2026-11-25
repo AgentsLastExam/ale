@@ -994,10 +994,11 @@ def start(index: str) -> None:
         raise RuntimeError(f"node {rank} of Sandbox {index} runs on {this_node()}")
     stored = node_store()
     limit = limit_cgroup()
+    cpus = sorted(os.sched_getaffinity(0))
     if (
         int((limit / "memory.max").read_text()) != spec["memory_mb"] << 20
         or (limit / "memory.swap.max").read_text().strip() != "0"
-        or len(os.sched_getaffinity(0)) != spec["cpus"]
+        or len(cpus) != spec["cpus"]
     ):
         raise RuntimeError(
             f"Slurm did not enforce the requested CPU, memory and zero-swap allocation on "
@@ -1093,6 +1094,7 @@ def start(index: str) -> None:
                 volumes=found,
                 node=this_node(),
                 hcas=hcas,
+                cpus=cpus,
             ),
         )
         while True:

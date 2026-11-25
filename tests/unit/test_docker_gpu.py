@@ -21,7 +21,7 @@ import pytest
 from tests.support import TraceSink
 
 import orbit.run.providers.docker.provider as docker_provider
-from orbit.core.capability import GpuHold
+from orbit.core.capability import CpuHold, GpuHold
 from orbit.core.errors import (
     GuestUnreachableError,
     ProviderCapabilityError,
@@ -38,6 +38,7 @@ from orbit.core.sandbox import (
     SandboxState,
 )
 from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from orbit.run.providers import admission
 from orbit.run.providers.docker import gpu_sharing, subnets
 from orbit.run.providers.docker.gpu_sharing import GpuProcess, Holder, Overrun
 from orbit.run.providers.docker.provider import (
@@ -480,6 +481,7 @@ def _watched_sandbox(
     sandbox.state = SandboxState.READY
     sandbox.allocation = ResourceAllocation(
         cpus=1,
+        cpu_hold=CpuHold.SHARED,
         memory_mb=1024,
         sudo=False,
         network_mode=NetworkMode.BLOCK,
@@ -927,8 +929,8 @@ async def test_every_sandbox_is_labelled_with_what_it_holds_and_limited_where_it
 ) -> None:
     """Both labels on every Sandbox, empty where it holds nothing, so that an image's labels
     never stand in for Orbit's record; the lock is held while Docker starts it."""
-    provider = DockerProvider(runtime=runtime, gpu_lock_dir=tmp_path)
-    lock = tmp_path / "orbit-gpu-DAEMON-1.lock"
+    provider = DockerProvider(runtime=runtime, lock_dir=tmp_path)
+    lock = tmp_path / "orbit-admission-DAEMON-1.lock"
     held: list[bool] = []
 
     async def starting() -> None:
@@ -960,7 +962,7 @@ async def test_every_sandbox_is_labelled_with_what_it_holds_and_limited_where_it
 async def test_a_refused_sandbox_starts_nothing_and_says_why_for_each_gpu(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    provider = DockerProvider(runtime="gvisor", gpu_lock_dir=tmp_path)
+    provider = DockerProvider(runtime="gvisor", lock_dir=tmp_path)
     holders = f"{A} orbit-a {G0}/40000\n{B} orbit-b {G1},{G2}/\n"
     daemon = Daemon(monkeypatch, holders=holders, processes=[_process(A, G0, 600)])
     with pytest.raises(ProviderCapacityError) as refused:
@@ -971,7 +973,7 @@ async def test_a_refused_sandbox_starts_nothing_and_says_why_for_each_gpu(
     assert not daemon.runs()
     # The Sandbox's own network goes with it, and the lock is free again.
     assert daemon.calls[-1][:2] == ("network", "rm")
-    assert _free(tmp_path / "orbit-gpu-DAEMON-1.lock")
+    assert _free(tmp_path / "orbit-admission-DAEMON-1.lock")
 
 
 @pytest.mark.asyncio
@@ -988,7 +990,7 @@ async def test_two_creates_through_one_daemon_take_turns_and_the_second_sees_the
         await asyncio.sleep(0.3)
 
     daemon = Daemon(monkeypatch, starts=True, starting=starting)
-    first, second = (DockerProvider(gpus=(2,), gpu_lock_dir=tmp_path) for _ in range(2))
+    first, second = (DockerProvider(gpus=(2,), lock_dir=tmp_path) for _ in range(2))
     taking = asyncio.ensure_future(first.create(_request(Resources(gpus=1), "first")))
     await asyncio.sleep(0.05)
     with pytest.raises(ProviderCapacityError, match=r"orbit-first-[0-9a-f]+ holds it whole"):
@@ -1003,7 +1005,7 @@ async def test_two_creates_through_one_daemon_take_turns_and_the_second_sees_the
 async def test_a_docker_run_that_never_returns_leaves_the_lock_free(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
 ) -> None:
-    lock = tmp_path / "orbit-gpu-DAEMON-1.lock"
+    lock = tmp_path / "orbit-admission-DAEMON-1.lock"
 
     async def starting() -> None:
         if how == "timed out":
@@ -1011,7 +1013,7 @@ async def test_a_docker_run_that_never_returns_leaves_the_lock_free(
         await asyncio.Event().wait()
 
     daemon = Daemon(monkeypatch, starting=starting)
-    provider = DockerProvider(runtime="gvisor", gpu_lock_dir=tmp_path)
+    provider = DockerProvider(runtime="gvisor", lock_dir=tmp_path)
     creating = asyncio.ensure_future(provider.create(_request(Resources(gpus=1))))
     await asyncio.sleep(0.1)
     if how == "cancelled":
@@ -1031,16 +1033,16 @@ def test_the_lock_file_is_one_every_user_can_lock_and_is_created_once(
     """Created readable by all whatever the umask, opened read-only when it exists, since
     fs.protected_regular refuses O_CREAT on another user's file in a sticky /tmp, and opened
     as another's when that process created it between the two opens."""
-    path = tmp_path / "orbit-gpu-DAEMON-1.lock"
+    path = tmp_path / "orbit-admission-DAEMON-1.lock"
     previous = os.umask(0o077)
     try:
-        descriptor = gpu_sharing._open_lock(path)
+        descriptor = admission._open_lock(path)
     finally:
         os.umask(previous)
     os.close(descriptor)
     assert stat.S_IMODE(path.stat().st_mode) == 0o644
     path.chmod(0o444)  # as another user's file looks: no write needed
-    descriptor = gpu_sharing._open_lock(path)
+    descriptor = admission._open_lock(path)
     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     os.close(descriptor)
     # Another process creates it between this one's two opens.
@@ -1057,8 +1059,8 @@ def test_the_lock_file_is_one_every_user_can_lock_and_is_created_once(
             raise FileExistsError(name)
         return real(name, flags, mode)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(gpu_sharing.os, "open", opening)
-    os.close(gpu_sharing._open_lock(raced))
+    monkeypatch.setattr(admission.os, "open", opening)
+    os.close(admission._open_lock(raced))
     assert attempts == [os.O_RDONLY, os.O_RDONLY | os.O_CREAT | os.O_EXCL, os.O_RDONLY]
 
 
@@ -1072,7 +1074,7 @@ async def test_a_shared_sandbox_records_its_reservation_and_is_watched_while_a_r
     """The RunLock's allocation says what each GPU had at admission, what the Sandbox
     reserved on it and how it is held to that. It is watched until it is destroyed, kept or
     snapshotted, and again once a later Run reattaches to it."""
-    provider = DockerProvider(runtime=runtime, gpu_lock_dir=tmp_path)
+    provider = DockerProvider(runtime=runtime, lock_dir=tmp_path)
     _starts(monkeypatch, runtime)
     daemon = Daemon(monkeypatch, starts=True)
     monkeypatch.setattr(gpu_sharing, "WATCH_SEC", 0.01)
@@ -1143,3 +1145,55 @@ def test_an_allocation_reserves_memory_exactly_when_it_shares_its_gpus() -> None
     for hold, memory in ((GpuHold.WATCHED, None), (GpuHold.WHOLE, 1)):
         with pytest.raises(ValueError, match="exactly when it is shared"):
             GpuAllocation(**base, observed_devices=(), hold=hold, memory_mb=memory)  # type: ignore[arg-type]
+
+
+class _PinningDaemon(Daemon):
+    """A daemon that applies cpusets, whose running containers hold the Host CPUs 0 and 1."""
+
+    async def docker(self, *argv: str, **kwargs: object) -> tuple[int, str, str]:
+        if argv[:3] == ("info", "--format", "{{.CPUSet}}"):
+            self.calls.append(argv)
+            return 0, "true\n", ""
+        if argv[0] == "ps" and f"label={admission.LABEL}" in argv:
+            self.calls.append(argv)
+            return 0, "0-1\n", ""
+        return await super().docker(*argv, **kwargs)
+
+
+#: Four cores of two threads each.
+_CORES = admission.Topology(((0, 4), (1, 5), (2, 6), (3, 7)))
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_is_pinned_to_cores_no_running_sandbox_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both threads of each core it takes, of cores no other Sandbox holds a thread of."""
+    monkeypatch.setattr(admission, "topology", lambda: _CORES)
+    daemon = _PinningDaemon(monkeypatch)
+    with pytest.raises(ProviderStartError, match="stopped after the flags were read"):
+        await DockerProvider(lock_dir=tmp_path).create(_request(Resources(cpus=4)))
+    (run,) = daemon.runs()
+    assert run[run.index("--cpuset-cpus") + 1] == "2-3,6-7"
+    labels = [run[index + 1] for index, flag in enumerate(run) if flag == "--label"]
+    assert f"{admission.LABEL}=2-3,6-7" in labels
+    assert run[run.index("--cpus") + 1] == "4"
+
+
+@pytest.mark.asyncio
+async def test_a_kata_sandbox_starts_half_a_cpu_short_and_unpinned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Kata rounds its VM up from the quota beside a fraction of its own, so the Sandbox
+    starts below its count, and writes a cpuset to the Host byte-reversed, so it is not
+    pinned."""
+    monkeypatch.setattr(admission, "topology", lambda: _CORES)
+    daemon = _PinningDaemon(monkeypatch)
+    provider = DockerProvider(runtime="kata", lock_dir=tmp_path)
+    with pytest.raises(ProviderStartError, match="stopped after the flags were read"):
+        await provider.create(_request(Resources(cpus=2)))
+    (run,) = daemon.runs()
+    assert run[run.index("--cpus") + 1] == "1.5"
+    assert "--cpuset-cpus" not in run
+    labels = [run[index + 1] for index, flag in enumerate(run) if flag == "--label"]
+    assert f"{admission.LABEL}=" in labels

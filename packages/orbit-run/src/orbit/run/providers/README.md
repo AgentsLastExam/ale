@@ -348,9 +348,10 @@ and the default margin), so that a Sandbox that needs more on every model it acc
 the next listed Provider rather than to a leaf that could never admit it.
 
 **Admission.** A Docker leaf admits a Sandbox to the Host's GPUs under one lock for its
-Docker daemon, `/tmp/orbit-gpu-<daemon ID>.lock` (`docker info --format {{.ID}}`), which
-every Orbit process of every user that admits through that daemon takes, whatever its cache,
-from reading the GPUs until `docker run` returns. It is opened read-only, which `flock`
+Docker daemon, `/tmp/orbit-admission-<daemon ID>.lock` (`docker info --format {{.ID}}`),
+which every Orbit process of every user that admits through that daemon takes, whatever its
+cache, from reading the GPUs until `docker run` returns, and under which it also takes its
+[CPUs](#cpus). It is opened read-only, which `flock`
 needs no more than: `fs.protected_regular` refuses `O_CREAT` on another user's file in the
 sticky `/tmp`, so the first process creates it with `O_EXCL`, readable by all whatever its
 umask, and the others open it as it is. The running containers' labels are the record of
@@ -497,6 +498,51 @@ and its size is unchanged, and Kata's cgroup on the Host has no limit either way
 VMs have no swap: the VM base, built from `ubuntu:24.04`, and Firecracker's microVM, built
 from the Task's image, have neither a swap file nor a swap partition. Windows keeps its page
 file and macOS its swap on the guest's own disk, part of what the VM holds.
+
+## CPUs
+
+A Sandbox's `cpus` are hardware threads, an even number of them
+([Task authoring](../../../../../../docs/specs/task-authoring.md#cpus)). Every leaf that
+starts its Sandboxes through a Docker daemon, a Docker one and QEMU's and Firecracker's
+runner containers, pins each Sandbox with `--cpuset-cpus` to the threads of free cores, cores
+no other Sandbox holds a thread of, so no two Sandboxes share a core
+([`admission.py`](admission.py)). The label `orbit.cpus` on each Sandbox's container records
+the Host CPUs it holds, empty where it holds none, so that a snapshot's label never stands
+in, and the daemon's running containers are the record; the daemon's
+[admission lock](#gpu-memory) is held from reading what is free until Docker has started the
+container. A Sandbox that finds too few free waits for them, and says so in the Run's log
+every ten minutes. Nothing keeps the Host's other programs, nor containers Orbit did not
+start, off these CPUs. A rootless daemon applies a cpuset only where the user's systemd
+delegates the cpuset controller to it (`Delegate=cpu cpuset io memory pids` for
+`user@.service`); without it Docker drops `--cpuset-cpus` with a warning, so the leaf pins
+nothing there and records `shared`, as it does on a Host without Linux's CPU topology.
+
+| Provider | What `cpus = N` is | What the Sandbox counts | `cpu_hold` |
+|---|---|---|---|
+| `docker:runc` | `--cpuset-cpus` of the N threads of N/2 free cores, and `--cpus N` | N: `nproc`, `os.sched_getaffinity` and Python 3.13's `os.process_cpu_count()`; the Host's: `os.cpu_count()`, `/proc/cpuinfo` and `/sys/devices/system/cpu`, which a cpuset does not change | `reserved` |
+| `docker:gvisor` | the same | N everywhere: the Sentry counts the cpuset's CPUs, as separate cores whose siblings it does not show, and holds no process to an affinity set inside it | `reserved` |
+| `docker:kata` | N vCPUs, unpinned, and the quota of N in the guest's cgroup: Kata gives its VM a fifth of a vCPU of its own beside the quota, rounded up, so the Sandbox starts with `--cpus N-0.5` and `docker update --cpus N` gives it its whole quota once it runs; Kata cannot be pinned ([Docker](docker/AGENTS.md#kata-and-cpus)) | N everywhere in the guest | `shared` |
+| `qemu` | N vCPUs, each a core of one thread to the guest, on the runner's cpuset of N threads of free cores | N; Windows N cores and N logical processors | `reserved` |
+| `firecracker` | N vCPUs, SMT off, on the runner's cpuset of N threads of free cores | N | `reserved` |
+| `slurm` | a step of `--cpus-per-task=N` Slurm CPUs bound to threads, which Slurm takes from whole cores of the job's ([Slurm](#slurm)) | N everywhere: gVisor counts the step's CPUs | `reserved`, unless the partition lets Slurm give a job's cores to other jobs (`OverSubscribe=FORCE`) |
+| `daytona` | Daytona's `cpu: N`, a quota outside the sandbox | its machine's CPUs, 48 when measured | `shared` |
+| `orchard` | a Tart VM of N vCPUs, which macOS runs on any of its cores | N | `shared` |
+| `fleet` | its Node's leaf's; the Node lends the machine's hardware threads less `--reserve-cpus` | as on that leaf | as on that leaf |
+
+Each leaf that pins checks after start that Docker or Slurm pinned the Sandbox to what it
+took, and QEMU, Firecracker and the Docker leaves where they pin and under Kata check that
+the Sandbox counts N CPUs; a Sandbox that does not is refused. The allocation lists the Host
+CPUs a Sandbox is pinned to on each node, a Slurm Sandbox's too where they are `shared`.
+
+The two threads of a core share it: measured with as many busy processes as CPUs on a Host of
+56 cores of two threads under a load of about 25 (Linux 7.0), four threads of two cores gave
+2.2 to 2.7 cores' throughput under runc, gVisor, QEMU and Firecracker; on OpenRSI, 16 threads
+of 8 cores under Slurm gave 7.6. A gVisor Sandbox's network stack runs on its CPUs too: of 20
+raw packets a Sandbox pinned to a single thread wrote back to back, 3 to 6 left it, where
+unpinned at least 10 did; written 10 ms apart, all of them did. Inside gVisor and the VMs a
+program cannot tell which of its CPUs share a core, nor, under gVisor, pin itself to one: two
+busy processes set to one CPU there ran at 1.55 times one alone, against 1.74 unpinned,
+where under runc they shared it, at 1.36 against 2.46.
 
 ## Container features
 
@@ -793,7 +839,7 @@ configuration is used as it ships.
 | Hands the VM its networks at boot: `docker network connect` succeeds and the VM never sees the network | The sandbox boots on a bridge network of its own, `orbit-net-<sandbox id>`, which no other container joins, so frames another container writes as the Host never reach it (measured). The network is not internal, an `open` Task's included: egress opens by removing the seal and leaves through the network's NAT. Sealing adds filters that drop every frame but those to and from the Host's address, ARP included, so it reaches neither the Internet nor another container; while it is open, the Host's other addresses are reached as any other host is. A sandbox that is not `open` starts sealed: the filters are in place before guestd connects, though the image's own command starts before them. Sealing again replaces each filter in place, so a drop is never missing; opening egress removes them and checks that no drop filter is left. Destroying the sandbox removes its network |
 | Docker's embedded DNS server, `127.0.0.11` on any network but the default bridge, is served through netfilter in the namespace and out of the guest's reach: a lookup failed | As the sandbox starts, the Provider writes over its `/etc/resolv.conf` the one Docker gives a container on the default bridge, which names the Host's upstream servers, read once by a helper there, so the daemon needs its default bridge; the file stays the container's own and writable |
 | Makes the VM exactly the container's memory limit; the guest kernel and agent take about 96 MiB plus 2.5 % of it (512 MiB declared left 395 MiB usable, against 504 MiB on runc) | Starts the VM with `memory_mb + 96 + memory_mb / 40` MiB, which leaves the Task's processes at least what runc gives them; the allocation records `memory_mb`. With the base image's desktop running in 512 MiB, one process then held 312–320 MiB against 240–288 MiB on runc: in a VM the kernel's own work for the desktop is not charged to the container |
-| Gives the VM one vCPU more than `--cpus` and applies the quota in the guest's cgroup | Nothing: the quota holds, and `nproc` reports `cpus + 1` rather than the Host's count |
+| Sizes the VM at its quota and a fifth of a vCPU of its own, rounded up, and writes a cpuset to the Host byte-reversed | Starts the Sandbox half a CPU short, so it has `cpus` vCPUs, gives it its whole quota once it runs, and pins it nowhere ([CPUs](#cpus)) |
 | Cannot take Docker's `--gpus` | Its profile attaches no GPUs |
 | Drops what a filter drops: tc cannot answer with a rejection, so a sealed guest's DNS lookup took 112 s to fail, and broke sudo's first use when the guest did not yet list its own host name | A sandbox that can be sealed gets `NET_ADMIN`, and the framework removes the guest's default route while it is sealed and restores it when it opens. What runc's internal network refuses then fails at once here too; only a blocked port of the Host's address, which stays on-link, times out. The capability works inside the VM only: root there that re-adds the route makes failures slow again, and still reaches nothing. The framework removes the route through guestd, which holds only the container's own capabilities, so root that replaces the framework's Python gains nothing at its next start |
 | Runs no seccomp filter in the guest (`disable_guest_seccomp`) | Nothing: the VM is the boundary, and the filters are outside it |
@@ -955,6 +1001,10 @@ max_nodes = 2
 
 Each entry describes a homogeneous partition's effective per-node limits for that QoS, and
 how many of its nodes one allocation may span (`max_nodes`, one unless it says more).
+`max_cpus` counts Slurm CPUs, which are hardware threads where its nodes' `ThreadsPerCore` is
+more than one. A partition with `OverSubscribe=FORCE` lets Slurm give the same cores to
+several jobs once every CPU of the cluster is allocated, so its Sandboxes record `shared`
+([CPUs](#cpus)).
 CPU-only allocations use CPU entries; an allocation whose solver or verifier needs GPUs
 takes the first matching GPU entry, as whole cards. The provider checks each step's CPU and
 memory limits, the started image and the allocated GPU UUIDs against the devices the guest

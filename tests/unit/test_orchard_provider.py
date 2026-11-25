@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from orbit.core.capability import Arch, SandboxNeeds
+from orbit.core.capability import Arch, CpuHold, SandboxNeeds
 from orbit.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from orbit.core.sandbox import (
     DesktopResolution,
@@ -705,6 +705,7 @@ async def test_file_contract_and_streamed_upload_with_unprivileged_guestd(
         agent_home=str(tmp_path),
         allocation=ResourceAllocation(
             cpus=1,
+            cpu_hold=CpuHold.SHARED,
             memory_mb=1024,
             sudo=False,
             network_mode=NetworkMode.OPEN,

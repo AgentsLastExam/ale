@@ -256,10 +256,19 @@ def _distinct(features: tuple[ContainerFeature, ...]) -> tuple[ContainerFeature,
 _ContainerFeatures = Annotated[tuple[ContainerFeature, ...], AfterValidator(_distinct)]
 
 
+def _even(cpus: int) -> int:
+    return cpus + cpus % 2
+
+
+#: Hardware threads, which a VM sees as its vCPUs. An odd count is rounded up to the next even
+#: one, so that a Sandbox holds both threads of each of its cores.
+_Cpus = Annotated[int, Field(ge=1), AfterValidator(_even)]
+
+
 class Resources(BaseModel):
     model_config = _FROZEN
 
-    cpus: int = Field(default=2, ge=1)
+    cpus: _Cpus = 2
     memory_mb: int = Field(default=8192, ge=1)
     storage_mb: int | None = Field(default=None, ge=1)
     gpus: int = Field(default=0, ge=0)
@@ -478,7 +487,7 @@ class VerifierResources(BaseModel):
 
     model_config = _FROZEN
 
-    cpus: int = Field(ge=1)
+    cpus: _Cpus
     memory_mb: int = Field(ge=1)
     storage_mb: int | None = Field(ge=1)
     gpus: int = Field(ge=0)

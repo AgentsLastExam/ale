@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from orbit.core.capability import CapabilityProfile, SandboxNeeds
+from orbit.core.capability import CapabilityProfile, CpuHold, SandboxNeeds
 from orbit.core.config import RunConfig, SandboxConfig, SlurmProviderConfig
 from orbit.core.errors import ProviderStartError
 from orbit.core.harness import (
@@ -515,6 +515,7 @@ class MemorySandbox(Sandbox):
             ),
             allocation=ResourceAllocation(
                 cpus=request.resources.cpus,
+                cpu_hold=CpuHold.SHARED,
                 memory_mb=request.resources.memory_mb,
                 sudo=request.sudo,
                 network_mode=request.network.mode,

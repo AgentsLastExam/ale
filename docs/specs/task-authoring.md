@@ -94,7 +94,7 @@ network_justification = "the Task reads one publisher's live catalog"
 os = "linux"                                # linux | windows | macos; default linux
 # image = "registry.example/image:tag"      # Orbit; used directly, or a build script's base
 build_timeout_sec = 3600                    # seconds the Task's own build may run; default 3600
-cpus = 2                                    # whole CPUs; default 2
+cpus = 2                                    # hardware threads, an odd count rounded up; default 2
 memory_mb = 8192                            # default 8192
 storage_mb = 8192                           # writable storage; default the Provider's
 gpus = 0                                    # GPU count, not indices; default 0
@@ -134,7 +134,7 @@ env = { REFERENCE_DB = "${REFERENCE_DB}" }  # the verifier only
 [verifier.environment]                      # a separate or snapshot verifier's own sandbox
 # image = "registry.example/verifier:tag"   # Orbit; separate only; not with tests/Dockerfile
 build_timeout_sec = 3600                    # separate only; default 3600
-cpus = 1                                    # default [environment].cpus
+cpus = 2                                    # default [environment].cpus
 memory_mb = 4096                            # default [environment].memory_mb
 storage_mb = 8192                           # default the Provider's
 gpus = 0                                    # default 0
@@ -154,7 +154,7 @@ visibility = false                          # a read-only copy for the agent; de
 
 [verifier.validation.environment]           # over [verifier.environment], key by key
 # image = "registry.example/val:tag"        # separate only; not with validation/Dockerfile
-cpus = 2                                    # here [verifier.environment]'s 1 otherwise
+cpus = 4                                    # here [verifier.environment]'s 2 otherwise
 
 [solution]
 env = { CATALOG_TOKEN = "${CATALOG_TOKEN}" }  # the oracle only
@@ -317,6 +317,25 @@ its own disk, as Windows and macOS do, keeps its paging. A Linux Sandbox's `/dev
 half its `memory_mb`, as on a Linux machine of that memory, so that processes that share
 memory through it, such as PyTorch's DataLoader workers, get the same room on every Provider
 ([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#memory)).
+
+### CPUs
+
+`cpus` counts hardware threads, the CPUs Linux counts, which a VM sees as its vCPUs. The two
+threads of one core share its execution units, so one runs at half to two thirds of the
+core's speed while the other is busy. An odd count is therefore rounded up to the next even
+one: a Sandbox holds both threads of each of its cores, and its programs count `cpus` CPUs
+when they size their thread pools (`nproc`, `os.sched_getaffinity`, the CPUs a VM has).
+
+A Provider pins each Sandbox to Host CPUs, on cores of its own, that no other Sandbox it
+admits is given, where it can, and a Sandbox waits while too few are free. The RunLock
+records how each Sandbox held its CPUs: `reserved`, pinned to CPUs held for it, which it
+lists; or `shared`, a quota of CPU time, vCPUs the Host runs anywhere, or CPUs a scheduler
+may also give another job. Nothing in Orbit keeps the Host's other programs off a Sandbox's
+CPUs, so a Task whose result depends on having its cores to itself, such as one that times
+its code, checks that it has them where it runs, in setup and again as it verifies, and exits
+with the reason where it cannot confirm it, so that the episode fails rather than scores.
+What each Provider gives is in
+[Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#cpus).
 
 ### GPUs
 

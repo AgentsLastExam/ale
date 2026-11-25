@@ -46,7 +46,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
-from orbit.core.capability import CapabilityProfile, GpuHold, GpuModel, SandboxNeeds, accepts_model
+from orbit.core.capability import (
+    CapabilityProfile,
+    CpuHold,
+    GpuHold,
+    GpuModel,
+    SandboxNeeds,
+    accepts_model,
+)
 from orbit.core.config import GPU_MEMORY_MARGIN_MB
 from orbit.core.errors import (
     GuestUnreachableError,
@@ -84,7 +91,7 @@ from orbit.run.gpu import parse_nvidia_smi
 from orbit.run.images import resolve_container_image, resolve_prepared_container_image
 from orbit.run.iptables import GATEWAY_CHAIN
 from orbit.run.process import run
-from orbit.run.providers import machine_arch, memory, relay
+from orbit.run.providers import admission, machine_arch, memory, relay
 from orbit.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from orbit.run.providers.docker import (
     gpu_sharing,
@@ -900,6 +907,13 @@ class Runtime:
     GPUs, its flag that does, which ``<runtime> flags`` lists and a Sandbox's annotation
     ``dev.gvisor.flag.<flag>`` sets for it alone; a shared Sandbox of one without is only
     watched."""
+    pins: bool = True
+    """Whether it holds a Sandbox to the cpuset it is started with, on the Host's CPUs that
+    ``--cpuset-cpus`` names."""
+    vcpus_from_quota: bool = False
+    """Whether it sizes each Sandbox's VM by its CPU quota, rounded up beside a fraction of a
+    vCPU of its own (Kata): such a Sandbox starts with half a CPU less, which it rounds to
+    ``cpus`` vCPUs, and is given its whole quota once it runs."""
 
     @property
     def feature_sets(self) -> tuple[frozenset[ContainerFeature], ...]:
@@ -973,6 +987,9 @@ RUNTIMES: dict[str, Runtime] = {
         guest_kernel=True,
         oom_kills=kata.OOM_KILLS,
         oom_counter="its cgroup",
+        # Kata writes a cpuset to the Host's cgroup byte-reversed (the Docker AGENTS.md).
+        pins=False,
+        vcpus_from_quota=True,
     ),
     "gvisor": Runtime(
         gvisor.RUNTIME,
@@ -1630,15 +1647,17 @@ class DockerProvider(Provider):
         *,
         gpus: tuple[int, ...] = (),
         gpu_memory_margin_mb: int = GPU_MEMORY_MARGIN_MB,
-        gpu_lock_dir: Path = Path("/tmp"),
+        lock_dir: Path = Path("/tmp"),
         runtime: str = "runc",
     ) -> None:
         self.gpus = gpus
         #: What a GPU must have free beyond a shared Sandbox's need to admit it.
         self.gpu_memory_margin_mb = gpu_memory_margin_mb
-        #: Where the lock file of each Docker daemon's GPU admission is, which every user of
-        #: the Host can lock.
-        self.gpu_lock_dir = gpu_lock_dir
+        #: Its admission through the daemon, whose lock file is in ``lock_dir``, where every
+        #: user of the Host can lock it.
+        self._admission = admission.Admission(
+            lambda *argv, timeout: _docker(*argv, timeout=timeout), lock_dir
+        )
         #: A key of :data:`RUNTIMES`: ``kata`` starts each sandbox in a microVM of its own.
         self.runtime = runtime
         # An image's conformance cannot change while it is pinned to a digest, and the
@@ -1646,7 +1665,6 @@ class DockerProvider(Provider):
         # once rather than ten thousand times.
         self._checked: dict[str, list[str]] = {}
         self._gpu_models: tuple[GpuModel, ...] | None = None
-        self._daemon: str | None = None
         self._networks = _Networks()
         self._watchdog = gpu_sharing.Watchdog()
         self._host_ports = rootless.HostPorts(self._rootless_bridges)
@@ -1658,6 +1676,7 @@ class DockerProvider(Provider):
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
         runtime = RUNTIMES[self.runtime]
         models = await self._models() if runtime.gpus else ()
+        host = admission.topology()
         profiles = []
         for features in runtime.feature_sets:
             # A commit keeps no volume and what a Sandbox writes to one is not measured
@@ -1676,6 +1695,7 @@ class DockerProvider(Provider):
                     gpus=bool(models),
                     gpu_models=models,
                     gpu_hold=runtime.gpu_hold if models else GpuHold.WHOLE,
+                    max_cpus=host.threads if host else None,
                     storage_limit=True,
                     container_features=features,
                     volumes=True,
@@ -1914,7 +1934,7 @@ class DockerProvider(Provider):
             "--label", f"{NETWORK_LABEL}={request.network.mode.value}",
             "--label", f"{WRITTEN_LABEL}={written}",
             "--label", f"{volumes.MOUNTS_LABEL}={volumes.mounts_label(mounts)}",
-            "--cpus", str(resources.cpus),
+            "--cpus", str(resources.cpus - 0.5 if runtime.vcpus_from_quota else resources.cpus),
             "--memory", memory_limit,
             "--memory-swap", memory_limit,
             # Kata ignores it: its guest's own /dev/shm already holds half the microVM.
@@ -1954,14 +1974,13 @@ class DockerProvider(Provider):
                     request = request.model_copy(
                         update={"proxy_url": _reachable(request.proxy_url, host=host_ip)}
                     )
-            # One lock for every GPU this daemon's Sandboxes may take, held from reading what
-            # is free until Docker has started the Sandbox, whose labels then record what it
-            # took.
-            async with (
-                gpu_sharing.locked(await self._lock_path())
-                if resources.gpus
-                else contextlib.nullcontext()
-            ):
+            # One lock for the CPUs and GPUs this daemon's Sandboxes take, held from reading
+            # what is free until Docker has started the Sandbox, whose labels then record what
+            # it took.
+            async with self._admission.admitted(
+                resources, pins=runtime.pins, gpus=bool(resources.gpus)
+            ) as cpu_grant:
+                argv += admission.run_args(cpu_grant)
                 if resources.gpus:
                     admitted = await self._admit(resources, candidates)
                     argv += _gpu_run_args(tuple(device.id for device in admitted))
@@ -1990,9 +2009,11 @@ class DockerProvider(Provider):
                 raise ProviderStartError(f"could not start container: {stderr.strip()}")
 
             code, started, stderr = await _docker(
-                "inspect", "--format", "{{.Image}} {{.HostConfig.Runtime}}", container, timeout=30
-            )
-            started_content, _, ran_under = started.strip().partition(" ")
+                "inspect", "--format",
+                "{{.Image}} {{.HostConfig.Runtime}} {{.HostConfig.CpusetCpus}}", container,
+                timeout=30,
+            )  # fmt: skip
+            started_content, ran_under, pinned_to = [*started.split(), "", "", ""][:3]
             if code != 0 or started_content != resolved_image.observed_identity:
                 raise ProviderStartError(
                     "started container image identity does not match the resolved image: "
@@ -2002,6 +2023,19 @@ class DockerProvider(Provider):
                 raise ProviderStartError(
                     f"Docker started {container} under runtime {ran_under!r}, not {registered!r}"
                 )
+            if cpu_grant is not None and admission.parse_cpu_list(pinned_to) != cpu_grant.cpus:
+                raise ProviderStartError(
+                    f"Docker pinned {container} to CPUs {pinned_to or 'none'}, not "
+                    f"{admission.cpu_list(cpu_grant.cpus)}"
+                )
+            if runtime.vcpus_from_quota:
+                code, _, stderr = await _docker(
+                    "update", "--cpus", str(resources.cpus), container, timeout=60
+                )
+                if code != 0:
+                    raise ProviderStartError(
+                        f"could not give {container} its {resources.cpus} CPUs: {stderr.strip()}"
+                    )
 
             runtime_identity = None
             if admitted:
@@ -2035,6 +2069,8 @@ class DockerProvider(Provider):
             if mounts:
                 meter = await volumes.Meter.start(sandbox_id, mounts, NETFILTER_IMAGE)
             await set_and_prove_elevation(client, request, agent_user)
+            if cpu_grant is not None or runtime.guest_kernel:
+                await admission.require_cpus(client, resources.cpus)
             observed_gpu: tuple[GpuDevice, ...] = ()
             if admitted:
                 observed_gpu = _verify_docker_gpu(admitted, await self._container_gpus(client))
@@ -2078,6 +2114,8 @@ class DockerProvider(Provider):
             resolved_image=resolved_image,
             allocation=ResourceAllocation(
                 cpus=resources.cpus,
+                cpu_hold=CpuHold.SHARED if cpu_grant is None else CpuHold.RESERVED,
+                host_cpus=() if cpu_grant is None else (cpu_grant.cpus,),
                 memory_mb=resources.memory_mb,
                 storage_mb=resources.storage_mb,
                 gpu=(
@@ -2129,16 +2167,6 @@ class DockerProvider(Provider):
         if code != 0:
             raise ProviderStartError(f"could not find the Docker daemon: {stderr.strip()}")
         return rootless.namespaces(endpoint.strip())
-
-    async def _lock_path(self) -> Path:
-        """The lock file of this Docker daemon's GPU admission, by the daemon's ID, which
-        every Orbit process that admits through the daemon takes, whatever its user or cache."""
-        if self._daemon is None:
-            code, out, stderr = await _docker("info", "--format", "{{.ID}}", timeout=30)
-            if code != 0 or not out.strip():
-                raise ProviderStartError(f"could not identify the Docker daemon: {stderr.strip()}")
-            self._daemon = out.strip()
-        return self.gpu_lock_dir / f"orbit-gpu-{self._daemon}.lock"
 
     async def _admit(
         self, resources: Resources, candidates: tuple[str, ...]

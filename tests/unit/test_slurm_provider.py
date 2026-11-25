@@ -147,9 +147,9 @@ def test_an_allocation_is_sized_for_every_verifier_it_may_hold_in_turn():
         ),
     )
     solver = needs(Resources(cpus=2, memory_mb=2048)).model_copy(update={"verifier": verifiers})
-    assert _capacity(solver) == (3, step_memory_mb(6144), 0, 1)
+    assert _capacity(solver) == (4, step_memory_mb(6144), 0, 1)
     assert _capacity(solver, Resources(cpus=1, memory_mb=1024, gpus=1, nodes=2)) == (
-        3,
+        4,
         step_memory_mb(6144),
         1,
         2,
@@ -655,7 +655,7 @@ async def test_a_sandbox_slurm_ended_is_explained_so_before_an_oom_kill_it_outli
     transport = job_module.JobTransport(
         [],
         job_module.SandboxSteps(held.job, "1", "n0"),
-        job_module.StepReady(image="i", devices=(), step="0", node="n0"),
+        job_module.StepReady(image="i", devices=(), step="0", node="n0", cpus=(0, 1)),
         [Watcher()],
     )
     explained = await transport.explain(GuestUnreachableError("guest went away"))
@@ -942,6 +942,7 @@ def test_a_sandbox_step_spans_the_first_nodes_of_the_allocation(monkeypatch, tmp
     argv = started[0]
     assert "--nodelist=n0,n1" in argv and "--ntasks=2" in argv and "--ntasks-per-node=1" in argv
     assert "--kill-on-bad-exit=1" in argv and "--gres=gpu:8" in argv
+    assert "--cpus-per-task=4" in argv and "--cpu-bind=threads" in argv
 
 
 def test_a_router_derives_its_wireguard_public_key_as_x25519_does():
@@ -984,7 +985,7 @@ def test_each_node_gets_the_nodes_variables_and_nccl_keeps_to_infiniband_only_on
     from orbit.run.providers.slurm.provider import _group_variables
 
     def ready(node, hcas):
-        return StepReady(image="i", devices=(), step="0", node=node, hcas=hcas)
+        return StepReady(image="i", devices=(), step="0", node=node, hcas=hcas, cpus=(0,))
 
     both = _group_variables([ready("a", ("/dev/infiniband/uverbs1",)), ready("b", ("x",))])
     assert both[1] == {

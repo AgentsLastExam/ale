@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import shutil
 from collections.abc import Sequence
@@ -28,7 +29,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model, unmet
+from orbit.core.capability import (
+    Arch,
+    CapabilityProfile,
+    CpuHold,
+    SandboxNeeds,
+    accepts_model,
+    unmet,
+)
 from orbit.core.config import SlurmPartition, SlurmProviderConfig
 from orbit.core.errors import (
     AllocationEndedError,
@@ -542,6 +550,16 @@ class SlurmProvider(Provider):
         self.config = config
         #: The snapshots this process saved, by handle, with the allocation that holds them.
         self.snapshots: dict[str, tuple[_Chain, _Snapshot]] = {}
+        self._reserved: dict[str, bool] = {}
+
+    async def _reserves(self, partition: SlurmPartition) -> bool:
+        """Whether Slurm gives a job's CPUs to it alone in ``partition``: not where it may give
+        a core to several jobs that did not ask to share it (``OverSubscribe=FORCE``)."""
+        if partition.name not in self._reserved:
+            shown = await slurm("scontrol", "show", "partition", partition.name, "-o")
+            setting = re.search(r"\bOverSubscribe=(\w+)", shown)
+            self._reserved[partition.name] = setting is not None and setting[1] != "FORCE"
+        return self._reserved[partition.name]
 
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
         return tuple(
@@ -951,6 +969,12 @@ class SlurmProvider(Provider):
                 resolved_image=resolved,
                 allocation=ResourceAllocation(
                     cpus=resources.cpus,
+                    cpu_hold=(
+                        CpuHold.RESERVED
+                        if await self._reserves(chain.job.partition)
+                        else CpuHold.SHARED
+                    ),
+                    host_cpus=tuple(ready.cpus for ready in readies),
                     memory_mb=resources.memory_mb,
                     gpu=gpu,
                     sudo=request.sudo,

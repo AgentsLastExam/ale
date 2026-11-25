@@ -276,7 +276,7 @@ async def test_a_gvisor_sandbox_has_mount_and_raw_sockets_only_when_it_asked() -
 #: ``frame DST_MAC SRC_MAC SRC DST PORT`` the same as a whole Ethernet frame on eth0,
 #: ``arp DST_MAC SRC_MAC SENDER TARGET`` an ARP reply.
 _FORGE = r"""
-import socket, struct, sys
+import socket, struct, sys, time
 
 def checksum(data):
     data += bytes(len(data) % 2)
@@ -301,6 +301,8 @@ if kind == "ip":
     with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW) as raw:
         for _ in range(count):
             raw.sendto(syn(args[0], args[1], int(args[2])), (args[1], 0))
+            # gVisor's netstack on one CPU drops most of a burst before it reaches the device.
+            time.sleep(0.01)
 else:
     head = mac(args[0]) + mac(args[1])
     if kind == "frame":
@@ -314,6 +316,7 @@ else:
         link.bind(("eth0", 0))
         for _ in range(count):
             link.send(frame)
+            time.sleep(0.01)
 print("sent")
 """
 #: Connects to the fixed Gateway port, whatever answers there.

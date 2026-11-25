@@ -88,7 +88,7 @@ class TestUnmet:
                 {"network_mode": NetworkMode.ALLOWLIST},
                 "network allowlist is not one it applies (block, open)",
             ),
-            ({"resources": Resources(cpus=9)}, "9 CPUs exceed its 8"),
+            ({"resources": Resources(cpus=10)}, "10 CPUs exceed its 8"),
             (
                 {"resources": Resources(memory_mb=16385)},
                 "16385 MB of memory exceed its 16384 MB",
@@ -107,6 +107,11 @@ class TestUnmet:
         self, asked: dict[str, object], reason: str
     ) -> None:
         assert unmet(PROFILE, needs(**asked)) == (reason,)
+
+    def test_an_odd_cpu_count_is_needed_as_the_next_even_one(self) -> None:
+        assert Resources(cpus=7).cpus == 8
+        assert unmet(PROFILE, needs(resources=Resources(cpus=7))) == ()
+        assert unmet(PROFILE, needs(resources=Resources(cpus=9))) == ("10 CPUs exceed its 8",)
 
     def test_a_sandbox_that_names_storage_mb_needs_a_profile_that_limits_its_writes(self) -> None:
         """A limit nothing enforces lets a Sandbox fill the Host's disk unnoticed."""

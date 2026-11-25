@@ -43,6 +43,19 @@ job's limit, and a step that asks for `--gres=gpu:0` in a GPU job sees no GPU. B
 Sandbox's step to threads: Slurm can allocate both hardware threads of a core when one CPU
 is requested.
 
+A Slurm CPU is a hardware thread on OpenRSI's nodes (`ThreadsPerCore=2`, 208 CPUs of 104
+cores, `select/cons_tres` with `CR_CORE_MEMORY`, which allocates a job whole cores). Measured
+there (November 2026), a step of `--cpus-per-task=16 --cpu-bind=threads` ran on 16 threads
+of 8 cores, at 7.4 to 8.3 cores of throughput under gVisor, and the whisper sample's
+verifier, which needs 16 cores, refused it (`cpu_smt_overlap`). `--hint=nomultithread` ran it
+on one thread of each of 16 cores, at 15.9. OpenRSI's partitions are all
+`OverSubscribe=FORCE:4`: Slurm may give up to 4 jobs the same cores once every CPU of the
+cluster is allocated, whatever a job asks (the partition's setting takes precedence over
+`--exclusive`), so their Sandboxes record `shared`. Decided: no mode of one thread per core,
+which would not keep other jobs off the cores either; a step gets its even number of threads
+as Slurm packs them, and a Task that needs cores to itself checks for them where it runs,
+though inside gVisor it can neither see which threads share a core nor pin itself to one.
+
 One allocation serves a solver and every Sandbox booted from its snapshots, as the episode
 boots them one at a time: a validation round's verifier and next solver, or a snapshot
 verifier, start from the node's own Podman store, with no copy and no second wait in the

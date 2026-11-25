@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds
+from orbit.core.capability import Arch, CapabilityProfile, CpuHold, SandboxNeeds
 from orbit.core.errors import ProviderCapabilityError, ProviderStartError, TaskError
 from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -68,7 +68,7 @@ from orbit.run import HELPER_RUNTIME, guestd, orbit_image
 from orbit.run.framework import with_framework
 from orbit.run.images import acquire_lock, resolve_container_image, resolve_prepared_container_image
 from orbit.run.process import run
-from orbit.run.providers import relay
+from orbit.run.providers import admission, relay
 from orbit.run.providers.desktop import CONTAINER_VARIABLE, require_resolution
 from orbit.run.providers.docker import volumes as docker_volumes
 from orbit.run.providers.privileges import set_and_prove_elevation
@@ -654,8 +654,13 @@ class FirecrackerProvider(Provider):
         self.snapshot_dir = snapshot_dir or self.overlay_dir.parent / "firecracker-snapshots"
         self.disk_dir = disk_dir or self.overlay_dir.parent / "firecracker-disks"
         self.runner_image = runner_image
+        #: The Host CPUs each runner, and so its microVM's vCPUs, is pinned to.
+        self._admission = admission.Admission(
+            lambda *argv, timeout: _run("docker", *argv, timeout=timeout)
+        )
 
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        host = admission.topology()
         return (
             CapabilityProfile(
                 provider=self.id,
@@ -670,7 +675,7 @@ class FirecrackerProvider(Provider):
                 snapshot=True,
                 # Each save stacks one more layer, so a chain of them is capped.
                 max_saves=MAX_LAYERS,
-                max_cpus=MAX_CPUS,
+                max_cpus=min(MAX_CPUS, host.threads) if host else MAX_CPUS,
                 # Each microVM writes to a disk of its own, sized from storage_mb.
                 storage_limit=True,
                 container_features=FEATURES,
@@ -752,7 +757,7 @@ class FirecrackerProvider(Provider):
                 views=_view_devices(len(layers), len(viewed), viewed_paths),
             )
             host_port = free_port()
-            await self._boot(
+            pinned = await self._boot(
                 container,
                 request,
                 storage,
@@ -776,6 +781,7 @@ class FirecrackerProvider(Provider):
             client = await self._first_connection(container, host_port, token, console)
             clients.append(client)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
+            await admission.require_cpus(client, request.resources.cpus)
             storage_mb = await self._root_capacity_mb(
                 client, request.resources.storage_mb, written_mb
             )
@@ -806,6 +812,8 @@ class FirecrackerProvider(Provider):
             resolved_image=resolved_image,
             allocation=ResourceAllocation(
                 cpus=request.resources.cpus,
+                cpu_hold=CpuHold.SHARED if pinned is None else CpuHold.RESERVED,
+                host_cpus=() if pinned is None else (pinned.cpus,),
                 memory_mb=request.resources.memory_mb,
                 storage_mb=storage_mb,
                 sudo=request.sudo,
@@ -976,8 +984,9 @@ class FirecrackerProvider(Provider):
         *,
         written_mb: int = 0,
         views: tuple[Path, ...] = (),
-    ) -> None:
-        """Start the runner, which makes the writable disk and starts the microVM.
+    ) -> admission.Grant | None:
+        """Start the runner, which makes the writable disk and starts the microVM; the Host
+        CPUs it, and so each of the microVM's vCPUs, is pinned to.
 
         The disk leaves room for what ``storage_mb`` holds beyond ``written_mb``, what the
         snapshot it boots from holds, as a disk of that size holding that snapshot would.
@@ -1011,11 +1020,13 @@ class FirecrackerProvider(Provider):
             "--mount", f"type=bind,src={storage.resolve()},dst={RUNNER_STORAGE}",
             "--publish", f"127.0.0.1:{host_port}:{GUEST_PORT}",
             "--env", f"RW_DISK_MB={storage_mb + STORAGE_OVERHEAD_MB}",
-            self.runner_image,
         ]  # fmt: skip
-        code, _, stderr = await _run(*argv, timeout=180)
+        async with self._admission.admitted(request.resources) as pinned:
+            pins = admission.run_args(pinned)
+            code, _, stderr = await _run(*argv, *pins, self.runner_image, timeout=180)
         if code != 0:
             raise ProviderStartError(f"could not start the Firecracker runner: {stderr.strip()}")
+        return pinned
 
     async def _first_connection(
         self, container: str, host_port: int, token: str, console: Console

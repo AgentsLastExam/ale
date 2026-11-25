@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from orbit.core.capability import Arch
+from orbit.core.capability import Arch, CpuHold
 from orbit.core.errors import ProviderCapabilityError, TaskError
 from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -128,6 +128,7 @@ def sandbox(
         ),
         allocation=ResourceAllocation(
             cpus=2,
+            cpu_hold=CpuHold.SHARED,
             memory_mb=2048,
             sudo=False,
             network_mode=req.network.mode,
@@ -193,8 +194,8 @@ async def test_gpus_vm_images_and_other_systems_are_refused_before_anything_star
         await provider.accepts(vm)
     with pytest.raises(ProviderCapabilityError, match="runs linux, not windows"):
         await provider.accepts(request(os=OperatingSystem.WINDOWS))
-    with pytest.raises(ProviderCapabilityError, match="33 CPUs exceed its 32"):
-        await provider.accepts(request(resources=Resources(cpus=33)))
+    with pytest.raises(ProviderCapabilityError, match="34 CPUs exceed its 32"):
+        await provider.accepts(request(resources=Resources(cpus=34)))
 
 
 def test_the_machine_boots_the_shared_kernel_on_the_read_only_root() -> None:
@@ -456,14 +457,22 @@ async def test_a_snapshot_boot_has_room_for_its_storage_beyond_what_the_snapshot
         await provider._boot(
             "orbit-fc-x", req, tmp_path, tmp_path / "rootfs.ext4", (), 4100, written_mb=written
         )
-    disks = [next(arg for arg in call if arg.startswith("RW_DISK_MB=")) for call in recorder.calls]
+    disks = [
+        next(arg for arg in call if arg.startswith("RW_DISK_MB="))
+        for call in recorder.calls
+        if "run" in call
+    ]
     assert disks == [
         f"RW_DISK_MB={4096 - 700 + STORAGE_OVERHEAD_MB}",
         f"RW_DISK_MB={4096 + STORAGE_OVERHEAD_MB}",
         f"RW_DISK_MB={DEFAULT_STORAGE_MB + STORAGE_OVERHEAD_MB}",
     ]
     # The runner carries what its snapshot holds, for a later Run that drives it again.
-    labels = [next(arg for arg in call if arg.startswith(WRITTEN_LABEL)) for call in recorder.calls]
+    labels = [
+        next(arg for arg in call if arg.startswith(WRITTEN_LABEL))
+        for call in recorder.calls
+        if "run" in call
+    ]
     assert labels == [f"{WRITTEN_LABEL}=700", f"{WRITTEN_LABEL}=0", f"{WRITTEN_LABEL}=700"]
 
 

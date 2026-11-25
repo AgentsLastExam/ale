@@ -101,7 +101,7 @@ def test_a_separate_validation_verifier_shares_the_tasks_verifier_provider(
         {
             "agent": {"validation_rounds": 1},
             "verifier": {
-                "validation": {"environment_mode": "separate", "environment": {"cpus": 3}}
+                "validation": {"environment_mode": "separate", "environment": {"cpus": 4}}
             },
         },
     )
@@ -111,21 +111,21 @@ def test_a_separate_validation_verifier_shares_the_tasks_verifier_provider(
     )
     assert image == "validation"
     assert (solver_role, verifier_role) == (SandboxRole.SHARED, SandboxRole.VERIFIER)
-    assert solver.verifier is None and verifier.resources.cpus == 3
+    assert solver.verifier is None and verifier.resources.cpus == 4
     snapshot = _task(
         tmp_path / "snapshot",
         {
             "agent": {"validation_rounds": 1},
             "verifier": {
-                "validation": {"environment_mode": "snapshot", "environment": {"cpus": 3}}
+                "validation": {"environment_mode": "snapshot", "environment": {"cpus": 4}}
             },
         },
     )
     snapshot.validations = 1
     ((_, _, booted, _),) = _sandboxes(snapshot, snapshot=False, solver=True, timeouts=RunTimeouts())
-    assert booted.verifier is not None and booted.verifier.resources.cpus == 3
+    assert booted.verifier is not None and booted.verifier.resources.cpus == 4
     resources = round_verifier_resources(snapshot.spec)
-    assert resources is not None and resources.cpus == 3
+    assert resources is not None and resources.cpus == 4
 
 
 def test_a_sandbox_boots_from_a_snapshot_or_views_one(tmp_path: Path) -> None:
@@ -223,6 +223,6 @@ async def test_a_verifier_refused_its_views_gets_the_volumes_copied_from_the_sna
     # solver's size, and a verifier of its own size that mounts nothing.
     for viewer, reader, verifier in (verifiers_asked[:3], verifiers_asked[3:]):
         assert viewer.volumes_from is not None and reader.snapshot == viewer.volumes_from
-        assert (reader.resources.cpus, verifier.resources.cpus) == (1, 4)
+        assert (reader.resources.cpus, verifier.resources.cpus) == (2, 4)
         assert verifier.volumes_from is None and verifier.snapshot is None
     assert provider.snapshots == {}

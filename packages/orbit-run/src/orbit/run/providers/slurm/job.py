@@ -121,6 +121,8 @@ class StepReady(BaseModel):
     """The volume candidates the image has a directory at, which the Sandbox mounts."""
     hcas: tuple[str, ...] = ()
     """The InfiniBand verbs devices the node gave a Sandbox that spans several."""
+    cpus: tuple[int, ...]
+    """The node's CPUs its step runs on."""
 
 
 class Job:

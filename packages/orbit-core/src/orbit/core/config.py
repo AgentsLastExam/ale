@@ -297,6 +297,7 @@ class SlurmPartition(BaseModel):
     name: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
     qos: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
     max_cpus: int = Field(ge=1)
+    """Slurm CPUs, which are hardware threads where its nodes count each core's threads."""
     max_memory_mb: int = Field(ge=1)
     gpu_model: GpuModel | None = None
     max_gpus: int = Field(default=0, ge=0)

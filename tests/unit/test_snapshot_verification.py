@@ -144,7 +144,7 @@ async def test_the_verifier_boots_from_the_solvers_snapshot_with_its_own_resourc
     # It saw what the agent left outside any declared artifact.
     assert result.verdict.rewards == {"reward": 1.0}
     solver, verifier = provider.requests
-    assert (solver.role, solver.snapshot, solver.resources.cpus) == (SandboxRole.SOLVER, None, 1)
+    assert (solver.role, solver.snapshot, solver.resources.cpus) == (SandboxRole.SOLVER, None, 2)
     solver_sandbox = provider.sandboxes[0]
     assert verifier.role is SandboxRole.VERIFIER
     assert verifier.snapshot == f"memory:snapshot:{solver_sandbox.sandbox_id}"

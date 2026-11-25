@@ -28,6 +28,7 @@ from orbit.core.taskspec import (
 __all__ = [
     "Arch",
     "CapabilityProfile",
+    "CpuHold",
     "GpuHold",
     "GpuModel",
     "SandboxNeeds",
@@ -50,6 +51,16 @@ class Arch(StrEnum):
         """What a Task's Sandbox runs. A Task names no architecture: Orbit's images and the
         Tasks built on them are x86-64, apart from macOS, which only Apple silicon runs."""
         return cls.ARM64 if operating_system is OperatingSystem.MACOS else cls.X86_64
+
+
+class CpuHold(StrEnum):
+    """How a Sandbox holds its CPUs."""
+
+    RESERVED = "reserved"
+    """Pinned to Host CPUs that no other Sandbox is given."""
+    SHARED = "shared"
+    """A share of CPUs that others may run on too: a time quota, vCPUs the Host runs on any
+    of its threads, or CPUs a scheduler may also give another job."""
 
 
 class GpuHold(StrEnum):
@@ -114,6 +125,7 @@ class CapabilityProfile(BaseModel):
     or watched, where the leaf shares them; whole where it does not. A Sandbox that names none
     always holds them whole."""
     max_cpus: int | None = Field(default=None, ge=1)
+    """The most hardware threads one Sandbox holds on each machine."""
     max_memory_mb: int | None = Field(default=None, ge=1)
     max_nodes: int = Field(default=1, ge=1)
     """How many machines one Sandbox may span, each of ``max_cpus`` and ``max_memory_mb``."""

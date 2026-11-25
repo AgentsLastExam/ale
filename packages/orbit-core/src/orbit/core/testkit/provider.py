@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from orbit.core.capability import CpuHold
 from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
@@ -430,6 +431,22 @@ class ProviderConformance:
             assert sandbox.allocation.leaf in leaves
 
     @pytest.mark.asyncio
+    async def test_a_sandbox_runs_on_the_cpus_it_was_given(self) -> None:
+        """One CPU asked for is two, as an odd count rounds up: every Sandbox records how it
+        holds them, one held for it alone is pinned, and one pinned lists two on each node
+        and, on Linux, counts two."""
+        request = await self.request(resources=Resources(cpus=1, memory_mb=1024))
+        async with await self.provider.create(request) as sandbox:
+            allocation = sandbox.allocation
+            assert allocation.cpus == 2
+            assert allocation.host_cpus or allocation.cpu_hold is CpuHold.SHARED
+            if allocation.host_cpus:
+                assert all(len(set(cpus)) == 2 for cpus in allocation.host_cpus)
+                if request.os is OperatingSystem.LINUX:
+                    seen = await sandbox.exec(["nproc"], identity=Identity.AGENT)
+                    assert seen.ok and seen.stdout.strip() == "2", seen.stderr
+
+    @pytest.mark.asyncio
     async def test_a_sandbox_is_driven_again_by_its_handle(self) -> None:
         """Another Sandbox object drives the same Sandbox by its handle, and ``discard``
         destroys it, idempotently, after which reattaching fails."""
@@ -735,7 +752,7 @@ class ProviderConformance:
             await sandbox.destroy()
         larger = original.resources.model_copy(
             update={
-                "cpus": original.resources.cpus + 1,
+                "cpus": original.resources.cpus + 2,
                 "memory_mb": original.resources.memory_mb + 1024,
             }
         )

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
+from orbit.core.capability import Arch, CapabilityProfile, CpuHold, SandboxNeeds, accepts_model
 from orbit.core.errors import ProviderCapabilityError, ProviderStartError
 from orbit.core.sandbox import (
     SANDBOX_GATEWAY_PORT,
@@ -74,7 +74,7 @@ from orbit.run.images import (
     set_parent,
 )
 from orbit.run.process import run
-from orbit.run.providers import relay
+from orbit.run.providers import admission, relay
 from orbit.run.providers.desktop import require_resolution
 from orbit.run.providers.docker.provider import only_vanished
 from orbit.run.providers.privileges import set_and_prove_elevation
@@ -730,8 +730,13 @@ class QemuProvider(Provider):
         self.image_cache_dir = image_cache_dir
         self.gpu_devices = gpu_devices
         self.gpu_lock_dir = gpu_lock_dir or cache_root() / "gpu-locks" / self.name
+        #: The Host CPUs each runner, and so its VM's vCPUs, is pinned to.
+        self._admission = admission.Admission(
+            lambda *argv, timeout: _run("docker", *argv, timeout=timeout)
+        )
 
     async def profiles(self) -> tuple[CapabilityProfile, ...]:
+        host = admission.topology()
         return tuple(
             CapabilityProfile(
                 provider=self.id,
@@ -747,6 +752,7 @@ class QemuProvider(Provider):
                 storage_limit=True,
                 # The models of a VFIO pool are known once a guest sees them.
                 gpus=bool(self.gpu_devices),
+                max_cpus=host.threads if host else None,
                 # A Linux guest mounts them as overlays (guest_volumes.py); a Windows one
                 # keeps them on its disk, and a verifier views them through junctions.
                 volumes=True,
@@ -871,7 +877,7 @@ class QemuProvider(Provider):
             groups = {key.removeprefix("vfio-group:") for key in lease.device_keys}
             selected = tuple(sorted((by_group[group] for group in groups), key=lambda gpu: gpu.bdf))
         try:
-            container = await self._boot(
+            container, pinned = await self._boot(
                 request,
                 storage,
                 base_image,
@@ -892,6 +898,7 @@ class QemuProvider(Provider):
             client = await _connect(host_port, guest_token, console)
             clients.append(client)
             agent_user, agent_home, has_desktop = await self._read_guest_contract(client, request)
+            await admission.require_cpus(client, request.resources.cpus, request.os)
             if viewed is not None:
                 await self._attach_view(container, request.os, viewed)
             mounted = await self._mounted_volumes(client, storage, request.os)
@@ -936,6 +943,8 @@ class QemuProvider(Provider):
             resolved_image=resolved_image,
             allocation=ResourceAllocation(
                 cpus=request.resources.cpus,
+                cpu_hold=CpuHold.SHARED if pinned is None else CpuHold.RESERVED,
+                host_cpus=() if pinned is None else (pinned.cpus,),
                 memory_mb=request.resources.memory_mb,
                 storage_mb=effective_storage_mb,
                 gpu=(
@@ -1021,9 +1030,10 @@ class QemuProvider(Provider):
         gpus: tuple[_VfioGpu, ...] = (),
         *,
         viewed: Path | None = None,
-    ) -> str:
+    ) -> tuple[str, admission.Grant | None]:
         """Start the runner, which starts the machine, and, for a Linux guest, hands it its
-        volumes and attaches read-only the disk of the snapshot it ``viewed``.
+        volumes and attaches read-only the disk of the snapshot it ``viewed``; the runner,
+        and the Host CPUs it, and so each of the machine's vCPUs, is pinned to.
 
         Every layer of the disk's chain is mounted read-only beside the overlay that backs
         onto it, so one image serves every concurrent episode and none of them can write
@@ -1084,9 +1094,10 @@ class QemuProvider(Provider):
             for group in sorted({gpu.group for gpu in gpus}):
                 argv += [f"--device=/dev/vfio/{group}"]
             argv += ["--env", f"ORBIT_QEMU_VFIO_DEVICES={','.join(gpu.bdf for gpu in gpus)}"]
-        argv += [self.runner_image]
 
-        code, stdout, stderr = await _run(*argv, timeout=180)
+        async with self._admission.admitted(request.resources) as pinned:
+            pins = admission.run_args(pinned)
+            code, stdout, stderr = await _run(*argv, *pins, self.runner_image, timeout=180)
         if code != 0:
             raise ProviderStartError(f"could not start the qemu runner: {stderr.strip()}")
         container = stdout.strip() and name
@@ -1101,7 +1112,7 @@ class QemuProvider(Provider):
             if alive != 0 or running.strip() != "true":
                 _, logs, _ = await _run("docker", "logs", "--tail", "20", container, timeout=30)
                 raise ProviderStartError(f"the qemu runner exited immediately: {logs.strip()}")
-            return container
+            return container, pinned
         except BaseException:
             with contextlib.suppress(BaseException):
                 await asyncio.shield(_run("docker", "rm", "-f", container, timeout=60))

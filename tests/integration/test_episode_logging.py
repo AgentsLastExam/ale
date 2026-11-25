@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from orbit.core.capability import CapabilityProfile, SandboxNeeds
+from orbit.core.capability import CapabilityProfile, CpuHold, SandboxNeeds
 from orbit.core.episode import EpisodeContext
 from orbit.core.lock import (
     AgentProvenance,
@@ -101,6 +101,7 @@ class LoggedProtocol:
         )
         ctx.resource_allocation = ResourceAllocation(
             cpus=task.spec.resources.cpus,
+            cpu_hold=CpuHold.SHARED,
             memory_mb=task.spec.resources.memory_mb,
             storage_mb=None,
             sudo=False,

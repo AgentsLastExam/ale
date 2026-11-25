@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from orbit.core.capability import CpuHold
 from orbit.core.config import (
     AssetCollectionConfig,
     GatewayLimits,
@@ -85,6 +86,7 @@ def make_lock(**overrides: object) -> RunLock:
             requested=Resources(),
             effective=ResourceAllocation(
                 cpus=1,
+                cpu_hold=CpuHold.SHARED,
                 memory_mb=1024,
                 sudo=False,
                 network_mode="block",

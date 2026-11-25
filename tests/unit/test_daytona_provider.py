@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from orbit.core.capability import CpuHold
 from orbit.core.config import RunConfig
 from orbit.core.errors import (
     GuestUnreachableError,
@@ -219,6 +220,7 @@ def network_sandbox(api: NetworkApi, policy: NetworkPolicy) -> tuple[DaytonaSand
         ),
         allocation=ResourceAllocation(
             cpus=2,
+            cpu_hold=CpuHold.SHARED,
             memory_mb=2048,
             sudo=False,
             network_mode=policy.mode,

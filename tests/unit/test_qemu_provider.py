@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from tests.support import FakeQemuImg, write_qcow2
 
-from orbit.core.capability import Arch
+from orbit.core.capability import Arch, CpuHold
 from orbit.core.errors import (
     GuestUnreachableError,
     MemoryExhaustedError,
@@ -162,7 +162,7 @@ def test_cancelled_boot_removes_the_started_runner(
 
     assert commands[-1][:3] == ("docker", "rm", "-f")
     assert commands[-1][3].startswith("orbit-qemu-")
-    started = commands[0]
+    started = next(command for command in commands if command[:2] == ("docker", "run"))
     for label in (
         f"{MANAGED_LABEL}=true",
         f"{EPISODE_LABEL}=e1",
@@ -192,7 +192,8 @@ async def test_windows_admin_boot_is_explicit_and_uses_the_resolved_runner(
 
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
         commands.append(argv)
-        return 0, "true\n", ""
+        # A daemon that applies no cpuset: the runner is not pinned.
+        return 0, "false\n" if "{{.CPUSet}}" in argv else "true\n", ""
 
     async def no_sleep(_seconds: float) -> None:
         return None
@@ -204,9 +205,10 @@ async def test_windows_admin_boot_is_explicit_and_uses_the_resolved_runner(
     await QemuProvider(runner_image=runner)._boot(
         request(os=operating_system, sudo=sudo), tmp_path, write_qcow2(tmp_path / "b.qcow2"), 7411
     )
-    assert commands[0][-1] == runner
-    assert "VM_NET_IP=172.30.0.2" in commands[0]
-    arguments = next(item for item in commands[0] if item.startswith("ARGUMENTS="))
+    (started,) = (command for command in commands if command[:2] == ("docker", "run"))
+    assert started[-1] == runner
+    assert "VM_NET_IP=172.30.0.2" in started
+    arguments = next(item for item in started if item.startswith("ARGUMENTS="))
     assert ("-smbios type=1,serial=orbit-sudo" in arguments) is marker
 
 
@@ -219,7 +221,8 @@ async def test_the_display_announces_the_requested_resolution(
 
     async def fake_run(*argv: str, **_kwargs: object) -> tuple[int, str, str]:
         commands.append(argv)
-        return 0, "true\n", ""
+        # A daemon that applies no cpuset: the runner is not pinned.
+        return 0, "false\n" if "{{.CPUSet}}" in argv else "true\n", ""
 
     async def no_sleep(_seconds: float) -> None:
         return None
@@ -233,8 +236,9 @@ async def test_the_display_announces_the_requested_resolution(
         write_qcow2(tmp_path / "base.qcow2"),
         7411,
     )
-    assert "VGA=std" in commands[0]
-    arguments = next(item for item in commands[0] if item.startswith("ARGUMENTS="))
+    (started,) = (command for command in commands if command[:2] == ("docker", "run"))
+    assert "VGA=std" in started
+    arguments = next(item for item in started if item.startswith("ARGUMENTS="))
     assert "-global VGA.xres=1366 -global VGA.yres=768" in arguments
 
 
@@ -762,6 +766,7 @@ async def test_qemu_retained_solver_can_be_reattached(
     monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
     allocation = ResourceAllocation(
         cpus=2,
+        cpu_hold=CpuHold.SHARED,
         memory_mb=2048,
         sudo=False,
         network_mode=NetworkMode.BLOCK,
@@ -868,6 +873,7 @@ class _LeftRunning:
         monkeypatch.setattr(QemuProvider, "_read_guest_contract", contract)
         self.allocation = ResourceAllocation(
             cpus=2,
+            cpu_hold=CpuHold.SHARED,
             memory_mb=2048,
             sudo=False,
             network_mode=NetworkMode.BLOCK,
@@ -1393,6 +1399,7 @@ RELAY = "127.0.0.1:41999"
 def _allocation(*, desktop: bool = False) -> ResourceAllocation:
     return ResourceAllocation(
         cpus=2,
+        cpu_hold=CpuHold.SHARED,
         memory_mb=2048,
         sudo=False,
         network_mode=NetworkMode.ALLOWLIST,

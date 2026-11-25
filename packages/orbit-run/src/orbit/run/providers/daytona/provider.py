@@ -45,7 +45,7 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model
+from orbit.core.capability import Arch, CapabilityProfile, CpuHold, SandboxNeeds, accepts_model
 from orbit.core.config import DaytonaProviderConfig
 from orbit.core.errors import (
     GuestUnreachableError,
@@ -1217,6 +1217,8 @@ def _observed_allocation(request: SandboxRequest, data: dict[str, Any]) -> Resou
         )
     return ResourceAllocation(
         cpus=got[0],
+        # A quota on a machine Daytona shares, which the sandbox cannot see.
+        cpu_hold=CpuHold.SHARED,
         memory_mb=got[1],
         storage_mb=got[2],
         sudo=request.sudo,

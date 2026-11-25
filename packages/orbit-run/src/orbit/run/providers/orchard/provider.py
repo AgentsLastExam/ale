@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds
+from orbit.core.capability import Arch, CapabilityProfile, CpuHold, SandboxNeeds
 from orbit.core.errors import GuestUnreachableError, ProviderCapabilityError, ProviderStartError
 from orbit.core.ids import content_hash
 from orbit.core.sandbox import (
@@ -1199,6 +1199,8 @@ class OrchardProvider(Provider):
                 ),
                 allocation=ResourceAllocation(
                     cpus=int(record["assignedCPU"]),
+                    # macOS runs a VM's vCPUs on any of its cores.
+                    cpu_hold=CpuHold.SHARED,
                     memory_mb=int(record["assignedMemory"]),
                     storage_mb=storage,
                     sudo=request.sudo,

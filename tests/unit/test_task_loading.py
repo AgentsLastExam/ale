@@ -129,7 +129,7 @@ def test_a_verifier_environment_falls_back_to_the_solver_s_size(tmp_path: Path) 
     edit(
         task,
         {
-            "environment": {"cpus": 3, "memory_mb": 2048, "build_timeout_sec": 7200},
+            "environment": {"cpus": 4, "memory_mb": 2048, "build_timeout_sec": 7200},
             "verifier": {"environment": {"storage_mb": 1024, "build_timeout_sec": 60}},
         },
     )
@@ -138,7 +138,20 @@ def test_a_verifier_environment_falls_back_to_the_solver_s_size(tmp_path: Path) 
     assert spec.verify.image is not None and spec.verify.image.build_timeout_sec == 60
     resources = spec.verify.resources
     assert resources is not None
-    assert (resources.cpus, resources.memory_mb, resources.storage_mb) == (3, 2048, 1024)
+    assert (resources.cpus, resources.memory_mb, resources.storage_mb) == (4, 2048, 1024)
+
+
+def test_an_odd_cpu_count_rounds_up_to_the_next_even_one(tmp_path: Path) -> None:
+    """So that a Sandbox holds both threads of each of its cores; a verifier's too."""
+    task = scaffold_task(tmp_path / "demo")
+    edit(task, {"environment": {"cpus": 1}, "verifier": {"environment_mode": "separate"}})
+    spec = load_tasks(task)[0].spec
+    assert spec.resources.cpus == 2
+    assert spec.verify.resources is not None and spec.verify.resources.cpus == 2
+    edit(task, {"environment": {"cpus": 4}, "verifier": {"environment": {"cpus": 3}}})
+    spec = load_tasks(task)[0].spec
+    assert spec.resources.cpus == 4
+    assert spec.verify.resources is not None and spec.verify.resources.as_resources().cpus == 4
 
 
 def test_gpu_types_are_harbor_s_and_absent_accepts_every_model(tmp_path: Path) -> None:
@@ -544,10 +557,10 @@ def test_separate_verification_follows_harbor(tmp_path: Path) -> None:
     assert verify.image is None
     assert verify.resources is not None and verify.resources.cpus == 2
 
-    edit(task, {"verifier": {"environment": {"cpus": 1, "memory_mb": 1024}}})
+    edit(task, {"verifier": {"environment": {"cpus": 4, "memory_mb": 1024}}})
     verify = load_tasks(task)[0].spec.verify
     assert verify.resources is not None
-    assert (verify.resources.cpus, verify.resources.memory_mb) == (1, 1024)
+    assert (verify.resources.cpus, verify.resources.memory_mb) == (4, 1024)
     assert verify.image is None
 
     (task / "tests/Dockerfile").write_text("FROM scratch\n")

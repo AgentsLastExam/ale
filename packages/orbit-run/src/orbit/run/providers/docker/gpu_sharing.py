@@ -13,13 +13,10 @@ that holds it. This module reads and decides; the Provider acts.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import fcntl
 import logging
-import os
 import re
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,7 +35,6 @@ __all__ = [
     "Watched",
     "admit",
     "host_process",
-    "locked",
     "overruns",
     "read_processes",
 ]
@@ -168,45 +164,6 @@ async def read_processes(proc: Path = PROC) -> list[GpuProcess]:
         ):
             found.append(process)
     return found
-
-
-@contextlib.asynccontextmanager
-async def locked(path: Path) -> AsyncIterator[None]:
-    """Hold the lock file at ``path``, which every Orbit process of every user that admits
-    Sandboxes through one Docker daemon takes, from reading what is free until Docker has
-    started the Sandbox that takes it, so two Sandboxes never take the same memory."""
-    descriptor = _open_lock(path)
-    try:
-        while True:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                await asyncio.sleep(0.1)
-        yield
-    finally:
-        os.close(descriptor)  # which releases the lock
-
-
-def _open_lock(path: Path) -> int:
-    """The lock file at ``path``, read-only, which flock needs no more than.
-
-    One that exists is opened without ``O_CREAT``: ``fs.protected_regular`` refuses that on
-    another user's file in a sticky directory such as ``/tmp``. One that does not is created
-    readable by every user, whatever the umask; when another process creates it first, it is
-    opened as theirs.
-    """
-    while True:
-        try:
-            return os.open(path, os.O_RDONLY)
-        except FileNotFoundError:
-            pass
-        try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            continue
-        os.fchmod(descriptor, 0o644)
-        return descriptor
 
 
 def admit(
