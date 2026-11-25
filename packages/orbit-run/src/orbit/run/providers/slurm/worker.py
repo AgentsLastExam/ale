@@ -646,20 +646,30 @@ def alive(pid: int) -> bool:
     return state not in {"Z", "X"}
 
 
-def runtime_binary(command: list[str], version: str) -> Path:
+def runtime(command: list[str], version: str, build: str) -> Path:
+    """Orbit's gVisor build ``build`` of ``version``, copied once from GHCR into the cache,
+    which every node shares: the directory that holds its ``runsc``."""
     cache = Path.cwd().parent
-    runtime = cache / ("gvisor-" + version)
-    with (cache / ("gvisor-" + version + ".lock")).open("a") as lock:
+    name = f"gvisor-{version}.{build}"
+    found = cache / name
+    with (cache / (name + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if not runtime.is_dir():
-            source = output(
-                *command, "create", "ghcr.io/agentslastexam/orbit-gvisor:" + version, "/bin/true"
+        if not found.is_dir():
+            image = "ghcr.io/agentslastexam/orbit-gvisor:" + version
+            subprocess.run([*command, "pull", "-q", image], check=True, stdout=subprocess.DEVNULL)
+            published = output(
+                *command, "image", "inspect", "-f", '{{index .Labels "orbit.gvisor.build"}}', image
             )
+            if published != build:
+                raise RuntimeError(
+                    f"{image} on GHCR is build {published}, not this engine's {build}"
+                )
+            source = output(*command, "create", image, "/bin/true")
             with tempfile.TemporaryDirectory(dir=cache) as temporary:
-                dest = Path(temporary) / "runtime"
-                subprocess.run([*command, "cp", source + ":/gvisor", str(dest)], check=True)
-                dest.rename(runtime)
-    return runtime / "runsc"
+                dest = Path(temporary) / "gvisor"
+                subprocess.run([*command, "cp", f"{source}:/gvisor", str(dest)], check=True)
+                dest.rename(found)
+    return found
 
 
 def launch(
@@ -868,9 +878,10 @@ def set_up(command: list[str], directory: str, spec: dict[str, object], rank: in
     seed = spec["seeds"][rank]  # type: ignore[index]
     load(command, seed["archive"], seed["image"])
     load_layers(command, directory, seed["layers"])
-    runsc = str(runtime_binary(command, str(spec["version"])))
+    found = runtime(command, str(spec["version"]), str(spec["build"]))
+    runsc = str(found / "runsc")
     version = output(runsc, "--version").splitlines()[0]
-    if not version.endswith("+orbit." + str(spec["version"])):
+    if not version.endswith(f"+orbit.{spec['version']}.{spec['build']}"):
         raise RuntimeError(f"unexpected gVisor build {version} on {this_node()}")
     if spec["gpus"]:
         supported = output(runsc, "nvproxy", "list-supported-drivers").split()
@@ -881,7 +892,10 @@ def set_up(command: list[str], directory: str, spec: dict[str, object], rank: in
                     "supports; its nvproxy lists them with list-supported-drivers"
                 )
     STORES.mkdir(exist_ok=True)
-    write(STORES / f"{this_node()}.json", dict(directory=directory, runsc=runsc))
+    write(
+        STORES / f"{this_node()}.json",
+        dict(directory=directory, runsc=runsc),
+    )
     return version
 
 

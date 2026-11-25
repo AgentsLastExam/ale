@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Make the Orbit images this engine uses available locally.
 #
-# Every Orbit image is published once per version and never overwritten. The builder and
+# Every Orbit image but the gVisor runtime is published once per version and never
+# overwritten. The builder and
 # runner share the engine's version (packages/orbit-run/pyproject.toml); a base has its own
 # (BASES in packages/orbit-run/src/orbit/run/__init__.py). A version the registry already
 # has is pulled; one not published yet is built here, for testing before CI publishes it.

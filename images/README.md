@@ -30,7 +30,9 @@ macOS Tasks name a Tart image of their own; the Orchard and Tart that run it com
 The image contract and identity rules are defined in
 [`../docs/specs/sandbox-image.md`](../docs/specs/sandbox-image.md).
 
-Every image is published once per version and never overwritten. The builder and runner
+Every image but the gVisor runtime, which
+[its README](runtimes/gvisor/README.md#the-image) covers, is published once per version
+and never overwritten. The builder and runner
 run the engine's own logic, so they share the engine's version
 (`packages/orbit-run/pyproject.toml`) and a changed one ships with the next engine version.
 A base carries no part of the framework and has its own version: the Linux bases' are in
@@ -42,7 +44,8 @@ just images                                    # pull published images, build un
 images/build.sh orbit-qemu-runner              # one image
 ```
 
-`.github/workflows/images.yml` publishes each version once; its manual `promote` input
+`.github/workflows/images.yml` publishes each version once, and the gVisor runtime as its
+build id changes; its manual `promote` input
 gives an already-published image a version without rebuilding it. It pushes with this
 repository's workflow token, so each GHCR package must grant `AgentsLastExam/orbit` write
 access in its package settings (Manage Actions access); a package first pushed by hand has

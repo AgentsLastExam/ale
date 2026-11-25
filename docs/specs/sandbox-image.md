@@ -145,13 +145,16 @@ Repository sources are separated by responsibility:
 Every Orbit image is published once per version and never overwritten: the publishing
 workflow skips a version the registry already has, and no `latest` tag is published, since
 a tag that every change overwrote would change every checkout's next build behind its back.
+The gVisor runtime is the one exception while Orbit is in development: it stays at one
+version, a build id tells its builds apart, and each engine names the build it runs and
+refuses another, so a republished build changes nothing behind an engine's back.
 
 The VM builder and the QEMU runner run the engine's own logic, so they are published under
 the engine's version, such as `0.2.0`; an engine runs exactly those of its own version, and
 a changed one ships with the next engine version. A base carries no part of the framework,
 so nothing in it depends on the engine: each base has its own version, raised when the base
 itself changes, and any engine runs any version of it. A container runtime that Orbit builds
-for Hosts to install depends on no engine either and has a version of its own.
+for Hosts to install depends on no engine either, and has its own version and build id.
 
 A Task may build from any image. Task repositories maintained with Orbit name an exact
 version of an Orbit base, such as `container-ubuntu22-base:0.1.1`, so that a Task keeps

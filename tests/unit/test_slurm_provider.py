@@ -22,6 +22,7 @@ from orbit.core.sandbox import (
 from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from orbit.run.oci import Reference, api, qualified
 from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.docker import gvisor
 from orbit.run.providers.slurm import images, worker
 from orbit.run.providers.slurm.job import CACHE, Job, JobReady
 from orbit.run.providers.slurm.job import seconds as job_seconds
@@ -678,7 +679,8 @@ async def test_an_allocations_deadline_is_slurms_own_count_less_its_drain(monkey
     async def left(job):
         return 3600
 
-    monkeypatch.setattr(Job, "stage", lambda job, spec, **_: None)
+    staged = []
+    monkeypatch.setattr(Job, "stage", lambda job, spec, **_: staged.append(spec))
     monkeypatch.setattr(Job, "submit", nothing)
     monkeypatch.setattr(Job, "ready", ready)
     monkeypatch.setattr(Job, "time_left", left)
@@ -697,6 +699,8 @@ async def test_an_allocations_deadline_is_slurms_own_count_less_its_drain(monkey
         patient=True,
     )
     assert waited == [slurm.config.queue_timeout_sec, None]
+    # Its nodes fetch the gVisor build this engine runs.
+    assert (staged[0]["version"], staged[0]["build"]) == (gvisor.VERSION, gvisor.BUILD_ID)
 
 
 @pytest.mark.asyncio

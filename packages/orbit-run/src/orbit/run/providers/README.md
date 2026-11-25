@@ -842,8 +842,9 @@ Sandbox runs under `runsc` unless it asks for `raw_sockets` or `nested_container
 entirely under `runsc-net-raw` or `runsc-nested`; no profile gives both, so a Sandbox that
 asks for both is refused before anything starts. Besides finding each name the Run's
 Sandboxes run under, registered with exactly those arguments, the preflight checks that
-`runsc --version` reports the build this engine runs (`+orbit.0.1.5`, `VERSION` in its
-`build.sh`; a stock `runsc` lacks the rootless and out-of-memory fixes) and, whenever GPUs
+`runsc --version` reports the build this engine runs (`+orbit.0.1.0.<build>`, its
+`build.sh`'s `VERSION` and build id; a stock `runsc` lacks the rootless and out-of-memory
+fixes) and, whenever GPUs
 may be attached, a Sandbox needing them or a Node whose profiles offer the Host's, that
 `runsc nvproxy list-supported-drivers` lists the Host's NVIDIA driver, and, whenever a
 Sandbox may share GPUs, that `runsc flags` lists the flag that limits its GPU memory. In the

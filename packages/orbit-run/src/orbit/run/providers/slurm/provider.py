@@ -815,7 +815,7 @@ class SlurmProvider(Provider):
         each = [seeds[rank] if rank < len(seeds) else seeds[0] for rank in range(nodes)]
         job = Job(part)
         try:
-            job.stage(dict(seeds=each, version=gvisor.VERSION, gpus=gpus))
+            job.stage(dict(seeds=each, version=gvisor.VERSION, build=gvisor.BUILD_ID, gpus=gpus))
             await job.submit(
                 cpus=cpus,
                 memory_mb=memory_mb + JOB_OVERHEAD_MB,
