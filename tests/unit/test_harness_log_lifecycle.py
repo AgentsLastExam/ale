@@ -68,6 +68,7 @@ def _context(path: Path) -> SimpleNamespace:
         secrets=("token",),
         agent_version="1",
         spec=SimpleNamespace(instruction="instruction", artifacts=(), validation_visible=False),
+        resource_allocation=None,
         agent_run=None,
         logging_policy=LoggingPolicy(),
         trajectory_written=False,

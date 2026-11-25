@@ -359,7 +359,9 @@ under the same account, sudo and network policy. The nodes are named `node0` to
 `node<N-1>`, which is also each one's hostname, and reach one another on a network of their
 own that reaches nothing else, whatever the Task's network; a job's ranks rendezvous and
 exchange data there, or over a faster fabric the Provider gives them, such as InfiniBand.
-`ORBIT_NODES` lists the names and `ORBIT_NODE_RANK` is each node's number.
+`ORBIT_NODES` lists the names and `ORBIT_NODE_RANK` is each node's number. The agent's first
+prompt names the nodes and how to reach them
+([Episode protocol](episode-protocol.md#agent-or-oracle)).
 
 As on a cluster, `ssh NODE COMMAND` runs a command on another node, for the agent's account
 and for root, without a password: an image needs no ssh of its own, and `scp`, `rsync`,

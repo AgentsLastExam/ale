@@ -22,6 +22,7 @@ from tests.support import (
 )
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
+from orbit.core.capability import GpuHold
 from orbit.core.config import RunConfig, SandboxRetentionConfig
 from orbit.core.errors import (
     AgentError,
@@ -44,7 +45,14 @@ from orbit.core.harness import (
 )
 from orbit.core.lock import LimitTermination
 from orbit.core.result import ResultRecord
-from orbit.core.sandbox import ExecResult, PreparedTaskImage, SandboxRequest, SandboxRole
+from orbit.core.sandbox import (
+    ExecResult,
+    GpuAllocation,
+    GpuDevice,
+    PreparedTaskImage,
+    SandboxRequest,
+    SandboxRole,
+)
 from orbit.core.task import Stage
 from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources, TaskConfig
 from orbit.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
@@ -205,6 +213,106 @@ async def test_the_prompts_say_how_the_turns_go_and_show_validation_never_tests(
         1,
         2,
     ]
+
+
+LIMITS = (
+    "Tools that report the machine's size can show more of the host than that; these are your "
+    "limits."
+)
+
+
+def _gpus(count: int, **shared: Any) -> GpuAllocation:
+    return GpuAllocation(
+        requested_count=count,
+        provider_addresses=tuple(str(index) for index in range(count)),
+        lease_keys=(),
+        observed_devices=tuple(
+            GpuDevice(id=f"GPU-{index}", model="NVIDIA H100 80GB HBM3", driver_version="570.1")
+            for index in range(count)
+        ),
+        **shared,
+    )
+
+
+class _Giving(RoundsProvider):
+    """Gives each Sandbox the resources ``given``, whatever its Task declared."""
+
+    def __init__(self, **given: Any) -> None:
+        super().__init__()
+        self.given = given
+
+    async def create(self, request: SandboxRequest) -> MemorySandbox:
+        sandbox = await super().create(request)
+        sandbox.allocation = sandbox.allocation.model_copy(update=self.given)
+        return sandbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("given", "machine"),
+    [
+        (
+            {"cpus": 8, "memory_mb": 32768, "storage_mb": 102400, "gpu": _gpus(1)},
+            "Your machine: 8 CPUs, 32 GiB of memory, 100 GiB of disk for everything you "
+            f"write, and 1 GPU (NVIDIA H100 80GB HBM3). {LIMITS}",
+        ),
+        ({"memory_mb": 1536}, f"Your machine: 1 CPU and 1.5 GiB of memory. {LIMITS}"),
+        (
+            {"gpu": _gpus(1, hold=GpuHold.LIMIT, memory_mb=20480)},
+            "Your machine: 1 CPU, 1 GiB of memory, and 1 GPU (NVIDIA H100 80GB HBM3), with "
+            f"20 GiB of its memory. {LIMITS}",
+        ),
+        (
+            {"gpu": _gpus(2, hold=GpuHold.WATCHED, memory_mb=10240)},
+            "Your machine: 1 CPU, 1 GiB of memory, and 2 GPUs (NVIDIA H100 80GB HBM3), with "
+            f"10 GiB of each one's memory. {LIMITS}",
+        ),
+        (
+            {
+                "cpus": 16,
+                "memory_mb": 65536,
+                "storage_mb": 51200,
+                "gpu": _gpus(6),
+                "nodes": ("gpu-a", "gpu-b", "gpu-c"),
+            },
+            "Each of your 3 machines: 16 CPUs, 64 GiB of memory, 50 GiB of disk for everything "
+            f"you write, and 2 GPUs (NVIDIA H100 80GB HBM3). {LIMITS} They are node0, node1 and "
+            "node2, and you are on node0. ssh NODE COMMAND runs a command on NODE (node1 or "
+            "node2), and scp copies to it. /shared is one directory that every machine "
+            "sees, and what you write there counts toward node0's disk; every other path is "
+            "each machine's own. A file created in /shared can take up to half a minute to "
+            "appear on another machine that was already looking for it, and appending to one "
+            "file from several machines at once can lose data.",
+        ),
+        (
+            {"cpus": 4, "memory_mb": 8192, "nodes": ("gpu-a", "gpu-b")},
+            f"Each of your 2 machines: 4 CPUs and 8 GiB of memory. {LIMITS} They are node0 and "
+            "node1, and you are on node0. ssh node1 COMMAND runs a command on node1, and scp "
+            "copies to it. /shared is one directory that every machine sees, and what "
+            "you write there counts toward node0's disk; every other path is each machine's "
+            "own. A file created in /shared can take up to half a minute to appear on another "
+            "machine that was already looking for it, and appending to one file from several "
+            "machines at once can lose data.",
+        ),
+    ],
+    ids=["gpu", "no-storage-or-gpu", "shared-gpu", "shared-gpus", "three-nodes", "two-nodes"],
+)
+async def test_the_first_prompt_states_the_machine_its_solver_was_given(
+    tmp_path: Path, verifiers: Verifiers, given: dict[str, Any], machine: str
+) -> None:
+    """From the allocation the solver got, not the Task's one CPU and 1 GiB, last below the
+    instruction, in the first prompt alone, and recorded as it was sent."""
+    harness = TurnsHarness()
+    task = _task(tmp_path, rounds=1)
+    result = await _run(tmp_path, _Giving(**given), task, harness)
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    first, second = harness.prompts
+    assert first.endswith(f"do not survive into your next turn.\n{machine}\n")
+    assert machine not in second
+    trajectory = AtifTrajectory.model_validate_json(
+        (result.run_dir / "trajectory.json").read_text()
+    )
+    assert next(step.message for step in trajectory.steps if step.source == "user") == first
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from tests.support import MemorySandbox, RoundsProvider, TurnsHarness, Verifiers, rounds_task
-from tests.unit.test_validation_rounds import _run, _task
+from tests.unit.test_validation_rounds import LIMITS, _run, _task
 
 from orbit.core.sandbox import SandboxRole
 from orbit.core.verdict import Status
@@ -15,6 +15,8 @@ from orbit.core.verdict import Status
 pytestmark = pytest.mark.unit
 
 _NOTE = "where you can read them but not change them."
+#: What the first prompt says last, of the Task's own resources, which the Sandbox got.
+_MACHINE = f"Your machine: 1 CPU and 1 GiB of memory. {LIMITS}\n"
 
 
 def _files(root: Path) -> set[str]:
@@ -53,13 +55,13 @@ async def test_the_stage_that_validates_is_copied_for_the_agent_as_setup_ends(
     assert f"/opt/orbit/{stage}" in provider.sandboxes[1].uploads
     named = "validation set" if validation_dir else "test set that scores your final state"
     assert harness.prompts[0].endswith(
-        f"The files of the {named} are at /opt/validation, {_NOTE}\n"
+        f"The files of the {named} are at /opt/validation, {_NOTE}\n{_MACHINE}"
     )
     assert _NOTE not in harness.prompts[1]
 
 
 @pytest.mark.asyncio
-async def test_without_rounds_the_note_alone_follows_the_instruction(
+async def test_without_rounds_the_note_and_the_machine_follow_the_instruction(
     tmp_path: Path, verifiers: Verifiers
 ) -> None:
     harness = TurnsHarness()
@@ -69,7 +71,7 @@ async def test_without_rounds_the_note_alone_follows_the_instruction(
     (prompt,) = harness.prompts
     assert prompt == (
         f"{task.spec.instruction}\n\n---\n\n"
-        f"The files of the validation set are at /opt/validation, {_NOTE}\n"
+        f"The files of the validation set are at /opt/validation, {_NOTE}\n{_MACHINE}"
     )
 
 

@@ -183,7 +183,6 @@ MOVED_PROMPT = (
 #: the stage that validates. Framework-owned and neutral: it says how the episode goes on,
 #: never how to do the Task.
 VALIDATION_PREAMBLE = (
-    "\n\n---\n\n"
     "How your work is evaluated: each time you end your turn, your work is scored on a "
     "validation set and you receive the result, after which you continue working. This "
     "happens at most {rounds}. After that, your final state is scored once, on a separate "
@@ -195,12 +194,27 @@ VISIBLE_NOTE = (
     "The files of the {set} are at {path}, where you can read them but not change them.\n"
 )
 TESTS_PREAMBLE = (
-    "\n\n---\n\n"
     "How your work is evaluated: each time you end your turn, your work is scored on the "
     "test set that scores your final state and you receive the result, after which you "
     "continue working. This happens at most {rounds}. After that, your final state is scored "
     "once more, on the same test set. Your time limit of {minutes} minutes covers all of "
     "your turns. Processes you leave running do not survive into your next turn.\n"
+)
+#: Below the instruction, last, the machine the agent has, each one of a Sandbox of several
+#: nodes, as its Sandbox was given it: tools in a container can report the host's instead.
+#: Framework-owned and neutral: it states the agent's limits, never how to do the Task.
+MACHINE_NOTE = (
+    "{machine}: {resources}. Tools that report the machine's size can show more of the host "
+    "than that; these are your limits."
+)
+#: After it, for a Sandbox of several nodes: how the agent, on the first, reaches the others.
+NODES_NOTE = (
+    "They are {names}, and you are on {first}. ssh {node} COMMAND runs a command on {target}, "
+    "and scp copies to it. /shared is one directory that every machine sees, and what "
+    "you write there counts toward {first}'s disk; every other path is each machine's own. A "
+    "file created in /shared can take up to half a minute to appear on another machine that was "
+    "already looking for it, and appending to one file from several machines at once can lose "
+    "data."
 )
 
 
@@ -1511,23 +1525,29 @@ class EpisodeProtocol:
         )
 
     def _instruction(self, ctx: EpisodeContext) -> str:
-        """The first prompt: the instruction, verbatim, and, when the agent receives
-        validation rounds, the preamble that says how its turns go, and where the Task shows
-        it the stage that validates, where that is."""
+        """The first prompt: the instruction, verbatim, and below it, when the agent receives
+        validation rounds, the preamble that says how its turns go, where the Task shows it
+        the stage that validates, where that is, and the machine the solver was given, as
+        provisioning recorded it."""
         spec = ctx.spec
-        note = ""
+        below: list[str] = []
+        if self.validation_rounds:
+            rounds = "once" if self.validation_rounds == 1 else f"{self.validation_rounds} times"
+            total = self.timeouts.agent or spec.timeouts.agent
+            tests = ctx.validation_stage is Stage.TESTS
+            preamble = TESTS_PREAMBLE if tests else VALIDATION_PREAMBLE
+            below.append(preamble.format(rounds=rounds, minutes=_minutes(total)))
         if spec.validation_visible:
             tests = ctx.validation_stage is Stage.TESTS
-            note = VISIBLE_NOTE.format(
-                set="test set that scores your final state" if tests else "validation set",
-                path=_visible_dir(spec.os),
+            below.append(
+                VISIBLE_NOTE.format(
+                    set="test set that scores your final state" if tests else "validation set",
+                    path=_visible_dir(spec.os),
+                )
             )
-        if not self.validation_rounds:
-            return spec.instruction + (f"\n\n---\n\n{note}" if note else "")
-        rounds = "once" if self.validation_rounds == 1 else f"{self.validation_rounds} times"
-        total = self.timeouts.agent or spec.timeouts.agent
-        preamble = TESTS_PREAMBLE if ctx.validation_stage is Stage.TESTS else VALIDATION_PREAMBLE
-        return spec.instruction + preamble.format(rounds=rounds, minutes=_minutes(total)) + note
+        if ctx.resource_allocation is not None:
+            below.append(_machine(ctx.resource_allocation))
+        return spec.instruction + ("\n\n---\n\n" + "".join(below) if below else "")
 
     async def _validation_rounds(
         self,
@@ -2553,7 +2573,7 @@ class EpisodeProtocol:
         context = TrajectoryParseContext(
             episode_id=ctx.episode_id,
             trajectory_id=ctx.trajectory_id,
-            # The first prompt as sent, the preamble of validation rounds included.
+            # The first prompt as sent, with what the framework states below the instruction.
             instruction=self._instruction(ctx),
             logs_dir=ctx.run_dir / "logs" / self.harness.name,
             model=ctx.session.model,
@@ -3192,6 +3212,52 @@ def _round_status(error: Exception) -> Status:
 
 def _minutes(seconds: float) -> str:
     return f"{max(seconds, 0.0) / 60:.1f}".removesuffix(".0")
+
+
+def _gib(mb: int) -> str:
+    return f"{mb / 1024:.1f}".removesuffix(".0") + " GiB"
+
+
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _listed(items: Sequence[str], conjunction: str = "and", *, serial: bool = False) -> str:
+    """``a``, ``a and b``, ``a, b and c``, or with ``serial`` ``a, b, and c``."""
+    *rest, last = items
+    if not rest:
+        return last
+    return f"{', '.join(rest)}{',' if serial and len(rest) > 1 else ''} {conjunction} {last}"
+
+
+def _machine(allocation: ResourceAllocation) -> str:
+    """The paragraph that states the machine the agent has, each one of several nodes: the
+    allocation's CPUs, memory and storage are each node's, its GPUs all nodes' together."""
+    count = max(len(allocation.nodes), 1)
+    resources = [_counted(allocation.cpus, "CPU"), f"{_gib(allocation.memory_mb)} of memory"]
+    if allocation.storage_mb is not None:
+        resources.append(f"{_gib(allocation.storage_mb)} of disk for everything you write")
+    gpu = allocation.gpu
+    if gpu is not None:
+        each = gpu.requested_count // count
+        models = tuple(dict.fromkeys(device.model for device in gpu.observed_devices))
+        part = _counted(each, "GPU") + (f" ({_listed(models)})" if models else "")
+        if gpu.memory_mb is not None:
+            whose = "its" if each == 1 else "each one's"
+            part += f", with {_gib(gpu.memory_mb)} of {whose} memory"
+        resources.append(part)
+    machine = "Your machine" if count == 1 else f"Each of your {count} machines"
+    text = MACHINE_NOTE.format(machine=machine, resources=_listed(resources, serial=True))
+    if count > 1:
+        names = [f"node{index}" for index in range(count)]
+        # The one other node by its name; of several, any of them.
+        node, target = (
+            (names[1], names[1]) if count == 2 else ("NODE", f"NODE ({_listed(names[1:], 'or')})")
+        )
+        text += " " + NODES_NOTE.format(
+            names=_listed(names), first=names[0], node=node, target=target
+        )
+    return text + "\n"
 
 
 def _round_prompt(
