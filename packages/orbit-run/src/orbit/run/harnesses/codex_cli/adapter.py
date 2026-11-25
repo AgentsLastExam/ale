@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
+import tarfile
+from functools import cached_property
 from pathlib import PurePosixPath
+from tempfile import TemporaryDirectory
 
+from orbit.core.errors import AgentError, AgentUnsupportedError, ConfigError
 from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from orbit.core.sandbox import Identity, Sandbox
-from orbit.core.taskspec import StdioMcpServer
+from orbit.core.taskspec import OperatingSystem, StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses._npm import (
+    agent_home,
+    agent_path,
+    npm_env,
+    reported_version,
+    version_mismatch,
+)
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -24,6 +35,18 @@ from . import trajectory
 from .settings import CodexCliSettings
 
 DEFAULT_CLI_VERSION = "0.146.0"
+NATIVE_PACKAGE_VERSION = "0.170.0"
+NATIVE_PACKAGE_SHA256 = "a77ff87be7ba809d715728270a78f5ce3527dc07529416d1ef8929b90b8475eb"
+
+_ACTIVATE_NATIVE_PACKAGE = """
+set -eu
+package=$1
+binary=$2
+mkdir -p "$(dirname "$binary")"
+chmod +x "$package"/bin/* "$package"/codex-path/rg "$package"/codex-resources/bwrap
+ln -sfn "$package/bin/codex" "$binary"
+"$binary" --version
+"""
 
 
 class CodexCliHarness(CliHarness):
@@ -38,6 +61,68 @@ class CodexCliHarness(CliHarness):
     logs = (LOG_ROOT, ".codex-orbit/sessions", trajectory.TRACES)
     # Its CODEX_HOME, where a login keeps its credentials.
     credentials = (".codex-orbit/auth.json",)
+
+    def validate_os(self, operating_system: OperatingSystem) -> None:
+        super().validate_os(operating_system)
+        if self.settings.native_package_archive is None:
+            return
+        if operating_system is not OperatingSystem.LINUX:
+            raise AgentUnsupportedError("the pinned native Codex package requires Linux x86-64")
+        if self.version() != NATIVE_PACKAGE_VERSION:
+            raise ConfigError(f"native_package_archive requires Codex {NATIVE_PACKAGE_VERSION}")
+        # Validate and stage the archive once, before preparing any Task images.
+        _ = self._native_package_directory
+
+    def integrity(self) -> str:
+        if self.settings.native_package_archive is not None:
+            return f"sha256:{NATIVE_PACKAGE_SHA256}"
+        return super().integrity()
+
+    @cached_property
+    def _native_package_directory(self) -> TemporaryDirectory[str]:
+        archive = self.settings.native_package_archive
+        assert archive is not None
+        directory = TemporaryDirectory(prefix="orbit-codex-package-")
+        try:
+            with archive.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != NATIVE_PACKAGE_SHA256:
+                raise ConfigError(f"native Codex archive has unexpected sha256 {digest}")
+            with tarfile.open(archive, "r:gz") as package:
+                package.extractall(directory.name, filter="data")
+        except (OSError, tarfile.TarError) as error:
+            directory.cleanup()
+            raise ConfigError(f"could not stage native Codex package: {error}") from error
+        except ConfigError:
+            directory.cleanup()
+            raise
+        return directory
+
+    async def install(self, sandbox: Sandbox) -> str:
+        if self.settings.native_package_archive is None:
+            return await super().install(sandbox)
+
+        self.validate_os(sandbox.request.os)
+        architecture = await sandbox.exec(["uname", "-m"], identity=Identity.AGENT, timeout_sec=60)
+        if not architecture.ok or architecture.stdout.strip() != "x86_64":
+            raise AgentUnsupportedError("the pinned native Codex package requires Linux x86-64")
+
+        prefix = agent_path(await agent_home(sandbox)) / ".local"
+        package_dir = prefix / "share" / "orbit" / "codex-package"
+        binary = prefix / "bin" / self.binary
+        await sandbox.upload_dir(
+            self._native_package_directory.name, str(package_dir), identity=Identity.AGENT
+        )
+        result = await sandbox.exec(
+            ["sh", "-c", _ACTIVATE_NATIVE_PACKAGE, "sh", str(package_dir), str(binary)],
+            timeout_sec=60,
+            identity=Identity.AGENT,
+        )
+        output = f"{result.stdout}\n{result.stderr}"
+        installed = reported_version(output, self.version()) if result.ok else None
+        if installed is None:
+            raise AgentError(version_mismatch(self.binary, self.version(), output))
+        return installed
 
     async def install_resources(
         self,
