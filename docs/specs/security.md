@@ -166,7 +166,8 @@ provider:
   The Gateway refuses such a request rather than forwarding it without the tool. A
   configured Harness never sends one, so a request that does comes from a changed CLI
   default or from the agent itself, and a refusal makes that visible in the trace where
-  a quiet rewrite would hide it.
+  a quiet rewrite would hide it. A Judge's calls are exempt: a Judge is the Task's
+  evaluator rather than the agent it evaluates, and refusing its tools only fails verdicts.
 
 A policy refusal is recorded as a `refused` call naming the policy and, unlike a limit,
 does not end the episode. Each dialect's routes, authentication and policies are in the

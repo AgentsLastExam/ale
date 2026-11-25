@@ -92,11 +92,12 @@ Request changes beyond the model:
 ### Provider-side network tools
 
 Each dialect names what makes a provider Orbit ships reach the network on the agent's
-behalf, as that provider documents it. Unless the Task's network is `open`, a request that
-asks for any of it is refused as `web_tools` before it reaches the provider, with status
-400 and `x-should-retry: false`, in the dialect's own error format:
+behalf, as that provider documents it. Unless the Task's network is `open` or the session is
+a Judge's, a request that asks for any of it is refused as `web_tools` before it reaches the
+provider, with status 400 and `x-should-retry: false`, in the dialect's own error format:
 `invalid_request_error` for Anthropic and OpenAI, `FAILED_PRECONDITION` for Gemini. The
-error names what was refused. In an `open` Task the request is forwarded unchanged.
+error names what was refused. In an `open` Task or a Judge's session the request is
+forwarded unchanged.
 
 | Dialect | Refused |
 |---|---|

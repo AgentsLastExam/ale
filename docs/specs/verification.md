@@ -161,9 +161,11 @@ network](task-authoring.md#resources-and-network), `no-network` included, and ne
 their own in an allowlist. Each episode opens one Gateway session per configured Judge that
 holds the Judge's endpoint, protocol and key; the verifier receives only the Gateway's address
 and that session's token (`ORBIT_LLM_JUDGE_TOKEN`, `ORBIT_AGENT_JUDGE_TOKEN`), so code the solver
-wrote cannot read a credential it could spend elsewhere. Judge sessions have no limits and
-never replay a cached response, so a retried verdict samples again; their calls appear in the
-transport trace with `purpose: judge` and are left out of the agent's trajectory and usage. A
+wrote cannot read a credential it could spend elsewhere. Judge sessions have no limits,
+refuse none of the provider's own tools, web search included, whatever the Task's network,
+and never replay a cached response, so a retried verdict samples again; their calls appear
+in the transport trace with `purpose: judge` and are left out of the agent's trajectory and
+usage. A
 Judge whose key is not set on the Host gets no session. The RunLock records the endpoint each
 Judge's provider resolved to, with an LLM Judge's request path, not the Gateway address the
 verifier saw.

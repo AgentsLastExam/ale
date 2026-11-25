@@ -75,7 +75,9 @@ async def test_a_judge_session_reaches_its_own_endpoint_and_never_replays(
         assert env == {"ORBIT_LLM_JUDGE_TOKEN": token}
         assert JUDGE_KEY not in json.dumps(payload)
 
-        body = {"model": "anything", "input": "judge this"}
+        # With the provider's web search, as a Codex Agent Judge offers it: nothing a
+        # Judge asks for is refused, whatever the Task's network.
+        body = {"model": "anything", "input": "judge this", "tools": [{"type": "web_search"}]}
         async with ClientSession() as client:
             for _ in range(2):
                 async with client.post(
