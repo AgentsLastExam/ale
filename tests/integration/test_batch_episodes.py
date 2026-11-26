@@ -1,6 +1,6 @@
-"""Run a solver and its snapshot verifier on a PBS Pro login node.
+"""Run a solver and its snapshot verifier on a PBS Pro or LSF login node.
 
-ORBIT_TEST_PBS_CONFIG selects a Run TOML for the site.
+ORBIT_TEST_PBS_CONFIG or ORBIT_TEST_LSF_CONFIG selects a Run TOML for the site.
 ORBIT_TEST_BATCH_GPUS optionally requests whole GPUs in both Sandboxes.
 """
 
@@ -58,13 +58,21 @@ PYTHON
 """
 
 
-@pytest.mark.needs_pbs
-async def test_solver_and_snapshot_verifier_on_batch_cluster(tmp_path: Path) -> None:
-    variable = "ORBIT_TEST_PBS_CONFIG"
+@pytest.mark.parametrize(
+    "scheduler",
+    [
+        pytest.param("pbs", marks=pytest.mark.needs_pbs),
+        pytest.param("lsf", marks=pytest.mark.needs_lsf),
+    ],
+)
+async def test_solver_and_snapshot_verifier_on_batch_cluster(
+    scheduler: str, tmp_path: Path
+) -> None:
+    variable = f"ORBIT_TEST_{scheduler.upper()}_CONFIG"
     if not (path := os.environ.get(variable)):
         pytest.skip(f"set {variable} to a Run TOML for this login node")
     config = load_run_config(run_path=Path(path))
-    assert config.sandbox.providers == ("pbs",), f"{variable} must select only pbs"
+    assert config.sandbox.providers == (scheduler,), f"{variable} must select only {scheduler}"
     gpus = int(os.environ.get("ORBIT_TEST_BATCH_GPUS", "0"))
     assert gpus >= 0
     stage = f"#!/bin/sh\nset -eu\nset -- {gpus}\n" + _DEVICES

@@ -5,7 +5,7 @@ Providers turn prepared Task images into Sandboxes. Orbit ships the following ba
 | Package | Backend | Prepared input |
 |---|---|---|
 | `docker/` | local Docker container, a Kata microVM per container ([Kata](#docker-on-kata-containers)), or a container on gVisor ([gVisor](#docker-on-gvisor)) | immutable OCI image identity |
-| `batch/` | [PBS Professional](#pbs-professional), with one or more gVisor Sandboxes in a single-node job | immutable OCI image identity |
+| `batch/` | [PBS Professional and Spectrum LSF](#pbs-professional-and-spectrum-lsf), with one or more gVisor Sandboxes in a single-node job | immutable OCI image identity |
 | `slurm/` | a Linux gVisor container on each node a Sandbox spans, in a Slurm batch allocation beside the Sandboxes booted from its snapshots | immutable OCI image identity |
 | `qemu/` | QEMU/KVM guest runner | qcow2 disk, or a chain of [layers](#disk-layers) on one |
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
@@ -933,10 +933,10 @@ against 0.07 to 0.13 s, and starting the framework's Python 1.2 to 2.4 s against
 0.9 s. A Run with no Task that asks for a container feature starts one Sandbox more, for
 the preflight's check: about 15 s with that image.
 
-## PBS Professional
+## PBS Professional and Spectrum LSF
 
-Run Orbit on the submit host with `providers = ["pbs"]` under `[sandbox]`.
-The Provider prepares images in a batch job and runs the solver and verifiers in rootless
+Run Orbit on the submit host with `providers = ["pbs"]` or `["lsf"]` under `[sandbox]`.
+Both Providers prepare images in a batch job and run the solver and verifiers in rootless
 gVisor. The job owns one compute node or a share of one. A private control directory on
 a shared filesystem carries the guest protocol between the controller and its job.
 The Task does not need a scheduler client or a site name.
@@ -949,18 +949,18 @@ From the checkout, run `uv run orbit prepare TASK --config docs/guides/sites/flo
 before `uv run orbit run TASK --agent oracle --config docs/guides/sites/flow2.toml`.
 The Task image and any binaries it installs must run on ARM64.
 
-For another PBS site, describe queues in preference order. For example:
+For another PBS or LSF site, describe queues in preference order. For example:
 
 ```toml
 [sandbox]
-providers = ["pbs"]
+providers = ["lsf"]
 
-[sandbox.pbs]
+[sandbox.lsf]
 shared_fs_dir = "/shared/home/me/orbit"
-# account = "project"     # qsub -A
+# account = "project"     # bsub -P (qsub -A on PBS)
 build_queue = "cpu"
 
-[[sandbox.pbs.partitions]]
+[[sandbox.lsf.partitions]]
 name = "cpu"
 max_cpus = 32
 max_memory_mb = 65536
@@ -971,7 +971,7 @@ Each queue declares its effective per-job CPU, memory and whole-GPU capacity. PB
 `chunk_resources` controls which of `ncpus`, `mem`, and `ngpus` appear in the select
 chunk; omit resource fields supplied by the queue itself. `min_gpus` declares GPUs the
 queue requires even for a CPU-only guest. Set `build_queue` and `build_gpus` when
-builds need a particular queue or GPU reservation.
+builds need a particular queue or GPU reservation. LSF uses one-host placement.
 
 The submit host needs the scheduler CLI. Each compute node needs Python 3.9 or newer, rootless
 Podman with its helpers on the job's PATH (or an absolute `podman` path), working
@@ -990,8 +990,9 @@ ORBIT_TEST_PBS_CONFIG=docs/guides/sites/flow2.toml ORBIT_TEST_BATCH_GPUS=1 \
   uv run pytest -q -m needs_pbs tests/integration/test_batch_episodes.py
 ```
 
-Use four GPUs to exercise the whole-node queue. The GPU test writes device memory and
-reads it back in both Sandboxes.
+Use four GPUs to exercise the whole-node queue. For LSF, set `ORBIT_TEST_LSF_CONFIG`
+to the site's Run TOML and select `-m needs_lsf`. The GPU test writes device memory
+and reads it back in both Sandboxes.
 
 ## Slurm
 
