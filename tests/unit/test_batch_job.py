@@ -10,6 +10,8 @@ from orbit.core.config import BatchProviderConfig, BatchQueue
 from orbit.core.errors import ProviderStartError
 from orbit.run.providers.batch import job as batch
 
+pytestmark = pytest.mark.unit
+
 
 def job(tmp_path, *, chunk=None, min_gpus=0):
     queue = BatchQueue(

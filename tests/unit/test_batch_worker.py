@@ -13,6 +13,8 @@ import pytest
 
 from orbit.run.providers.batch import bridge, worker
 
+pytestmark = pytest.mark.unit
+
 
 def test_job_device_visibility(monkeypatch):
     cards = [{"id": "GPU-one"}, {"id": "GPU-two"}]
