@@ -1,13 +1,17 @@
-"""Running a Host program to completion from asyncio."""
+"""Running a Host program to completion from asyncio, and ending one that holds a session."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Mapping
 
 from orbit.core.errors import ProviderStartError
 
-__all__ = ["run"]
+__all__ = ["end", "run"]
+
+#: How long a session's program has to exit once its input ends, before it is killed.
+END_TIMEOUT_SEC = 5
 
 
 async def run(
@@ -44,3 +48,35 @@ async def run(
         stdout.decode("utf-8", "replace"),
         stderr.decode("utf-8", "replace"),
     )
+
+
+async def end(process: asyncio.subprocess.Process) -> None:
+    """End the session ``process`` holds into a Sandbox as a command ends: close its input,
+    which ends the guest's end of it once that reads it, and kill the process only if it is
+    still running ``END_TIMEOUT_SEC`` later, or once the caller is cancelled.
+
+    A session killed first may leave its far end unaware it ended: on Slurm the step takes
+    Podman's monitor of its ``podman exec`` with it, and Podman, never told the session
+    ended, then fails to stop the container for a save (the Slurm Provider's AGENTS.md).
+    Nothing waits for a killed process: one whose output nobody reads any more would keep
+    that wait from ever returning.
+    """
+    if process.returncode is not None:
+        return
+    if process.stdin is not None:
+        with contextlib.suppress(OSError):
+            process.stdin.close()
+    try:
+        await asyncio.wait_for(process.wait(), END_TIMEOUT_SEC)
+    except TimeoutError:
+        _kill(process)
+    except BaseException:
+        _kill(process)
+        raise
+
+
+def _kill(process: asyncio.subprocess.Process) -> None:
+    # It may have exited while its output, which nobody reads, held the wait.
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()

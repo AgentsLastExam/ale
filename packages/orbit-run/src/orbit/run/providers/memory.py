@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 
 from orbit.core.errors import ProviderStartError
+from orbit.run.process import end
 
 __all__ = ["WATCHER", "GuestEvents", "shm_mb"]
 
@@ -129,15 +130,7 @@ class GuestEvents:
 
     async def close(self) -> None:
         self._reading.cancel()
-        if self._process.returncode is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                assert self._process.stdin is not None
-                self._process.stdin.close()
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=5)
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    self._process.kill()
+        await end(self._process)
 
 
 def _pairs(raw: bytes) -> dict[str, int]:

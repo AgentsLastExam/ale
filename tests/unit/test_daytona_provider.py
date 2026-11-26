@@ -7,6 +7,7 @@ import json
 import shlex
 import socket
 import stat
+import struct
 import sys
 from pathlib import Path
 from typing import Any
@@ -737,6 +738,57 @@ async def test_the_host_tunnel_serves_the_sandbox_and_reconnects_when_ssh_drops(
     finally:
         await tunnel.close()
         server.close()
+
+
+async def test_closing_the_tunnel_ends_its_guest_end_by_its_input() -> None:
+    """The guest's end exits once its input ends, so its session ends as a command's does:
+    a session killed instead leaves Podman, on Slurm, one it never saw end."""
+    tunnel = GatewayTunnel(
+        LocalRelay(),  # type: ignore[arg-type]
+        listeners=[(free_port(), 0)],
+        targets=[("127.0.0.1", 1)],
+    )
+    await tunnel.start(timeout_sec=30)
+    process = tunnel._process
+    await tunnel.close()
+    assert process is not None and process.returncode == 0
+
+
+class GarblingRelay(LocalRelay):
+    """Its first session says it is ready, then sends a frame larger than the tunnel accepts
+    (``CHUNK_BYTES``), and exits once its input ends; later ones run the real ``tunnel.py``."""
+
+    async def argv(self, remote_command: str) -> list[str]:
+        if self.starts:
+            return await super().argv(remote_command)
+        self.starts += 1
+        frames = struct.pack("!BII", guest_tunnel.READY, 0, 0) + struct.pack(
+            "!BII", guest_tunnel.DATA, 1, guest_tunnel.CHUNK_BYTES + 1
+        )
+        script = f"import sys; sys.stdout.buffer.write({frames!r}); sys.stdout.flush(); "
+        return [sys.executable, "-c", script + "sys.stdin.buffer.read()"]
+
+
+async def test_a_tunnel_that_reconnects_ends_its_lost_session_by_its_input() -> None:
+    relay = GarblingRelay()
+    tunnel = GatewayTunnel(
+        relay,  # type: ignore[arg-type]
+        listeners=[(free_port(), 0)],
+        targets=[("127.0.0.1", 1)],
+    )
+    await tunnel.start(timeout_sec=30)
+    try:
+        first = tunnel._process
+        assert first is not None
+        await asyncio.wait_for(first.wait(), 10)
+        assert first.returncode == 0
+        for _ in range(100):
+            if relay.starts >= 2:
+                break
+            await asyncio.sleep(0.1)
+        assert relay.starts >= 2
+    finally:
+        await tunnel.close()
 
 
 async def test_a_relay_that_cannot_listen_fails_the_start_with_its_reason() -> None:

@@ -24,6 +24,7 @@ from typing import Any, Protocol
 
 from orbit.core.errors import GuestUnreachableError, OutputStreamError, ProviderStartError
 from orbit.core.sandbox import ExecOutputSink, SandboxFile
+from orbit.run.process import end
 
 __all__ = ["GuestClient", "StdioTransport", "TcpTransport", "Transport"]
 
@@ -104,14 +105,8 @@ class StdioTransport:
 
     async def close(self) -> None:
         proc, self._proc = self._proc, None
-        if proc is None or proc.returncode is not None:
-            return
-        try:
-            if proc.stdin is not None:
-                proc.stdin.close()
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except (TimeoutError, ProcessLookupError):
-            proc.kill()
+        if proc is not None:
+            await end(proc)
 
     def _require(self) -> asyncio.subprocess.Process:
         if self._proc is None:

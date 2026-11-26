@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 from types import MappingProxyType
@@ -22,6 +21,7 @@ from orbit.core.sandbox import (
 )
 from orbit.run import guestd
 from orbit.run.guestd.tunnel import Mux
+from orbit.run.process import end
 from orbit.run.providers import relay
 from orbit.run.transport import GuestClient
 
@@ -66,12 +66,13 @@ class GatewayTunnel:
         self._closing = True
         if self._first.done() and not self._first.cancelled():
             self._first.exception()  # mark retrieved
-        if self._process is not None and self._process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                self._process.kill()
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+        try:
+            if self._process is not None:
+                await end(self._process)
+        finally:
+            if self._task is not None:
+                self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
 
     async def _dial(self, index: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         host, port = self._targets[index]
@@ -107,9 +108,7 @@ class GatewayTunnel:
                         await running
                 finally:
                     running.cancel()
-                    if process.returncode is None:
-                        with contextlib.suppress(ProcessLookupError):
-                            process.kill()
+                    await end(process)
                     assert process.stderr is not None
                     detail = (await process.stderr.read()).decode("utf-8", "replace").strip()
             except asyncio.CancelledError:
