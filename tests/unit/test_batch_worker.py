@@ -51,9 +51,9 @@ def test_job_without_delegation_does_not_start_steps(tmp_path):
 
 
 def test_worker_keeps_only_assigned_gpu_ids(monkeypatch):
-    monkeypatch.setenv("PBS_JOBID", "100")
+    monkeypatch.setenv("LSB_JOBID", "100")
     monkeypatch.setenv("ORBIT_BATCH_STEP_GPUS", "GPU-b")
-    context = worker.Batch({"scheduler": "pbs", "gpus": 2})
+    context = worker.Batch({"scheduler": "lsf", "gpus": 2})
     assert context.devices([{"id": "GPU-a"}, {"id": "GPU-b"}]) == [{"id": "GPU-b"}]
 
 

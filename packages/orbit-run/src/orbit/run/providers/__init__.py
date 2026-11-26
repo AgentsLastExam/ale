@@ -76,6 +76,7 @@ RETAINING_PROVIDERS = (
     "orchard",
     "slurm",
     "pbs",
+    "lsf",
     "fleet",
 )
 
@@ -105,10 +106,15 @@ def leaf(
     """The leaf a provider id names: ``docker:<runtime>`` for each runtime Docker's table
     holds, ``qemu``, ``firecracker``, ``slurm`` or ``orchard``. ``docker`` holds a Docker leaf's
     settings: the Host GPUs it may lease and the margin it admits a shared one with."""
-    if provider_id == "pbs":
+    if provider_id in ("pbs", "lsf"):
         from orbit.run.providers.slurm import SlurmProvider
 
-        return SlurmProvider(batch or BatchProviderConfig())
+        if batch is None:
+            defaults = SandboxConfig()
+            batch = defaults.pbs if provider_id == "pbs" else defaults.lsf
+        if batch.scheduler != provider_id:
+            raise ConfigError(f"{provider_id} needs its own batch configuration")
+        return SlurmProvider(batch)
     if provider_id == "slurm":
         from orbit.run.providers.slurm import SlurmProvider
 
@@ -321,8 +327,8 @@ class ProviderRegistry:
             from orbit.run.providers.daytona import DaytonaProvider
 
             return DaytonaProvider(settings.daytona)
-        if provider_id == "pbs":
-            return leaf(provider_id, batch=settings.pbs)
+        if provider_id in ("pbs", "lsf"):
+            return leaf(provider_id, batch=settings.pbs if provider_id == "pbs" else settings.lsf)
         return leaf(provider_id, docker=settings.docker, slurm=settings.slurm)
 
     async def select(
@@ -576,8 +582,9 @@ def provider_named(name: str, settings: SandboxConfig | None = None) -> Provider
     if name == "slurm":
         # Its snapshots are listed from its cache, whatever the partitions.
         return leaf("slurm", slurm=settings.slurm if settings else None)
-    if name == "pbs":
-        return leaf(name, batch=settings.pbs if settings else None)
+    if name in ("pbs", "lsf"):
+        config = settings or SandboxConfig()
+        return leaf(name, batch=config.pbs if name == "pbs" else config.lsf)
     if name == "daytona":
         from orbit.run.providers.daytona import DaytonaProvider
 

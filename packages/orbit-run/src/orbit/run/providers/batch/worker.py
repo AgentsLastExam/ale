@@ -1,4 +1,4 @@
-"""Single-node PBS Pro allocation steps, staged as batch_worker.py."""
+"""Single-node PBS Pro and LSF allocation steps, staged as batch_worker.py."""
 
 from __future__ import annotations
 
@@ -242,7 +242,7 @@ class Allocation:
 class Batch:
     def __init__(self, config: dict):
         self.scheduler = config["scheduler"]
-        self.job = os.environ["PBS_JOBID"]
+        self.job = os.environ[{"pbs": "PBS_JOBID", "lsf": "LSB_JOBID"}[self.scheduler]]
         self.gpu_count = config["gpus"]
         self.cpu_count = config.get("cpus")
         self.podman = config.get("podman") or "podman"

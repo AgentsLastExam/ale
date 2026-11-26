@@ -258,6 +258,7 @@ ProviderId = Literal[
     "docker:gvisor",
     "slurm",
     "pbs",
+    "lsf",
     "qemu",
     "firecracker",
     "orchard",
@@ -374,10 +375,10 @@ class BatchQueue(SlurmPartition):
 
 
 class BatchProviderConfig(SlurmProviderConfig):
-    """A PBS Pro site and its queues, in placement order."""
+    """A PBS Pro or Spectrum LSF site and its queues, in placement order."""
 
-    scheduler: Literal["pbs", "lsf"] = "pbs"
-    shared_fs_dir: str = Field(default="~/.cache/orbit/pbs", min_length=1)
+    scheduler: Literal["pbs", "lsf"]
+    shared_fs_dir: str = Field(min_length=1)
     architecture: Arch = Arch.X86_64
     partitions: tuple[BatchQueue, ...] = ()
     build_queue: str | None = None
@@ -401,7 +402,21 @@ class BatchProviderConfig(SlurmProviderConfig):
             not self.build_queue or self.build_gpus > queues[self.build_queue].max_gpus
         ):
             raise ValueError("build_gpus must fit the configured build_queue")
+        if self.scheduler == "lsf" and any(
+            q.chunk_resources != ("ncpus", "mem", "ngpus") for q in self.partitions
+        ):
+            raise ValueError("chunk_resources is a PBS setting")
         return self
+
+
+class PBSProviderConfig(BatchProviderConfig):
+    scheduler: Literal["pbs"] = "pbs"
+    shared_fs_dir: str = "~/.cache/orbit/pbs"
+
+
+class LSFProviderConfig(BatchProviderConfig):
+    scheduler: Literal["lsf"] = "lsf"
+    shared_fs_dir: str = "~/.cache/orbit/lsf"
 
 
 class DaytonaProviderConfig(BaseModel):
@@ -440,14 +455,18 @@ class SandboxConfig(BaseModel):
     same way; a scheduler's own leaves are its deployment's to configure."""
     docker: DockerProviderConfig = DockerProviderConfig()
     slurm: SlurmProviderConfig = SlurmProviderConfig()
-    pbs: BatchProviderConfig = BatchProviderConfig()
+    pbs: PBSProviderConfig = PBSProviderConfig()
+    lsf: LSFProviderConfig = LSFProviderConfig()
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
     fleet: FleetConfig = FleetConfig()
 
     @property
     def linux_container_arch(self) -> Arch:
         """Native target of this Run's cluster images, independent of the controller's CPU."""
-        return self.pbs.architecture if "pbs" in self.providers else Arch.X86_64
+        for site in (self.pbs, self.lsf):
+            if site.scheduler in self.providers:
+                return site.architecture
+        return Arch.X86_64
 
     # --- validation ---
 
@@ -462,8 +481,14 @@ class SandboxConfig(BaseModel):
 
     @model_validator(mode="after")
     def _settings_have_their_provider(self) -> Self:
-        if "pbs" in self.providers and not self.pbs.partitions:
-            raise ValueError("the pbs Provider needs sandbox.pbs.partitions")
+        sites = [site for site in (self.pbs, self.lsf) if site.scheduler in self.providers]
+        if len({site.architecture for site in sites}) > 1:
+            raise ValueError("the Run's batch sites must agree on its Linux image architecture")
+        for site in sites:
+            if not site.partitions:
+                raise ValueError(
+                    f"the {site.scheduler} Provider needs sandbox.{site.scheduler}.partitions"
+                )
         if "slurm" in self.providers and not self.slurm.partitions:
             raise ValueError("the slurm Provider needs sandbox.slurm.partitions")
         if self.docker.gpus and not any(name.startswith("docker:") for name in self.providers):

@@ -831,6 +831,8 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
         "docker:z",
         "firecracker:a",
         "firecracker:z",
+        "lsf:a",
+        "lsf:z",
         "orchard:a",
         "orchard:z",
         "pbs:a",
@@ -1003,10 +1005,10 @@ async def test_flow2_uses_the_native_target_for_solver_and_snapshot_verifier(
 
 
 def test_batch_settings_survive_serialization_and_reject_unsupported_allocations() -> None:
-    pbs = _settings(
-        "pbs", pbs={"partitions": [{"name": "cpu", "max_cpus": 4, "max_memory_mb": 8192}]}
+    lsf = _settings(
+        "lsf", lsf={"partitions": [{"name": "cpu", "max_cpus": 4, "max_memory_mb": 8192}]}
     )
-    assert RunConfig.model_validate(pbs.model_dump()).sandbox.pbs == pbs.sandbox.pbs
+    assert RunConfig.model_validate(lsf.model_dump()).sandbox.lsf == lsf.sandbox.lsf
     with pytest.raises(ValidationError, match="max_nodes"):
         _settings(
             "pbs",

@@ -47,7 +47,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# A PBS job stages the compute-side adapter beside this script. Isolated Python
+# A PBS or LSF job stages the compute-side adapter beside this script. Isolated Python
 # does not import sibling modules, and guest-controlled directories never go on sys.path.
 batch = None
 
@@ -931,8 +931,8 @@ def load(command: list[str], archive: str, image: str) -> None:
 def stale_stores(node_local_dir: Path) -> list[Path]:
     """The stores on this node of this account's jobs that have ended: one that Slurm
     killed, at its wall time or by preemption, or whose node went down, cleaned up nothing."""
-    # A scheduler may reap this job on timeout or preemption. PBS uses its own store
-    # prefix and job IDs.
+    # A scheduler may reap this job on timeout or preemption. PBS/LSF give each
+    # job its own prefix. Never delete their stores using Slurm's job-id namespace.
     stale = []
     if batch is not None:
         return batch.abandoned(node_local_dir)
