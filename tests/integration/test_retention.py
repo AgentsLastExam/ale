@@ -229,8 +229,10 @@ async def test_retained_episode_is_reverified_without_rerunning_agent(
 
     stale.unlink()
     (task_path / "tests/verify.py").write_text(
-        "from orbit_verify import checks, write\n"
+        "from orbit_verify import checks, load_trajectory, write\n"
         "v = {}\n"
+        "agent = load_trajectory().document['agent']['name']\n"
+        "v['source_trajectory'] = float(agent == 'oracle')\n"
         "v['reverified'] = checks.text_equals('/home/user/output/result.tx"
         "t', 'hello\\n')['score']\n"
         "v['stale_removed'] = checks.file_missing('/opt/orbit/tests/stale.txt')['score']\n"

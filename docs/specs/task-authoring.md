@@ -685,8 +685,8 @@ predicts the final one less well where the two see different things. Run shared,
 a Sandbox booted from a snapshot of the agent's, with the agent's resources and
 `[environment].env` and no sudo, since the agent goes on from that state. Each round
 receives the agent's trajectory up to the turn that ended, converted as that turn ends just
-as the final one is, so `judge(..., trajectory=True)` and the `checks.trajectory_*` checks
-work in every round as they do in `tests/`.
+as the final one is, so `load_trajectory()` returns it in every round as it does in
+`tests/` ([Verification](verification.md#trajectory)).
 
 With `[verifier.validation] visibility = true`, the agent works beside a read-only copy of
 the stage that validates at `/opt/validation` (`C:\validation` on Windows), mounted from the

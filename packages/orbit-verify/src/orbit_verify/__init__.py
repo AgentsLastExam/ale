@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import sys
 import uuid
 from collections.abc import Mapping, Sequence
@@ -15,9 +14,9 @@ from typing import Any
 
 from . import _agents, _llm, checks
 from ._io import (
-    MAX_TOTAL_EVIDENCE_BYTES,
     ConfigurationError,
     EvidenceError,
+    JudgeContextError,
     JudgeError,
     VerificationError,
     atomic_json,
@@ -29,12 +28,12 @@ from ._io import (
     load_config,
     media_type,
     read_file_evidence,
-    read_text_evidence,
     redact,
 )
 from ._journal import journal
 from ._json import json_object, schema_validator
 from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation
+from ._trajectory import Trajectory, load_trajectory
 
 __version__ = "0.2.0"
 __all__ = [
@@ -43,13 +42,16 @@ __all__ = [
     "EvidenceError",
     "EvidenceReference",
     "JudgeAttempt",
+    "JudgeContextError",
     "JudgeError",
     "JudgeInvocation",
+    "Trajectory",
     "VerificationError",
     "checks",
     "endpoint_identity",
     "judge",
     "judge_route",
+    "load_trajectory",
     "probe_judge",
     "read_result",
     "write",
@@ -194,7 +196,6 @@ def judge(
     output_schema: dict[str, Any] | None = None,
     files: Sequence[str] = (),
     reference: str | None = None,
-    trajectory: bool = False,
     mcp_servers: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, Any]:
     """Return model data; all interpretation and scoring belong to the caller."""
@@ -232,13 +233,6 @@ def judge(
             evidence.append((content, item))
         if reference is not None:
             evidence.append(inline_evidence(reference, kind="reference"))
-        if trajectory:
-            path = os.environ.get("ORBIT_TRAJECTORY_PATH")
-            if not path:
-                raise EvidenceError("no solver trajectory was recorded")
-            evidence.append(read_text_evidence(path, kind="solver_trajectory"))
-        if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
-            raise EvidenceError("Judge evidence exceeds the total byte limit")
         journal(
             kind,
             {

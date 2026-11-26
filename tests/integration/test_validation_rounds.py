@@ -37,10 +37,9 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 #: what of validation/ or tests/ a turn saw and how many prompts the trajectory it received
 #: holds; validation/'s feedback tells the agent how far it got, and tests/'s is never read.
 VERIFY = """\
-import json
 import os
 from pathlib import Path
-from orbit_verify import write
+from orbit_verify import load_trajectory, write
 
 home = Path(os.environ["ORBIT_HOME"])
 work = home / "work.txt"
@@ -53,10 +52,8 @@ turns = {
     name: (home / name).read_text().splitlines() if (home / name).is_file() else []
     for name in ("shown", "written", "mounted")
 }
-# The oracle, which calibration runs, has no trajectory.
-trajectory = os.environ.get("ORBIT_TRAJECTORY_PATH")
-steps = json.loads(Path(trajectory).read_text())["steps"] if trajectory else []
-prompts = sum(step["source"] == "user" for step in steps)
+trajectory = load_trajectory()
+prompts = sum(step["source"] == "user" for step in trajectory.document["steps"])
 reward = round(min(1.0, len(lines) / 3), 2)
 result = {
     "reward": reward,

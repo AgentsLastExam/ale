@@ -203,39 +203,6 @@ def http(
     )
 
 
-def trajectory_tool_used(name: str) -> dict[str, Any]:
-    used = name in _trajectory_tools()
-    return _result(
-        float(used),
-        "tool was used" if used else "tool was not used",
-        name,
-        _trajectory_evidence(),
-    )
-
-
-def trajectory_tool_not_used(name: str) -> dict[str, Any]:
-    used = name in _trajectory_tools()
-    return _result(
-        float(not used),
-        "tool was not used" if not used else "tool was used",
-        name,
-        _trajectory_evidence(),
-    )
-
-
-def trajectory_turn_count(minimum: int | None = None, maximum: int | None = None) -> dict[str, Any]:
-    if minimum is None and maximum is None:
-        raise ValueError("set minimum or maximum")
-    count = sum(1 for step in _trajectory()["steps"] if step.get("source") == "agent")
-    matched = (minimum is None or count >= minimum) and (maximum is None or count <= maximum)
-    return _result(
-        float(matched),
-        "turn count matched" if matched else "turn count differed",
-        count,
-        _trajectory_evidence(),
-    )
-
-
 def _text(path, predicate, success: str, expected: object) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     try:
         with open(path, encoding="utf-8") as handle:
@@ -266,37 +233,12 @@ def _json_parts(path: str) -> list[str]:
     return parts
 
 
-def _trajectory() -> dict[str, object]:
-    path = os.environ.get("ORBIT_TRAJECTORY_PATH")
-    if not path:
-        raise RuntimeError("ORBIT_TRAJECTORY_PATH is not configured")
-    with open(path, encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if payload.get("schema_version") != "ATIF-v1.8" or not isinstance(payload.get("steps"), list):
-        raise ValueError("trusted trajectory is malformed")
-    return payload
-
-
-def _trajectory_tools() -> set[object]:
-    return {
-        call.get("function_name")
-        for step in _trajectory()["steps"]  # type: ignore[union-attr]
-        for call in step.get("tool_calls") or ()
-        if isinstance(call, dict)
-    }
-
-
-def _trajectory_evidence() -> tuple[EvidenceReference, ...]:
-    path = os.environ.get("ORBIT_TRAJECTORY_PATH")
-    return _evidence(path, kind="solver_trajectory") if path else ()
-
-
-def _evidence(path: str | os.PathLike[str], kind: str = "file") -> tuple[EvidenceReference, ...]:
+def _evidence(path: str | os.PathLike[str]) -> tuple[EvidenceReference, ...]:
     try:
         raw = Path(path).read_bytes()
         return (
             EvidenceReference(
-                kind=kind,  # type: ignore[arg-type]
+                kind="file",
                 location=os.fspath(path),
                 sha256=digest(raw),
                 size_bytes=len(raw),

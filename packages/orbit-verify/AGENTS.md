@@ -8,7 +8,8 @@ API. Read [`README.md`](README.md) and `../../docs/specs/verification.md` first.
 - Judge calls persist request and response events independently of task results.
 - Judge transport/configuration failure is not a score and must remain an explicit
   exception; do not invent a zero score.
-- Evidence paths are bounded regular files; credentials must not enter records or logs.
+- Evidence paths are absolute regular files with no size limit of Orbit's; credentials
+  must not enter records or logs.
 - Update public examples and package tests when changing author-facing behavior.
 
 Run `uv run pytest packages/orbit-verify/tests` and `just lint` from the repository root.

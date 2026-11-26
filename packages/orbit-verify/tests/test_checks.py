@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 import sys
 import threading
@@ -46,9 +45,7 @@ def test_command_numeric_csv_and_sqlite_checks(tmp_path: Path) -> None:
     assert checks.sqlite_value(db, "select value from values_", 7)["score"] == 1
 
 
-def test_loopback_http_and_trajectory_checks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_loopback_http_check(monkeypatch: pytest.MonkeyPatch) -> None:
     class Response:
         status = 200
 
@@ -63,24 +60,6 @@ def test_loopback_http_and_trajectory_checks(
 
     monkeypatch.setattr(checks.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
     assert checks.http("http://127.0.0.1:8080/health", contains="ready")["score"] == 1
-    trajectory = tmp_path / "trajectory.json"
-    trajectory.write_text(
-        json.dumps(
-            {
-                "schema_version": "ATIF-v1.8",
-                "steps": [
-                    {
-                        "source": "agent",
-                        "tool_calls": [{"function_name": "shell"}],
-                    }
-                ],
-            }
-        )
-    )
-    monkeypatch.setenv("ORBIT_TRAJECTORY_PATH", str(trajectory))
-    assert checks.trajectory_tool_used("shell")["score"] == 1
-    assert checks.trajectory_tool_not_used("browser")["score"] == 1
-    assert checks.trajectory_turn_count(minimum=1, maximum=1)["score"] == 1
     with pytest.raises(ValueError, match="local"):
         checks.http("https://example.com")
 

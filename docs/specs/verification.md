@@ -95,7 +95,7 @@ write(verify())
 ```
 
 `judge(kind, name="judge", *, prompt, output_schema=None, files=(), reference=None,
-trajectory=False, mcp_servers=())` returns a normal dictionary. `kind` is `llm` or
+mcp_servers=())` returns a normal dictionary. `kind` is `llm` or
 `agent`. Names label logs and need not be unique. Optional `output_schema` uses JSON
 Schema draft 04, 06 or 07; without it the response must still be a JSON object. Schema
 checking does not insert defaults or coerce values. References must be self-contained;
@@ -131,7 +131,7 @@ artifacts and trajectory are not overwritten by those modifications.
 
 `files` supplies absolute regular-file paths. LLM Judge supports text, PNG, JPEG, GIF,
 WebP and PDF evidence; Agent Judge receives file paths to inspect. `reference` supplies
-inline text; `trajectory=True` includes the solver trajectory. Missing or unusable evidence
+inline text. Missing or unusable evidence
 raises `EvidenceError`; the tool does not decide that it deserves zero. Authors should check
 expected submissions before invoking a Judge and assign missing or unusable submissions
 the task's intended deductions or zero score. Passing missing evidence to a Judge still
@@ -139,10 +139,41 @@ raises. Invalid JSON or schema-mismatched model output receives the error and th
 for up to three repair attempts after the initial response; only exhaustion raises.
 An unhandled Judge failure is not a score.
 
-Evidence is bounded: 20 MiB per file, 32 MiB per invocation, 256 KiB for inline references,
-and 1 MiB for text and trajectory inputs. These are transport limits, not scoring policy;
-inputs are never silently truncated. There is no separate structured-response or
-rubric-scoring mode.
+Orbit sets no size limit on a Judge's prompt, files or reference, since only what the Judge's
+model accepts can bound them, and never truncates them. There is no separate
+structured-response or rubric-scoring mode.
+
+## Trajectory
+
+`load_trajectory()` returns the agent's [trajectory](trace.md#atif-trajectory) as a
+`Trajectory`, or `None` where the episode recorded none, as when its agent never started. An
+oracle's, as in calibration, holds the instruction and its final message, its agent named
+`oracle`. A validation round receives the trajectory up to the turn that ended, `tests/` all
+of it, and `orbit reverify` its source episode's.
+
+A `Trajectory` holds the ATIF v1.8 `document` and `incomplete`, which names why it is
+incomplete (`agent_interrupted`, `collection_failed` or `conversion_failed`) and is
+otherwise `None`, so a trajectory cut short is not taken for an agent that did little. Task
+code reads, filters or condenses the document as it sees fit and gives a Judge what it makes
+of it as any other input: in the prompt, as a reference or as a file, which an Agent Judge
+reads in pieces as it reads any file.
+
+```python
+import json
+from pathlib import Path
+
+from orbit_verify import judge, load_trajectory
+
+steps = [step for step in load_trajectory().document["steps"] if step["source"] == "agent"]
+review = judge("llm", "process", prompt="Rate the agent's checks:\n" + json.dumps(steps))
+
+Path("/tmp/process.json").write_text(json.dumps(steps, indent=1))
+audit = judge("agent", "audit", prompt="Audit the process.", files=["/tmp/process.json"])
+```
+
+The verifier receives `trajectory.json` alone. The images and audio it references stay in
+the episode's `blobs/` on the Host, since uploading every screenshot to every verification
+and validation round would cost time for Tasks that never read them.
 
 ## Judge records
 
@@ -182,13 +213,26 @@ budget: the engine passes the seconds left in the verify phase as
 `ORBIT_VERIFY_DEADLINE_SECONDS`, and a Judge stops retrying 30 seconds before it so that the
 failure is recorded rather than killed. Without that budget, as when an author runs
 `verify.py` directly, a transient failure gets three further attempts instead. Any other
-provider rejection fails at once. An
+provider rejection fails at once, a stream that ends rejecting the request included. An
 invalid or refused response gets at most three further attempts; invalid verdicts receive a
 schema-repair prompt that names the error, and a verdict wrapped in a Markdown JSON fence
 is accepted. Agent Judge runs each CLI attempt with no timeout but that remaining budget,
 retries CLI failures and timeouts with the same evidence in a fresh native session, and
 repairs invalid verdicts in the existing session. Missing credentials and native session
 identity mismatches stop immediately. Unhandled Judge failures fail verification rather than becoming a score.
+
+A request larger than the Judge's model accepts fails at once, without a retry, as
+`JudgeContextError`, a `JudgeError`, however its protocol, a gateway before it or an Agent
+Judge's CLI reports it, since the same request would be refused again. Orbit condenses no
+input itself, as only the Task knows which parts matter. Task code may catch the error and
+ask again with less, or give the input to an Agent Judge as a file:
+
+```python
+try:
+    review = judge("llm", "process", prompt=prompt + json.dumps(steps))
+except JudgeContextError:
+    review = judge("llm", "process", prompt=prompt + json.dumps(steps[-200:]))
+```
 
 ### Preflight
 
