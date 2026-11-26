@@ -139,10 +139,9 @@ raises. Invalid JSON or schema-mismatched model output receives the error and th
 for up to three repair attempts after the initial response; only exhaustion raises.
 An unhandled Judge failure is not a score.
 
-Evidence is bounded: 20 MiB per file, 32 MiB per invocation, 256 KiB for inline references,
-and 1 MiB for text inputs. These are transport limits, not scoring policy;
-inputs are never silently truncated. There is no separate structured-response or
-rubric-scoring mode.
+Orbit sets no size limit on a Judge's prompt, files or reference, since only what the Judge's
+model accepts can bound them, and never truncates them. There is no separate
+structured-response or rubric-scoring mode.
 
 ## Trajectory
 

@@ -31,10 +31,6 @@ def test_credentials_and_unsafe_evidence_are_rejected_or_redacted(tmp_path: Path
     symlink.symlink_to(regular)
     with pytest.raises(EvidenceError):
         read_text_evidence(symlink)
-    oversized = tmp_path / "large.txt"
-    oversized.write_bytes(b"x" * 10)
-    with pytest.raises(EvidenceError, match="exceeds"):
-        read_text_evidence(oversized, max_bytes=5)
 
 
 @pytest.mark.needs_docker

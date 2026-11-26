@@ -336,7 +336,7 @@ def test_successful_provider_fields_are_sanitized(
         call()
 
 
-def test_evidence_requires_absolute_bounded_regular_utf8_files(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_evidence_requires_absolute_regular_utf8_files_of_any_size(tmp_path) -> None:  # type: ignore[no-untyped-def]
     regular = tmp_path / "answer.txt"
     regular.write_text("answer")
     assert read_text_evidence(regular)[0] == "answer"
@@ -346,10 +346,10 @@ def test_evidence_requires_absolute_bounded_regular_utf8_files(tmp_path) -> None
     link.symlink_to(regular)
     with pytest.raises(EvidenceError):
         read_text_evidence(link)
+    # Orbit sets no size of its own: only the Judge's model bounds what it reads.
     large = tmp_path / "large"
-    large.write_bytes(b"x" * 10)
-    with pytest.raises(EvidenceError, match="exceeds"):
-        read_text_evidence(large, max_bytes=5)
+    large.write_bytes(b"x" * (3 * 1024 * 1024))
+    assert len(read_text_evidence(large)[0]) == 3 * 1024 * 1024
 
 
 @pytest.mark.parametrize(
@@ -423,6 +423,34 @@ def test_mixed_evidence_reaches_each_protocol_and_survives_repair(
     assert observed[0] != observed[1]
     assert "Your previous response was rejected" in parts[0]["text"]
     assert base64.b64encode(png).decode() not in json.dumps(asdict(invocation))
+
+
+def test_a_judge_takes_inputs_of_any_size(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from orbit_verify import judge
+
+    text = tmp_path / "process.json"
+    text.write_text("t" * (33 * 1024 * 1024))
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"llm": config()}))
+    monkeypatch.setenv("JUDGE_KEY", "secret")
+    monkeypatch.setenv("ORBIT_VERIFY_CONFIG_PATH", str(settings))
+    monkeypatch.setenv("ORBIT_LLM_JUDGE_LOG_PATH", str(tmp_path / "llm-judge.jsonl"))
+    sent = []
+
+    def open_(request, timeout):  # type: ignore[no-untyped-def]
+        sent.append(len(request.data))
+        return Response({"output_text": '{"choice":"yes","reasoning":"Read it all."}'})
+
+    monkeypatch.setattr(_llm.urllib.request, "urlopen", open_)
+    verdict = judge(
+        "llm",
+        prompt="Judge the process.",
+        output_schema=schema(),
+        files=[str(text)],
+        reference="r" * (512 * 1024),
+    )
+    assert verdict["choice"] == "yes"
+    assert sent[0] > 33 * 1024 * 1024
 
 
 @pytest.mark.parametrize(

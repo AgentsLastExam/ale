@@ -14,7 +14,6 @@ from typing import Any
 
 from . import _agents, _llm, checks
 from ._io import (
-    MAX_TOTAL_EVIDENCE_BYTES,
     ConfigurationError,
     EvidenceError,
     JudgeError,
@@ -232,8 +231,6 @@ def judge(
             evidence.append((content, item))
         if reference is not None:
             evidence.append(inline_evidence(reference, kind="reference"))
-        if sum(item.size_bytes for _, item in evidence) > MAX_TOTAL_EVIDENCE_BYTES:
-            raise EvidenceError("Judge evidence exceeds the total byte limit")
         journal(
             kind,
             {
