@@ -4,10 +4,12 @@ Orbit's cache with its compute nodes; no Docker is needed there."""
 from __future__ import annotations
 
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
+from orbit.core.sandbox import Identity, ImageRef, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
 from orbit.run.episode import run_episode
 from orbit.run.gateway.server import Gateway
 from orbit.run.harnesses.base import CliCommand
@@ -22,7 +24,7 @@ from tests.integration.test_validation_rounds import _episode as rounds_episode
 from tests.integration.test_validation_rounds import _task as rounds_task
 from tests.integration.test_volume_artifacts import _check as check_volume
 from tests.integration.test_volume_artifacts import _episode as volume_episode
-from tests.support import ScriptedCliHarness, provider_registry, slurm_config
+from tests.support import CONTAINER_BASE, ScriptedCliHarness, provider_registry, slurm_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_slurm]
 
@@ -144,3 +146,36 @@ async def test_every_turn_reaches_the_gateway_through_its_tunnel_over_slurm_roun
         await model.stop()
     check_rounds(result)
     assert len(model.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_save_outlasts_a_guest_session_whose_srun_was_killed() -> None:
+    """A guest session whose srun on the login node was killed leaves Podman a session it
+    never saw end, which fails the save's first ``podman stop``: the save still keeps the
+    Sandbox's disk (the Provider's AGENTS.md)."""
+    provider = SlurmProvider(slurm_config())
+    request = SandboxRequest(
+        episode_id="slurm-lost-session",
+        prepared_image=await provider.prepare_image(
+            ImageRef(kind="container", reference=CONTAINER_BASE)
+        ),
+        resources=Resources(cpus=2, memory_mb=2048),
+        network=NetworkPolicy(mode=NetworkMode.BLOCK),
+        retention="snapshot",
+    )
+    sandbox = await provider.create(request)
+    kept = str(PurePosixPath(sandbox.agent_home) / "kept.txt")
+    try:
+        await sandbox.write_file(kept, b"kept", identity=Identity.AGENT)
+        lost = sandbox._file_client._transport._proc  # type: ignore[attr-defined]
+        lost.kill()
+        await lost.wait()
+        retained = await sandbox.snapshot(roles=("solver",), reason="test")
+    finally:
+        await sandbox.destroy()
+    try:
+        booted = await provider.create(request.model_copy(update={"snapshot": retained.handle}))
+        async with booted:
+            assert await booted.read_file(kept) == b"kept"
+    finally:
+        await provider.destroy_retained(retained.handle)
