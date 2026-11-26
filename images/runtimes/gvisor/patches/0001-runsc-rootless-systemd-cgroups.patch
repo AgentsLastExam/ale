@@ -25,7 +25,7 @@ when that is a socket, which it tries first. Under rootful Docker 29.1.3
 limits.
 
 diff --git a/runsc/cgroup/systemd.go b/runsc/cgroup/systemd.go
-index 0840f17..8f8384a 100644
+index 2e66b98..8e669bb 100644
 --- a/runsc/cgroup/systemd.go
 +++ b/runsc/cgroup/systemd.go
 @@ -62,6 +62,13 @@ type cgroupSystemd struct {
@@ -63,9 +63,9 @@ index 0840f17..8f8384a 100644
 +	}
 +	// Rewrite Path so that it is compatible with cgroupv2 methods.
 +	cg.Path = filepath.Join(cg.ManagerRoot, expandSlice(cg.Parent), cg.unitName())
- 	var version int
- 	if version, err = systemdVersion(conn); err != nil {
- 		return nil, fmt.Errorf("error parsing systemd version: %v", err)
+ 	version, err := systemdVersion(conn)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("reading systemd version: %w", err)
 @@ -200,7 +215,7 @@ func (c *cgroupSystemd) Update(res *specs.LinuxResources) error {
  	}
  

@@ -15,8 +15,8 @@ set -euo pipefail
 # This image's own version, which stays 0.1.0 while Orbit is in development: a changed
 # build is published under it again, and the build's id tells the builds apart.
 VERSION=0.1.0
-GVISOR_TAG=release-20261109.0
-GVISOR_COMMIT=a0e6be6fb5e03d8ebea13592f36a097c7e9a41b9
+GVISOR_TAG=release-20261116.0
+GVISOR_COMMIT=89cacadae21eca4270a8f7c79281d0426d33ac5f
 
 here=$(cd "$(dirname "$0")" && pwd)
 # What goes into the build: the release, each patch's change in name order (not its header)
@@ -31,6 +31,12 @@ build_id() {
 }
 if [[ ${1-} == --id ]]; then build_id; exit 0; fi
 (( $# == 1 )) || { echo "usage: $0 WORKDIR" >&2; exit 2; }
+arch=$(uname -m)
+case "$arch" in
+    x86_64) platform=linux/amd64 ;;
+    aarch64) platform=linux/arm64 ;;
+    *) echo "ERROR: unsupported build architecture: $arch" >&2; exit 2 ;;
+esac
 mkdir -p "$1"
 work=$(cd "$1" && pwd)
 src=$work/gvisor
@@ -66,7 +72,7 @@ chmod +x "$src/tools/orbit_workspace_status.sh"
 # gVisor's release pipeline builds //debian:gvisor-release-tar-* with these options; its
 # Makefile runs Bazel in its builder container.
 echo ">> building $stamp"
-options="--config=x86_64 --compilation_mode=opt"
+options="--config=$arch --compilation_mode=opt"
 options+=" --workspace_status_command=tools/orbit_workspace_status.sh"
 mkdir -p "$out"
 status=0
@@ -74,7 +80,7 @@ make -C "$src" BAZEL_CACHE="$work/bazel-cache" BAZEL_OPTIONS="$options" \
     copy TARGETS=//debian:gvisor-release-tar-bz2 DESTINATION="$out/" || status=$?
 make -C "$src" bazel-shutdown >/dev/null 2>&1 || true
 # gVisor's Makefile leaves the container it commits its builder image from.
-docker rm -f "gvisor-builder-$("$src/tools/compat/realpath.py" "$src" | md5sum | cut -c1-8)-x86_64" \
+docker rm -f "gvisor-builder-$("$src/tools/compat/realpath.py" "$src" | md5sum | cut -c1-8)-$arch" \
     >/dev/null 2>&1 || true
 (( status == 0 )) || exit "$status"
 
@@ -104,5 +110,5 @@ reported=$("$out/check/runsc" --version | head -1)
 rm -rf "$out/check"
 
 echo ">> building $image"
-docker build --file "$here/Dockerfile" --build-arg "GVISOR_TAG=$GVISOR_TAG" \
+docker build --platform "$platform" --file "$here/Dockerfile" --build-arg "GVISOR_TAG=$GVISOR_TAG" \
     --build-arg "BUILD_ID=$id" --tag "$image" "$out"

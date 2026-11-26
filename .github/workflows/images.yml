@@ -15,11 +15,13 @@ on:
     branches: [main]
     paths:
       - 'images/**'
+      - '.github/workflows/images.yml'
       - 'packages/orbit-run/pyproject.toml'
       - 'packages/orbit-run/src/orbit/run/__init__.py'
   pull_request:
     paths:
       - 'images/**'
+      - '.github/workflows/images.yml'
   workflow_dispatch:
     inputs:
       promote_repository:
@@ -173,16 +175,24 @@ jobs:
           uv run orbit vm-image push "$RUNNER_TEMP/vm-ubuntu24-base.qcow2"
           "${{ steps.release.outputs.image }}"
 
-  # Orbit's gVisor runtime is built by gVisor's own Bazel build, which build.sh runs before
-  # it builds the image, and is published whenever its build id (build.sh --id) differs from
-  # the registry's.
+  # Stage native images independently. The public version advances once both exist.
   gvisor:
     if: github.event_name != 'workflow_dispatch' || inputs.promote_repository == ''
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     permissions:
       contents: read
       packages: write
+    env:
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -194,38 +204,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check whether this build is published
+      - name: Check for the native image of this build
         id: release
         run: |
           version=$(sed -n 's/^VERSION=\([0-9.]*\)$/\1/p' images/runtimes/gvisor/build.sh)
-          [ -n "$version" ] || { echo "::error::no version for orbit-gvisor"; exit 1; }
           build=$(images/runtimes/gvisor/build.sh --id)
           image="ghcr.io/agentslastexam/orbit-gvisor:$version"
+          native="$image-$build-$ARCH"
           echo "image=$image" >> "$GITHUB_OUTPUT"
-          published=$(docker buildx imagetools inspect "$image" --format '{{json .Image}}' \
-            2>/dev/null | python3 -c 'import json, sys
-          image = json.load(sys.stdin)
-          image = image if "config" in image else next(iter(image.values()))
-          print(image["config"].get("Labels", {}).get("orbit.gvisor.build", ""))' || true)
-          if [ "$published" = "$build" ]; then
-            echo "$image is build $build already"
-            echo "published=true" >> "$GITHUB_OUTPUT"
+          echo "native=$native" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$native" >/dev/null 2>&1; then
+            echo 'published=true' >> "$GITHUB_OUTPUT"
           else
-            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo 'published=false' >> "$GITHUB_OUTPUT"
           fi
 
-      # gVisor's builder image and Bazel cache take about 15 GB.
       - name: Free disk space
         if: steps.release.outputs.published == 'false'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
 
-      - name: Build
+      - name: Build and boot the native runtime
         if: steps.release.outputs.published == 'false'
-        run: images/runtimes/gvisor/build.sh "$RUNNER_TEMP/gvisor"
+        run: |
+          images/runtimes/gvisor/build.sh "$RUNNER_TEMP/gvisor"
+          mkdir "$RUNNER_TEMP/runtime"
+          tar -xjf "$RUNNER_TEMP/gvisor/out/gvisor.tar.bz2" -C "$RUNNER_TEMP/runtime"
+          sudo "$RUNNER_TEMP/runtime/runsc" --root "$RUNNER_TEMP/state" --platform=systrap --network=none do /bin/true
 
-      - name: Publish
+      - name: Stage the native image
         if: steps.release.outputs.published == 'false' && github.event_name != 'pull_request'
-        run: docker push "${{ steps.release.outputs.image }}"
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          NATIVE: ${{ steps.release.outputs.native }}
+        run: |
+          docker tag "$IMAGE" "$NATIVE"
+          docker push --platform "linux/$ARCH" "$NATIVE"
+
+  gvisor-manifest:
+    needs: gvisor
+    concurrency: gvisor-runtime-release
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the multi-platform runtime
+        run: |
+          version=$(sed -n 's/^VERSION=\([0-9.]*\)$/\1/p' images/runtimes/gvisor/build.sh)
+          build=$(images/runtimes/gvisor/build.sh --id)
+          # Another build may have reached main while the two native builds ran.
+          git fetch --quiet --depth=1 origin main
+          git checkout --quiet --detach FETCH_HEAD
+          [[ $(images/runtimes/gvisor/build.sh --id) == "$build" ]] || exit 0
+          image="ghcr.io/agentslastexam/orbit-gvisor:$version"
+          docker buildx imagetools create --tag "$image" "$image-$build-amd64" "$image-$build-arm64"
 
   # Give an image that was published without a version (such as a floating tag's current
   # target) a version, by pointing a new tag at the very same manifest. Nothing is rebuilt.
