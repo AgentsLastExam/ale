@@ -19,6 +19,7 @@ from orbit.core.errors import (
     ProviderCapacityError,
     ProviderStartError,
     SandboxHandOff,
+    TaskDefinitionError,
 )
 from orbit.core.sandbox import (
     ImageKind,
@@ -1609,3 +1610,33 @@ async def test_an_image_named_without_a_task_carries_the_nodes_openssh(monkeypat
     shape = dict(reference=recipe.reference, context=None, user=recipe.user, keep_alive=False)
     assert recipe.key == images.key("external-ref", **shape, multinode=True)
     assert recipe.key != images.key("external-ref", **shape, multinode=False)
+
+
+@pytest.mark.parametrize(
+    ("phase", "failure"),
+    [("build", TaskDefinitionError), ("framework", ProviderStartError), ("", ProviderStartError)],
+)
+@pytest.mark.parametrize("plain", [False, True], ids=["worker-json", "plain-text"])
+async def test_image_preparation_attributes_the_worker_failure(tmp_path, phase, failure, plain):
+    config = provider().config
+    job = job_module.Job(config, config.partitions[0])
+    job.directory = tmp_path
+    job.id = "241"
+    message = 'build command failed:\n"missing-file"'
+    for name, value in (("error", message), ("failed", phase)):
+        if value:
+            path = tmp_path / name
+            if plain:
+                path.write_text(value)
+            else:
+                worker.write(path, value)
+    (tmp_path / "job.log").write_text("worker stderr")
+    recipe = images.Recipe(key="key", source="solver-local", context=tmp_path)
+    with pytest.raises(failure) as caught:
+        await images._prepared(job, 1, recipe)
+    detail = str(caught.value)
+    assert "slurm job 241" in detail and message in detail and "worker stderr" in detail
+    if phase:
+        assert f"during {phase}" in detail
+    if phase == "build":
+        assert str(tmp_path / "Dockerfile") in detail
