@@ -179,26 +179,16 @@ MOVED_PROMPT = (
     "Continue the task. Time left: {minutes} minutes.\n"
 )
 
-#: Below the instruction, verbatim above it, when the agent receives validation rounds, by
-#: the stage that validates. Framework-owned and neutral: it says how the episode goes on,
-#: never how to do the Task.
-VALIDATION_PREAMBLE = (
-    "How your work is evaluated: each time you end your turn, your work is scored on a "
-    "validation set and you receive the result, after which you continue working. This "
-    "happens at most {rounds}. After that, your final state is scored once, on a separate "
-    "hidden test set. Your time limit of {minutes} minutes covers all of your turns. "
-    "Processes you leave running do not survive into your next turn.\n"
+#: Below the instruction, first, and last in each validation round's prompt: the time the turn
+#: has. Framework-owned and minimal: how the agent is scored, how often and on what, and what
+#: it may do with a round's result, are the Task's to say in its instruction.
+TIME_NOTE = (
+    "Your time limit is {minutes} minutes. If it runs out, your work is scored as it is then.\n"
 )
-#: Below the instruction where the agent has a read-only copy of the stage that validates.
-VISIBLE_NOTE = (
-    "The files of the {set} are at {path}, where you can read them but not change them.\n"
-)
-TESTS_PREAMBLE = (
-    "How your work is evaluated: each time you end your turn, your work is scored on the "
-    "test set that scores your final state and you receive the result, after which you "
-    "continue working. This happens at most {rounds}. After that, your final state is scored "
-    "once more, on the same test set. Your time limit of {minutes} minutes covers all of "
-    "your turns. Processes you leave running do not survive into your next turn.\n"
+#: The same for an agent that receives validation rounds, each turn of which has that time.
+TURN_TIME_NOTE = (
+    "Your time limit for this turn is {minutes} minutes. If it runs out, your work is scored "
+    "as it is then.\n"
 )
 #: Below the instruction, last, the machine the agent has, each one of a Sandbox of several
 #: nodes, as its Sandbox was given it: tools in a container can report the host's instead.
@@ -441,25 +431,39 @@ class _Solver:
     """That snapshot's handle."""
     continuation: NativeContinuation | None = None
     """The native session the agent's work goes on in, once one was reported."""
+    turn_stop: PhaseTimeoutError | BudgetExceededError | None = None
+    """What ended the last turn where a validation round follows it: its time, or a Gateway
+    limit, which end that turn only."""
 
 
 @dataclass
 class _AgentTime:
-    """The agent's time: ``total`` across all its turns, of which ``used`` is spent, and the
-    run going on since ``running`` (monotonic), if one is."""
+    """The agent's time: ``total`` for each of its turns, of which the current turn has
+    spent ``turn_used``; ``used`` across all its turns; and the run going on since ``running``
+    (monotonic), if one is."""
 
     total: float
     used: float = 0.0
+    turn_used: float = 0.0
     running: float | None = None
 
     @property
     def remaining(self) -> float:
-        return self.total - self.used
+        """What is left of the current turn's time."""
+        return self.total - self.turn_used
 
     @property
     def spent(self) -> float:
-        """What is spent, the run going on included."""
+        """What all turns spent, the run going on included."""
         return self.used + (time.monotonic() - self.running if self.running is not None else 0)
+
+    def begin_turn(self) -> None:
+        """Give a new turn the whole of its time; a move goes on in the turn it cut."""
+        self.turn_used = 0.0
+
+    def spend(self, seconds: float) -> None:
+        self.used += seconds
+        self.turn_used += seconds
 
 
 @dataclass(frozen=True)
@@ -484,7 +488,7 @@ class _Moved(Exception):
 
 def _cut(left: float | None, budget: _AgentTime) -> bool:
     """Whether a run its Sandbox has ``left`` for ended at its Sandbox's deadline rather than
-    at the end of the agent's time, which ``budget`` holds as the run began."""
+    at the end of the turn's time, which ``budget`` holds as the run began."""
     return left is not None and left < budget.remaining
 
 
@@ -1125,7 +1129,7 @@ class EpisodeProtocol:
         round_index: int | None = None,
         segment: int | None = None,
     ) -> _Cut | None:
-        """One turn of the agent, with what is left of its time: the first, launched with the
+        """One turn of the agent, with what is left of the turn's time: the first, launched with the
         instruction, or resumed with it in the session a continued episode left; or a later
         one, resumed with ``prompt``, validation round ``round_index``'s, or the one that
         resumes the turn a move cut in ``segment``, in its own ``continuation``.
@@ -1293,7 +1297,7 @@ class EpisodeProtocol:
                 finally:
                     # Only the agent's own run spends its time and its model session: no
                     # save, validation or boot, and nothing its programs left running.
-                    budget.used += time.monotonic() - started
+                    budget.spend(time.monotonic() - started)
                     budget.running = None
                     if ctx.open_agent_session is not None:
                         ctx.open_agent_session(False)
@@ -1319,12 +1323,35 @@ class EpisodeProtocol:
             # Past the backstop the guest no longer replies, so nothing there can be verified.
             if isinstance(error, PhaseTimeoutError) and isinstance(error.__cause__, TimeoutError):
                 raise
+            # The turn's time and Gateway limits are each turn's own: reaching one ends this
+            # turn, and its round follows, in the session the cut run left.
+            limited = isinstance(error, PhaseTimeoutError) or (
+                isinstance(error, BudgetExceededError) and error.layer == "gateway"
+            )
+            left_by = (error.native_session_id if limited else None) or (
+                continuation.native_session_id if continuation else None
+            )
+            if limited and left_by is not None and self._round_follows(ctx):
+                solver.continuation = NativeContinuation(
+                    harness=harness.name, native_session_id=left_by
+                )
+                solver.turn_stop = error
+                with self._traced(ctx, Phase.AGENT):
+                    logging.getLogger("orbit.execution").info(
+                        "the turn reached a limit; its validation round follows",
+                        extra={"orbit_data": {"error": type(error).__name__, "detail": str(error)}},
+                    )
+                return None
             ctx.agent_stop = error
         finally:
             polling.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await polling
         return None
+
+    def _round_follows(self, ctx: EpisodeContext) -> bool:
+        """Whether a validation round, and a turn after it, follow the turn that runs."""
+        return len(ctx.validation_rounds) < self.validation_rounds
 
     def _kept_for_verification(self, ctx: EpisodeContext) -> float:
         """What a run leaves of its Sandbox for the verification after it: a shared
@@ -1374,9 +1401,13 @@ class EpisodeProtocol:
         continuation: NativeContinuation | None = None,
         round_index: int | None = None,
     ) -> None:
-        """One turn of the agent, in as many solvers as its Sandboxes' deadlines take: each
-        time one cuts the turn, or leaves no time to start it, the solver moves where it can
-        go on, and the agent resumes its session there, with the time it has left."""
+        """One turn of the agent, with the whole of a turn's time and Gateway limits, in as
+        many solvers as its Sandboxes' deadlines take: each time one cuts the turn, or leaves
+        no time to start it, the solver moves where it can go on, and the agent resumes its
+        session there, with what the turn has left."""
+        budget.begin_turn()
+        if ctx.begin_agent_turn is not None:
+            ctx.begin_agent_turn()
         segment: int | None = None
         moved = False
         while True:
@@ -1525,29 +1556,14 @@ class EpisodeProtocol:
         )
 
     def _instruction(self, ctx: EpisodeContext) -> str:
-        """The first prompt: the instruction, verbatim, and below it, when the agent receives
-        validation rounds, the preamble that says how its turns go, where the Task shows it
-        the stage that validates, where that is, and the machine the solver was given, as
-        provisioning recorded it."""
+        """The first prompt: the instruction, verbatim, and below it the time the turn has and
+        the machine the solver was given, as provisioning recorded it."""
         spec = ctx.spec
-        below: list[str] = []
-        if self.validation_rounds:
-            rounds = "once" if self.validation_rounds == 1 else f"{self.validation_rounds} times"
-            total = self.timeouts.agent or spec.timeouts.agent
-            tests = ctx.validation_stage is Stage.TESTS
-            preamble = TESTS_PREAMBLE if tests else VALIDATION_PREAMBLE
-            below.append(preamble.format(rounds=rounds, minutes=_minutes(total)))
-        if spec.validation_visible:
-            tests = ctx.validation_stage is Stage.TESTS
-            below.append(
-                VISIBLE_NOTE.format(
-                    set="test set that scores your final state" if tests else "validation set",
-                    path=_visible_dir(spec.os),
-                )
-            )
+        note = TURN_TIME_NOTE if self.validation_rounds else TIME_NOTE
+        below = [note.format(minutes=_minutes(self.timeouts.agent or spec.timeouts.agent))]
         if ctx.resource_allocation is not None:
             below.append(_machine(ctx.resource_allocation))
-        return spec.instruction + ("\n\n---\n\n" + "".join(below) if below else "")
+        return spec.instruction + "\n\n---\n\n" + "".join(below)
 
     async def _validation_rounds(
         self,
@@ -1558,9 +1574,9 @@ class EpisodeProtocol:
         logs: LogMirror | None,
         budget: _AgentTime,
     ) -> None:
-        """Validate each time a turn of the agent ends normally, and give the agent each
-        result as its next turn, in a solver booted from the snapshot the round saved; a turn
-        that something else ended, a Gateway limit included, is the last.
+        """Validate each time a turn of the agent ends, normally or at its time or a Gateway
+        limit, and give the agent each result as its next turn, in a solver booted from the
+        snapshot the round saved; a turn that something else ended is the last.
         ``check_validation`` validates once, with no turn after it.
 
         Each round copies the agent's logs and converts its trajectory so far, saves the
@@ -1576,22 +1592,19 @@ class EpisodeProtocol:
         for index in range(1, self.validations + 1):
             if ctx.agent_stop is not None:
                 return
+            stop, solver.turn_stop = solver.turn_stop, None
             if self.validation_rounds:
                 refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
-                if refusal is not None:
+                if stop is None and refusal is not None:
                     # A turn that exited normally after the Gateway refused one of its calls
-                    # was stopped by that limit.
-                    ctx.agent_stop = BudgetExceededError(
+                    # ended at that limit.
+                    stop = BudgetExceededError(
                         refusal.name, float(refusal.configured_value), refusal.observed_value
                     )
-                    return
-                run = ctx.agent_run
-                if run is None or run.continuation is None:
+                if solver.continuation is None:
                     ctx.agent_stop = NativeContinuationError(
                         f"{self.harness.name} reported no native session to resume"
                     )
-                    return
-                if budget.remaining <= 0:
                     return
             directory = ctx.run_dir / "validation" / str(index)
             artifacts: ArtifactSink | None = None
@@ -1630,7 +1643,15 @@ class EpisodeProtocol:
                 await self._release_rounds(ctx, earlier)
             try:
                 feedback = await self._validate(
-                    task, ctx, index, handle, solver.image, artifacts, viewed, trajectory
+                    task,
+                    ctx,
+                    index,
+                    handle,
+                    solver.image,
+                    artifacts,
+                    viewed,
+                    trajectory,
+                    turn_stop=stop,
                 )
             finally:
                 if artifacts is not None:
@@ -1653,14 +1674,8 @@ class EpisodeProtocol:
             if not self.validation_rounds:
                 return
             self._segment_begins(ctx, solver, budget, "round", index)
-            assert ctx.agent_run is not None and ctx.agent_run.continuation is not None
-            prompt = _round_prompt(
-                ctx.validation_rounds[-1],
-                self.validation_rounds,
-                feedback,
-                budget.remaining,
-                ctx.validation_stage,
-            )
+            assert solver.continuation is not None
+            prompt = _round_prompt(ctx.validation_rounds[-1], feedback, budget.total)
             await self._work(
                 task,
                 ctx,
@@ -1668,7 +1683,7 @@ class EpisodeProtocol:
                 logs=logs,
                 budget=budget,
                 prompt=prompt,
-                continuation=ctx.agent_run.continuation,
+                continuation=solver.continuation,
                 round_index=index,
             )
 
@@ -1731,10 +1746,13 @@ class EpisodeProtocol:
         artifacts: ArtifactSink | None,
         viewed: tuple[str, ...] = (),
         trajectory: Path | None = None,
+        *,
+        turn_stop: PhaseTimeoutError | BudgetExceededError | None = None,
     ) -> str | None:
         """Score the snapshot ``handle`` with the stage that validates and the agent's
-        ``trajectory`` so far under its verifier's limit and record the round; return the
-        feedback text the agent receives.
+        ``trajectory`` so far under its verifier's limit and record the round, with the
+        ``turn_stop`` that ended the turn before it, if any; return the feedback text the agent
+        receives.
 
         A round that produces no score is recorded with its failure, and the agent receives
         it as such: the round counts, and the episode goes on. One whose verifier's
@@ -1803,7 +1821,9 @@ class EpisodeProtocol:
                     )
                 continue
             break
-        feedback = self._record_round(ctx, index, directory, started_at, failure_phase, outcome)
+        feedback = self._record_round(
+            ctx, index, directory, started_at, failure_phase, outcome, turn_stop
+        )
         if unreleased is not None:
             raise unreleased
         return feedback
@@ -1816,10 +1836,21 @@ class EpisodeProtocol:
         started_at: datetime,
         failure_phase: Phase | None,
         outcome: tuple[float, str | None] | Exception,
+        turn_stop: PhaseTimeoutError | BudgetExceededError | None = None,
     ) -> str | None:
-        """Record round ``index``'s ``outcome``, its score or why it has none, and return the
-        feedback text the agent receives."""
+        """Record round ``index``'s ``outcome``, its score or why it has none, and what ended
+        the turn before it where not the agent, and return the feedback text the agent
+        receives."""
         logger = logging.getLogger("orbit.execution")
+        turn_ended_by = (
+            None
+            if turn_stop is None
+            else FailureInfo(
+                error_type=type(turn_stop).__name__,
+                message=str(turn_stop),
+                phase=Phase.AGENT.value,
+            )
+        )
         if isinstance(outcome, Exception):
             error = outcome
             # The episode goes on, so the failure is the round's, not the episode's.
@@ -1835,6 +1866,7 @@ class EpisodeProtocol:
                         message=message,
                         phase=Phase.VALIDATE.value,
                     ),
+                    turn_ended_by=turn_ended_by,
                     started_at=started_at,
                     finished_at=datetime.now(UTC),
                 )
@@ -1863,6 +1895,7 @@ class EpisodeProtocol:
                 status=Status.COMPLETED,
                 reward=reward,
                 feedback=record,
+                turn_ended_by=turn_ended_by,
                 started_at=started_at,
                 finished_at=datetime.now(UTC),
             )
@@ -3260,38 +3293,19 @@ def _machine(allocation: ResourceAllocation) -> str:
     return text + "\n"
 
 
-def _round_prompt(
-    record: ValidationRound, rounds: int, feedback: str | None, seconds_left: float, stage: Stage
-) -> str:
+def _round_prompt(record: ValidationRound, feedback: str | None, seconds: float) -> str:
     """The prompt that gives the agent one validation round's result: framework-owned and
-    neutral, with the feedback of the stage that validates verbatim, in the words of the
-    preamble, which names no validation set when ``tests/`` validates."""
+    minimal, the reward, or that there is none and why, the feedback of the stage that
+    validates verbatim, if it wrote any, and the next turn's time."""
     result = (
-        f"reward {record.reward:.2f}"
+        f"Your work was scored: reward {record.reward:.2f}."
         if record.reward is not None
-        else f"no score ({record.status.value})"
+        else f"Your work could not be scored ({record.status.value})."
     )
-    validation = stage is Stage.VALIDATION
-    name = "Validation round" if validation else "Round"
-    lines = [f"{name} {record.index} of {rounds}: {result}.", ""]
-    stage_set = "validation set" if validation else "test set"
-    if feedback is None:
-        lines.append(f"The {stage_set} gave no feedback.")
-    else:
-        lines += [f"Feedback from the {stage_set}:", "<feedback>"]
-        lines += [feedback.rstrip("\n"), "</feedback>"]
-    lines.append("")
-    left = rounds - record.index
-    if left:
-        then = "your work is validated again." if validation else "your work is scored again."
-    elif validation:
-        then = "your final state is scored once, on the hidden test set."
-    else:
-        then = "your final state is scored once more, on the same test set."
-    lines.append(
-        f"{name}s left: {left or 'none'}. Time left: {_minutes(seconds_left)} "
-        f"minutes. When you end this turn, {then}"
-    )
+    lines = [result, ""]
+    if feedback is not None:
+        lines += ["Feedback:", "<feedback>", feedback.rstrip("\n"), "</feedback>", ""]
+    lines.append(TURN_TIME_NOTE.format(minutes=_minutes(seconds)).rstrip("\n"))
     return "\n".join(lines)
 
 
@@ -3438,7 +3452,12 @@ def _attributed(ctx: EpisodeContext) -> Iterator[None]:
         refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
         if refusal is not None:
             raise BudgetExceededError(
-                refusal.name, float(refusal.configured_value), refusal.observed_value
+                refusal.name,
+                float(refusal.configured_value),
+                refusal.observed_value,
+                native_session_id=error.native_session_id
+                if isinstance(error, AgentError)
+                else None,
             ) from error
         failure = ctx.model_provider_failure() if ctx.model_provider_failure is not None else None
         if failure is None or not _program_failed(error):

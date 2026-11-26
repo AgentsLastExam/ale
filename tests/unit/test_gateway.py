@@ -452,6 +452,31 @@ class TestLimits:
         assert body["error"]["orbit"]["limit"] == "max_output_tokens"
         assert upstream.seen_max_tokens == [100]
 
+    async def test_each_turn_of_the_agent_has_the_whole_of_its_limits(self, stack) -> None:
+        """Limits count the turn's calls, as they count the one turn of an episode without
+        validation rounds; the session's usage still counts them all."""
+        gateway, _, session, _ = stack
+        session.limits = Limits(max_model_calls=1)
+
+        first, _ = await call(gateway, session)
+        refused, body = await call(
+            gateway, session, messages=[{"role": "user", "content": "a second call"}]
+        )
+        assert (first, refused) == (200, 429)
+        assert body["error"]["orbit"]["limit"] == "max_model_calls"
+        assert session.refusal is not None
+
+        session.begin_turn()
+        assert session.refusal is None
+        next_turn, _ = await call(
+            gateway, session, messages=[{"role": "user", "content": "the next turn"}]
+        )
+        again, _ = await call(
+            gateway, session, messages=[{"role": "user", "content": "one more in that turn"}]
+        )
+        assert (next_turn, again) == (200, 429)
+        assert session.usage.model_calls == 2
+
     async def test_total_limit_does_not_preempt_the_current_call(self, stack) -> None:
         gateway, upstream, session, _ = stack
         upstream.counted_input = 100

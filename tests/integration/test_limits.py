@@ -413,8 +413,10 @@ async def test_native_limit_records_layer_and_preserves_partial_evidence(
     trajectory = AtifTrajectory.model_validate_json(
         (result.run_dir / "trajectory.json").read_text()
     )
-    expected = load_tasks(task_root)[0].spec.instruction
-    assert trajectory.steps[0].message == expected
+    # The instruction as it was sent, with what the framework states below it.
+    expected = load_tasks(task_root)[0].spec.instruction + "\n\n---\n\nYour time limit is "
+    assert isinstance(trajectory.steps[0].message, str)
+    assert trajectory.steps[0].message.startswith(expected)
     assert result.verdict.failure is not None
     assert "max_turns" in result.verdict.failure.message
 

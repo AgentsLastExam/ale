@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -135,7 +135,7 @@ class GatewaySession:
     """The Task's secret values, kept out of retained payloads and token evidence."""
 
     refusal: LimitReached | None = field(default=None, repr=False)
-    """The first limit that refused one of this session's calls, if any."""
+    """The first limit that refused one of this turn's calls, if any."""
     failure: UpstreamFailure | None = field(default=None, repr=False)
     """How the model provider is failing this session's calls, until it answers one."""
     suspended: bool = False
@@ -179,11 +179,19 @@ class GatewaySession:
     _inflight: dict[str, asyncio.Future[Any]] = field(default_factory=dict, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _reserved_calls: int = field(default=0, repr=False)
+    _turn_base: Usage = field(default_factory=Usage, repr=False)
+    """``usage`` as the agent's current turn began, from which its limits count."""
+
+    def begin_turn(self) -> None:
+        """Count the limits afresh for a turn of the agent: each turn has the whole of them,
+        as the only turn of an episode without validation rounds does."""
+        self._turn_base = replace(self.usage)
+        self.refusal = None
 
     async def reserve(self) -> GatewayReservation:
         """Refuse reached limits, then reserve one model call."""
         async with self._lock:
-            limits, usage = self.limits, self.usage
+            limits, usage = self.limits, self._turn_usage()
             calls = usage.model_calls + self._reserved_calls + 1
             if limits.max_model_calls is not None and calls > limits.max_model_calls:
                 raise LimitReached("max_model_calls", limits.max_model_calls, calls)
@@ -199,6 +207,17 @@ class GatewaySession:
 
             self._reserved_calls += 1
             return GatewayReservation()
+
+    def _turn_usage(self) -> Usage:
+        """What the current turn's calls used, against which the limits count."""
+        base = self._turn_base
+        return Usage(
+            model_calls=self.usage.model_calls - base.model_calls,
+            input_tokens=self.usage.input_tokens - base.input_tokens,
+            cache_read_tokens=self.usage.cache_read_tokens - base.cache_read_tokens,
+            cache_write_tokens=self.usage.cache_write_tokens - base.cache_write_tokens,
+            output_tokens=self.usage.output_tokens - base.output_tokens,
+        )
 
     async def commit(
         self,

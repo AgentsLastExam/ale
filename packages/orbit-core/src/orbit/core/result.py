@@ -94,6 +94,9 @@ class ValidationRound(BaseModel):
     failure: FailureInfo | None = None
     feedback: ValidationFeedback | None = None
     """The text the agent was shown below the reward; none when the verifier wrote none."""
+    turn_ended_by: FailureInfo | None = None
+    """What ended the turn before the round where the agent did not: the turn's time, or a
+    Gateway limit, each of which ends that turn only."""
     started_at: datetime
     finished_at: datetime
 
