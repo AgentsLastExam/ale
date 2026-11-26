@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from collections.abc import Sequence
 from contextlib import AsyncExitStack, suppress
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Literal
 
 from orbit.core.capability import Arch, CapabilityProfile, SandboxNeeds, accepts_model, unmet
-from orbit.core.config import SlurmPartition, SlurmProviderConfig
+from orbit.core.config import BatchProviderConfig, SlurmPartition, SlurmProviderConfig
 from orbit.core.errors import (
     AllocationEndedError,
     GuestUnreachableError,
@@ -69,6 +70,7 @@ from orbit.run.providers.slurm.job import (
     SandboxSteps,
     StepReady,
     cache,
+    create_job,
     slurm,
     write,
 )
@@ -88,7 +90,6 @@ COPY_TIMEOUT_SEC = 4 * 3600
 #: How long before its deadline an allocation still takes a Sandbox that names no duration:
 #: a solver, which moves where it lasts once its allocation's deadline comes.
 MIN_LEFT_SEC = 300
-PREFIX = "slurm:"
 #: The account an image named by its reference alone is prepared for.
 USER = "user"
 
@@ -112,10 +113,10 @@ def _profiles(
     common = {ContainerFeature.FUSE, ContainerFeature.USER_NAMESPACES, ContainerFeature.MOUNT}
     return tuple(
         CapabilityProfile(
-            provider="slurm",
+            provider=config.scheduler if isinstance(config, BatchProviderConfig) else "slurm",
             kind=ImageKind.CONTAINER,
             os=OperatingSystem.LINUX,
-            arch=Arch.X86_64,
+            arch=config.architecture if isinstance(config, BatchProviderConfig) else Arch.X86_64,
             gui=True,
             network_modes=frozenset(NetworkMode),
             snapshot=True,
@@ -198,14 +199,14 @@ def _capacity(needs: SandboxNeeds, separate: Resources | None = None) -> tuple[i
 
 
 def _handle(job: Job, index: str) -> str:
-    return f"{PREFIX}{job.name}/{index}"
+    return f"{job.scheduler}:{job.name}/{index}"
 
 
-def _parse(handle: str) -> tuple[str, str]:
-    name, _, index = handle.removeprefix(PREFIX).partition("/")
-    if not handle.startswith(PREFIX) or not (name.startswith("orbit-") and index.isdigit()):
-        raise ProviderCapabilityError(f"{handle!r} is no Slurm snapshot handle")
-    return name, index
+def _parse(handle: str, provider: str = "slurm") -> tuple[str, str]:
+    match = re.fullmatch(re.escape(provider) + r":(orbit-[A-Za-z0-9]+)/([0-9]+)", handle)
+    if match is None:
+        raise ProviderCapabilityError(f"{handle!r} is no {provider} snapshot handle")
+    return match[1], match[2]
 
 
 def _resolved(
@@ -216,7 +217,7 @@ def _resolved(
     record = images.recorded(config, image) if image.kind is ImageKind.CONTAINER else None
     if record is None:
         raise ProviderCapabilityError(
-            f"Slurm's cache holds no image {image.prepared_identity} prepared for the cluster"
+            f"the cluster cache holds no image {image.prepared_identity} prepared for the cluster"
         )
     if user is not None and record.get("user") != user:
         raise ProviderCapabilityError(
@@ -383,17 +384,18 @@ async def _gpu_allocation(
                 < max(expected.memory_mb or 0, resources.gpu_memory_mb or 0)
             ):
                 raise ProviderCapabilityError(
-                    f"Slurm allocated an incompatible GPU on {ready.node}: {device}"
+                    f"{chain.job.scheduler} allocated an incompatible GPU on {ready.node}: {device}"
                 )
         code, _, err, _ = await client.exec(["ldconfig"])
         if code:
-            raise ProviderStartError(f"could not register Slurm's GPU driver libraries: {err}")
+            raise ProviderStartError(f"could not register the GPU driver libraries: {err}")
         code, out, err, _ = await client.exec(
             ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"]
         )
         if code or set(out.split()) != set(ids) or len(set(ids)) != resources.gpus:
             raise ProviderStartError(
-                f"Slurm GPU allocation does not match guest devices on {ready.node}: {out} {err}"
+                f"{chain.job.scheduler} GPU allocation does not match guest devices "
+                f"on {ready.node}: {out} {err}"
             )
     devices = tuple(device for ready in readies for device in ready.devices)
     ids = tuple(device.id for device in devices)
@@ -554,7 +556,7 @@ class SlurmSandbox(TunneledSandbox):
         if self.request.retention == "snapshot" and not self.request.planned_saves:
             await self.provider.write_out(self.chain, snapshot)
         return RetainedSandbox(
-            provider="slurm",
+            provider=self.provider.name,
             handle=handle,
             episode_id=self.request.episode_id,
             roles=roles,
@@ -583,6 +585,11 @@ class SlurmProvider(Provider):
 
     def __init__(self, config: SlurmProviderConfig) -> None:
         self.config = config
+        if isinstance(config, BatchProviderConfig):
+            self.name = config.scheduler
+        self.architecture = (
+            config.architecture if isinstance(config, BatchProviderConfig) else Arch.X86_64
+        )
         #: The snapshots this process saved, by handle, with the allocation that holds them.
         self.snapshots: dict[str, tuple[_Chain, _Snapshot]] = {}
         #: How many running Sandboxes use each shared directory, below the cache.
@@ -599,7 +606,10 @@ class SlurmProvider(Provider):
         cpus, memory_mb, gpus, nodes = _capacity(needs, separate)
         for part in self.config.partitions:
             if (
-                bool(gpus) != bool(part.max_gpus)
+                (
+                    not isinstance(self.config, BatchProviderConfig)
+                    and bool(gpus) != bool(part.max_gpus)
+                )
                 or gpus > part.max_gpus
                 or cpus > part.max_cpus
                 or memory_mb + JOB_OVERHEAD_MB > part.max_memory_mb
@@ -613,7 +623,7 @@ class SlurmProvider(Provider):
     def refusals(self, needs: SandboxNeeds, *, user: str, role: SandboxRole) -> tuple[str, ...]:
         if self._partition(needs) is None:
             return (
-                "no configured Slurm partition serves that allocation"
+                f"no configured {self.name} queue serves that allocation"
                 + (" with the verifier booted from its snapshot" if needs.verifier else ""),
             )
         return ()
@@ -624,6 +634,13 @@ class SlurmProvider(Provider):
             if not needs
             else tuple(part for need in needs if (part := self._partition(need)) is not None)
         )
+        if isinstance(self.config, BatchProviderConfig):
+            from orbit.run.providers.batch.job import preflight
+
+            selected = {part.name for part in partitions}
+            selected.add(images.build_partition(self.config).name)
+            await preflight(self.config, [p for p in self.config.partitions if p.name in selected])
+            return
         for command in ("sbatch", "srun", "squeue", "scancel", "sacct", "scontrol"):
             if shutil.which(command) is None:
                 raise ProviderStartError(
@@ -638,9 +655,10 @@ class SlurmProvider(Provider):
         its recipe (:meth:`prepare_recipe`), as no container runtime runs here."""
         if isinstance(image, ImageRef):
             if image.kind is not ImageKind.CONTAINER:
-                raise ProviderCapabilityError("Slurm requires a Linux container image")
+                raise ProviderCapabilityError(f"{self.name} requires a Linux container image")
             # For the account Orbit's images run their agent as. No Task says whether one of
             # its Sandboxes spans several nodes, so the image carries the nodes' OpenSSH.
+            multinode = not isinstance(self.config, BatchProviderConfig)
             pinned = await images.pin(image.reference)
             prepared, _ = await self.prepare_recipe(
                 Recipe(
@@ -650,12 +668,13 @@ class SlurmProvider(Provider):
                         context=None,
                         user=USER,
                         keep_alive=False,
-                        multinode=True,
+                        multinode=multinode,
+                        arch=self.architecture,
                     ),
                     source="external-ref",
                     reference=pinned,
                     user=USER,
-                    multinode=True,
+                    multinode=multinode,
                 )
             )
             return prepared
@@ -734,7 +753,7 @@ class SlurmProvider(Provider):
         found = self.snapshots.get(handle)
         if found is not None:
             return found[1].shared, found[1].written
-        name, index = _parse(handle)
+        name, index = _parse(handle, self.name)
         try:
             saved = json.loads(
                 (cache(self.config) / SNAPSHOTS / f"{name}-{index}.json").read_text()
@@ -767,7 +786,7 @@ class SlurmProvider(Provider):
         views none."""
         handle = request.snapshot or request.volumes_from
         assert handle is not None
-        name, index = _parse(handle)
+        name, index = _parse(handle, self.name)
         found = self.snapshots.get(handle)
         if found is not None:
             chain, snapshot = found
@@ -779,7 +798,7 @@ class SlurmProvider(Provider):
                     (cache(self.config) / SNAPSHOTS / f"{name}-{index}.json").read_text()
                 )
             except FileNotFoundError:
-                raise ProviderCapabilityError(f"Slurm holds no snapshot {handle}") from None
+                raise ProviderCapabilityError(f"{self.name} holds no snapshot {handle}") from None
             chain, snapshot = None, None
             try:
                 images, prepared = tuple(saved["images"]), saved["prepared_identity"]
@@ -822,8 +841,8 @@ class SlurmProvider(Provider):
                 # the job gone and closes the allocation.
                 ended = await chain.job.ended()
                 raise AllocationEndedError(
-                    f"Slurm ended job {chain.job.id} ({ended or 'gone'}), and with it snapshot "
-                    f"{handle}, which was not written out"
+                    f"{self.name} ended job {chain.job.id} ({ended or 'gone'}), and with it "
+                    f"snapshot {handle}, which was not written out"
                 )
             # Written out before it ended: it boots from its archives, in one of its own.
             with suppress(ProviderStartError):
@@ -918,12 +937,20 @@ class SlurmProvider(Provider):
         long as Slurm keeps it pending."""
         part = self._partition(needs, separate=separate)
         if part is None:
-            raise ProviderCapabilityError("no configured Slurm partition serves that allocation")
+            raise ProviderCapabilityError(f"no configured {self.name} queue serves that allocation")
         cpus, memory_mb, gpus, nodes = _capacity(needs, separate)
         each = [seeds[rank] if rank < len(seeds) else seeds[0] for rank in range(nodes)]
-        job = Job(self.config, part)
+        job = create_job(self.config, part)
         try:
-            job.stage(dict(seeds=each, version=gvisor.VERSION, build=gvisor.BUILD_ID, gpus=gpus))
+            job.stage(
+                dict(
+                    seeds=each,
+                    version=gvisor.VERSION,
+                    build=gvisor.BUILD_ID,
+                    gpus=gpus,
+                    architecture=self.architecture.value,
+                )
+            )
             await job.submit(
                 cpus=cpus,
                 memory_mb=memory_mb + JOB_OVERHEAD_MB,
@@ -934,7 +961,7 @@ class SlurmProvider(Provider):
             ready = await job.ready(None if patient else self.config.queue_timeout_sec)
             if len(ready.nodes) != nodes:
                 raise ProviderStartError(
-                    f"Slurm job {job.id} has {len(ready.nodes)} nodes, not {nodes}"
+                    f"{self.name} job {job.id} has {len(ready.nodes)} nodes, not {nodes}"
                 )
             left = await job.time_left()
         except BaseException:
@@ -1017,7 +1044,7 @@ class SlurmProvider(Provider):
             readies = await chain.job.start(index, spec, nodes=count, timeout=START_TIMEOUT_SEC)
             if [ready.node for ready in readies] != [node.node for node in nodes]:
                 raise ProviderStartError(
-                    f"Slurm ran Sandbox {index} on {[r.node for r in readies]}, not its nodes"
+                    f"{self.name} ran Sandbox {index} on {[r.node for r in readies]}, not its nodes"
                 )
             watchers: list[memory.GuestEvents] = []
             for node in nodes:
@@ -1039,7 +1066,7 @@ class SlurmProvider(Provider):
             )
             home = str(healths[0].get("agent_home") or "")
             if not home:
-                raise ProviderStartError("Slurm guestd did not report an agent home")
+                raise ProviderStartError(f"{self.name} guestd did not report an agent home")
             for client in clients:
                 await set_and_prove_elevation(client, request, request.user)
             gpu = await _gpu_allocation(clients, readies, resources, chain)
@@ -1204,6 +1231,8 @@ class SlurmProvider(Provider):
         for path in sorted((cache(self.config) / SNAPSHOTS).glob("*.json")):
             try:
                 saved = json.loads(path.read_text())
+                if not saved["handle"].startswith(self.name + ":"):
+                    continue
                 record = _record(
                     saved["handle"], saved["episode"], saved["roles"], saved["images"][0]
                 )
@@ -1218,7 +1247,7 @@ class SlurmProvider(Provider):
         return sorted(records.values(), key=lambda item: str(item["handle"]))
 
     async def destroy_retained(self, handle: str) -> None:
-        name, index = _parse(handle)
+        name, index = _parse(handle, self.name)
         shared, _ = self._snapshot_state(handle)
         found = self.snapshots.get(handle)
         if found is not None:
@@ -1295,7 +1324,7 @@ def _archive(name: str, index: str, rank: int) -> str:
 
 def _record(handle: str, episode: str, roles: Sequence[str], image: str) -> dict[str, object]:
     return {
-        "provider": "slurm",
+        "provider": handle.partition(":")[0],
         "handle": handle,
         "episode": episode,
         "role": ",".join(roles),

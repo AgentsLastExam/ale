@@ -566,7 +566,7 @@ async def _on_cluster(
     }[role]
     assert image is not None
     if _kind(image) is not ImageKind.CONTAINER or task.spec.os is not OperatingSystem.LINUX:
-        raise TaskDefinitionError("Slurm runs Linux container images only")
+        raise TaskDefinitionError(f"{provider.name} runs Linux container images only")
     folder = _task_folder(task)
     reference: str | None = None
     context: Path | None = None
@@ -593,9 +593,10 @@ async def _on_cluster(
         user=image.user,
         keep_alive=image.keep_alive,
         multinode=image.multinode,
+        arch=provider.architecture,
     )
     prepared, reused = await _stage(
-        "slurm-preparation",
+        f"{provider.name}-preparation",
         provider.prepare_recipe(
             Recipe(
                 key=key,
@@ -613,7 +614,7 @@ async def _on_cluster(
     )
     steps = [
         ImagePreparationStep(
-            "slurm-preparation",
+            f"{provider.name}-preparation",
             "reused" if reused else "executed",
             prepared.prepared_identity,
             reference or "built from the Task's context on the cluster",

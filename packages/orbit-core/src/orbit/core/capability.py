@@ -47,8 +47,7 @@ class Arch(StrEnum):
 
     @classmethod
     def of(cls, operating_system: OperatingSystem) -> Arch:
-        """What a Task's Sandbox runs. A Task names no architecture: Orbit's images and the
-        Tasks built on them are x86-64, apart from macOS, which only Apple silicon runs."""
+        """Default architecture when preparation specifies no other native container target."""
         return cls.ARM64 if operating_system is OperatingSystem.MACOS else cls.X86_64
 
 

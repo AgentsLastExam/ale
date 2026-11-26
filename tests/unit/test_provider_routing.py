@@ -833,6 +833,8 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
         "firecracker:z",
         "orchard:a",
         "orchard:z",
+        "pbs:a",
+        "pbs:z",
         "qemu:a",
         "qemu:z",
         "slurm:a",
@@ -938,10 +940,28 @@ def test_prepare_accepts_only_config_and_set_options() -> None:
 async def test_retained_slurm_snapshots_are_found_in_the_cache_a_run_configuration_names(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from orbit.core.config import SlurmProviderConfig
+    from orbit.core.config import SandboxConfig, SlurmProviderConfig
     from orbit.run.providers import provider_named
     from orbit.run.providers.slurm import SlurmProvider
 
-    named = provider_named("slurm", SlurmProviderConfig(shared_fs_dir=str(tmp_path)))
+    named = provider_named(
+        "slurm", SandboxConfig(slurm=SlurmProviderConfig(shared_fs_dir=str(tmp_path)))
+    )
     assert isinstance(named, SlurmProvider) and named.config.shared_fs_dir == str(tmp_path)
     assert provider_named("slurm").config.shared_fs_dir == "~/.cache/orbit/slurm"  # type: ignore[attr-defined]
+
+
+def test_batch_settings_survive_serialization_and_reject_unsupported_allocations() -> None:
+    pbs = _settings(
+        "pbs", pbs={"partitions": [{"name": "cpu", "max_cpus": 4, "max_memory_mb": 8192}]}
+    )
+    assert RunConfig.model_validate(pbs.model_dump()).sandbox.pbs == pbs.sandbox.pbs
+    with pytest.raises(ValidationError, match="max_nodes"):
+        _settings(
+            "pbs",
+            pbs={
+                "partitions": [
+                    {"name": "gpu", "max_cpus": 4, "max_memory_mb": 8192, "max_nodes": 2}
+                ]
+            },
+        )

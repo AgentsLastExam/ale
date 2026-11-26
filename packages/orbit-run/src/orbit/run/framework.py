@@ -64,6 +64,7 @@ import zipfile
 from collections.abc import Callable, Iterator
 from pathlib import Path, PureWindowsPath
 
+from orbit.core.capability import Arch
 from orbit.core.errors import ProviderStartError, TaskDefinitionError
 from orbit.core.ids import content_hash
 from orbit.core.sandbox import PreparedTaskImage
@@ -131,6 +132,10 @@ _PYTHON = {
         "cpython-3.12.15+20261013-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
         "178d3d83b6e8e99285a65d3fce9c16b87952cc5efdb4d1a0e3ff3be18ff0fc9c",
     ),
+    "linux-arm64": (
+        "cpython-3.12.15+20261013-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "9467a99bacc7d90b64b02de7fa9ecfc99b72905e64e74f7ff6b460ad95cfed5a",
+    ),
     "windows": (
         "cpython-3.12.15+20261013-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
         "7a2aef48e5ee569e310b29b32681debbc5d888e92790d85331a47736c6b06aad",
@@ -146,6 +151,10 @@ _CUA_DRIVER = {
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-linux-x86_64-binary.tar.gz",
         "31ab9709dd91ce73677e49b9f3e75c6f0d3e4d9625c286c9e58262bfbea698dd",
     ),
+    "linux-arm64": (
+        f"cua-driver-rs-{CUA_DRIVER_VERSION}-linux-arm64-binary.tar.gz",
+        "80c9ae66bc7322052dd426c6133c96086b33894bf06c972bca8215384400b33d",
+    ),
     "windows": (
         f"cua-driver-rs-{CUA_DRIVER_VERSION}-windows-x86_64-binary.zip",
         "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5",
@@ -155,7 +164,11 @@ _CUA_DRIVER = {
         "5f71191c082ca07c9dfc13b7c9a6eec60a82818c245a93534cc0eb7911471d72",
     ),
 }
-_CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}
+_CUA_DRIVER_BINARY = {
+    "linux": "cua-driver",
+    "linux-arm64": "cua-driver",
+    "windows": "cua-driver.exe",
+}
 #: Run inside the VM builder to install the Windows framework into a disk.
 _WINDOWS_INSTALLER = Path(__file__).with_name("framework_windows.py")
 #: Where the macOS framework puts its Python, readable by every account so the agent's
@@ -252,14 +265,17 @@ printf '%s\n' "$identity" > /opt/orbit/framework
 """
 
 
-def framework_identity(*, user: str, vm: bool, multinode: bool = False) -> str:
+def framework_identity(
+    *, user: str, vm: bool, multinode: bool = False, arch: Arch = Arch.X86_64
+) -> str:
     """Everything the Linux framework is built from, for a container image or, with its boot
     unit, a VM disk, so a change to any of it rebuilds it."""
+    platform = "linux-arm64" if arch is Arch.ARM64 else "linux"
     return content_hash(
         {
             "guestd": _guestd_digests(),
-            "cua_driver": _CUA_DRIVER["linux"][1],
-            "python": _PYTHON["linux"][1],
+            "cua_driver": _CUA_DRIVER[platform][1],
+            "python": _PYTHON[platform][1],
             "setup": _SETUP,
             "unit": _GUEST_UNIT if vm else None,
             "volumes": (_VOLUMES_UNIT, _VOLUMES_SCRIPT.read_text()) if vm else None,
@@ -575,12 +591,12 @@ def _explained(stderr: str, stdout: str = "") -> str:
 
 
 def container_framework(
-    *, user: str, keep_alive: bool, multinode: bool = False
+    *, user: str, keep_alive: bool, multinode: bool = False, arch: Arch = Arch.X86_64
 ) -> tuple[list[str], list[str]]:
     """The framework layer's instructions below its ``FROM``, which a container image builds
     from a context :func:`stage_container_framework` laid out: those before the base's own
     account is restored, and those after it."""
-    identity = framework_identity(user=user, vm=False, multinode=multinode)
+    identity = framework_identity(user=user, vm=False, multinode=multinode, arch=arch)
     body = [
         "USER root",
         "COPY guestd/ /opt/orbit/guestd/",
@@ -597,11 +613,12 @@ def container_framework(
     return body, [*tail, f"LABEL {LABEL}={json.dumps(identity)}"]
 
 
-def stage_container_framework(context: Path) -> Path:
+def stage_container_framework(context: Path, arch: Arch = Arch.X86_64) -> Path:
     """Lay out the files a container image's framework layer copies in ``context``; return
     the framework's Python, which the build mounts as the ``python`` context."""
-    _stage(context, _cua_driver("linux"), user="", vm=False)
-    return _python("linux")
+    platform = "linux-arm64" if arch is Arch.ARM64 else "linux"
+    _stage(context, _cua_driver(platform), user="", vm=False)
+    return _python(platform)
 
 
 async def _build(base: dict, tag: str, *, user: str, keep_alive: bool, multinode: bool) -> None:

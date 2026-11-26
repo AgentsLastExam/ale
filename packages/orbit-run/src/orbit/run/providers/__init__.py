@@ -24,7 +24,14 @@ from orbit.core.capability import (
     solver_saves,
     unmet,
 )
-from orbit.core.config import DockerProviderConfig, RunConfig, RunTimeouts, SlurmProviderConfig
+from orbit.core.config import (
+    BatchProviderConfig,
+    DockerProviderConfig,
+    RunConfig,
+    RunTimeouts,
+    SandboxConfig,
+    SlurmProviderConfig,
+)
 from orbit.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
 from orbit.core.sandbox import (
     Provider,
@@ -37,8 +44,10 @@ from orbit.core.sandbox import (
 from orbit.core.task import Task
 from orbit.core.taskspec import (
     ContainerFeature,
+    ImageKind,
     NetworkMode,
     NetworkPolicy,
+    OperatingSystem,
     VerificationMode,
     VerifySpec,
 )
@@ -59,7 +68,16 @@ __all__ = [
 
 #: Every Provider that can leave a sandbox behind. A retained sandbox outlives the run
 #: configuration that made it, so listing and destroying consult all of them.
-RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "orchard", "slurm", "fleet")
+RETAINING_PROVIDERS = (
+    "docker",
+    "firecracker",
+    "qemu",
+    "daytona",
+    "orchard",
+    "slurm",
+    "pbs",
+    "fleet",
+)
 
 #: The provider ids of the schedulers, which start Sandboxes on machines they manage; every
 #: other provider id names a leaf, which starts the final Sandbox directly.
@@ -82,10 +100,15 @@ def leaf(
     *,
     docker: DockerProviderConfig = DockerProviderConfig(),
     slurm: SlurmProviderConfig | None = None,
+    batch: BatchProviderConfig | None = None,
 ) -> Provider:
     """The leaf a provider id names: ``docker:<runtime>`` for each runtime Docker's table
     holds, ``qemu``, ``firecracker``, ``slurm`` or ``orchard``. ``docker`` holds a Docker leaf's
     settings: the Host GPUs it may lease and the margin it admits a shared one with."""
+    if provider_id == "pbs":
+        from orbit.run.providers.slurm import SlurmProvider
+
+        return SlurmProvider(batch or BatchProviderConfig())
     if provider_id == "slurm":
         from orbit.run.providers.slurm import SlurmProvider
 
@@ -149,7 +172,12 @@ _Planned = tuple[SandboxRole, str, SandboxNeeds, _Image]
 
 
 def _sandboxes(
-    task: Task, *, snapshot: bool, solver: bool, timeouts: RunTimeouts
+    task: Task,
+    *,
+    snapshot: bool,
+    solver: bool,
+    timeouts: RunTimeouts,
+    linux_arch: Arch = Arch.X86_64,
 ) -> Iterator[_Planned]:
     """Each Sandbox an episode of ``task`` starts, as the episode protocol requests it: its
     role, the agent's account in it, what it needs and which prepared image it runs. A
@@ -159,6 +187,12 @@ def _sandboxes(
     :func:`~orbit.core.capability.solver_saves` counts. Each verifier needs to be held for its
     limit, on the leaf that saved the snapshot it boots from, or in the solver it runs in."""
     spec = task.spec
+
+    def architecture(kind: ImageKind | None) -> Arch:
+        if spec.os is OperatingSystem.LINUX and kind is ImageKind.CONTAINER:
+            return linux_arch
+        return Arch.of(spec.os)
+
     mode = spec.verify.environment_mode
     tests = timeouts.verification(spec)
     rounds = timeouts.verification(spec, validation=True) if task.validations else None
@@ -180,6 +214,7 @@ def _sandboxes(
             (snapshot_verifier, spec.verify.network.mode),
             (round_verifier_resources(spec, task.validations), spec.validation_spec.network.mode),
         ),
+        arch=architecture(spec.image.kind),
     )
     saves = solver_saves(
         task.validations,
@@ -193,7 +228,7 @@ def _sandboxes(
             SandboxNeeds(
                 kind=spec.image.kind,
                 os=spec.os,
-                arch=Arch.of(spec.os),
+                arch=architecture(spec.image.kind),
                 # Able to apply the shared verifier's network too.
                 network_mode=spec.solver_network.mode,
                 resources=spec.resources,
@@ -230,7 +265,7 @@ def _sandboxes(
             SandboxNeeds(
                 kind=image.kind,
                 os=spec.os,
-                arch=Arch.of(spec.os),
+                arch=architecture(image.kind),
                 network_mode=placed.network.mode,
                 resources=placed.resources.as_resources(),
                 duration_sec=limit,
@@ -286,6 +321,8 @@ class ProviderRegistry:
             from orbit.run.providers.daytona import DaytonaProvider
 
             return DaytonaProvider(settings.daytona)
+        if provider_id == "pbs":
+            return leaf(provider_id, batch=settings.pbs)
         return leaf(provider_id, docker=settings.docker, slurm=settings.slurm)
 
     async def select(
@@ -311,7 +348,11 @@ class ProviderRegistry:
         for task in tasks:
             sandboxes = list(
                 _sandboxes(
-                    task, snapshot=snapshots, solver=solvers, timeouts=self.settings.timeouts
+                    task,
+                    snapshot=snapshots,
+                    solver=solvers,
+                    timeouts=self.settings.timeouts,
+                    linux_arch=self.settings.sandbox.linux_container_arch,
                 )
             )
             groups: list[tuple[list[_Planned], Sequence[str]]]
@@ -391,7 +432,11 @@ class ProviderRegistry:
         first: dict[tuple[str, frozenset[ContainerFeature]], SandboxRequest] = {}
         for task in tasks:
             planned = _sandboxes(
-                task, snapshot=False, solver=solvers, timeouts=self.settings.timeouts
+                task,
+                snapshot=False,
+                solver=solvers,
+                timeouts=self.settings.timeouts,
+                linux_arch=self.settings.sandbox.linux_container_arch,
             )
             for role, user, needs, prepared in planned:
                 verifier = role is SandboxRole.VERIFIER
@@ -517,7 +562,7 @@ async def _watching(provider: Provider, needs: SandboxNeeds) -> list[str]:
     )
 
 
-def provider_named(name: str, slurm: SlurmProviderConfig | None = None) -> Provider:
+def provider_named(name: str, settings: SandboxConfig | None = None) -> Provider:
     """A default-configured Provider, for work on sandboxes it retained earlier.
 
     Retained handles name the Provider that made a sandbox; that name, not the current run
@@ -530,7 +575,9 @@ def provider_named(name: str, slurm: SlurmProviderConfig | None = None) -> Provi
         return leaf(name)
     if name == "slurm":
         # Its snapshots are listed from its cache, whatever the partitions.
-        return leaf("slurm", slurm=slurm)
+        return leaf("slurm", slurm=settings.slurm if settings else None)
+    if name == "pbs":
+        return leaf(name, batch=settings.pbs if settings else None)
     if name == "daytona":
         from orbit.run.providers.daytona import DaytonaProvider
 

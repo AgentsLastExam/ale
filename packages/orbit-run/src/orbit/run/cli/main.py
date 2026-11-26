@@ -17,7 +17,7 @@ from typing import Annotated, Any
 
 import typer
 
-from orbit.core.config import SlurmProviderConfig, load_run_config
+from orbit.core.config import SandboxConfig, load_run_config
 from orbit.core.errors import OrbitError, ProviderCapabilityError
 from orbit.core.sandbox import Provider
 from orbit.run import __version__
@@ -379,19 +379,21 @@ def _print_asset_sync(results: Sequence[AssetSyncResult]) -> None:
 
 #: Where Slurm's cache is, which a Run configuration names.
 _RETAINED_CONFIG = typer.Option(
-    "--config", help="Run configuration TOML, for a Slurm cache other than the default"
+    "--config", help="Run configuration TOML, for the cluster cache holding the snapshots"
 )
 
 
-def _slurm(config: Path | None) -> SlurmProviderConfig | None:
-    return load_run_config(run_path=config).sandbox.slurm if config else None
+def _sandbox_settings(config: Path | None) -> SandboxConfig | None:
+    if config is None and (site := os.environ.get("ORBIT_RUN_CONFIG")):
+        config = Path(site)
+    return load_run_config(run_path=config).sandbox if config else None
 
 
 @sandbox_app.command("list")
 def sandbox_list(config: Annotated[Path | None, _RETAINED_CONFIG] = None) -> None:
     """List Orbit-managed sandboxes and snapshots requested for retention."""
     try:
-        records = run_async(_list_retained_sandboxes(_slurm(config)))
+        records = run_async(_list_retained_sandboxes(_sandbox_settings(config)))
     except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
@@ -409,7 +411,7 @@ def sandbox_destroy(
 ) -> None:
     """Destroy one Orbit-retained sandbox or snapshot and its owned resources."""
     try:
-        run_async(_destroy_retained_sandbox(handle, _slurm(config)))
+        run_async(_destroy_retained_sandbox(handle, _sandbox_settings(config)))
     except OrbitError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(EXIT_PROVIDER) from error
@@ -417,13 +419,13 @@ def sandbox_destroy(
 
 
 async def _list_retained_sandboxes(
-    slurm: SlurmProviderConfig | None = None,
+    settings: SandboxConfig | None = None,
 ) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for name in RETAINING_PROVIDERS:
         if name == "fleet" and not os.environ.get("ORBIT_FLEET_URL"):
             continue  # no Fleet named here
-        provider = provider_named(name, slurm)
+        provider = provider_named(name, settings)
         try:
             records.extend(await provider.list_retained())
         finally:
@@ -431,12 +433,12 @@ async def _list_retained_sandboxes(
     return sorted(records, key=lambda item: str(item["handle"]))
 
 
-async def _destroy_retained_sandbox(handle: str, slurm: SlurmProviderConfig | None = None) -> None:
+async def _destroy_retained_sandbox(handle: str, settings: SandboxConfig | None = None) -> None:
     name, separator, _ = handle.partition(":")
     if not separator or name not in RETAINING_PROVIDERS:
         offered = ", ".join(f"'{provider}:'" for provider in RETAINING_PROVIDERS)
         raise ProviderCapabilityError(f"retained sandbox handle must start with {offered}")
-    provider = provider_named(name, slurm)
+    provider = provider_named(name, settings)
     try:
         await provider.destroy_retained(handle)
     finally:

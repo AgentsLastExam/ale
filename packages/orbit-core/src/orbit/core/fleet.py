@@ -330,6 +330,7 @@ class SandboxDemand(BaseModel):
                     (self.verifier, self.verifier_network_mode),
                     (self.round_verifier, self.round_verifier_network_mode),
                 ),
+                arch=self.arch,
             ),
         )
 

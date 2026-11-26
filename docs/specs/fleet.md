@@ -271,8 +271,8 @@ machines, so neither the Harness nor the episode protocol knows it is there.
   leaves' own rules, which a Node's leaf applies as it creates the Sandbox. Which Node
   serves a request is placement's decision, and a request no registered Node could serve
   fails when the control plane receives it, before anything is created. A Task names no
-  architecture, so a container or a Linux or Windows VM asks for an x86-64 Node and a macOS
-  VM for an arm64 one.
+  architecture. Prepared native container images target their recorded instruction set;
+  macOS VMs target arm64 and other VMs target x86-64.
 - **Retention** happens on the Sandbox's Node and in the ledger ([Lifecycle](#lifecycle),
   [Node agent](#node-agent)). The handle is `fleet:<sandbox>` or `fleet:snapshot:<sandbox>`.
   - `--continue-from` continues in a kept Sandbox through the Run's own Fleet connection, so
