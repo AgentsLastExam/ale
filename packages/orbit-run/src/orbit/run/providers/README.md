@@ -5,6 +5,7 @@ Providers turn prepared Task images into Sandboxes. Orbit ships the following ba
 | Package | Backend | Prepared input |
 |---|---|---|
 | `docker/` | local Docker container, a Kata microVM per container ([Kata](#docker-on-kata-containers)), or a container on gVisor ([gVisor](#docker-on-gvisor)) | immutable OCI image identity |
+| `batch/` | [PBS Professional](#pbs-professional), with one or more gVisor Sandboxes in a single-node job | immutable OCI image identity |
 | `slurm/` | a Linux gVisor container on each node a Sandbox spans, in a Slurm batch allocation beside the Sandboxes booted from its snapshots | immutable OCI image identity |
 | `qemu/` | QEMU/KVM guest runner | qcow2 disk, or a chain of [layers](#disk-layers) on one |
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
@@ -931,6 +932,66 @@ first screenshot came after 7.6 s against 4.3 s and its cgroup held 541 MB idle 
 against 0.07 to 0.13 s, and starting the framework's Python 1.2 to 2.4 s against 0.4 to
 0.9 s. A Run with no Task that asks for a container feature starts one Sandbox more, for
 the preflight's check: about 15 s with that image.
+
+## PBS Professional
+
+Run Orbit on the submit host with `providers = ["pbs"]` under `[sandbox]`.
+The Provider prepares images in a batch job and runs the solver and verifiers in rootless
+gVisor. The job owns one compute node or a share of one. A private control directory on
+a shared filesystem carries the guest protocol between the controller and its job.
+The Task does not need a scheduler client or a site name.
+
+The [Flow2 configuration](../../../../../../docs/guides/sites/flow2.toml) targets ARM64
+GB200 nodes. It sends single-GPU allocations to `t2-share` and larger allocations, up to
+four GPUs, to `t2-single`. A shared job requests `select=1:ngpus=1`; a whole-node job
+requests `select=1` and the queue assigns four GPUs. Builds use one GPU in `t2-share`.
+From the checkout, run `uv run orbit prepare TASK --config docs/guides/sites/flow2.toml`
+before `uv run orbit run TASK --agent oracle --config docs/guides/sites/flow2.toml`.
+The Task image and any binaries it installs must run on ARM64.
+
+For another PBS site, describe queues in preference order. For example:
+
+```toml
+[sandbox]
+providers = ["pbs"]
+
+[sandbox.pbs]
+shared_fs_dir = "/shared/home/me/orbit"
+# account = "project"     # qsub -A
+build_queue = "cpu"
+
+[[sandbox.pbs.partitions]]
+name = "cpu"
+max_cpus = 32
+max_memory_mb = 65536
+```
+
+`shared_fs_dir` must resolve to the same path on the submit and compute nodes.
+Each queue declares its effective per-job CPU, memory and whole-GPU capacity. PBS
+`chunk_resources` controls which of `ncpus`, `mem`, and `ngpus` appear in the select
+chunk; omit resource fields supplied by the queue itself. `min_gpus` declares GPUs the
+queue requires even for a CPU-only guest. Set `build_queue` and `build_gpus` when
+builds need a particular queue or GPU reservation.
+
+The submit host needs the scheduler CLI. Each compute node needs Python 3.9 or newer, rootless
+Podman with its helpers on the job's PATH (or an absolute `podman` path), working
+subordinate UID and GID mappings, and a writable delegated cgroup v2 subtree in the job
+for enforcing each Sandbox's CPU, memory and swap limits. GPU jobs also need NVIDIA
+CDI devices and driver libraries compatible with Orbit's patched gVisor. The worker
+checks these prerequisites before admitting a Sandbox. Registry pulls can use the site's proxy credentials. Image
+build commands receive credential-free proxy settings, and solver and verifier containers
+receive the environment declared by their image, Task and Orbit. A successful bare `runsc`
+probe alone does not validate a site's Podman or job cgroups. The Flow2 preset records
+queue policy; deployment must qualify these compute-node prerequisites. On a login node
+with this deployment configured, run the solver and its snapshot verifier with:
+
+```sh
+ORBIT_TEST_PBS_CONFIG=docs/guides/sites/flow2.toml ORBIT_TEST_BATCH_GPUS=1 \
+  uv run pytest -q -m needs_pbs tests/integration/test_batch_episodes.py
+```
+
+Use four GPUs to exercise the whole-node queue. The GPU test writes device memory and
+reads it back in both Sandboxes.
 
 ## Slurm
 

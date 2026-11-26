@@ -951,6 +951,57 @@ async def test_retained_slurm_snapshots_are_found_in_the_cache_a_run_configurati
     assert provider_named("slurm").config.shared_fs_dir == "~/.cache/orbit/slurm"  # type: ignore[attr-defined]
 
 
+@pytest.mark.asyncio
+async def test_flow2_uses_the_native_target_for_solver_and_snapshot_verifier(
+    tmp_path: Path,
+) -> None:
+    from orbit.core.capability import Arch
+    from orbit.run.providers import _sandboxes
+    from orbit.run.providers.slurm.images import build_partition, key
+    from orbit.run.providers.slurm.job import create_job
+
+    preset = Path(__file__).resolve().parents[2] / "docs/guides/sites/flow2.toml"
+    site = load_run_config(run_path=preset)
+    registry = ProviderRegistry(site)
+    pbs = registry.get("pbs")
+    options = site.sandbox.pbs
+    assert build_partition(options).name == "t2-share" and options.build_gpus == 1
+    profiles = await pbs.profiles()
+    assert {profile.arch for profile in profiles} == {Arch.ARM64}
+    assert {profile.max_nodes for profile in profiles} == {1}
+
+    for cards, queue in ((0, "t2-share"), (1, "t2-share"), (2, "t2-single"), (4, "t2-single")):
+        task = _task(
+            tmp_path / f"cards-{cards}",
+            {
+                "environment": {"gpus": cards},
+                "verifier": {"environment_mode": "snapshot"},
+            },
+        )
+        await registry.select([task])
+        assert task.provider == "pbs"
+        planned = list(
+            _sandboxes(
+                task, snapshot=True, solver=True, timeouts=site.timeouts, linux_arch=Arch.ARM64
+            )
+        )
+        assert all(need.arch is Arch.ARM64 for _, _, need, _ in planned)
+        solver = planned[0][2]
+        assert solver.verifier and solver.verifier.arch is Arch.ARM64
+        chosen = pbs._partition(solver)
+        assert chosen and chosen.name == queue
+        assert create_job(options, chosen).scheduler == "pbs"
+
+    arguments = dict(
+        reference="registry/image@sha256:" + "9" * 64,
+        context=None,
+        user="user",
+        keep_alive=False,
+        multinode=False,
+    )
+    assert key("external-ref", **arguments) != key("external-ref", **arguments, arch=Arch.ARM64)
+
+
 def test_batch_settings_survive_serialization_and_reject_unsupported_allocations() -> None:
     pbs = _settings(
         "pbs", pbs={"partitions": [{"name": "cpu", "max_cpus": 4, "max_memory_mb": 8192}]}
