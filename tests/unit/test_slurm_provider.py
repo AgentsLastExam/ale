@@ -43,6 +43,8 @@ from orbit.run.providers.slurm.provider import (
     step_memory_mb,
 )
 
+pytestmark = pytest.mark.unit
+
 #: Orbit's directory on the cluster by default, below the home.
 CACHE = ".cache/orbit/slurm"
 
