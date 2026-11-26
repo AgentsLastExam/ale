@@ -24,7 +24,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from orbit.core.capability import GpuModel
+from orbit.core.capability import Arch, GpuModel
 from orbit.core.errors import ConfigError
 from orbit.core.ids import content_hash
 from orbit.core.sandbox import DesktopResolution
@@ -36,6 +36,8 @@ __all__ = [
     "AgentJudgeConfig",
     "ArtifactPolicy",
     "AssetCollectionConfig",
+    "BatchProviderConfig",
+    "BatchQueue",
     "DaytonaProviderConfig",
     "DockerProviderConfig",
     "FleetConfig",
@@ -255,6 +257,7 @@ ProviderId = Literal[
     "docker:kata",
     "docker:gvisor",
     "slurm",
+    "pbs",
     "qemu",
     "firecracker",
     "orchard",
@@ -345,7 +348,59 @@ class SlurmProviderConfig(BaseModel):
     @model_validator(mode="after")
     def _drains_within_its_wall_time(self) -> Self:
         if self.drain_minutes >= self.walltime_minutes:
-            raise ValueError("sandbox.slurm.drain_minutes must be below walltime_minutes")
+            raise ValueError("drain_minutes must be below walltime_minutes")
+        return self
+
+
+class BatchQueue(SlurmPartition):
+    """Per-job capacity for a single-node queue. PBS queues choose which chunk fields to emit."""
+
+    max_nodes: Literal[1] = 1
+    min_gpus: int = Field(default=0, ge=0)
+    """Whole GPUs the queue charges per allocation, including CPU-only jobs."""
+    chunk_resources: tuple[Literal["ncpus", "mem", "ngpus"], ...] = ("ncpus", "mem", "ngpus")
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _queue_fields(self) -> Self:
+        if self.min_gpus > self.max_gpus:
+            raise ValueError("min_gpus must fit the GPU capacity of the queue")
+        if self.qos or self.constraint:
+            raise ValueError("qos and constraint are Slurm partition settings")
+        if len(set(self.chunk_resources)) != len(self.chunk_resources):
+            raise ValueError("chunk_resources must name each PBS resource once")
+        return self
+
+
+class BatchProviderConfig(SlurmProviderConfig):
+    """A PBS Pro site and its queues, in placement order."""
+
+    scheduler: Literal["pbs"] = "pbs"
+    shared_fs_dir: str = Field(default="~/.cache/orbit/pbs", min_length=1)
+    architecture: Arch = Arch.X86_64
+    partitions: tuple[BatchQueue, ...] = ()
+    build_queue: str | None = None
+    build_gpus: int = Field(default=0, ge=0)
+    podman: str | None = None
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _site(self) -> Self:
+        if not Path(os.path.expandvars(self.shared_fs_dir)).expanduser().is_absolute():
+            raise ValueError("shared_fs_dir must resolve to an absolute path")
+        if self.podman is not None and not Path(self.podman).is_absolute():
+            raise ValueError("podman must be an absolute path on the compute nodes")
+        queues = {queue.name: queue for queue in self.partitions}
+        if len(queues) != len(self.partitions):
+            raise ValueError("queue names must be unique within a site")
+        if self.build_queue is not None and self.build_queue not in queues:
+            raise ValueError("build_queue must name a configured queue")
+        if self.build_gpus and (
+            not self.build_queue or self.build_gpus > queues[self.build_queue].max_gpus
+        ):
+            raise ValueError("build_gpus must fit the configured build_queue")
         return self
 
 
@@ -385,8 +440,14 @@ class SandboxConfig(BaseModel):
     same way; a scheduler's own leaves are its deployment's to configure."""
     docker: DockerProviderConfig = DockerProviderConfig()
     slurm: SlurmProviderConfig = SlurmProviderConfig()
+    pbs: BatchProviderConfig = BatchProviderConfig()
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
     fleet: FleetConfig = FleetConfig()
+
+    @property
+    def linux_container_arch(self) -> Arch:
+        """Native target of this Run's cluster images, independent of the controller's CPU."""
+        return self.pbs.architecture if "pbs" in self.providers else Arch.X86_64
 
     # --- validation ---
 
@@ -401,6 +462,8 @@ class SandboxConfig(BaseModel):
 
     @model_validator(mode="after")
     def _settings_have_their_provider(self) -> Self:
+        if "pbs" in self.providers and not self.pbs.partitions:
+            raise ValueError("the pbs Provider needs sandbox.pbs.partitions")
         if "slurm" in self.providers and not self.slurm.partitions:
             raise ValueError("the slurm Provider needs sandbox.slurm.partitions")
         if self.docker.gpus and not any(name.startswith("docker:") for name in self.providers):

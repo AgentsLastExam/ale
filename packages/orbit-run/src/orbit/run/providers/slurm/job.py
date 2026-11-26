@@ -16,7 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from orbit.core.config import SlurmPartition, SlurmProviderConfig
+from orbit.core.config import BatchProviderConfig, BatchQueue, SlurmPartition, SlurmProviderConfig
 from orbit.core.errors import (
     AllocationEndedError,
     GuestUnreachableError,
@@ -43,7 +43,7 @@ QUEUE_NOTICE_SEC = 600
 
 def cache(config: SlurmProviderConfig) -> Path:
     """Orbit's directory on the cluster's shared file system."""
-    return Path(config.shared_fs_dir).expanduser()
+    return Path(os.path.expandvars(config.shared_fs_dir)).expanduser()
 
 
 async def slurm(*argv: str, timeout: float = 60) -> str:
@@ -124,6 +124,15 @@ class StepReady(BaseModel):
     """The InfiniBand verbs devices the node gave a Sandbox that spans several."""
 
 
+def create_job(config: SlurmProviderConfig, partition: SlurmPartition) -> Job:
+    if isinstance(config, BatchProviderConfig):
+        from orbit.run.providers.batch.job import BatchJob
+
+        assert isinstance(partition, BatchQueue)
+        return BatchJob(config, partition)
+    return Job(config, partition)
+
+
 class Job:
     """One batch job of one or more alike nodes, whose batch step runs each Sandbox started
     in it as a step of its own over the first nodes it spans."""
@@ -134,6 +143,13 @@ class Job:
         self.name = "orbit-" + uuid.uuid4().hex
         self.directory = cache(config) / self.name
         self.id = ""
+
+    @property
+    def scheduler(self) -> str:
+        return self.config.scheduler if isinstance(self.config, BatchProviderConfig) else "slurm"
+
+    async def step_accounting_state(self, step: str) -> str:
+        return await slurm("sacct", "-nj", f"{self.id}.{step}", "--format=State%32", "-P")
 
     @property
     def label(self) -> str:
@@ -206,7 +222,7 @@ class Job:
         noticed = loop.time()
         while deadline is None or loop.time() < deadline:
             if error := read(self.directory / "error"):
-                raise ProviderStartError(f"Slurm job {self.id} could not start: {error}")
+                raise ProviderStartError(f"{self.scheduler} job {self.id} could not start: {error}")
             if ready := read(self.directory / "ready"):
                 return JobReady.model_validate_json(ready)
             state = await self.state()
@@ -221,13 +237,12 @@ class Job:
                 )
             if state not in {"PENDING", "RUNNING", "CONFIGURING"}:
                 raise ProviderStartError(
-                    f"Slurm job {self.id} ended before readiness ({state or 'gone'}): "
+                    f"{self.scheduler} job {self.id} ended before readiness ({state or 'gone'}): "
                     + tail(self.directory / "job.log")
                 )
             await asyncio.sleep(2)
-        raise ProviderStartError(
-            f"Slurm job {self.id} timed out during {'startup' if started else 'queueing'}"
-        )
+        phase = "startup" if started else "queueing"
+        raise ProviderStartError(f"{self.scheduler} job {self.id} timed out during {phase}")
 
     async def start(
         self, index: str, spec: dict[str, object], *, nodes: int, timeout: int
@@ -245,7 +260,7 @@ class Job:
             if error := read(box / "error"):
                 # The step's own log holds what Podman said.
                 raise ProviderStartError(
-                    f"Slurm job {self.id} could not start Sandbox {index}: {error}\n"
+                    f"{self.scheduler} job {self.id} could not start Sandbox {index}: {error}\n"
                     + tail(box / "step.log")
                 )
             readies = [read(box / "nodes" / str(rank) / "ready") for rank in range(nodes)]
@@ -253,12 +268,12 @@ class Job:
                 return [StepReady.model_validate_json(ready) for ready in readies]
             if exists(box / "done"):
                 raise ProviderStartError(
-                    f"Slurm job {self.id} ended Sandbox {index}'s step before readiness: "
+                    f"{self.scheduler} job {self.id} ended Sandbox {index} before readiness: "
                     + tail(box / "step.log")
                 )
             await self._alive()
             await asyncio.sleep(1)
-        raise ProviderStartError(f"Slurm job {self.id} did not start Sandbox {index}")
+        raise ProviderStartError(f"{self.scheduler} job {self.id} did not start Sandbox {index}")
 
     async def save(
         self, index: str, *, nodes: int, timeout: int = 1800
@@ -283,13 +298,15 @@ class Job:
                 ]
             if error := read(box / "error"):
                 raise ProviderStartError(
-                    f"Slurm job {self.id} could not save Sandbox {index}: {error}"
+                    f"{self.scheduler} job {self.id} could not save Sandbox {index}: {error}"
                 )
             if exists(box / "done"):
                 raise ProviderStartError(f"Sandbox {index} ended before its disk was saved")
             await self._alive()
             await asyncio.sleep(1)
-        raise ProviderStartError(f"Slurm job {self.id} did not save Sandbox {index} in time")
+        raise ProviderStartError(
+            f"{self.scheduler} job {self.id} did not save Sandbox {index} in time"
+        )
 
     async def end(self, index: str, *, timeout: int = 180) -> None:
         """End a Sandbox's step, idempotently, and wait until Slurm has released it."""
@@ -302,7 +319,9 @@ class Job:
             if not await self.state():
                 return
             await asyncio.sleep(1)
-        raise ProviderStartError(f"Slurm job {self.id} did not end Sandbox {index}'s step")
+        raise ProviderStartError(
+            f"{self.scheduler} job {self.id} did not end Sandbox {index}'s step"
+        )
 
     async def control(self, *args: str, nodes: Sequence[str], timeout: int = 60) -> None:
         """Run the worker's ``args`` on each of ``nodes``, at once."""
@@ -346,7 +365,7 @@ class Job:
             if not state:
                 if failure := read(self.directory / "cleanup-error"):
                     raise ProviderStartError(f"Slurm cleanup failed in {self.directory}: {failure}")
-                await _remove(self.directory)
+                await remove_job_directory(self.directory)
                 return
             # Each node's store is removed as the job ends, which takes about a minute for a
             # 2 GB image: only one that cleanup does not end in ten minutes is cancelled.
@@ -376,11 +395,11 @@ class Job:
     async def _alive(self) -> None:
         if not await self.state():
             raise ProviderStartError(
-                f"Slurm job {self.id} ended: " + tail(self.directory / "job.log")
+                f"{self.scheduler} job {self.id} ended: " + tail(self.directory / "job.log")
             )
 
 
-async def _remove(directory: Path) -> None:
+async def remove_job_directory(directory: Path) -> None:
     """Remove a job's directory; a compute node may still be closing its NFS handle to the
     batch log, which leaves a silly-renamed file behind for a moment."""
     for _ in range(4):
@@ -429,8 +448,8 @@ class JobTransport(StdioTransport):
         with contextlib.suppress(ProviderStartError):
             if (ended := await job.ended()) in ENDED:
                 return AllocationEndedError(
-                    f"Slurm ended job {job.id} ({ended}): what the Sandbox held since its "
-                    "last save written out is lost"
+                    f"{job.scheduler} ended job {job.id} ({ended}): "
+                    "what the Sandbox held since its last save written out is lost"
                 )
         box = job.directory / "sandboxes" / self.steps.index
         for rank in range(len(self.watchers)):
@@ -445,16 +464,14 @@ class JobTransport(StdioTransport):
                 return StorageExhaustedError(message)
         for watcher in self.watchers:
             if counted := watcher.oom_killed():
-                return MemoryExhaustedError(f"Slurm job {job.id}: {counted} ({error})")
+                return MemoryExhaustedError(f"{job.scheduler} job {job.id}: {counted} ({error})")
         counters = [box / "nodes" / str(rank) / "memory" for rank in range(len(self.watchers))]
         with contextlib.suppress(ProviderStartError):
             for _ in range(5):
                 if all(exists(each) for each in counters):
                     break
                 await asyncio.sleep(1)
-            state = await slurm(
-                "sacct", "-nj", f"{job.id}.{self.ready.step}", "--format=State%32", "-P"
-            )
+            state = await job.step_accounting_state(self.ready.step)
             if "OUT_OF_MEMORY" in state or any(
                 line.startswith("oom_kill ")
                 and line.split()[-1].isdigit()
@@ -463,6 +480,6 @@ class JobTransport(StdioTransport):
                 for line in read(each).splitlines()
             ):
                 return MemoryExhaustedError(
-                    f"Slurm recorded an OOM kill in step {job.id}.{self.ready.step}"
+                    f"{job.scheduler} recorded an OOM kill in step {job.id}.{self.ready.step}"
                 )
         return error
