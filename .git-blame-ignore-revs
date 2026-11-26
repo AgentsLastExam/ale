@@ -1,0 +1,8 @@
+# Commits that changed lines without changing what they do, which blame skips: GitHub reads
+# this file itself, and `git config blame.ignoreRevsFile .git-blame-ignore-revs` makes
+# `git blame` do the same.
+
+# The scripted rename of ALE to Orbit (#206).
+e46b8f3f2adfc39f079370dd648441805c0b0f43
+# The re-wrap of the prose lines that rename lengthened (#206).
+a7da5b634a069a3275313664748af089bf694838
