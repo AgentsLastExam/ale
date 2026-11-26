@@ -376,7 +376,7 @@ class BatchQueue(SlurmPartition):
 class BatchProviderConfig(SlurmProviderConfig):
     """A PBS Pro site and its queues, in placement order."""
 
-    scheduler: Literal["pbs"] = "pbs"
+    scheduler: Literal["pbs", "lsf"] = "pbs"
     shared_fs_dir: str = Field(default="~/.cache/orbit/pbs", min_length=1)
     architecture: Arch = Arch.X86_64
     partitions: tuple[BatchQueue, ...] = ()

@@ -1,1 +1,1 @@
-"""PBS Professional scheduler adapter."""
+"""PBS Professional and Spectrum LSF scheduler adapters."""

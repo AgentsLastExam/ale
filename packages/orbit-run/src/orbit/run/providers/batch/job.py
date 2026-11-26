@@ -1,4 +1,4 @@
-"""PBS Professional batch allocations driven from a cluster login node."""
+"""PBS Professional and LSF batch allocations driven from a cluster login node."""
 
 from __future__ import annotations
 
@@ -22,7 +22,13 @@ from orbit.run.process import run
 from orbit.run.providers.slurm.job import Job, read, remove_job_directory, seconds, write
 
 _PBS_ID = re.compile(r"[0-9]+(?:\.[a-zA-Z0-9][\w.-]*)?")
-_MISSING = re.compile(r"unknown job id|job has (?:already )?finished", re.I)
+_MISSING = re.compile(
+    r"unknown job id|job has (?:already )?finished|job <[^>]+> is (?:not found|already finished)",
+    re.I,
+)
+_NO_JOBS = re.compile(
+    r"no (?:unfinished |matching |unfinished and finished )?job(?:s)? found", re.I
+)
 
 
 async def _command(*args: str, stdin: bytes | None = None, absent: re.Pattern | None = None) -> str:
@@ -39,11 +45,15 @@ async def _command(*args: str, stdin: bytes | None = None, absent: re.Pattern | 
 
 
 async def preflight(config: BatchProviderConfig, partitions: Sequence[BatchQueue]) -> None:
-    for command in ("qsub", "qselect", "qstat", "qdel"):
+    pbs = config.scheduler == "pbs"
+    commands = (
+        ("qsub", "qselect", "qstat", "qdel") if pbs else ("bsub", "bjobs", "bqueues", "bkill")
+    )
+    for command in commands:
         if not shutil.which(command):
             raise ProviderStartError(f"{config.scheduler} needs {command} on the login node")
     for name in dict.fromkeys(queue.name for queue in partitions):
-        await _command("qstat", "-Q", name)
+        await _command(*(("qstat", "-Q", name) if pbs else ("bqueues", "-w", name)))
 
 
 @dataclass(frozen=True)
@@ -105,6 +115,47 @@ def _pbs_status(job: str, listing: str) -> _Status:
     return _Status(active, reason=fields.get("comment", state), left=left)
 
 
+def _lsf_status(job: str, listing: str) -> _Status:
+    try:
+        (record,) = json.loads(listing)["RECORDS"]
+        if _MISSING.search(str(record.get("ERROR", ""))):
+            return _Status()
+        if str(record["JOBID"]) != job:
+            raise ValueError
+        state = record["STAT"]
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ProviderStartError(f"bjobs returned no valid record for job {job}") from exc
+    if state in {"DONE", "EXIT"}:
+        reason = str(record.get("EXIT_REASON", ""))
+        for word, outcome in (
+            ("TERM_RUNLIMIT", "TIMEOUT"),
+            ("TERM_PREEMPT", "PREEMPTED"),
+            ("TERM_MEMLIMIT", "OUT_OF_MEMORY"),
+            ("TERM_OWNER", "CANCELLED"),
+            ("TERM_ADMIN", "CANCELLED"),
+        ):
+            if word in reason:
+                return _Status(ended=outcome)
+        return _Status(ended="COMPLETED" if state == "DONE" else "FAILED")
+    active = {
+        "PEND": "PENDING",
+        "PSUSP": "PENDING",
+        "WAIT": "PENDING",
+        "PROV": "CONFIGURING",
+        "RUN": "RUNNING",
+        "USUSP": "RUNNING",
+        "SSUSP": "RUNNING",
+    }.get(state)
+    if not active:
+        raise ProviderStartError(f"bjobs returned state {state!r} for job {job}")
+    left = None
+    if match := re.fullmatch(
+        r"(\d+):(\d{1,2})(?:\s+[ELX])?", str(record.get("TIME_LEFT", "")).strip()
+    ):
+        left = 3600 * int(match[1]) + 60 * int(match[2])
+    return _Status(active, reason=str(record.get("PEND_REASON") or state), left=left)
+
+
 class BatchJob(Job):
     """A single-node batch allocation with a private scheduler job ID and control directory."""
 
@@ -131,14 +182,17 @@ class BatchJob(Job):
     ) -> None:
         if nodes != 1:
             raise ProviderStartError(f"{self.config.scheduler} needs a single-node allocation")
+        pbs = self.config.scheduler == "pbs"
         queue = self.partition
         gpus = max(queue.min_gpus, gpus)
         spec = {
             "scheduler": self.config.scheduler,
             "podman": self.config.podman,
-            "gpus": queue.max_gpus if "ngpus" not in queue.chunk_resources else gpus,
-            "cpus": queue.max_cpus if "ncpus" not in queue.chunk_resources else cpus,
-            "memory_mb": queue.max_memory_mb if "mem" not in queue.chunk_resources else memory_mb,
+            "gpus": queue.max_gpus if pbs and "ngpus" not in queue.chunk_resources else gpus,
+            "cpus": queue.max_cpus if pbs and "ncpus" not in queue.chunk_resources else cpus,
+            "memory_mb": queue.max_memory_mb
+            if pbs and "mem" not in queue.chunk_resources
+            else memory_mb,
         }
         script = (
             "#!/bin/sh\n"
@@ -147,45 +201,73 @@ class BatchJob(Job):
             + f"exec python3 -I worker.py {shlex.quote(command)} >>job.log 2>&1\n"
         ).encode()
         log = str(self.directory / "batch.log")
-        resources = {"ncpus": str(cpus), "mem": f"{memory_mb}mb", "ngpus": str(gpus)}
-        select = ":".join(
-            (
-                "select=1",
-                *(
-                    f"{key}={resources[key]}"
-                    for key in queue.chunk_resources
-                    if key != "ngpus" or gpus
-                ),
+        if pbs:
+            resources = {"ncpus": str(cpus), "mem": f"{memory_mb}mb", "ngpus": str(gpus)}
+            select = ":".join(
+                (
+                    "select=1",
+                    *(
+                        f"{key}={resources[key]}"
+                        for key in queue.chunk_resources
+                        if key != "ngpus" or gpus
+                    ),
+                )
             )
-        )
-        argv = [
-            "qsub",
-            "-S",
-            "/bin/sh",
-            "-q",
-            queue.name,
-            "-N",
-            self.name,
-            "-r",
-            "n",
-            "-j",
-            "oe",
-            "-o",
-            log,
-            "-l",
-            select,
-            "-l",
-            f"walltime={minutes // 60:02d}:{minutes % 60:02d}:00",
-        ]
-        if self.config.account:
-            argv.extend(("-A", self.config.account))
+            argv = [
+                "qsub",
+                "-S",
+                "/bin/sh",
+                "-q",
+                queue.name,
+                "-N",
+                self.name,
+                "-r",
+                "n",
+                "-j",
+                "oe",
+                "-o",
+                log,
+                "-l",
+                select,
+                "-l",
+                f"walltime={minutes // 60:02d}:{minutes % 60:02d}:00",
+            ]
+            if self.config.account:
+                argv.extend(("-A", self.config.account))
+        else:
+            # LSF otherwise sends the entire Host environment, including credentials.
+            argv = [
+                "bsub",
+                "-env",
+                "none",
+                "-rn",
+                "-q",
+                queue.name,
+                "-J",
+                self.name,
+                "-o",
+                log,
+                "-n",
+                str(cpus),
+                "-W",
+                f"{minutes // 60}:{minutes % 60:02d}",
+                "-M",
+                f"{memory_mb}M",
+                "-R",
+                f"span[hosts=1] rusage[mem={memory_mb}MB/host]",
+            ]
+            if gpus:
+                argv.extend(("-gpu", f"num={gpus}:mode=shared:j_exclusive=yes"))
+            if self.config.account:
+                argv.extend(("-P", self.config.account))
         with (self.directory / "submission").open("a") as lock:
             await acquire_lock(lock)
             if read(self.directory / "stop") or read(self.directory / "submitting"):
                 raise ProviderStartError(f"job {self.name} was stopped or already submitted")
             write(self.directory / "batch.json", json.dumps(spec).encode())
             write(self.directory / "submitting", b"1")
-            # Finish recording the job ID before cancellation releases the lock to cleanup.
+            # qsub and bsub both accept a job script on stdin. Finish recording the ID
+            # before cancellation can release the lock to cleanup.
             pending = asyncio.create_task(self._submit(argv, script))
             try:
                 await asyncio.shield(pending)
@@ -195,10 +277,14 @@ class BatchJob(Job):
 
     async def _submit(self, argv: list[str], script: bytes) -> None:
         out = await _command(*argv, stdin=script)
-        match = _PBS_ID.fullmatch(out)
+        match = (
+            _PBS_ID.fullmatch(out)
+            if self.config.scheduler == "pbs"
+            else re.search(r"^Job <([0-9]+)>", out, re.M)
+        )
         if not match:
             raise ProviderStartError(f"{argv[0]} returned an invalid job ID: {out!r}")
-        self.id = match[0]
+        self.id = match[0] if self.config.scheduler == "pbs" else match[1]
         write(self.directory / "job-id", self.id.encode())
 
     async def _recover_id(self) -> str:
@@ -206,8 +292,23 @@ class BatchJob(Job):
             return job
         if not read(self.directory / "submitting"):
             return ""
-        out = await _command("qselect", "-u", getpass.getuser(), "-N", self.name)
-        if out and not _PBS_ID.fullmatch(out):
+        if self.config.scheduler == "pbs":
+            out = await _command("qselect", "-u", getpass.getuser(), "-N", self.name)
+            valid = _PBS_ID
+        else:
+            out = await _command(
+                "bjobs",
+                "-u",
+                getpass.getuser(),
+                "-J",
+                self.name,
+                "-noheader",
+                "-o",
+                "jobid",
+                absent=_NO_JOBS,
+            )
+            valid = re.compile(r"[0-9]+")
+        if out and not valid.fullmatch(out):
             raise ProviderStartError(f"cannot recover a unique job ID for {self.name}: {out!r}")
         if out:
             write(self.directory / "job-id", out.encode())
@@ -216,10 +317,21 @@ class BatchJob(Job):
     async def _status(self, *, history: bool = False) -> _Status:
         if not self.id:
             return _Status()
+        if self.config.scheduler == "pbs":
+            listing = await _command(
+                "qstat", *(("-x",) if history else ()), "-f", self.id, absent=_MISSING
+            )
+            return _pbs_status(self.id, listing) if listing else _Status()
         listing = await _command(
-            "qstat", *(("-x",) if history else ()), "-f", self.id, absent=_MISSING
+            "bjobs",
+            "-a",
+            "-o",
+            "jobid stat time_left exit_reason pend_reason",
+            "-json",
+            self.id,
+            absent=_MISSING,
         )
-        return _pbs_status(self.id, listing) if listing else _Status()
+        return _lsf_status(self.id, listing) if listing else _Status()
 
     async def state(self) -> str:
         return (await self._status()).state
@@ -278,4 +390,6 @@ class BatchJob(Job):
         await remove_job_directory(self.directory)
 
     async def _cancel(self) -> None:
-        await _command("qdel", self.id, absent=_MISSING)
+        await _command(
+            "qdel" if self.config.scheduler == "pbs" else "bkill", self.id, absent=_MISSING
+        )
