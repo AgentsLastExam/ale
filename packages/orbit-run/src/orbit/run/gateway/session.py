@@ -160,7 +160,8 @@ class GatewaySession:
     """Whether calls may use the provider's own web tools, such as search or grounding.
 
     They reach the web from the provider's side, outside the Sandbox's network policy, so
-    only a Task whose network is open may use them; the default refuses them.
+    only an agent whose Task's network is open may use them, and a Judge always; the default
+    refuses them.
     """
 
     def may_reach(self, host: str) -> bool:

@@ -198,6 +198,9 @@ def open_judge_sessions(
                 model=section["model"],
                 purpose="judge",
                 upstream=Upstream(dialect=protocol, endpoint=endpoint, api_key=key),
+                # The Task's evaluator, not the agent it evaluates: a Judge's provider tools
+                # are its own, as its CLI offers them, whatever the Task's network.
+                provider_web_tools=True,
             ),
             trace=trace,
         )
