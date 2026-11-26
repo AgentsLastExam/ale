@@ -50,6 +50,7 @@ def codex_config() -> dict[str, str]:
     return {
         "adapter": "codex-cli",
         "version": "1.2.3",
+        "executable": "/usr/bin/codex",
         "model": "gpt-5",
         "reasoning_effort": "high",
         "base_url": "https://api.openai.com",
@@ -61,6 +62,7 @@ def claude_config() -> dict[str, str]:
     return {
         "adapter": "claude-code",
         "version": "2.1.0",
+        "executable": "/usr/bin/claude",
         "model": "claude-sonnet-4",
         "reasoning_effort": "high",
         "base_url": "https://api.anthropic.com",
@@ -80,7 +82,7 @@ def test_native_failure_exhausts_internal_retries_and_keeps_cause_despite_stderr
     config: dict[str, str],
     exit_code: int,
 ) -> None:
-    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("agent", config["version"]))
+    monkeypatch.setattr(_agents, "_installed_binary", lambda *_args: ("agent", config["version"]))
     calls = []
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
@@ -124,7 +126,7 @@ def test_service_failure_retries_then_repairs_a_verdict_within_one_budget(
     config: dict[str, str],
     failure: str,
 ) -> None:
-    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("agent", config["version"]))
+    monkeypatch.setattr(_agents, "_installed_binary", lambda *_args: ("agent", config["version"]))
     calls = []
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
@@ -181,7 +183,7 @@ def test_recovered_codex_error_does_not_reject_a_valid_judge_verdict(
     monkeypatch: pytest.MonkeyPatch,
     agent_env: dict[str, Path],
 ) -> None:
-    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("codex", "1.2.3"))
+    monkeypatch.setattr(_agents, "_installed_binary", lambda *_args: ("codex", "1.2.3"))
     monkeypatch.setattr(
         _agents.subprocess,
         "run",
@@ -201,7 +203,6 @@ def test_codex_command_root_home_cwd_version_and_final_response(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
     calls = []
-    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         calls.append((argv, kwargs))
@@ -234,7 +235,6 @@ def test_claude_command_and_final_response(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
     calls = []
-    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         calls.append((argv, kwargs))
@@ -266,9 +266,8 @@ def test_claude_command_and_final_response(
 def test_missing_cli_and_non_root_fail_before_launch(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
-    monkeypatch.setattr(_agents.shutil, "which", lambda _name: None)
-    with pytest.raises(JudgeError, match="unavailable"):
-        run(codex_config())
+    with pytest.raises(JudgeError, match="installed no codex-cli"):
+        run({key: value for key, value in codex_config().items() if key != "executable"})
     monkeypatch.setattr(_agents.os, "geteuid", lambda: 1000)
     with pytest.raises(JudgeError, match="framework privileges"):
         run(codex_config())
@@ -277,7 +276,6 @@ def test_missing_cli_and_non_root_fail_before_launch(
 def test_version_probe_failure_is_recorded_as_a_failed_invocation(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
-    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         _agents.subprocess,
         "run",
@@ -293,7 +291,6 @@ def test_existing_invocation_transcripts_are_preserved(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
     agent_env["log"].write_text('{"stale":true}\n')
-    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
@@ -309,33 +306,21 @@ def test_existing_invocation_transcripts_are_preserved(
     assert '"stale"' in agent_env["log"].read_text()
 
 
-def test_missing_or_different_cli_is_installed_at_the_exact_version(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_the_judge_runs_only_the_exact_cli_the_engine_installed(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    reports = {"version": "codex 1.2.3\n"}
     monkeypatch.setattr(
-        _agents.shutil,
-        "which",
-        lambda name: "/usr/bin/npm" if name == "npm" else "/usr/bin/codex",
+        _agents.subprocess, "run", lambda argv, **kwargs: completed(reports["version"])
     )
-    calls = []
-
-    def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append(argv)
-        if argv == ["/usr/bin/codex", "--version"]:
-            return completed("codex 9.9.9\n")
-        if argv[1] == "install":
-            root = Path(argv[argv.index("--prefix") + 1])
-            installed = root / "node_modules/.bin/codex"
-            installed.parent.mkdir(parents=True)
-            installed.write_text("")
-            return completed("")
-        return completed("codex 1.2.3\n")
-
-    monkeypatch.setattr(_agents.subprocess, "run", execute)
-    binary, version = _agents._ensure_binary("codex-cli", "1.2.3", tmp_path)
-    assert version == "1.2.3"
-    assert binary.endswith("agent-tools/codex-cli-1.2.3/node_modules/.bin/codex")
-    assert any("@openai/codex@1.2.3" in argv for argv in calls)
+    config = {"adapter": "codex-cli", "version": "1.2.3"}
+    with pytest.raises(JudgeError, match="installed no codex-cli"):
+        _agents._installed_binary(config)
+    installed = "/opt/orbit/judge/codex/1.2.3/codex"
+    assert _agents._installed_binary({**config, "executable": installed}) == (installed, "1.2.3")
+    reports["version"] = "codex 9.9.9\n"
+    with pytest.raises(JudgeError, match=r"version 9\.9\.9, expected 1\.2\.3"):
+        _agents._installed_binary({**config, "executable": installed})
 
 
 def test_invocation_local_mcp_supports_stdio_and_http_without_solver_inheritance(
@@ -385,7 +370,7 @@ def test_a_judge_run_is_bounded_only_by_what_is_left_of_verification(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
     config = codex_config()
-    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("agent", config["version"]))
+    monkeypatch.setattr(_agents, "_installed_binary", lambda *_args: ("agent", config["version"]))
     timeouts = []
     verdict = json.dumps({"choice": "yes", "reasoning": "Checked."})
 

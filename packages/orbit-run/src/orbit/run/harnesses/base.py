@@ -229,7 +229,10 @@ class CliHarness(AutonomousHarness):
         self, sandbox: Sandbox, directory: str, *, identity: Identity, fetch: bool
     ) -> list[str]:
         """Put a program from npm below ``directory`` as ``identity``, unless it is there
-        already; the command that runs it. With ``fetch`` the Sandbox downloads its archives."""
+        already; the command that runs it. With ``fetch`` the Sandbox downloads its archives.
+
+        Also how the Agent Judge gets its program into a verifier.
+        """
         home = await agent_home(sandbox)
         platform = await _install.sandbox_platform(sandbox, home)
         program = f"{self.binary}/{self.version()}"

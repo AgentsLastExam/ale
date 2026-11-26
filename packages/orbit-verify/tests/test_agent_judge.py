@@ -70,7 +70,6 @@ def test_invalid_verdict_repairs_in_the_same_session_with_concrete_error(
             event("thread-1", {"choice": "yes", "reasoning": "Fixed."}),
         ]
     )
-    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
@@ -93,7 +92,7 @@ def test_timeout_after_schema_repair_keeps_latest_error_and_partial_native_evide
     monkeypatch: pytest.MonkeyPatch,
     agent_env: dict[str, Path],
 ) -> None:
-    monkeypatch.setattr(_agents, "_ensure_binary", lambda *_args: ("codex", "1.2.3"))
+    monkeypatch.setattr(_agents, "_installed_binary", lambda *_args: ("codex", "1.2.3"))
     calls = []
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
@@ -137,7 +136,6 @@ def test_three_repairs_are_the_limit_and_no_fresh_session_is_started(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
     calls = []
-    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
@@ -156,7 +154,6 @@ def test_three_repairs_are_the_limit_and_no_fresh_session_is_started(
 def test_transcript_is_sanitized(
     monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
-    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]
         if "--version" in argv:
@@ -196,7 +193,6 @@ def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
     trajectory = agent_env["workspace"] / "trajectory.json"
     trajectory.write_text('{"steps":[]}')
     monkeypatch.setenv("ORBIT_TRAJECTORY_PATH", str(trajectory))
-    monkeypatch.setattr(_agents.shutil, "which", lambda name: f"/usr/bin/{name}")
     calls = []
 
     def execute(argv, **kwargs):  # type: ignore[no-untyped-def]

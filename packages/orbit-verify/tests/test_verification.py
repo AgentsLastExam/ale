@@ -6,7 +6,16 @@ import sys
 import pytest
 
 import orbit_verify
-from orbit_verify import EvidenceError, JudgeError, _io, _llm, judge, read_result, write
+from orbit_verify import (
+    ConfigurationError,
+    EvidenceError,
+    JudgeError,
+    _io,
+    _llm,
+    judge,
+    read_result,
+    write,
+)
 
 
 @pytest.fixture
@@ -217,6 +226,32 @@ def test_optional_schema_and_calls_after_write(monkeypatch, verify_env):
     write({"reward": 0})
     assert judge("llm", prompt="Inspect") == {"anything": [1, True]}
     assert judge("llm", prompt="Inspect again") == {"anything": [1, True]}
+
+
+def test_an_agent_judge_config_names_its_program_only_where_the_engine_installed_one(
+    monkeypatch, verify_env
+):
+    from orbit_verify._io import load_config
+
+    _, log = verify_env
+    config_path = log.parent / "config.json"
+    config = json.loads(config_path.read_text())
+    agent = {**config["llm"], "adapter": "codex-cli", "version": "1.2.3"}
+    for section, accepted in (
+        (agent, True),
+        ({**agent, "executable": "/opt/orbit/judge/codex/1.2.3/codex"}, True),
+        ({**agent, "binary": "/usr/bin/codex"}, False),
+    ):
+        config_path.write_text(json.dumps({"agent": section}))
+        if accepted:
+            assert load_config()["agent"] == section
+        else:
+            with pytest.raises(ConfigurationError, match="fields are invalid"):
+                load_config()
+    # Only the Agent Judge has a program.
+    config_path.write_text(json.dumps({"llm": {**config["llm"], "executable": "/bin/true"}}))
+    with pytest.raises(ConfigurationError, match="fields are invalid"):
+        load_config()
 
 
 def test_each_judge_kind_keeps_its_own_events(monkeypatch, verify_env):

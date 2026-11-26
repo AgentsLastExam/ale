@@ -236,6 +236,40 @@ async def test_a_shared_solver_applies_each_phase_s_network(
     assert [policy == "sealed" for _, policy in applied] == expected
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent", "verifier", "downloads"),
+    [
+        ({"network_mode": "no-network"}, {"network_mode": "public"}, True),
+        ({"network_mode": "public"}, {"network_mode": "no-network"}, False),
+    ],
+)
+async def test_a_shared_solver_places_the_verifier_under_the_verifier_s_network(
+    tmp_path: Any,
+    verifiers: Verifiers,
+    monkeypatch: pytest.MonkeyPatch,
+    agent: dict[str, Any],
+    verifier: dict[str, Any],
+    downloads: bool,
+) -> None:
+    """The Agent Judge's program is placed once the verifier's network replaced the agent's,
+    so a Sandbox that downloads files does so only where that network is open."""
+    placed: list[tuple[bool, bool]] = []
+    stage = EpisodeProtocol._stage_verification_config
+
+    async def recorded(self: Any, ctx: Any, sandbox: Any, *args: Any, fetch: bool) -> None:
+        placed.append((sandbox.egress_open, fetch))
+        await stage(self, ctx, sandbox, *args, fetch=fetch)
+
+    monkeypatch.setattr(EpisodeProtocol, "_stage_verification_config", recorded)
+    monkeypatch.setattr(MemorySandbox, "fetches_files", True)
+    task = _task(tmp_path, "shared", agent, verifier)
+    result = await _run(tmp_path, RoundsProvider(), task, TurnsHarness())
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    # Open while it downloads, for the round's validation/ and the final tests/.
+    assert placed == [(downloads, downloads)] * 2
+
+
 @pytest.mark.parametrize(
     ("agent", "verifier", "solver"),
     [

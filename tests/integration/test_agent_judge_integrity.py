@@ -154,6 +154,11 @@ async def test_root_agent_judge_repairs_in_place_without_republishing_mutations(
     )
     task = load_tasks(task_root)[0]
 
+    async def preinstalled(*args: object, **kwargs: object) -> str:
+        # The image's fake CLI stands in for the Judge's program the engine would install.
+        return f"/usr/local/bin/{binary_name}"
+
+    monkeypatch.setattr("orbit.run.protocol.episode_protocol.install_agent_judge", preinstalled)
     gateway = Gateway()
     gateway_url = await gateway.start()
     try:

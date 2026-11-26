@@ -27,9 +27,6 @@ from ._journal import journal
 from ._json import response_object
 from ._records import EvidenceReference, JudgeAttempt, JudgeInvocation
 
-#: Installing an exact Judge CLI is setup rather than judging, so it keeps a bound.
-_INSTALL_TIMEOUT_SECONDS = 600
-
 
 def run(
     *,
@@ -86,7 +83,7 @@ def run(
     home.mkdir(parents=True, mode=0o700)
 
     try:
-        binary, version = _ensure_binary(adapter, config["version"], stage)
+        binary, version = _installed_binary(config)
         mcp_config = _write_mcp_config(adapter, home, mcp_servers)
     except JudgeError as exc:
         _preflight_failure(
@@ -625,13 +622,16 @@ def _failure_detail(
 
 
 def _version(binary: str) -> str:
-    result = subprocess.run(
-        [binary, "--version"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError:
+        raise JudgeError(f"could not run {Path(binary).name}") from None
     if result.returncode != 0:
         raise JudgeError(f"could not query {Path(binary).name} version")
     output = (result.stdout or result.stderr).strip()
@@ -641,40 +641,15 @@ def _version(binary: str) -> str:
     return match.group(1)
 
 
-def _ensure_binary(adapter: str, expected: str, stage: Path) -> tuple[str, str]:
-    binary_name = "codex" if adapter == "codex-cli" else "claude"
-    binary = shutil.which(binary_name)
-    if binary is not None:
-        try:
-            if _version(binary) == expected:
-                return binary, expected
-        except JudgeError:
-            pass
-    npm = shutil.which("npm")
-    if npm is None:
-        raise JudgeError(
-            f"{binary_name} {expected} is unavailable and npm is not installed "
-            "for exact installation"
-        )
-    root = stage / "agent-tools" / f"{adapter}-{expected}"
-    package = "@openai/codex" if adapter == "codex-cli" else "@anthropic-ai/claude-code"
-    completed = subprocess.run(
-        [npm, "install", "--prefix", str(root), "--no-audit", "--no-fund", f"{package}@{expected}"],
-        capture_output=True,
-        text=True,
-        timeout=_INSTALL_TIMEOUT_SECONDS,
-        check=False,
-    )
-    installed = root / "node_modules" / ".bin" / binary_name
-    if completed.returncode != 0 or not installed.is_file():
-        raise JudgeError(
-            f"could not install exact Agent Judge {adapter} {expected}: "
-            f"{(completed.stderr or completed.stdout)[-500:]}"
-        )
-    observed = _version(str(installed))
-    if observed != expected:
-        raise JudgeError(f"installed Agent Judge version {observed}, expected {expected}")
-    return str(installed), observed
+def _installed_binary(config: Mapping[str, str]) -> tuple[str, str]:
+    """The exact Judge CLI the engine installed in this verifier, and its version."""
+    binary = config.get("executable")
+    if not binary:
+        raise JudgeError(f"the engine installed no {config['adapter']} for the Agent Judge")
+    observed = _version(binary)
+    if observed != config["version"]:
+        raise JudgeError(f"installed Agent Judge version {observed}, expected {config['version']}")
+    return binary, observed
 
 
 def _write_mcp_config(

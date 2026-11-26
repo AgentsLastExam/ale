@@ -95,7 +95,9 @@ def load_config() -> dict[str, dict[str, str]]:
         required = {"model", "reasoning_effort", "base_url", "api_key_env"}
         if kind == "agent":
             required.update({"adapter", "version"})
-        if not isinstance(section, dict) or set(section) != required:
+        # The engine installs an Agent Judge's program only where it has a session.
+        optional = {"executable"} if kind == "agent" else set()
+        if not isinstance(section, dict) or not required <= set(section) <= required | optional:
             raise ConfigurationError(f"verification {kind} config fields are invalid")
         if any(not isinstance(value, str) or not value.strip() for value in section.values()):
             raise ConfigurationError(f"verification {kind} config values must be non-empty strings")

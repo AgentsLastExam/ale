@@ -163,7 +163,8 @@ number of connections, bounds them.
 
 **Solution.** `DaytonaSandbox.fetches_files` is true: the sandbox downloads each file
 itself, checks it by its digest and unpacks it, with the CA bundle the Host uploads beside
-the manifest. Grok's build, which the Host decompresses, is uploaded.
+the manifest. A verifier whose network is not open gets its Agent Judge uploaded, as every
+other Provider's sandbox does, and Grok's build, which the Host decompresses, is uploaded.
 
 **Decision.** Downloading in the sandbox, though a program of many small npm packages
 installs a few seconds slower: its cost is the registry's and stays per sandbox, while an

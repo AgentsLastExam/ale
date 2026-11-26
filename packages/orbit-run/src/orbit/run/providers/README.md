@@ -105,12 +105,12 @@ serves it on.
 
 ## Agent programs
 
-Where the files of an agent's program come from
+Where the files of an agent's program and the Agent Judge's come from
 ([Autonomous Harness](../../../../../../docs/specs/autonomous-harness.md#shipped-integrations)):
 
 | Provider | Files |
 |---|---|
-| Daytona | Downloaded by the sandbox itself before the Task network policy applies ([Daytona](daytona/AGENTS.md#agent-programs-download-in-the-sandbox)) |
+| Daytona | Downloaded by the sandbox itself before the Task network policy applies; a verifier whose network is not `public` gets them from the Host ([Daytona](daytona/AGENTS.md#agent-programs-download-in-the-sandbox)) |
 | Every other | Uploaded from the Host's cache |
 
 ## Egress relay

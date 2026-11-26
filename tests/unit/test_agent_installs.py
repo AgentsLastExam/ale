@@ -20,15 +20,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from orbit.core.errors import AgentError, AgentUnsupportedError
+from orbit.core.config import AgentJudgeConfig, VerificationConfig
+from orbit.core.errors import AgentError, AgentUnsupportedError, VerificationInfrastructureError
 from orbit.core.sandbox import ExecResult, Identity
+from orbit.core.task import Stage
 from orbit.core.taskspec import OperatingSystem
 from orbit.run import guestd
 from orbit.run.harnesses import _install
 from orbit.run.harnesses._install import Archive, Platform, ReleaseAsset, Tree
+from orbit.run.harnesses.builtin import OracleHarness
 from orbit.run.harnesses.codex_cli import CodexCliHarness
 from orbit.run.harnesses.droid import DroidHarness
 from orbit.run.harnesses.pi_cli import PiCliHarness
+from orbit.run.protocol import episode_protocol
+from orbit.run.verification import install_agent_judge
 
 pytestmark = pytest.mark.unit
 
@@ -545,6 +550,84 @@ async def test_a_javascript_program_runs_on_its_own_node_through_its_launcher(
     entry = f"{private}/pi/1.4.0/{package}/dist/bundle/cli.js"
     launcher = f'#!/bin/sh\nexec {private}/node/24.15.0/node {entry} "$@"\n'
     assert sandbox.files["/home/user/.local/bin/pi"] == launcher.encode()
+
+
+async def test_the_agent_judge_gets_its_own_copy_as_the_framework(
+    codex_archives: list[tuple],
+) -> None:
+    sandbox = Sandbox()
+    executable = await install_agent_judge(
+        sandbox,  # type: ignore[arg-type]
+        "codex-cli",
+        "0.146.0",
+        "/opt/orbit/judge",
+        fetch=False,
+    )
+    assert executable == f"/opt/orbit/judge/{CODEX}"
+    assert sandbox.uploads == [(["0"], "/opt/orbit/judge/.orbit-unpack", Identity.FRAMEWORK)]
+    ((argv, identity, _),) = sandbox.unpacked
+    assert argv[0] == guestd.PYTHON["linux"] and identity is Identity.FRAMEWORK
+    assert "/home/user/.local/bin/codex" not in sandbox.files  # orbit_verify runs it itself
+    # A copy of its own already there, as on the second stage of one verifier, is used.
+    codex_archives.clear()
+    installed = Sandbox(installed=True)
+    await install_agent_judge(
+        installed,  # type: ignore[arg-type]
+        "codex-cli",
+        "0.146.0",
+        "/opt/orbit/judge",
+        fetch=True,
+    )
+    assert codex_archives == [] and not installed.unpacked
+
+
+async def test_a_verifier_stage_gets_the_judge_program_only_when_it_calls_the_judge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = []
+
+    async def install(sandbox, adapter: str, version: str, directory: str, *, fetch: bool) -> str:  # type: ignore[no-untyped-def]
+        installed.append((adapter, version, directory, fetch))
+        return f"{directory}/codex/{version}/codex"
+
+    monkeypatch.setattr(episode_protocol, "install_agent_judge", install)
+    judge = AgentJudgeConfig(
+        provider="openai",
+        adapter="codex-cli",
+        version="0.146.0",
+        model="judge-model",
+        reasoning_effort="high",
+    )
+    ctx = SimpleNamespace(
+        verification_config=VerificationConfig(agent=judge),
+        judge_tokens={"agent": "episode-token"},
+        spec=SimpleNamespace(os=OperatingSystem.LINUX),
+    )
+    sandbox = Sandbox()
+    sandbox.gateway_url = "http://gateway"  # type: ignore[attr-defined]
+    protocol = episode_protocol.EpisodeProtocol(OracleHarness())
+    plain, calling = tmp_path / "plain", tmp_path / "calling"
+    for stage, source in ((plain, "print('ok')\n"), (calling, CALLS_THE_JUDGE)):
+        stage.mkdir()
+        (stage / "verify.py").write_text(source)
+
+    def staged() -> dict:
+        return json.loads(sandbox.files["/opt/orbit/tests/config.json"])["agent"]
+
+    stage = protocol._stage_verification_config
+    await stage(ctx, sandbox, Stage.TESTS, plain, fetch=False)  # type: ignore[arg-type]
+    assert installed == [] and "executable" not in staged()
+    await stage(ctx, sandbox, Stage.TESTS, calling, fetch=True)  # type: ignore[arg-type]
+    assert installed == [("codex-cli", "0.146.0", "/opt/orbit/judge", True)]
+    assert staged()["executable"] == "/opt/orbit/judge/codex/0.146.0/codex"
+
+    async def unreachable(*args: object, **kwargs: object) -> str:
+        raise AgentError("could not read @openai/codex@0.146.0 from the registry")
+
+    # The Judge's program is the verification's to provide, never the agent's fault.
+    monkeypatch.setattr(episode_protocol, "install_agent_judge", unreachable)
+    with pytest.raises(VerificationInfrastructureError, match="Agent Judge's codex-cli"):
+        await stage(ctx, sandbox, Stage.TESTS, calling, fetch=False)  # type: ignore[arg-type]
 
 
 async def test_a_release_binary_goes_into_the_agent_bin_or_where_its_program_looks(
