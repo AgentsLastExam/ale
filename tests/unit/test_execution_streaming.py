@@ -338,7 +338,7 @@ async def test_harbor_s_verifier_user_runs_verification_and_not_setup(tmp_path: 
     )  # type: ignore[arg-type]
     python, flag, _drop, user, *command = sandbox.argv
     assert (python, flag, user, command) == (
-        "/opt/orbit/python/bin/python3",
+        "/opt/orbit-python/bin/python3",
         "-c",
         "1000",
         ["bash", "test.sh"],

@@ -22,13 +22,14 @@ of the Task's own build or the image it names (the framework layer):
 - guestd, the guest service every sandbox operation goes through, under root-only
   `/opt/orbit`, so it always speaks the protocol of the engine driving it;
 - the framework's own Python at a pinned version, which guestd runs on whatever Python the
-  image has (or lacks): `/opt/orbit/python` on Linux and macOS,
-  `C:\ProgramData\Orbit\python` on Windows. guestd runs it isolated (`-I`), in a directory
-  only the framework writes, and so does every root process guestd starts on it, so neither
-  the image's `PYTHON*` variables, which a container's exec inherits, nor the agent's files
-  change their modules or the buffering of guestd's replies. Only the framework's identity
-  can run it, except on macOS, where the agent's desktop tool and Harness helpers run it
-  too; the agent's PATH never includes it;
+  image has (or lacks): `/opt/orbit-python` on Linux and macOS, beside the framework's
+  private `/opt/orbit`, and `C:\ProgramData\Orbit\python` on Windows. guestd runs it
+  isolated (`-I`), in a directory only the framework writes, and so does every root process
+  guestd starts on it, so neither the image's `PYTHON*` variables, which a container's exec
+  inherits, nor the agent's files change their modules or the buffering of guestd's replies.
+  Every account may run it, and only the framework may change it, so the agent's desktop
+  tool, program installs and Harness helpers need no Python of the image's. The agent's
+  PATH never includes it;
 - Cua Driver at a pinned version, the one desktop capture and input implementation, which
   every account may run, because the agent's `cua-desktop` MCP server runs it too;
 - for a VM, the boot-time unit that starts guestd: a systemd unit on Linux, a service on
@@ -43,6 +44,11 @@ of the Task's own build or the image it names (the framework layer):
   ([Permissions](#permissions));
 - a marker file recording which framework the image carries: `/opt/orbit/framework` on
   Linux and macOS, `C:\ProgramData\Orbit\framework` on Windows.
+
+Harness programs are not part of the image either: each run installs the selected one, with
+the Node.js a JavaScript one runs on, so no image needs npm or Node.js for them; what else a
+Harness needs from the image, its README names
+([Autonomous Harness](autonomous-harness.md#shipped-integrations)).
 
 A Linux or Windows VM disk, used directly or as a build's base, gets the same pieces,
 installed offline into a layer on the disk by the VM builder's libguestfs, so nothing on the
@@ -79,7 +85,7 @@ framework's pieces:
 - a boot service, running as the system on that Python, that starts guestd and Cua
   Driver in the agent's session with the account's elevated token, so Cua Driver can reach
   elevated windows. The service limits those files to the system and Administrators,
-  except that every account may run Cua Driver, as on Linux;
+  except that every account may run Cua Driver and the framework's Python, as on Linux;
 - a check, before anything is written, that the disk has the agent account, signs exactly
   that account in, keeps UAC on and was shut down completely (not left hibernated by Fast
   Startup), each failing with the one thing it lacks.

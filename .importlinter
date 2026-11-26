@@ -68,11 +68,12 @@ forbidden_modules =
     yaml
 
 [importlinter:contract:in-sandbox-scripts-stdlib-only]
-name = the container feature probe and the iptables writer run in the guest and import neither engine code nor third-party packages
+name = the container feature probe, the iptables writer and the program unpacker run in the guest and import neither engine code nor third-party packages
 type = forbidden
 source_modules =
     orbit.run.capprobe
     orbit.run.iptables
+    orbit.run.harnesses._unpack
 forbidden_modules =
     orbit.core
     orbit.run.gateway

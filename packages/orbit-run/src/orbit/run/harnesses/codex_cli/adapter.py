@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import shlex
 from pathlib import PurePosixPath
+from typing import ClassVar
 
 from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses._agent import agent_env, agent_path
+from orbit.run.harnesses._install import PlatformPackages
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -33,6 +35,12 @@ class CodexCliHarness(CliHarness):
     package = "@openai/codex"
     binary = "codex"
     default_version = DEFAULT_CLI_VERSION
+    # The executable finds its bundled ripgrep, sandbox helpers and shell beside it.
+    platform_packages: ClassVar[PlatformPackages] = {
+        "linux-x64": ("@openai/codex-linux-x64", "vendor/x86_64-unknown-linux-musl/bin/codex"),
+        "darwin-arm64": ("@openai/codex-darwin-arm64", "vendor/aarch64-apple-darwin/bin/codex"),
+        "win32-x64": ("@openai/codex-win32-x64", "vendor/x86_64-pc-windows-msvc/bin/codex.exe"),
+    }
     settings_type = CodexCliSettings
     settings: CodexCliSettings
     logs = (LOG_ROOT, ".codex-orbit/sessions", trajectory.TRACES)
@@ -135,7 +143,7 @@ class CodexCliHarness(CliHarness):
             f"{shlex.join(argv)} < {shlex.quote(prompt_path)}"
         )
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "CODEX_HOME": str(agent_path(session.home) / ".codex-orbit"),
             # The rollout keeps no record of a code-mode script's shell commands; this does.
             "CODEX_ROLLOUT_TRACE_ROOT": str(agent_path(session.home) / trajectory.TRACES),

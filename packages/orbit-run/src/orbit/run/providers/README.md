@@ -103,6 +103,16 @@ serves it on.
 | Orchard | A relay the Provider starts as root at boot listens at `127.0.0.1:7412` in the VM and connects to the Gateway's port at the Mac, the VM's default IPv4 route; it lives until the VM is deleted, or until a later episode that continues in a retained VM stops it (through `lsof` on the port) and starts its own |
 | Fleet | The Node's Provider's own route, to the port where the node agent listens for the Run; the agent carries each connection over the Run's tunnel to its Gateway |
 
+## Agent programs
+
+Where the files of an agent's program come from
+([Autonomous Harness](../../../../../../docs/specs/autonomous-harness.md#shipped-integrations)):
+
+| Provider | Files |
+|---|---|
+| Daytona | Downloaded by the sandbox itself before the Task network policy applies ([Daytona](daytona/AGENTS.md#agent-programs-download-in-the-sandbox)) |
+| Every other | Uploaded from the Host's cache |
+
 ## Egress relay
 
 The egress proxy knows an episode by its egress session's token, which many programs cannot
@@ -1217,7 +1227,7 @@ into `C:\ProgramData\Orbit`:
   Python, copied to `C:\ProgramData\Orbit\python`, as is guestd. At boot it limits
   `C:\ProgramData\Orbit` to the system and Administrators, because files written offline
   carry no access list and otherwise come out writable by everyone, then gives Users read
-  and execute access to `cua-driver`. It opens guestd's port to the runner's address only,
+  and execute access to `cua-driver` and `python`. It opens guestd's port to the runner's address only,
   waits for the agent's sign-in, and starts guestd and Cua Driver on the agent's desktop
   with the account's elevated token (the one UAC keeps beside the limited one), each in its
   own hidden console, restarting either that exits.

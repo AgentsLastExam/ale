@@ -15,8 +15,8 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import OperatingSystem, StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, npm_env
-from orbit.run.harnesses._release import ReleaseAsset, ReleaseAssets
+from orbit.run.harnesses._agent import agent_env, agent_path
+from orbit.run.harnesses._install import ReleaseAsset, ReleaseAssets
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -162,7 +162,7 @@ class OpenHandsCliHarness(CliHarness):
         ]
         provider, suffix = self._route(session.model)
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "OPENHANDS_PERSISTENCE_DIR": str(home / STATE),
             # The CLI's agent, with these three as its model; nothing else is persisted.
             "LLM_MODEL": f"{provider}/{session.model}",

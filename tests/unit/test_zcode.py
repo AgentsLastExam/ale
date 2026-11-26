@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import io
 import json
 import shutil
 import sqlite3
-import subprocess
-import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -21,7 +18,9 @@ from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, Traje
 from orbit.core.sandbox import ExecResult
 from orbit.core.taskspec import OperatingSystem, StreamableHttpMcpServer
 from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run import guestd
 from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses import _install
 from orbit.run.harnesses.zcode import ZCodeHarness
 from orbit.run.harnesses.zcode import adapter as zcode_adapter
 from orbit.run.recording import BlobStore
@@ -251,7 +250,7 @@ async def test_command_passes_the_prompt_file_as_its_argument() -> None:
     assert script.startswith("unset ZCODE_STORAGE_DIR ZCODE_SESSION_DB_PATH ")
     assert "cat -- /home/agent/.orbit-harness/prompt.md" in script
     assert script.endswith(' --prompt="$prompt"')
-    assert "node /home/agent/.local/lib/zcode/zcode.cjs --mode yolo" in script
+    assert "/home/agent/.local/bin/zcode --mode yolo" in script
     assert "--output-format stream-json --cwd /home/agent" in script
     assert "--disallowed-tools WebFetch,Agent --workflow-mode disabled --toolsearch-mode off" in (
         script
@@ -259,7 +258,7 @@ async def test_command_passes_the_prompt_file_as_its_argument() -> None:
     assert "--resume" not in script
     assert launch.env["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"] == PROVIDER
     assert launch.env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"] == (
-        "/home/agent/.local/lib/zcode/zcode-builtin.json"
+        "/home/agent/.local/share/orbit/zcode/0.17.0/zcode-builtin.json"
     )
     assert launch.env["ZCODE_MODEL_TELEMETRY_ENABLED"] == "false"
     assert "token" not in json.dumps(launch.env)
@@ -282,7 +281,7 @@ async def test_windows_command_keeps_git_bash_from_rewriting_the_prompt() -> Non
         native_session_id=None,
     )
     assert command.env["MSYS2_ARG_CONV_EXCL"] == "*"
-    assert "C:/Users/Agent/.local/lib/zcode/zcode.cjs" in command.script
+    assert "C:/Users/Agent/.local/bin/zcode " in command.script
 
 
 def _deb(members: dict[str, bytes], tmp_path: Path) -> Path:
@@ -308,81 +307,52 @@ def _deb(members: dict[str, bytes], tmp_path: Path) -> Path:
     return path
 
 
-def _spec(path: Path, target: Path, files: dict[str, bytes], sha512: str) -> str:
-    return json.dumps(
-        {
-            "url": path.as_uri(),
-            "sha512": sha512,
-            "target": str(target),
-            "files": {
-                member: [PurePosixPath(member).name, hashlib.sha256(data).hexdigest()]
-                for member, data in files.items()
-            },
-        }
+def test_only_the_pinned_files_of_the_installer_are_unpacked_each_checked() -> None:
+    installer = zcode_adapter.INSTALLER
+    assert installer.url == zcode_adapter.INSTALLER_URL
+    assert installer.digest == f"sha512:{zcode_adapter.INSTALLER_SHA512}"
+    assert installer.unpack == "members"
+    assert {member: (name, digest) for member, name, digest in installer.members} == (
+        zcode_adapter.FILES
     )
 
 
-def test_the_installer_unpacks_only_pinned_files_it_verified(tmp_path: Path) -> None:
-    wanted = {
-        "./opt/ZCode/resources/glm/zcode.cjs": b"console.log('zcode')\n",
-        "./opt/ZCode/resources/config/provider/zcode-builtin.json": b"{}\n",
-    }
-    deb = _deb({**wanted, "./opt/ZCode/zcode": b"\x7fELF gui"}, tmp_path)
-    sha512 = hashlib.sha512(deb.read_bytes()).hexdigest()
-    target = tmp_path / "lib"
-
-    def install(spec: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-I", "-c", zcode_adapter._INSTALL, spec],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    done = install(_spec(deb, target, wanted, sha512))
-    assert done.returncode == 0, done.stderr
-    assert sorted(path.name for path in target.iterdir()) == ["zcode-builtin.json", "zcode.cjs"]
-    assert (target / "zcode.cjs").read_bytes() == wanted["./opt/ZCode/resources/glm/zcode.cjs"]
-
-    # Matching files are reused without downloading again.
-    deb.unlink()
-    assert install(_spec(deb, target, wanted, sha512)).returncode == 0
-
-    shutil.rmtree(target)
-    deb = _deb({**wanted, "./opt/ZCode/zcode": b"\x7fELF gui"}, tmp_path)
-    tampered = install(_spec(deb, target, wanted, "0" * 128))
-    assert tampered.returncode != 0 and "not the pinned one" in tampered.stderr
-    other = install(
-        _spec(deb, target, {**wanted, "./opt/ZCode/resources/glm/zcode.cjs": b"other"}, sha512)
-    )
-    assert other.returncode != 0 and "not the pinned build" in other.stderr
-    assert not (target / "zcode.cjs").exists()
-
-
-async def test_install_requires_the_pinned_cli_version() -> None:
+async def test_install_requires_the_pinned_cli_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     class Sandbox(FakeSandbox):
+        fetches_files = False
+
         async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-            if argv and argv[0] == "python3":
-                spec = json.loads(argv[3])
-                assert spec["url"] == zcode_adapter.INSTALLER_URL
-                assert spec["sha512"] == zcode_adapter.INSTALLER_SHA512
-                assert spec["target"] == "/home/user/.local/lib/zcode"
-                return ExecResult(exit_code=0)
-            if "--version" in " ".join(map(str, argv)):
+            command = " ".join(map(str, argv))
+            if command.endswith("uname -m"):
+                return ExecResult(exit_code=0, stdout="x86_64\n")
+            if "--version" in command:
                 return ExecResult(exit_code=0, stdout="0.16.9\n")
             return await super().exec(argv, **kwargs)
 
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"x")
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(_install, "_downloaded", lambda archive_: archive)
     sandbox = Sandbox()
     sandbox.request = SimpleNamespace(os=OperatingSystem.LINUX)  # type: ignore[attr-defined]
     with pytest.raises(AgentError, match=r"does not name 0\.17\.0"):
         await ZCodeHarness().install(sandbox)  # type: ignore[arg-type]
+    private = "/home/user/.local/share/orbit"
+    manifest = json.loads(sandbox.files[f"{private}/.orbit-unpack/manifest.json"])
+    assert [entry["into"] for entry in manifest["archives"]] == ["node/24.15.0", "zcode/0.17.0"]
+    launcher = sandbox.files["/home/user/.local/bin/zcode"].decode()
+    assert launcher == (
+        f'#!/bin/sh\nexec {private}/node/24.15.0/node {private}/zcode/0.17.0/zcode.cjs "$@"\n'
+    )
 
 
 async def test_resume_asks_the_store_for_the_exact_top_level_session() -> None:
     sandbox = FakeSandbox()
     assert await ZCodeHarness()._session_exists(sandbox, session(), SESSION_ID)  # type: ignore[arg-type]
     argv = sandbox.commands[-1]
-    assert argv[0] == "python3"
+    assert argv[0] == guestd.PYTHON["linux"]
     assert argv[-2:] == ["/home/agent/.zcode/cli/db/db.sqlite", SESSION_ID]
     assert "parent_id is null" in argv[2]
     assert not await ZCodeHarness()._session_exists(FakeSandbox(1), session(), SESSION_ID)  # type: ignore[arg-type]

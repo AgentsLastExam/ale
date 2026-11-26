@@ -15,7 +15,7 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Resolved
 from orbit.core.sandbox import ExecResult, Identity, SandboxFile
 from orbit.core.taskspec import OperatingSystem, StdioMcpServer
 from orbit.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET
-from orbit.run.harnesses._npm import agent_python, npm_env
+from orbit.run.harnesses._agent import agent_env, agent_python
 from orbit.run.harnesses.base import CliHarness
 from orbit.run.harnesses.builtin import NopHarness, OracleHarness, ScriptedPolicyHarness
 from orbit.run.harnesses.claude_code import ClaudeCodeHarness
@@ -104,24 +104,23 @@ def test_macos_harnesses_accept_the_guest_system(harness) -> None:
 @pytest.mark.parametrize(
     ("operating_system", "python"),
     [
-        (OperatingSystem.LINUX, "python3"),
-        (OperatingSystem.WINDOWS, "python"),
-        (OperatingSystem.MACOS, "/opt/orbit/python/bin/python3"),
+        (OperatingSystem.LINUX, "/opt/orbit-python/bin/python3"),
+        (OperatingSystem.WINDOWS, "C:/ProgramData/Orbit/python/python.exe"),
+        (OperatingSystem.MACOS, "/opt/orbit-python/bin/python3"),
     ],
 )
 def test_helper_scripts_run_on_a_python_every_system_has(operating_system, python) -> None:
-    # A stock macOS has no Python 3.12, and its `python3` may be a stub until the
-    # Command Line Tools are installed; the agent may run the framework's.
+    # The framework's, which every account may run, so an image needs no Python of its own.
     assert agent_python(operating_system) == python
 
 
-async def test_macos_npm_path_includes_apple_silicon_runtime() -> None:
+async def test_macos_agent_path_includes_apple_silicon_runtime() -> None:
     async def execute(argv, **kwargs: object) -> ExecResult:
         assert argv == ["sh", "-c", 'printf %s "$PATH"']
         assert kwargs["identity"] is Identity.AGENT
         return ExecResult(exit_code=0, stdout="/opt/homebrew/bin:/custom/bin:/usr/bin:/bin")
 
-    env = await npm_env(SimpleNamespace(exec=execute), "/Users/agent")
+    env = await agent_env(SimpleNamespace(exec=execute), "/Users/agent")
     assert "/opt/homebrew/bin" in env["PATH"].split(":")
     assert env["PATH"].split(":")[0] == "/Users/agent/.local/bin"
     assert "/custom/bin" in env["PATH"].split(":")
@@ -211,7 +210,7 @@ async def test_macos_native_launch_uses_episode_gateway_and_agent_identity(harne
         assert env["ORBIT_GATEWAY_TOKEN"] == session.token
         config = tomllib.loads(files["/Users/agent/.grok-orbit/config.toml"].decode())
         assert config["model"]["test"]["base_url"] == session.gateway_url + "/v1"
-        assert "/Users/agent/.grok-build-install/bin/grok" in argv[2]
+        assert "/Users/agent/.local/bin/grok" in argv[2]
     else:
         assert env["OPENCLAW_HOME"] == "/Users/agent/.openclaw-orbit"
         assert env["ORBIT_GATEWAY_TOKEN"] == session.token

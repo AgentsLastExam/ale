@@ -112,7 +112,7 @@ for _ in range(10):
                 state = open(f"/proc/{name}/stat").read().rsplit(")", 1)[1].split()[0]
                 command = open(f"/proc/{name}/cmdline", "rb").read()
                 # A zombie, such as a child guestd has yet to reap, holds no memory.
-                if state != "Z" and not command.startswith(b"/opt/orbit/python/"):
+                if state != "Z" and not command.startswith(b"/opt/orbit-python/"):
                     left.append(name)
                     os.kill(int(name), signal.SIGKILL)
             except OSError:

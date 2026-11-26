@@ -19,7 +19,7 @@ from orbit.core.taskspec import (
     ToolProvision,
 )
 from orbit.run.agent_resources import resolve_agent_resources
-from orbit.run.harnesses._npm import agent_path
+from orbit.run.harnesses._agent import agent_path
 from orbit.run.harnesses.base import install_skills
 from orbit.run.harnesses.claude_code import ClaudeCodeHarness
 from orbit.run.providers.docker import DockerProvider

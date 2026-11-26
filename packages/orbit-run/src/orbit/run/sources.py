@@ -1,9 +1,13 @@
-"""Filesystem Task references."""
+"""Filesystem Task references, and the operator's cache for everything else."""
 
 from __future__ import annotations
 
+import fcntl
 import os
+import shutil
 import subprocess
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -11,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 from orbit.core.errors import RegistryError
 from orbit.core.lock import TaskSource
 
-__all__ = ["ResolvedSource", "cache_root", "resolve"]
+__all__ = ["ResolvedSource", "cache_root", "cached", "resolve"]
 
 
 def cache_root() -> Path:
@@ -20,6 +24,29 @@ def cache_root() -> Path:
         Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "orbit"
     )
     return Path(base)
+
+
+def cached(root: Path, fill: Callable[[Path], None]) -> Path:
+    """``root``, made once: ``fill`` writes a fresh directory, which then takes its name.
+
+    Processes wait on one lock beside ``root``, so each entry is made once, and a fill that
+    fails leaves nothing behind.
+    """
+    if root.is_dir():
+        return root
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with (root.parent / f".{root.name}.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if root.is_dir():
+            return root
+        partial = Path(tempfile.mkdtemp(prefix=f".{root.name}-", dir=root.parent))
+        try:
+            fill(partial)
+        except BaseException:
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+        partial.rename(root)
+    return root
 
 
 @dataclass(frozen=True)

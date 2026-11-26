@@ -69,9 +69,8 @@ from orbit.core.taskspec import (
 )
 from orbit.core.trace import ExecutionFailure, PhaseFinished, PhaseStarted
 from orbit.core.verdict import FINAL_STATUSES, Status, Verdict
-from orbit.run import artifact_files
+from orbit.run import artifact_files, guestd
 from orbit.run.assets import observe_task_assets
-from orbit.run.framework import MACOS_PYTHON
 from orbit.run.gateway.server import Gateway
 from orbit.run.gateway.session import GatewaySession, Limits, SessionRegistry
 from orbit.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
@@ -636,14 +635,8 @@ def _retained_outcome(entry: _LeaseEntry, retained: RetainedSandbox) -> SandboxO
 
 
 def _artifact_python(operating_system: OperatingSystem) -> str:
-    """The Python the framework copies artifacts with.
-
-    The image's own, except on macOS, which may have none, where it is the framework's.
-    """
-    return {
-        OperatingSystem.WINDOWS: "python.exe",
-        OperatingSystem.MACOS: MACOS_PYTHON,
-    }.get(operating_system, "python3")
+    """The Python the framework copies artifacts with: its own, so the image needs none."""
+    return guestd.PYTHON[operating_system.value]
 
 
 @dataclass

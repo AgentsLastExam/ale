@@ -38,7 +38,7 @@ its command does not depend on the shell agy uses. agy's other web tools, such a
 `read_url_content`, fetch from inside the Sandbox and stay under its network policy.
 
 agy reads a headless prompt from stdin only as a stream-json message, so the command first
-has the Sandbox's Python (on macOS the framework's) wrap `prompt.md` into
+has the framework's Python wrap `prompt.md` into
 `.orbit-harness/request.jsonl`, one `{"event": "user", "message": {"content": ...}}` line,
 and feeds that to agy. agy chooses the conversation ID and reports it in its `init` and
 `result` events; a resume passes it to `--conversation`. A failed turn ends with a `result`

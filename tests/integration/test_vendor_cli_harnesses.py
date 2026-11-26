@@ -539,8 +539,7 @@ async def _opencode_config(sandbox: Sandbox, session: HarnessSession) -> None:
 async def _zcode_skills(sandbox: Sandbox, session: HarnessSession) -> None:
     result = await sandbox.exec(
         [
-            "node",
-            f"{session.home}/.local/lib/zcode/zcode.cjs",
+            f"{session.home}/.local/bin/zcode",
             "skills",
             "list",
             "--cwd",
@@ -549,7 +548,7 @@ async def _zcode_skills(sandbox: Sandbox, session: HarnessSession) -> None:
         ],
         env={
             "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": (
-                f"{session.home}/.local/lib/zcode/zcode-builtin.json"
+                f"{session.home}/.local/share/orbit/zcode/0.17.0/zcode-builtin.json"
             ),
             "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": f"{session.home}/.zcode-orbit/provider.json",
         },

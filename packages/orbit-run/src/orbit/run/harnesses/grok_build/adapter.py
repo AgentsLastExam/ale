@@ -3,27 +3,20 @@
 from __future__ import annotations
 
 import json
-import re
 import shlex
 import uuid
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from orbit.core.errors import AgentError, ConfigError
+from orbit.core.errors import ConfigError
 from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import (
-    agent_home,
-    agent_path,
-    bash_command,
-    is_windows,
-    npm_command,
-    npm_env,
-)
+from orbit.run.harnesses._agent import agent_env, agent_path
+from orbit.run.harnesses._install import PlatformPackages
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -52,6 +45,12 @@ class GrokBuildHarness(CliHarness):
     package = "@xai-official/grok"
     binary = "grok"
     default_version = DEFAULT_CLI_VERSION
+    # npm ships each build brotli-compressed; the Host decompresses it.
+    platform_packages: ClassVar[PlatformPackages] = {
+        "linux-x64": ("@xai-official/grok-linux-x64", "bin/grok.br"),
+        "darwin-arm64": ("@xai-official/grok-darwin-arm64", "bin/grok.br"),
+        "win32-x64": ("@xai-official/grok-win32-x64", "bin/grok.exe.br"),
+    }
     settings_type = GrokBuildSettings
     settings: GrokBuildSettings
     logs = (LOG_ROOT, ".grok-orbit/sessions")
@@ -69,56 +68,6 @@ class GrokBuildHarness(CliHarness):
             raise ConfigError(f"grok-build does not support gateway dialect {gateway_dialect!r}")
         self.gateway_dialect = gateway_dialect
         super().__init__(cli_version=cli_version, settings=settings)
-
-    async def install(self, sandbox: Sandbox) -> str:
-        home = await agent_home(sandbox)
-        install_home = f"{home}/.grok-build-install"
-        env = {
-            **await npm_env(sandbox, home),
-            "GROK_HOME": install_home,
-            "GROK_MANAGED_BY_NPM": "1",
-        }
-        binary = f"{install_home}/bin/grok" + (".exe" if is_windows(home) else "")
-        probe = await sandbox.exec(
-            bash_command(
-                home,
-                f"test -x {shlex.quote(binary)} && {shlex.quote(binary)} --version",
-                login=False,
-            ),
-            env=env,
-            timeout_sec=60,
-            identity=Identity.AGENT,
-        )
-        installed = _version(probe.stdout + probe.stderr) if probe.ok else None
-        if installed != self.version():
-            result = await sandbox.exec(
-                npm_command(
-                    home,
-                    "install",
-                    "-g",
-                    "--force",
-                    "--prefix",
-                    f"{home}/.local",
-                    f"@xai-official/grok@{self.version()}",
-                ),
-                env=env,
-                timeout_sec=1200,
-                identity=Identity.AGENT,
-            )
-            if not result.ok:
-                raise AgentError(
-                    f"could not install Grok Build {self.version()}: "
-                    f"{(result.stderr or result.stdout)[-800:]}"
-                )
-            probe = await sandbox.exec(
-                [binary, "--version"], env=env, timeout_sec=60, identity=Identity.AGENT
-            )
-            installed = _version(probe.stdout + probe.stderr) if probe.ok else None
-        if installed != self.version():
-            raise AgentError(
-                f"Grok Build reports {installed or 'no version'} after installing {self.version()}"
-            )
-        return installed
 
     async def install_resources(
         self,
@@ -219,9 +168,7 @@ class GrokBuildHarness(CliHarness):
     ) -> CliCommand:
         home = agent_path(session.home)
         requested = native_session_id or str(uuid.uuid4())
-        binary = (
-            home / ".grok-build-install/bin" / ("grok.exe" if is_windows(session.home) else "grok")
-        )
+        binary = home / ".local/bin/grok"
         argv = [
             str(binary),
             "--prompt-file",
@@ -249,7 +196,7 @@ class GrokBuildHarness(CliHarness):
         if isinstance(self.settings.max_turns, int):
             argv.extend(["--max-turns", str(self.settings.max_turns)])
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "GROK_HOME": str(home / ".grok-orbit"),
             "GROK_MANAGED_BY_NPM": "1",
             "GROK_SANDBOX": "off",
@@ -280,8 +227,3 @@ def _toml(value: str) -> str:
 
 def _toml_key(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
-
-
-def _version(output: str) -> str | None:
-    match = re.search(r"\d+(?:\.\d+)+", output)
-    return match.group(0) if match else None

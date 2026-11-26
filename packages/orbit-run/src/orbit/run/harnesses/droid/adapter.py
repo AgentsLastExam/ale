@@ -6,7 +6,7 @@ import json
 import shlex
 import uuid
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
@@ -15,7 +15,8 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses._agent import agent_env, agent_path
+from orbit.run.harnesses._install import PlatformPackages
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -55,6 +56,13 @@ class DroidHarness(CliHarness):
     binary = "droid"
     mcp_sse = False  # no SSE transport is documented for Droid's configuration
     default_version = DEFAULT_CLI_VERSION
+    platform_packages: ClassVar[PlatformPackages] = {
+        "linux-x64": ("@factory/cli-linux-x64", "bin/droid"),
+        "linux-x64-baseline": ("@factory/cli-linux-x64-baseline", "bin/droid"),
+        "darwin-arm64": ("@factory/cli-darwin-arm64", "bin/droid"),
+        "win32-x64": ("@factory/cli-win32-x64", "bin/droid.exe"),
+        "win32-x64-baseline": ("@factory/cli-win32-x64-baseline", "bin/droid.exe"),
+    }
     settings_type = DroidSettings
     settings: DroidSettings
     logs = (LOG_ROOT, trajectory.SESSIONS)
@@ -166,7 +174,7 @@ class DroidHarness(CliHarness):
             prompt_path,
         ]
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "FACTORY_HOME_OVERRIDE": str(agent_path(session.home) / PurePosixPath(STATE).parent),
             "FACTORY_DROID_AUTO_UPDATE_ENABLED": "false",
             "OTEL_CUSTOMER_ENABLED": "false",

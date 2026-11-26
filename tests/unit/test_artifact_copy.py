@@ -15,7 +15,7 @@ import pytest
 from orbit.core.errors import TaskError
 from orbit.core.sandbox import ExecResult, Identity
 from orbit.core.taskspec import OperatingSystem, TaskSpec
-from orbit.run import artifact_files
+from orbit.run import artifact_files, guestd
 from orbit.run.artifact_files import inspect, read
 from orbit.run.episode import _Artifacts
 from orbit.run.framework import MACOS_PYTHON
@@ -129,9 +129,7 @@ async def test_copy_restore_skips_missing_and_links_and_preserves_bytes_types_an
     assert not (output / "stale.txt").exists()
     assert json.loads((sink.root / "snapshot.json").read_text())["entries"]
     # A macOS image may have no Python of its own; the framework always has one.
-    assert sandbox.pythons == {
-        MACOS_PYTHON if operating_system is OperatingSystem.MACOS else "python3"
-    }
+    assert sandbox.pythons == {guestd.PYTHON[operating_system.value]}
 
 
 @pytest.mark.asyncio

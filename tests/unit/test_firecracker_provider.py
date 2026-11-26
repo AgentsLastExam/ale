@@ -202,7 +202,7 @@ def test_the_machine_boots_the_shared_kernel_on_the_read_only_root() -> None:
     args = config["boot-source"]["boot_args"]  # type: ignore[index]
     assert "root=/dev/vda ro" in args
     assert f"ip=172.30.0.2::{HOST_IP}:255.255.255.0:orbit-x:eth0:off" in args
-    assert args.endswith("init=/opt/orbit/python/bin/python3 -- -I /opt/orbit/firecracker/init.py")
+    assert args.endswith("init=/opt/orbit-python/bin/python3 -- -I /opt/orbit/firecracker/init.py")
     drives = config["drives"]
     assert [(d["drive_id"], d["is_read_only"]) for d in drives] == [  # type: ignore[index, union-attr]
         ("rootfs", True),
@@ -688,4 +688,4 @@ def test_a_run_can_name_firecracker() -> None:
 
 
 def test_guestd_runs_isolated_from_the_images_variables() -> None:
-    assert guest_init.GUESTD == ("/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/main.py")
+    assert guest_init.GUESTD == ("/opt/orbit-python/bin/python3", "-I", "/opt/orbit/guestd/main.py")

@@ -36,7 +36,7 @@ changing macOS behavior, run the Orchard suites on a Mac
 ([macOS guide](../docs/guides/macos-orchard.md)). On a Mac whose local Orchard
 `scripts/setup_macos.py` keeps running, `ORBIT_TEST_CLI_OS=macos just test-harnesses`
 installs and runs every CLI in a macOS VM instead of a container: one of an image of the
-pinned Tahoe base with Node.js, built once.
+pinned Tahoe base, built once.
 
 Tests that require infrastructure must carry the matching marker (`needs_docker`,
 `needs_kvm`, `needs_orchard`, `needs_gui`, `needs_llm`, `needs_cli_install`, or a Hugging

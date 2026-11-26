@@ -392,6 +392,8 @@ class _Session(StdioTransport):
 class DaytonaSandbox(TunneledSandbox):
     """One Daytona sandbox, driven through guestd over SSH."""
 
+    fetches_files = True
+
     def __init__(
         self,
         *,

@@ -14,8 +14,8 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import OperatingSystem, StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, is_windows, npm_env
-from orbit.run.harnesses._release import ReleaseAsset, ReleaseAssets
+from orbit.run.harnesses._agent import agent_env, agent_path, is_windows
+from orbit.run.harnesses._install import ReleaseAsset, ReleaseAssets
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -159,7 +159,7 @@ class MuseCodeHarness(CliHarness):
         if not web_tools:
             argv.append("--disable-web-tools")
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             # Muse keeps settings under XDG_CONFIG_HOME and sessions under XDG_DATA_HOME;
             # naming the defaults fixes both inside the episode home on every system.
             "XDG_CONFIG_HOME": str(home / ".config"),

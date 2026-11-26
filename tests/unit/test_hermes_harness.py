@@ -12,6 +12,7 @@ from orbit.core.errors import AgentError, ConfigError, HarnessLimitError
 from orbit.core.harness import EffectiveAgentResources, TrajectoryParseContext
 from orbit.core.taskspec import OperatingSystem
 from orbit.core.trajectory import AtifTrajectory
+from orbit.run import guestd
 from orbit.run.cli.tasks import PRESET_DIR, _harness
 from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
 from orbit.run.harnesses.hermes import HermesHarness
@@ -700,7 +701,7 @@ def test_compactions_keep_each_call_once(tmp_path: Path) -> None:
 async def test_windows_runs_the_launcher_the_installer_publishes() -> None:
     class WindowsSandbox(FakeSandbox):
         async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-            if list(argv)[:2] == ["python", "-c"]:
+            if list(argv)[:3] == [guestd.AGENT_PYTHON["windows"], "-I", "-c"]:
                 from orbit.core.sandbox import ExecResult
 
                 return ExecResult(exit_code=0, stdout="C:/Windows/System32")

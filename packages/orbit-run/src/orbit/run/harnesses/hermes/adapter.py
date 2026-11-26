@@ -15,12 +15,12 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import (
+from orbit.run.harnesses._agent import (
+    agent_env,
     agent_home,
     agent_path,
     bash_command,
     is_windows,
-    npm_env,
     reported_version,
 )
 from orbit.run.harnesses.base import (
@@ -120,7 +120,7 @@ class HermesHarness(CliHarness):
             script += f"; {launcher} pm install --extra anthropic"
         result = await sandbox.exec(
             bash_command(home, script, login=False),
-            env={**await npm_env(sandbox, home), "NO_COLOR": "1"},
+            env={**await agent_env(sandbox, home), "NO_COLOR": "1"},
             timeout_sec=2400,
             identity=Identity.AGENT,
         )
@@ -261,7 +261,7 @@ class HermesHarness(CliHarness):
             'rm -f "$events" "$events.status"; exit "$status"'
         )
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "HERMES_HOME": str(home / STATE),
             "NO_COLOR": "1",
         }

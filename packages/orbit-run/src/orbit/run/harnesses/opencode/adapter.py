@@ -7,7 +7,7 @@ import re
 import shlex
 import uuid
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
@@ -16,8 +16,14 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import OperatingSystem, StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_home, agent_path, agent_python, bash_command, npm_env
-from orbit.run.harnesses._release import ReleaseAsset, ReleaseAssets, ensure_release_binary
+from orbit.run.harnesses._agent import agent_env, agent_home, agent_path, agent_python, bash_command
+from orbit.run.harnesses._install import (
+    PlatformPackages,
+    ReleaseAsset,
+    ReleaseAssets,
+    install_release,
+    sandbox_platform,
+)
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -167,6 +173,13 @@ class OpenCodeHarness(CliHarness):
     package = "@opencode/cli"
     binary = "opencode"
     default_version = DEFAULT_CLI_VERSION
+    platform_packages: ClassVar[PlatformPackages] = {
+        "linux-x64": ("@opencode/cli-linux-x64", "bin/opencode"),
+        "linux-x64-baseline": ("@opencode/cli-linux-x64-baseline", "bin/opencode"),
+        "darwin-arm64": ("@opencode/cli-darwin-arm64", "bin/opencode"),
+        "win32-x64": ("@opencode/cli-windows-x64", "bin/opencode.exe"),
+        "win32-x64-baseline": ("@opencode/cli-windows-x64-baseline", "bin/opencode.exe"),
+    }
     settings_type = OpenCodeSettings
     settings: OpenCodeSettings
     logs = (LOG_ROOT, trajectory.EXPORTS, trajectory.CONFIG)
@@ -213,7 +226,7 @@ class OpenCodeHarness(CliHarness):
         home = await agent_home(sandbox)
         paths = await sandbox.exec(
             bash_command(home, "opencode debug paths", login=False),
-            env={**await npm_env(sandbox, home), **_OFFLINE},
+            env={**await agent_env(sandbox, home), **_OFFLINE},
             timeout_sec=120,
             identity=Identity.AGENT,
         )
@@ -223,11 +236,13 @@ class OpenCodeHarness(CliHarness):
         )
         if not paths.ok or not directory:
             raise AgentError(f"opencode debug paths named no bin directory: {paths.stderr[-400:]}")
-        await ensure_release_binary(
+        await install_release(
             sandbox,
+            home,
             binary="rg",
             version="15.1.0",
             assets=RIPGREP,
+            platform=await sandbox_platform(sandbox, home),
             directory=str(agent_path(directory)),
         )
         return version
@@ -371,7 +386,7 @@ class OpenCodeHarness(CliHarness):
         await sandbox.write_file(invoke, _INVOKE_SCRIPT.encode(), identity=Identity.AGENT)
         script = shlex.join(["sh", invoke, agent_python(session.os), prompt_path, requested, *argv])
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             # In place of `~/.config/opencode`.
             "OPENCODE_CONFIG_DIR": str(home / STATE),
             **_OFFLINE,

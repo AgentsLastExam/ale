@@ -76,8 +76,9 @@ see or control the desktop.
 - The all-users Python 3.12 the base installs is for Tasks and agents; verification uses it
   when it can, since Task packages are installed there.
 
-Autonomous CLI Harnesses use native Windows Node.js and Git Bash; their CLI packages are
-installed per run, and model credentials stay on the Host Gateway.
+Autonomous CLI Harnesses use Git Bash and the framework's Python, not the base's Python or
+Node.js ([Autonomous Harness](../../../docs/specs/autonomous-harness.md#shipped-integrations)),
+and model credentials stay on the Host Gateway.
 
 Re-run `prepare.ps1` to update an existing Orbit seed. After reboot, run `tools.ps1 -CheckOnly`
 to check package managers, Python, Node.js/npm and Git Bash. Task-specific software belongs

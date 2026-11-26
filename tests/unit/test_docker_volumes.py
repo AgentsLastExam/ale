@@ -96,7 +96,7 @@ ROOT = volumes.Root(1000, 1000, 0o755)
 @pytest.mark.asyncio
 async def test_only_a_candidate_that_is_a_directory_in_the_image_is_a_volume(docker) -> None:
     docker.directories = ["/work"]
-    found = await volumes.directories("image", "/opt/orbit/python/bin/python3", ["/work", "/x.txt"])
+    found = await volumes.directories("image", "/opt/orbit-python/bin/python3", ["/work", "/x.txt"])
     assert found == ("/work",)
 
 

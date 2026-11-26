@@ -88,7 +88,7 @@ commands, then applies the agent's network policy. Autonomous Harnesses launch i
 sandbox, in `[agent].workdir` or else the agent's home; Policy Harnesses drive the
 framework-owned `TaskEnv`. The evaluated solver and
 the oracle, which runs a calibration case, both run as the image's agent account. Windows
-autonomous CLI Harnesses use the base's native Node.js and Git Bash.
+autonomous CLI Harnesses use the base's Git Bash.
 
 Below the instruction, the first prompt of an autonomous Harness states the turn's time
 limit in minutes and that the work is scored as it is when it runs out, and the machine the

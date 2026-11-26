@@ -10,7 +10,7 @@ them again when they exit. Agent commands are launched unelevated by guestd itse
 
 An offline write leaves the files it makes readable and writable by everyone, so the
 service first limits the framework's files to SYSTEM and Administrators, leaving Cua Driver
-runnable by every account.
+and the framework's Python runnable by every account.
 """
 
 from __future__ import annotations
@@ -246,6 +246,8 @@ class Service:
 
         Every account may still read and run Cua Driver, as /usr/local/bin/cua-driver on
         Linux: the agent's ``cua-desktop`` MCP server runs it to reach the driver started here.
+        So too the framework's Python, as /opt/orbit-python there, which that server, the
+        agent's program installs and the Harness helpers run on: none may change it.
         """
         root, owner = str(ROOT), _ADMINISTRATORS
         grant = f"{_SYSTEM}:(OI)(CI)(F)", f"{owner}:(OI)(CI)(F)"
@@ -256,7 +258,8 @@ class Service:
             # Files written offline carry no access list; they now inherit the directory's.
             self._run("icacls", str(ROOT / name), "/setowner", owner, "/T")
             self._run("icacls", str(ROOT / name), "/reset", "/T")
-        self._run("icacls", str(ROOT / "cua-driver"), "/grant", f"{_USERS}:(OI)(CI)(RX)")
+        for name in ("cua-driver", "python"):
+            self._run("icacls", str(ROOT / name), "/grant", f"{_USERS}:(OI)(CI)(RX)")
 
     def _open_port(self) -> None:
         """Let the Host's runner, and nothing else, reach guestd."""

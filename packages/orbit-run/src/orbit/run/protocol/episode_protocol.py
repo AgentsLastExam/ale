@@ -275,10 +275,10 @@ mkdir -m 0700 -- "$verifier"
 """
 
 #: Gives ``[verifier].user`` its stage and the verifier directory, and lets it through the
-#: framework's root on Linux, below which everything else stays the framework's alone.
+#: framework's root, below which everything else stays the framework's alone.
 _VERIFIER_USER_GRANT = """set -eu
 user="$1" framework="$2" stage="$3" verifier="$4"
-if [ "$(uname)" = Linux ]; then chmod -- o+x "$framework"; fi
+chmod -- o+x "$framework"
 chown -R -- "$user" "$stage" "$verifier"
 """
 
@@ -1937,7 +1937,7 @@ class EpisodeProtocol:
                 server = server.model_copy(
                     update={
                         "command": (
-                            "python.exe"
+                            guestd.AGENT_PYTHON["windows"]
                             if ctx.spec.os is OperatingSystem.WINDOWS and item.name == "cua-desktop"
                             else server.command.replace("{mcp}", target)
                         ),
@@ -2205,8 +2205,9 @@ class EpisodeProtocol:
                 ctx.open_judge_sessions(False)
             if ctx.open_egress_session is not None:
                 ctx.open_egress_session(NetworkPolicy())
-            if placed.user is not None and ctx.spec.os is OperatingSystem.LINUX:
-                # A solver kept for continuation gets its framework root back closed.
+            if placed.user is not None:
+                # A solver kept for continuation gets its framework root back closed; Windows
+                # refuses [verifier].user.
                 await sandbox.exec(["chmod", "--", "o-x", str(layout.root)])
             # Keep Judge evidence even if the task exits, raises or times out.
             invocations = await self._collect_judge_logs(ctx, sandbox, stage, records)

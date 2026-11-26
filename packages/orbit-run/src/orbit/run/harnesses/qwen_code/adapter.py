@@ -15,7 +15,7 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses._agent import agent_env, agent_path
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -55,6 +55,7 @@ class QwenCodeHarness(CliHarness):
     package = "@qwen-code/qwen-code"
     binary = "qwen"
     default_version = DEFAULT_CLI_VERSION
+    node = "24.15.0"
     settings_type = QwenCodeSettings
     settings: QwenCodeSettings
     logs = (LOG_ROOT, trajectory.PROJECTS)
@@ -167,7 +168,7 @@ class QwenCodeHarness(CliHarness):
         # Headless mode reads the prompt from stdin, which is not a terminal here.
         script = f"unset {' '.join(_OVERRIDES)}; {shlex.join(argv)} < {shlex.quote(prompt_path)}"
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "QWEN_HOME": str(qwen_home),
             "QWEN_RUNTIME_DIR": str(qwen_home),
             "QWEN_CODE_SYSTEM_SETTINGS_PATH": str(qwen_home / "system-settings.json"),

@@ -9,7 +9,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from orbit.core.harness import ResolvedMcpServer
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import OperatingSystem, StdioMcpServer
-from orbit.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET, MACOS_PYTHON
+from orbit.run import guestd
+from orbit.run.framework import MACOS_DRIVER, MACOS_DRIVER_SOCKET
 from orbit.run.tools.cua_desktop_mcp import SCREENSHOT_MAX_DIMENSION
 
 __all__ = ["CUA_DESKTOP_NAME", "resolved_cua_desktop", "stage_cua_desktop"]
@@ -27,11 +28,8 @@ def resolved_cua_desktop(
     screenshot_max_dimension: int | None = None,
 ) -> ResolvedMcpServer:
     """Return the built-in through the same canonical contract as external servers."""
-    command = {
-        OperatingSystem.WINDOWS: "python.exe",
-        # macOS has no Python 3.12 of its own; the framework's is readable by every account.
-        OperatingSystem.MACOS: MACOS_PYTHON,
-    }.get(operating_system, "python3")
+    # The framework's Python, which every account may run, so the image needs none.
+    command = guestd.AGENT_PYTHON[operating_system.value]
     # The server's settings travel in its environment: the values are not secret, and a CLI
     # that filters its MCP children's environment still passes what their configuration
     # names. On macOS the Provider starts the Driver, so the server is told where it is

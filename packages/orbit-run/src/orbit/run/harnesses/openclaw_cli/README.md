@@ -23,7 +23,10 @@ as it starts and runs tools. The Linux base image's desktop already uses about 6
 in a 1 GiB Sandbox the kernel OOM-kills the CLI part-way through a turn; run it in at
 least 2 GiB. Orbit sets `OPENCLAW_NO_RESPAWN=1` because OpenClaw's launcher otherwise runs
 the CLI as a second, detached Node process and exits 1 without a message when that child
-dies from a signal. An OOM kill now reports exit code 137.
+dies from a signal; with it an OOM kill reports exit code 137. It also sets
+`OPENCLAW_PATH_BOOTSTRAPPED=1`: OpenClaw's PATH bootstrap would put the directory of the
+Node.js it runs on, and `/usr/bin` and `/bin`, ahead of the PATH its tools inherit, so the
+agent's commands would find Orbit's Node.js rather than the image's.
 
 OpenClaw 2026.7.1 puts OpenAI's hosted `web_search` in a request only when the model's
 base URL is `api.openai.com` itself, and no setting extends that to another URL, so behind

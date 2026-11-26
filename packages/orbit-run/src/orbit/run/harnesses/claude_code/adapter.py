@@ -6,13 +6,15 @@ import json
 import shlex
 import uuid
 from pathlib import PurePosixPath
+from typing import ClassVar
 
 from orbit.core.errors import AgentError, AgentRefusalError, ConfigError, HarnessLimitError
 from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import SseMcpServer, StdioMcpServer, StreamableHttpMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses._agent import agent_env, agent_path
+from orbit.run.harnesses._install import PlatformPackages
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -43,6 +45,11 @@ class ClaudeCodeHarness(CliHarness):
     package = "@anthropic-ai/claude-code"
     binary = "claude"
     default_version = DEFAULT_CLI_VERSION
+    platform_packages: ClassVar[PlatformPackages] = {
+        "linux-x64": ("@anthropic-ai/claude-code-linux-x64", "claude"),
+        "darwin-arm64": ("@anthropic-ai/claude-code-darwin-arm64", "claude"),
+        "win32-x64": ("@anthropic-ai/claude-code-win32-x64", "claude.exe"),
+    }
     settings_type = ClaudeCodeSettings
     settings: ClaudeCodeSettings
     logs = (LOG_ROOT, ".claude-config/projects")
@@ -126,7 +133,7 @@ class ClaudeCodeHarness(CliHarness):
             f"--strict-mcp-config --mcp-config {shlex.quote(str(config_path))} "
             f"{selector} {shlex.quote(requested)} --print < {shlex.quote(prompt_path)}"
         )
-        env = {**self._env(session), **await npm_env(sandbox, session.home)}
+        env = {**self._env(session), **await agent_env(sandbox, session.home)}
         return CliCommand(script, env, requested)
 
     def read_result(self, stdout: str) -> NativeResult:

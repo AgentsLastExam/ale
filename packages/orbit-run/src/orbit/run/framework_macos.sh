@@ -136,16 +136,17 @@ need private/etc/kcpassword
 [ -f "$mnt/private/etc/kcpassword" ] ||
     fail "automatic login for '$user' has no stored password (/etc/kcpassword)"
 
-# The framework: guestd, for root alone, on a Python of its own that every account may run
-# and only root may change.
+# The framework: guestd in a directory for root alone, as on Linux, on a Python of its own
+# beside it that every account may run and only root may change.
 need opt/orbit
+need opt/orbit-python
 [ -d "$mnt/opt" ] || mkdir -m 0755 "$mnt/opt"
-rm -rf "$mnt/opt/orbit"
-mkdir -m 0755 "$mnt/opt/orbit"
+rm -rf "$mnt/opt/orbit" "$mnt/opt/orbit-python"
+mkdir -m 0700 "$mnt/opt/orbit"
 [ -x "$staging/payload/python/bin/python3" ] || fail "the payload has no framework Python"
-ditto "$staging/payload/python" "$mnt/opt/orbit/python"
-chown -R 0:0 "$mnt/opt/orbit"
-chmod -R go-w "$mnt/opt/orbit/python"
+ditto "$staging/payload/python" "$mnt/opt/orbit-python"
+chown -R 0:0 "$mnt/opt/orbit" "$mnt/opt/orbit-python"
+chmod -R go-w "$mnt/opt/orbit-python"
 mkdir -m 0700 "$mnt/opt/orbit/guestd"
 cp -P "$staging"/payload/guestd/*.py "$mnt/opt/orbit/guestd/"
 chmod 0600 "$mnt"/opt/orbit/guestd/*.py

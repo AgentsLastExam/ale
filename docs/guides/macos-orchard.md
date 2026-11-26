@@ -108,11 +108,11 @@ Every `network_mode` is supported; the sealed modes need Softnet, and their setu
 verification reach IPv4 addresses only. Use the
 [standard Task layout](../specs/task-authoring.md) with `.sh` stage entries; the reward
 goes to `/opt/orbit/logs/verifier`, because the macOS root volume is read-only. Every
-shipped Harness supports macOS. The npm-installed CLIs need Node/npm at the
-[required runtime version](../specs/autonomous-harness.md#shipped-integrations) in the
-image, and Hermes and OpenHands CLI need Git, which the Orbit bases provide on Linux and
-Windows. The `computer-use` Harness needs an Anthropic-compatible Gateway and a model
-endpoint that accepts its computer tool schema.
+shipped Harness supports macOS, and none needs Node.js or npm in the image
+([Autonomous Harness](../specs/autonomous-harness.md#shipped-integrations)); Hermes and
+OpenHands CLI need Git, which the Orbit bases provide on Linux and Windows. The
+`computer-use` Harness needs an Anthropic-compatible Gateway and a model endpoint that
+accepts its computer tool schema.
 
 `tests/fixtures/tasks/macos-desktop-smoke` exercises the desktop path: its oracle takes a
 Driver screenshot, clicks, types and saves in TextEdit, and its verifier checks the file.

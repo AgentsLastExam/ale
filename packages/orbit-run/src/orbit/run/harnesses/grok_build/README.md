@@ -1,9 +1,13 @@
 # Grok Build
 
-Runs Grok headless with `--prompt-file`. A session is a directory named by its ID below
-`.grok-orbit/sessions`, holding `chat_history.jsonl` and `updates.jsonl`; the parser joins
-the two and records tool failures from the updates. Other session directories are left
-unconverted, named in `parse_issues`, and are not guessed to be children.
+Runs Grok headless with `--prompt-file`, from the platform build its npm package
+`@xai-official/grok` names as an optional dependency. npm ships that build
+brotli-compressed, which no Sandbox can undo with the standard library, so the Host
+decompresses it and uploads the result, to a cloud Sandbox too. A session is a directory
+named by its ID below `.grok-orbit/sessions`, holding `chat_history.jsonl` and
+`updates.jsonl`; the parser joins the two and records tool failures from the updates. Other
+session directories are left unconverted, named in `parse_issues`, and are not guessed to be
+children.
 
 Grok gives the model an MCP tool's image as data-URL text in the tool's output. It splits
 images out only from an output over its MCP output limit, which it first truncates, writing

@@ -53,7 +53,7 @@ VIEWED = f"{RW}/viewed"
 #: A private tmpfs for guestd's claimed token, which must not outlive a boot.
 RUN = f"{HERE}/run"
 COMMAND_LOG = f"{RW}/orbit/command.log"
-GUESTD = ("/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/main.py")
+GUESTD = ("/opt/orbit-python/bin/python3", "-I", "/opt/orbit/guestd/main.py")
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 MS_RDONLY = 1

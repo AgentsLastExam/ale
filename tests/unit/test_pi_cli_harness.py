@@ -29,7 +29,7 @@ def test_preset_is_complete_and_follows_the_gateway_dialect() -> None:
     assert isinstance(harness, PiCliHarness)
     assert harness.gateway_dialect == config.gateway.dialect == "openai-chat-completions"
     assert config.gateway.provider == "openai"
-    assert harness.integrity() == "npm:@earendil-works/pi-coding-agent@1.4.0"
+    assert harness.integrity() == "npm:@earendil-works/pi-coding-agent@1.4.0 node@24.15.0"
 
 
 @pytest.mark.parametrize(
