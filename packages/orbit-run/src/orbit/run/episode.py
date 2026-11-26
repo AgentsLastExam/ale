@@ -1073,6 +1073,7 @@ async def run_episode(
         prepared_validation_image=task.prepared_validation_image,
         phase_callback=phase_callback,
         limit_refusal=lambda: _gateway_refusal(session),
+        begin_agent_turn=None if session is None else session.begin_turn,
         model_provider_failure=lambda: _model_provider_failure(session),
         open_agent_session=None if session is None else partial(_open_sessions, (session,)),
         logging_policy=logging_policy or LoggingPolicy(),

@@ -115,9 +115,9 @@ async def _episode(tmp_path: Path, root: Path, provider: Provider) -> Any:
     )
 
 
-def _check(result: Any, rounds: int = 2, *, stage: str = "validation", shown: bool = False) -> None:
-    """``rounds + 1`` turns, a round ``stage`` scored between each two, tests/ once on the
-    final state; every turn read the copy of ``stage`` where it was ``shown``, and none
+def _check(result: Any, rounds: int = 2, *, shown: bool = False) -> None:
+    """``rounds + 1`` turns, a round scored between each two, tests/ once on the final state;
+    every turn read the copy of the stage that validates where it was ``shown``, and none
     changed it."""
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert result.verdict.rewards == {"reward": round(min(1.0, (rounds + 1) / 3), 2)}
@@ -133,14 +133,10 @@ def _check(result: Any, rounds: int = 2, *, stage: str = "validation", shown: bo
     ]
     verification = json.loads((result.run_dir / "verification.json").read_text())
     # Each turn read its prompt back from its native session: the instruction first, then
-    # each round's result.
-    name = "Validation round" if stage == "validation" else "Round"
+    # each round's result, which reads the same whichever stage validated.
     assert verification["lines"] == [
         INSTRUCTION.strip(),
-        *(
-            f"{name} {index} of {rounds}: reward {score:.2f}."
-            for index, score in enumerate(scores, start=1)
-        ),
+        *(f"Your work was scored: reward {score:.2f}." for score in scores),
     ]
     # No process the agent started outlived the turn it started in, and no turn saw
     # validation/, tests/ or what they wrote.
@@ -205,7 +201,7 @@ async def test_an_agent_improves_over_rounds_tests_scores_without_validation_in_
     verifier of its own, and the agent receives its result."""
     root = _task(tmp_path / f"rounds-tests-{mode}", mode, validation=False)
     result = await _episode(tmp_path, root, DockerProvider())
-    _check(result, stage="tests")
+    _check(result)
     assert sorted(path.name for path in (result.run_dir / "validation/1").iterdir()) == [
         "feedback.md",
         "trajectory.json",
@@ -224,7 +220,7 @@ async def test_the_agent_reads_the_stage_that_validates_where_the_task_shows_it_
     root = _task(tmp_path / f"rounds-shown-{shown}", "shared", validation=validation)
     edit_task_config(root, {"verifier": {"validation": {"visibility": True}}})
     result = await _episode(tmp_path, root, DockerProvider())
-    _check(result, stage=shown, shown=True)
+    _check(result, shown=True)
     # Docker mounts the Task folder's stage read-only in every turn's solver, copying none.
     verification = json.loads((result.run_dir / "verification.json").read_text())
     assert verification["mounted"] == ["turn 1", "turn 2", "turn 3"]

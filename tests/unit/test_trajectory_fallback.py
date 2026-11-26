@@ -45,7 +45,7 @@ def test_conversion_failure_keeps_a_minimal_trajectory_and_the_native_logs(
         agent_run=AgentRun(exit_code=0, final_message="Report written."),
         episode_id="episode",
         trajectory_id="trajectory-1",
-        spec=SimpleNamespace(instruction="Write the report.", validation_visible=False),
+        spec=SimpleNamespace(instruction="Write the report.", timeouts=SimpleNamespace(agent=1800)),
         resource_allocation=None,
         run_dir=tmp_path,
         session=SimpleNamespace(model="model", token="secret-episode-token"),
@@ -59,8 +59,10 @@ def test_conversion_failure_keeps_a_minimal_trajectory_and_the_native_logs(
 
     assert ctx.trajectory_written
     trajectory = json.loads((tmp_path / "trajectory.json").read_text())
+    # The first prompt as it was sent, with the time stated below the instruction.
     assert [step["message"] for step in trajectory["steps"]] == [
-        "Write the report.",
+        "Write the report.\n\n---\n\nYour time limit is 30 minutes. If it runs out, your work "
+        "is scored as it is then.\n",
         "Report written.",
     ]
     orbit = trajectory["extra"]["orbit"]

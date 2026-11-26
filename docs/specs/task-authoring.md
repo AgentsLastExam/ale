@@ -691,10 +691,10 @@ as the final one is, so `load_trajectory()` returns it in every round as it does
 With `[verifier.validation] visibility = true`, the agent works beside a read-only copy of
 the stage that validates at `/opt/validation` (`C:\validation` on Windows), mounted from the
 Task folder where the solver's Provider mounts Host directories and copied as setup ends
-elsewhere, and a line below the instruction says where it is: a validation set the agent may
-study, its data and how it is scored, as a researcher studies one. The default is `false`,
-which keeps the stage out of every turn. A verifier always runs its own copy, so the agent's
-reaches no score.
+elsewhere, and the instruction says where it is, since nothing the framework states does: a
+validation set the agent may study, its data and how it is scored, as a researcher studies
+one. The default is `false`, which keeps the stage out of every turn. A verifier always runs
+its own copy, so the agent's reaches no score.
 
 A Task without `validation/` validates with `tests/` instead: its rounds run `tests/` in the
 verifier of validation rounds, so a Task whose data cannot be split still gives its agent
@@ -711,8 +711,10 @@ With `[agent].validation_rounds = N`, the agent works in up to `N + 1` turns: it
 ends, `validation/`, or else `tests/`, scores the state it left, the agent receives that
 result as its next turn begins, and so on until `tests/` scores the state its last turn
 left, once. A turn ends when the agent's program finishes normally, so the agent submits its
-work by ending its turn; there is nothing else to call. A turn that a timeout, a limit or a
-failure ends is the last. `[agent].timeout_sec` covers all turns together. Between turns the
+work by ending its turn; there is nothing else to call. A turn also ends, and its round
+follows, at `[agent].timeout_sec` or a Gateway limit, which are each turn's own; a turn that
+a failure ends is the last. The framework tells the agent only each turn's time limit, so
+the instruction says what ending a turn does, as often as rounds remain. Between turns the
 agent's Sandbox is saved and a new one booted from what it saved, without setup: files on
 its disk survive the end of a turn; files in memory, such as a tmpfs, and its desktop
 session do not, nor does any process, the agent's or a service setup started. A round

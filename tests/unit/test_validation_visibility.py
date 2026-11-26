@@ -14,8 +14,9 @@ from orbit.core.verdict import Status
 
 pytestmark = pytest.mark.unit
 
-_NOTE = "where you can read them but not change them."
-#: What the first prompt says last, of the Task's own resources, which the Sandbox got.
+#: What the first prompt says below the instruction, the time first and last the Task's own
+#: resources, which the Sandbox got.
+_TIME = "If it runs out, your work is scored as it is then.\n"
 _MACHINE = f"Your machine: 1 CPU and 1 GiB of memory. {LIMITS}\n"
 
 
@@ -28,8 +29,8 @@ def _files(root: Path) -> set[str]:
 async def test_the_stage_that_validates_is_copied_for_the_agent_as_setup_ends(
     tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch, validation_dir: bool
 ) -> None:
-    """validation/, or else tests/ as if copied into it, by the framework, where the first
-    prompt says it is; verifiers still stage their own."""
+    """validation/, or else tests/ as if copied into it, by the framework, which the
+    instruction names, not the framework; verifiers still stage their own."""
     uploaded: list[tuple[SandboxRole, str, object]] = []
     upload = MemorySandbox.upload_dir
 
@@ -53,15 +54,12 @@ async def test_the_stage_that_validates_is_copied_for_the_agent_as_setup_ends(
     ] == [(SandboxRole.SHARED, None)]
     # The round's verifier and the final one each ran the stage the Host staged for them.
     assert f"/opt/orbit/{stage}" in provider.sandboxes[1].uploads
-    named = "validation set" if validation_dir else "test set that scores your final state"
-    assert harness.prompts[0].endswith(
-        f"The files of the {named} are at /opt/validation, {_NOTE}\n{_MACHINE}"
-    )
-    assert _NOTE not in harness.prompts[1]
+    assert harness.prompts[0].endswith(f"{_TIME}{_MACHINE}")
+    assert not any("/opt/validation" in prompt for prompt in harness.prompts)
 
 
 @pytest.mark.asyncio
-async def test_without_rounds_the_note_and_the_machine_follow_the_instruction(
+async def test_without_rounds_the_time_and_the_machine_follow_the_instruction(
     tmp_path: Path, verifiers: Verifiers
 ) -> None:
     harness = TurnsHarness()
@@ -70,8 +68,7 @@ async def test_without_rounds_the_note_and_the_machine_follow_the_instruction(
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     (prompt,) = harness.prompts
     assert prompt == (
-        f"{task.spec.instruction}\n\n---\n\n"
-        f"The files of the validation set are at /opt/validation, {_NOTE}\n{_MACHINE}"
+        f"{task.spec.instruction}\n\n---\n\nYour time limit is 10 minutes. {_TIME}{_MACHINE}"
     )
 
 
@@ -85,7 +82,7 @@ async def test_by_default_no_stage_reaches_the_agent(tmp_path: Path, verifiers: 
     result = await _run(tmp_path, provider, task, harness)
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert not any("/opt/validation" in sandbox.uploads for sandbox in provider.sandboxes)
-    assert not any(_NOTE in prompt for prompt in harness.prompts)
+    assert not any("/opt/validation" in prompt for prompt in harness.prompts)
 
 
 def test_a_shown_tests_dir_is_part_of_what_the_agent_depended_on(tmp_path: Path) -> None:

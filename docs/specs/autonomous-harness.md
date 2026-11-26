@@ -213,7 +213,7 @@ resources may differ there, and that episode's RunLock records its own.
 [Validation rounds](episode-protocol.md#validation-rounds) are native resumes too: each turn
 after the first resumes the session in the solver booted from the round's snapshot, with the
 round's prompt, so a Run giving rounds to a Harness without native resume is refused before
-provisioning. The framework's preamble below the instruction and each round's prompt reach
+provisioning. What the framework states below the instruction and each round's prompt reach
 the program as any prompt does and are recorded with it, and every turn's invocation
 appends to the same evidence logs, so the trajectory is the one native session across all
 turns. Each Harness declares the files in which its program keeps credentials
@@ -294,7 +294,7 @@ the MCP client contract may not.
 Keep ownership explicit:
 
 - Gateway limits own model calls, provider-reported input tokens, output tokens, and
-  total tokens in both API-key and subscription modes.
+  total tokens in both API-key and subscription modes, counted for each turn of the agent.
 - Harness settings own native controls such as Claude `max_turns`.
 - Episode protocol timeouts own setup, agent, and verify wall time.
 
@@ -303,14 +303,15 @@ field. Termination records and provenance name the enforcing layer, limit, confi
 value, and observed value.
 
 Adapters do not parse Gateway refusals. The Gateway session records the first limit that
-refused a call, and the episode protocol attributes an agent phase that then fails,
-whatever error the agent program reported, to that limit: the episode ends
-`budget_exceeded` with a `gateway` termination. Refusals carry `x-should-retry: false` so
-SDKs stop retrying them. Nor do adapters classify a model provider's failures, such as a
-rate limit or an exhausted quota: the Gateway records how the provider failed each call,
-and an agent phase whose program fails while the provider fails its calls ends `env_error`
-([Episode protocol](episode-protocol.md#agent-or-oracle)). Adapters classify only their
-native limits.
+refused a call in the turn, and the episode protocol attributes a turn that then fails,
+whatever error the agent program reported, to that limit: the turn ends there, its
+[validation round](episode-protocol.md#validation-rounds) following where rounds remain, and
+at the last turn the episode ends `budget_exceeded` with a `gateway` termination. Refusals
+carry `x-should-retry: false` so SDKs stop retrying them. Nor do adapters classify a model
+provider's failures, such as a rate limit or an exhausted quota: the Gateway records how the
+provider failed each call, and an agent phase whose program fails while the provider fails
+its calls ends `env_error` ([Episode protocol](episode-protocol.md#agent-or-oracle)).
+Adapters classify only their native limits.
 
 The Gateway supports Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and
 Gemini `generateContent` for API-key mode; each dialect's routes and request handling
