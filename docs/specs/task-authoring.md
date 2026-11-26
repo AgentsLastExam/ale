@@ -355,33 +355,41 @@ whole GPU.
 `nodes` is how many machines the Sandbox spans, each with the CPUs, memory, storage and
 GPUs above, for work that one machine cannot hold, such as training across sixteen GPUs.
 The agent works on node 0, where its commands and files are; every node runs the same image
-under the same account, sudo and network policy, and its disk is its own, so data one node
-needs on another is copied there or fetched there. The nodes are named `node0` to
-`node<N-1>`, which is also each one's hostname, and reach one another on a network of
-their own that reaches nothing else, whatever the Task's network; a job's ranks rendezvous
-and exchange data there, or over a faster fabric the Provider gives them, such as
-InfiniBand. `ORBIT_NODES` lists the names and `ORBIT_NODE_RANK` is each node's number.
+under the same account, sudo and network policy. The nodes are named `node0` to
+`node<N-1>`, which is also each one's hostname, and reach one another on a network of their
+own that reaches nothing else, whatever the Task's network; a job's ranks rendezvous and
+exchange data there, or over a faster fabric the Provider gives them, such as InfiniBand.
+`ORBIT_NODES` lists the names and `ORBIT_NODE_RANK` is each node's number. The agent's first
+prompt names the nodes and how to reach them
+([Episode protocol](episode-protocol.md#agent-or-oracle)).
 
-On every node, `orbit-exec NODE COMMAND [ARG...]` runs a command on another node as the
-account that runs it, as `ssh` would: its arguments joined by spaces and run by `sh` there,
-in the same directory, or its home where that is missing there, with its input, output and
-exit status. Unlike `ssh`, the command also gets the variables its caller exported, the
-Task's among them, apart from those that describe a node, such as `ORBIT_NODE_RANK` and
-`HOME`, which are the other node's. A distributed launcher takes it as its remote shell, so
-the agent starts `torchrun` on each node, or `mpirun` with
-`--mca plm_rsh_agent orbit-exec`, without a scheduler or its credentials:
+As on a cluster, `ssh NODE COMMAND` runs a command on another node, for the agent's account
+and for root, without a password: an image needs no ssh of its own, and `scp`, `rsync`,
+`mpirun`, `pdsh` and DeepSpeed's launcher work over it. A session there gets the variables
+the image and the Task give the agent's commands, and its node's own. `/shared` is one
+directory every node sees, where every file is the agent account's; every other path is its
+node's own, so a program and its data go to `/shared` or are copied to each node:
 
 ```bash
-orbit-exec node1 torchrun --nnodes=2 --nproc-per-node=8 --rdzv-backend=c10d \
-    --rdzv-endpoint=node0:29400 train.py &
+cp train.py /shared/
+ssh node1 torchrun --nnodes=2 --nproc-per-node=8 --rdzv-backend=c10d \
+    --rdzv-endpoint=node0:29400 /shared/train.py &
 torchrun --nnodes=2 --nproc-per-node=8 --rdzv-backend=c10d \
-    --rdzv-endpoint=node0:29400 train.py
+    --rdzv-endpoint=node0:29400 /shared/train.py
 ```
 
-A verifier's `nodes` is its own, one unless its table names more; a verifier without a
-table spans the agent's. A snapshot verifier boots each of its nodes from the agent's node
-of the same number, so it spans no more nodes than the agent. Only some Providers join
-machines into one Sandbox
+What one node writes to `/shared` the others see, but a file another node is already waiting
+for can take up to half a minute to appear, and appends from several nodes to one file can
+be lost. What is written there counts against node 0's `storage_mb`.
+
+A verifier's `nodes` is its own, one unless its table names more; a verifier without a table
+spans the agent's. A snapshot verifier boots each of its nodes from the agent's node of the
+same number, so it spans no more nodes than the agent. A verifier booted from the agent's
+snapshot, or viewing its volumes, sees the agent's `/shared` as the agent left it,
+read-only, so that it never changes what another round or a later turn of the agent starts
+from; a Sandbox of the agent booted from a snapshot gets a copy of it, and a verifier that
+copies the agent's artifacts sees none of it. Only some Providers join machines into one
+Sandbox
 ([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#provider-ids-and-profiles));
 the others refuse a Task that names more than one node before anything starts.
 

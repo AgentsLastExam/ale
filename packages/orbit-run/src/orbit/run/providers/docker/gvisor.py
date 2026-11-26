@@ -24,6 +24,7 @@ __all__ = [
     "ARGUMENTS",
     "BANNER",
     "BUILD",
+    "BUILD_ID",
     "DRIVERS",
     "ENGINE_CAPABILITIES",
     "ENGINE_STORAGE",
@@ -81,9 +82,11 @@ ENGINE_CAPABILITIES = ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE")
 #: with whiteouts, which the Host's overlayfs, the sandbox's root, refuses to create.
 ENGINE_STORAGE = ("/var/lib/docker", "/var/lib/containerd", "/var/lib/containers")
 #: The version of Orbit's build of runsc this engine runs, ``VERSION`` in
-#: images/runtimes/gvisor/build.sh, and what ``runsc --version`` reports of it.
-VERSION = "0.1.5"
-BUILD = f"+orbit.{VERSION}"
+#: images/runtimes/gvisor/build.sh; the id of that build, which ``build.sh --id`` prints and
+#: which tells the builds of one version apart; and what ``runsc --version`` reports of it.
+VERSION = "0.1.0"
+BUILD_ID = "f76fcb080776"
+BUILD = f"+orbit.{VERSION}.{BUILD_ID}"
 #: The ``runsc`` command that lists the NVIDIA driver versions nvproxy supports.
 DRIVERS = ("nvproxy", "list-supported-drivers")
 #: What the kernel log of every gVisor sandbox starts with.

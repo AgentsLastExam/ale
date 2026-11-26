@@ -1,6 +1,8 @@
 """Slurm selection must find one feasible allocation of alike compute nodes."""
 
 import json
+import os
+import stat
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +15,7 @@ from orbit.core.config import RunConfig
 from orbit.core.errors import AllocationEndedError, ProviderCapabilityError, ProviderStartError
 from orbit.core.sandbox import (
     ImageKind,
+    ImageRef,
     PreparedTaskImage,
     SandboxRequest,
     SandboxRole,
@@ -22,12 +25,14 @@ from orbit.core.sandbox import (
 from orbit.core.taskspec import NetworkMode, NetworkPolicy, OperatingSystem, Resources
 from orbit.run.oci import Reference, api, qualified
 from orbit.run.providers import ProviderRegistry
+from orbit.run.providers.docker import gvisor
 from orbit.run.providers.slurm import images, worker
-from orbit.run.providers.slurm.job import CACHE, Job, JobReady
+from orbit.run.providers.slurm.job import Job, JobReady
 from orbit.run.providers.slurm.job import seconds as job_seconds
 from orbit.run.providers.slurm.provider import (
     JOB_OVERHEAD_MB,
     MAX_SAVES,
+    SlurmProvider,
     _capacity,
     _Chain,
     _handle,
@@ -37,6 +42,9 @@ from orbit.run.providers.slurm.provider import (
     _volume_specs,
     step_memory_mb,
 )
+
+#: Orbit's directory on the cluster by default, below the home.
+CACHE = ".cache/orbit/slurm"
 
 
 def provider(max_nodes=1):
@@ -74,7 +82,7 @@ def provider(max_nodes=1):
         (Resources(gpus=2, gpu_memory_mb=100000), False),
         (Resources(cpus=8, gpus=1, gpu_types=("H100",)), False),
         (Resources(gpus=3), False),
-        (Resources(storage_mb=1000), False),
+        (Resources(storage_mb=1000), True),
         (Resources(container_features=("nested_containers", "raw_sockets")), False),
         (Resources(container_features=("nested_containers", "mount", "fuse")), True),
         (Resources(nodes=2), False),
@@ -196,7 +204,7 @@ def running_jobs(monkeypatch):
 
 
 def chain(cpus=4, memory_mb=8192, gpus=2, nodes=1):
-    job = Job(provider(max_nodes=nodes).config.partitions[1])
+    job = Job(provider(max_nodes=nodes).config, provider(max_nodes=nodes).config.partitions[1])
     names = tuple(f"n{rank}" for rank in range(nodes))
     return _Chain(
         job=job,
@@ -285,7 +293,7 @@ async def test_a_snapshot_boot_that_does_not_fit_gets_an_allocation_that_loads_i
     monkeypatch.setattr(slurm, "_allocate", allocate)
     monkeypatch.setattr(slurm, "_load", load)
     # Both images were prepared for the cluster.
-    monkeypatch.setattr(images, "recorded", lambda image: {"user": "user"})
+    monkeypatch.setattr(images, "recorded", lambda config, image: {"user": "user"})
     image = PreparedTaskImage(
         kind=ImageKind.CONTAINER,
         source="external-ref",
@@ -388,7 +396,7 @@ async def test_a_reference_pinned_by_digest_needs_no_registry():
 async def test_an_image_is_prepared_on_the_cluster_once_per_key(tmp_path, monkeypatch):
     """The cache keeps what a preparation job saved; one whose archive is gone is prepared
     again."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     prepared = []
 
     async def run_job(config, recipe):
@@ -403,11 +411,13 @@ async def test_an_image_is_prepared_on_the_cluster_once_per_key(tmp_path, monkey
     )
     first, reused = await images.prepare(config, recipe)
     assert not reused and first.prepared_identity == OTHER
-    assert first.runtime_ref == images.archive(PREPARED) and images.recorded(first)
+    assert first.runtime_ref == images.archive(PREPARED) and images.recorded(
+        provider().config, first
+    )
     again, reused = await images.prepare(config, recipe)
     assert reused and again == first and prepared == [PREPARED]
     (tmp_path / CACHE / first.runtime_ref).unlink()
-    assert not images.recorded(first)
+    assert not images.recorded(provider().config, first)
     _, reused = await images.prepare(config, recipe)
     assert not reused and prepared == [PREPARED, PREPARED]
     # Images are prepared where no GPU is held.
@@ -603,7 +613,7 @@ async def test_an_allocation_whose_deadline_came_ends_though_a_verifier_was_to_b
 async def test_a_snapshot_of_an_allocation_slurm_ended_is_destroyed_with_its_files(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     slurm = provider()
     held = chain()
     snapshot = _saved(held)
@@ -678,7 +688,8 @@ async def test_an_allocations_deadline_is_slurms_own_count_less_its_drain(monkey
     async def left(job):
         return 3600
 
-    monkeypatch.setattr(Job, "stage", lambda job, spec, **_: None)
+    staged = []
+    monkeypatch.setattr(Job, "stage", lambda job, spec, **_: staged.append(spec))
     monkeypatch.setattr(Job, "submit", nothing)
     monkeypatch.setattr(Job, "ready", ready)
     monkeypatch.setattr(Job, "time_left", left)
@@ -697,6 +708,8 @@ async def test_an_allocations_deadline_is_slurms_own_count_less_its_drain(monkey
         patient=True,
     )
     assert waited == [slurm.config.queue_timeout_sec, None]
+    # Its nodes fetch the gVisor build this engine runs.
+    assert (staged[0]["version"], staged[0]["build"]) == (gvisor.VERSION, gvisor.BUILD_ID)
 
 
 @pytest.mark.asyncio
@@ -754,7 +767,7 @@ async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
     and then; any other gives up at it."""
     from orbit.run.providers.slurm import job as job_module
 
-    monkeypatch.setattr(job_module, "cache", lambda: tmp_path)
+    monkeypatch.setattr(job_module, "cache", lambda config: tmp_path)
     monkeypatch.setattr(job_module, "QUEUE_NOTICE_SEC", 0)
     clock = [0.0]
     states = ["PENDING"] * 5 + ["RUNNING"]
@@ -779,7 +792,7 @@ async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
     )
     monkeypatch.setattr(Job, "state", state)
     monkeypatch.setattr(Job, "pending_reason", reason)
-    job = Job(provider().config.partitions[0])
+    job = Job(provider().config, provider().config.partitions[0])
     job.directory.mkdir()
     with caplog.at_level("INFO", logger="orbit.execution"):
         ready = await job.ready(None)
@@ -789,14 +802,14 @@ async def test_a_job_without_a_queue_deadline_waits_until_slurm_starts_it(
     )
     states[:] = ["PENDING"] * 5
     with pytest.raises(ProviderStartError, match="during queueing"):
-        await Job(provider().config.partitions[0]).ready(900)
+        await Job(provider().config, provider().config.partitions[0]).ready(900)
 
 
 @pytest.mark.asyncio
 async def test_a_written_out_snapshot_of_an_allocation_slurm_ended_boots_from_its_archive(
     monkeypatch,
 ):
-    """Its store went with the allocation, but the archive on the shared home did not."""
+    """Its store went with the allocation, but the archive in the cache did not."""
     slurm = provider()
     held = chain(cpus=2, memory_mb=step_memory_mb(4096), gpus=1)
     snapshot = _saved(held)
@@ -874,7 +887,7 @@ async def test_each_node_of_a_sandbox_boots_from_the_same_node_of_its_snapshot(m
     snapshot = _group_snapshot(held)
     handle = _handle(held.job, "1")
     slurm.snapshots[handle] = (held, snapshot)
-    monkeypatch.setattr(images, "recorded", lambda image: {"user": "user"})
+    monkeypatch.setattr(images, "recorded", lambda config, image: {"user": "user"})
 
     async def load(chain, image):
         return image.prepared_identity
@@ -908,7 +921,7 @@ async def test_each_node_of_a_sandbox_boots_from_the_same_node_of_its_snapshot(m
 
 @pytest.mark.asyncio
 async def test_each_node_writes_its_own_part_of_a_snapshot_out(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / CACHE / "snapshots").mkdir(parents=True)
     slurm = provider(max_nodes=2)
     held = chain(nodes=2)
@@ -1024,29 +1037,41 @@ async def test_a_command_gets_the_nodes_variables_below_the_proxys_and_its_own()
 
 
 @pytest.mark.asyncio
-async def test_each_nodes_daemon_gets_its_variables_and_its_relays_while_sealed():
+async def test_each_nodes_sshd_gets_its_variables_and_its_relays_while_sealed():
+    from orbit.run.guestd import nodes
     from orbit.run.providers.slurm.provider import SlurmSandbox
 
-    written = {}
+    joined = {}
 
     class Client:
         def __init__(self, name):
             self.name = name
 
-        async def write_file(self, path, data):
-            written[(self.name, path)] = json.loads(data)
+        async def exec(self, argv, env):
+            assert argv[-1] == "join"
+            joined[self.name] = json.loads(env[nodes.VARIABLE])
+            return 0, "", "", False
 
     fake = SimpleNamespace(
         nodes=("n0", "n1"),
         _clients=(Client("n0"), Client("n1")),
         _node_variables=({"ORBIT_NODE_RANK": "0"}, {"ORBIT_NODE_RANK": "1"}),
         _peers=("node0", "node1"),
+        request=SimpleNamespace(user="agent"),
+        keys={"host": ["private", "ssh-ed25519 AAAA orbit-host"]},
     )
-    await SlurmSandbox._peer_variables(fake, ["127.0.0.1:1", "127.0.0.1:2"])
-    sealed = written[("n1", worker.PEERS_ENV)]
-    assert sealed["ORBIT_NODE_RANK"] == "1" and sealed["HTTP_PROXY"] == "http://127.0.0.1:2"
-    await SlurmSandbox._peer_variables(fake, [None, None])
-    assert written[("n1", worker.PEERS_ENV)] == {"ORBIT_NODE_RANK": "1"}
+    await SlurmSandbox.join(fake, ["127.0.0.1:1", "127.0.0.1:2"])
+    sealed = joined["n1"]
+    assert (sealed["rank"], sealed["names"], sealed["addresses"]) == (
+        1,
+        ["node0", "node1"],
+        ["10.214.0.1", "10.214.0.2"],
+    )
+    assert sealed["account"] == "agent" and sealed["keys"] == fake.keys
+    assert sealed["variables"]["ORBIT_NODE_RANK"] == "1"
+    assert sealed["variables"]["HTTP_PROXY"] == "http://127.0.0.1:2"
+    await SlurmSandbox.join(fake, [None, None])
+    assert joined["n1"]["variables"] == {"ORBIT_NODE_RANK": "1"}
 
 
 def test_a_node_gives_only_its_hcas_whose_infiniband_port_is_active(tmp_path):
@@ -1079,7 +1104,7 @@ def test_a_job_sweeps_only_empty_store_directories_some_minutes_old(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_snapshot_record_of_another_form_is_left_out_of_the_listing(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     files = tmp_path / CACHE / "snapshots"
     files.mkdir(parents=True)
     (files / "orbit-old-1.json").write_text(
@@ -1088,3 +1113,215 @@ async def test_a_snapshot_record_of_another_form_is_left_out_of_the_listing(tmp_
     assert await provider().list_retained() == []
     with pytest.raises(ProviderCapabilityError, match="records snapshots otherwise"):
         await provider()._boot(_snapshot_request("slurm:orbit-old/1"), ())
+
+
+#: Root reads and changes every mode, which these show the account's copy and removal handle.
+_AS_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the modes these check")
+
+
+@_AS_ROOT
+def test_a_shared_directory_is_copied_whole_its_links_modes_and_times_too(tmp_path):
+    source = tmp_path / "source"
+    (source / "pkg/sub").mkdir(parents=True)
+    (source / "pkg/m.py").write_text("x = 1\n")
+    (source / "pkg/m.py").chmod(0o640)
+    os.utime(source / "pkg/m.py", ns=(1_000_000_000, 2_000_000_000))
+    (source / "run.sh").write_text("#!/bin/sh\n")
+    (source / "run.sh").chmod(0o755)
+    (source / "pkg/link").symlink_to("m.py")
+    os.link(source / "pkg/m.py", source / "pkg/sub/hard.py")
+    os.mkfifo(source / "pipe", 0o600)
+    (source / "secret").write_text("kept")
+    (source / "secret").chmod(0)
+    (source / "pkg/sub").chmod(0o500)
+    destination = tmp_path / "copy"
+    worker.copy_tree(str(source), str(destination))
+    assert (destination / "pkg/m.py").read_text() == "x = 1\n"
+    assert stat.S_IMODE((destination / "pkg/m.py").stat().st_mode) == 0o640
+    assert (destination / "pkg/m.py").stat().st_mtime_ns == 2_000_000_000
+    assert stat.S_IMODE((destination / "run.sh").stat().st_mode) == 0o755
+    assert os.readlink(destination / "pkg/link") == "m.py"
+    assert (destination / "pkg/m.py").stat().st_ino == (
+        destination / "pkg/sub/hard.py"
+    ).stat().st_ino
+    assert stat.S_ISFIFO((destination / "pipe").lstat().st_mode)
+    assert stat.S_IMODE((destination / "secret").stat().st_mode) == 0
+    assert stat.S_IMODE((source / "secret").stat().st_mode) == 0
+    assert stat.S_IMODE((destination / "pkg/sub").stat().st_mode) == 0o500
+    worker.remove_tree(str(destination))
+    worker.remove_tree(str(source))
+    assert not destination.exists() and not source.exists()
+    worker.remove_tree(str(source))  # nothing left to remove
+
+
+@_AS_ROOT
+def test_a_shared_directory_its_owner_may_not_list_is_removed_too(tmp_path):
+    root = tmp_path / "shared"
+    (root / "locked/inner").mkdir(parents=True)
+    (root / "locked/inner/f").write_text("x")
+    (root / "locked/inner").chmod(0)
+    (root / "locked").chmod(0)
+    worker.remove_tree(str(root))
+    assert not root.exists()
+
+
+def test_what_a_node_wrote_counts_each_files_blocks_once(tmp_path):
+    with open(tmp_path / "a", "wb") as file:
+        file.write(os.urandom(1 << 20))
+        os.fsync(file.fileno())  # so that a file system that allocates lazily has its blocks
+    os.link(tmp_path / "a", tmp_path / "b")
+    with open(tmp_path / "sparse", "wb") as file:
+        file.truncate(1 << 30)
+    counted = worker.usage([str(tmp_path), str(tmp_path / "missing")])
+    assert (1 << 20) <= counted < (1 << 20) + (64 << 10)
+
+
+def test_a_sandbox_far_below_its_storage_is_measured_rarely_and_near_it_often():
+    from orbit.run.providers import storage
+
+    assert storage.interval(0) == storage.interval(-5) == storage.MIN_SEC
+    assert storage.interval(10 << 30) == storage.MIN_SEC
+    assert storage.interval(100 << 30) == 50.0
+    assert storage.interval(10 << 40) == storage.MAX_SEC
+    schedule = storage.measure_schedule(4096)
+    assert schedule["storage_mb"] == 4096
+    for headroom in (0, 100 << 30, 10 << 40):
+        assert worker.interval(schedule, headroom) == storage.interval(headroom)
+    # Two nodes write what node 0 counts: twice as soon.
+    assert worker.interval(storage.measure_schedule(4096, writers=2), 100 << 30) == 25.0
+
+
+@pytest.mark.asyncio
+async def test_a_job_goes_to_the_account_and_the_partitions_constraint(monkeypatch, tmp_path):
+    from orbit.core.config import SlurmPartition, SlurmProviderConfig
+    from orbit.run.providers.slurm import job as job_module
+
+    submitted = []
+
+    async def slurm(*argv, **_):
+        submitted.append(argv)
+        return "4242;cluster"
+
+    monkeypatch.setattr(job_module, "slurm", slurm)
+    part = SlurmPartition(name="gpu", qos="short", max_cpus=8, max_memory_mb=8192, constraint="ib")
+    config = SlurmProviderConfig(
+        partitions=(part,), account="project-a", shared_fs_dir=str(tmp_path), node_local_dir="/l/$U"
+    )
+    job = Job(config, part)
+    job.stage({"seeds": []})
+    assert json.loads((job.directory / "allocation.json").read_text())["node_local_dir"] == "/l/$U"
+    await job.submit(cpus=2, memory_mb=1024, gpus=0, minutes=10)
+    command = submitted[0][-1]
+    assert "--account=project-a" in command and "--constraint=ib" in command
+    assert "--qos=short" in command and job.id == "4242"
+    bare = part.model_copy(update={"constraint": None})
+    plain = Job(SlurmProviderConfig(partitions=(bare,), shared_fs_dir=str(tmp_path)), bare)
+    plain.stage({"seeds": []})
+    submitted.clear()
+    await plain.submit(cpus=2, memory_mb=1024, gpus=0, minutes=10)
+    assert "--account" not in submitted[0][-1] and "--constraint" not in submitted[0][-1]
+
+
+def test_a_node_keeps_its_stores_where_the_configuration_names_expanded_there(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SLURM_JOB_ID", "7")
+    monkeypatch.setenv("PLACE", str(tmp_path / "local"))
+    monkeypatch.setattr(worker.signal, "signal", lambda *_: None)
+    directory, _, scratch = worker.store({"node_local_dir": "$PLACE/stores"})
+    assert scratch == tmp_path / "local/stores" and Path(directory).parent == scratch
+    assert (Path(directory) / worker.OWNER).read_text() == "7"
+    monkeypatch.setenv("SLURM_TMPDIR", str(tmp_path / "slurm"))
+    (tmp_path / "slurm").mkdir()
+    _, _, default = worker.store({"node_local_dir": None})
+    assert default == tmp_path / "slurm"
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_a_node_stopped_past_its_storage_says_so(tmp_path):
+    from orbit.core.errors import GuestUnreachableError, StorageExhaustedError
+    from orbit.run.providers.slurm.job import JobTransport
+
+    box = tmp_path / "sandboxes" / "3" / "nodes" / "1"
+    box.mkdir(parents=True)
+    (box / "storage").write_text(json.dumps(dict(written_mb=4102, storage_mb=4096)))
+
+    async def ended():
+        return ""
+
+    async def settled(seconds):
+        return None
+
+    job = SimpleNamespace(id="9", directory=tmp_path, ended=ended)
+    watcher = SimpleNamespace(settled=settled, oom_killed=lambda: "")
+    transport = JobTransport(["true"], SimpleNamespace(job=job, index="3"), None, [watcher] * 2)
+    explained = await transport.explain(GuestUnreachableError("lost"))
+    assert isinstance(explained, StorageExhaustedError)
+    assert str(explained) == (
+        "Orbit's storage watch stopped the Sandbox: node 1 wrote 4102 MiB over its image, past "
+        "the 4096 MiB its Task declares"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_shared_directory_stays_while_a_snapshot_written_out_names_it(tmp_path):
+    from orbit.core.config import SlurmProviderConfig
+    from orbit.run.providers.slurm import SlurmProvider
+
+    slurm = SlurmProvider(SlurmProviderConfig(shared_fs_dir=str(tmp_path)))
+    (tmp_path / "shared" / "orbit-a-1").mkdir(parents=True)
+    (tmp_path / "shared" / "orbit-a-1" / "f").write_text("kept")
+    (tmp_path / "snapshots").mkdir()
+    record = tmp_path / "snapshots" / "orbit-a-1.json"
+    record.write_text(json.dumps(dict(shared="shared/orbit-a-1", written=[5, 7])))
+    assert slurm._snapshot_state("slurm:orbit-a/1") == ("shared/orbit-a-1", (5, 7))
+    slurm.shared_users["shared/orbit-a-1"] = 1
+    record.unlink()
+    await slurm.release_shared("shared/orbit-a-1")
+    assert (tmp_path / "shared" / "orbit-a-1" / "f").exists()  # a Sandbox still uses it
+    slurm.shared_users["shared/orbit-a-1"] = 0
+    record.write_text(json.dumps(dict(shared="shared/orbit-a-1")))
+    await slurm.release_shared("shared/orbit-a-1")
+    assert (tmp_path / "shared" / "orbit-a-1").exists()  # the written-out snapshot keeps it
+    record.unlink()
+    await slurm.release_shared("shared/orbit-a-1")
+    assert not (tmp_path / "shared" / "orbit-a-1").exists()
+    assert slurm._snapshot_state("slurm:orbit-a/1") == (None, ())
+
+
+@_AS_ROOT
+def test_a_walk_follows_no_link_and_gives_an_unsearchable_directory_its_mode_back(tmp_path):
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "big").write_bytes(b"x" * (1 << 20))
+    root = tmp_path / "shared"
+    (root / "hidden").mkdir(parents=True)
+    (root / "hidden" / "f").write_bytes(b"y" * 8192)
+    (root / "hidden").chmod(0o644)  # listable, not searchable
+    (root / "away").symlink_to(tmp_path / "outside")
+    counted = worker.usage([str(root)])
+    assert 8192 <= counted < (1 << 20)
+    assert stat.S_IMODE((root / "hidden").stat().st_mode) == 0o644
+    worker.remove_tree(str(root))
+    assert not root.exists() and (tmp_path / "outside" / "big").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_image_named_without_a_task_carries_the_nodes_openssh(monkeypatch):
+    """No Task says whether a Sandbox of a bare reference spans several nodes."""
+    asked = []
+
+    async def pin(reference):
+        return reference + "@sha256:" + "a" * 64
+
+    async def prepare_recipe(self, recipe):
+        asked.append(recipe)
+        return "prepared", False
+
+    monkeypatch.setattr(images, "pin", pin)
+    monkeypatch.setattr(SlurmProvider, "prepare_recipe", prepare_recipe)
+    await provider().prepare_image(ImageRef(kind=ImageKind.CONTAINER, reference="base:1"))
+    (recipe,) = asked
+    assert recipe.multinode
+    shape = dict(reference=recipe.reference, context=None, user=recipe.user, keep_alive=False)
+    assert recipe.key == images.key("external-ref", **shape, multinode=True)
+    assert recipe.key != images.key("external-ref", **shape, multinode=False)

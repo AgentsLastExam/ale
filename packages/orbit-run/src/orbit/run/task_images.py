@@ -257,7 +257,9 @@ async def prepare_task_image_result(task: Task, provider: Provider) -> ImagePrep
         if kind is ImageKind.CONTAINER:
             image = await _stage(
                 "framework-layer",
-                _framed_reference(image, user=spec.user, keep_alive=spec.keep_alive),
+                _framed_reference(
+                    image, user=spec.user, keep_alive=spec.keep_alive, multinode=spec.multinode
+                ),
             )
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
@@ -300,6 +302,7 @@ async def prepare_task_image_result(task: Task, provider: Provider) -> ImagePrep
         source="solver-local",
         user=spec.user,
         keep_alive=spec.keep_alive,
+        multinode=spec.multinode,
         build_timeout_sec=spec.build_timeout_sec,
     )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
@@ -409,7 +412,12 @@ async def prepare_verifier_image_result(
         if kind is ImageKind.CONTAINER:
             image = await _stage(
                 "framework-layer",
-                _framed_reference(image, user=declared.user, keep_alive=declared.keep_alive),
+                _framed_reference(
+                    image,
+                    user=declared.user,
+                    keep_alive=declared.keep_alive,
+                    multinode=declared.multinode,
+                ),
             )
             steps.append(
                 ImagePreparationStep("framework-layer", "executed", image.prepared_identity)
@@ -456,6 +464,7 @@ async def prepare_verifier_image_result(
         source=source,
         user=declared.user,
         keep_alive=declared.keep_alive,
+        multinode=declared.multinode,
         build_timeout_sec=declared.build_timeout_sec,
     )
     image = await _stage("artifact-check", provider.prepare_image(candidate))
@@ -583,6 +592,7 @@ async def _on_cluster(
         context=_context_identity(context, exclude=exclude) if context else None,
         user=image.user,
         keep_alive=image.keep_alive,
+        multinode=image.multinode,
     )
     prepared, reused = await _stage(
         "slurm-preparation",
@@ -596,6 +606,7 @@ async def _on_cluster(
                 source_identity=source_identity,
                 user=image.user,
                 keep_alive=image.keep_alive,
+                multinode=image.multinode,
                 timeout_sec=image.build_timeout_sec,
             )
         ),
@@ -635,6 +646,7 @@ async def _prepare_local(
     source: str,
     user: str,
     keep_alive: bool,
+    multinode: bool,
     build_timeout_sec: float,
 ) -> tuple[PreparedTaskImage, list[ImagePreparationStep]]:
     """The Task's own container build with the framework layer on top, built once per input.
@@ -648,7 +660,7 @@ async def _prepare_local(
         {
             "source": source,
             "context": _context_identity(context, exclude=exclude),
-            "framework": framework_identity(user=user, vm=False),
+            "framework": framework_identity(user=user, vm=False, multinode=multinode),
             # Only when set, so every other Task finds the image it recorded.
             **({"command": KEEP_ALIVE} if keep_alive else {}),
         }
@@ -674,7 +686,9 @@ async def _prepare_local(
                 )
                 layered = await _stage(
                     "framework-layer",
-                    with_framework(build.runtime_ref, user=user, keep_alive=keep_alive),
+                    with_framework(
+                        build.runtime_ref, user=user, keep_alive=keep_alive, multinode=multinode
+                    ),
                 )
                 found = (
                     build.oci_identity,
@@ -761,9 +775,11 @@ def _record(record: Path, built: str, build: _OciBuild) -> None:
 
 
 async def _framed_reference(
-    image: PreparedTaskImage, *, user: str, keep_alive: bool
+    image: PreparedTaskImage, *, user: str, keep_alive: bool, multinode: bool
 ) -> PreparedTaskImage:
-    layered = await with_framework(image.runtime_ref, user=user, keep_alive=keep_alive)
+    layered = await with_framework(
+        image.runtime_ref, user=user, keep_alive=keep_alive, multinode=multinode
+    )
     return image.model_copy(update={"runtime_ref": layered, "prepared_identity": layered})
 
 

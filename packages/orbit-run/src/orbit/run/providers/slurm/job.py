@@ -1,5 +1,5 @@
 """Submit and drive one batch job, and the Sandboxes in it, from the machine Orbit runs on: a
-login node of the cluster, whose home every compute node shares."""
+login node of the cluster, which shares Orbit's cache with every compute node."""
 
 from __future__ import annotations
 
@@ -16,33 +16,34 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from orbit.core.config import SlurmPartition
+from orbit.core.config import SlurmPartition, SlurmProviderConfig
 from orbit.core.errors import (
     AllocationEndedError,
     GuestUnreachableError,
     MemoryExhaustedError,
     ProviderStartError,
+    StorageExhaustedError,
 )
 from orbit.core.sandbox import GpuDevice
 from orbit.run.process import run
 from orbit.run.providers.memory import GuestEvents
 from orbit.run.transport import StdioTransport
 
-#: Below the account's home, which the login node and every compute node share.
-CACHE = ".cache/orbit/slurm"
 #: How Slurm records a job it ended itself: at its wall time, for a job of higher
 #: priority, or as its node failed.
 ENDED = {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "DEADLINE"}
-#: Below :data:`CACHE`: snapshots another allocation boots from, and the images prepared for
-#: the cluster, each by its key.
+#: Below :func:`cache`: snapshots another allocation boots from, the images prepared for
+#: the cluster, each by its key, and Sandboxes' shared directories.
 SNAPSHOTS = "snapshots"
 IMAGES = "images"
+SHARED = "shared"
 #: How often a job still waiting in the queue says so, with Slurm's reason.
 QUEUE_NOTICE_SEC = 600
 
 
-def cache() -> Path:
-    return Path.home() / CACHE
+def cache(config: SlurmProviderConfig) -> Path:
+    """Orbit's directory on the cluster's shared file system."""
+    return Path(config.shared_fs_dir).expanduser()
 
 
 async def slurm(*argv: str, timeout: float = 60) -> str:
@@ -127,10 +128,11 @@ class Job:
     """One batch job of one or more alike nodes, whose batch step runs each Sandbox started
     in it as a step of its own over the first nodes it spans."""
 
-    def __init__(self, partition: SlurmPartition) -> None:
+    def __init__(self, config: SlurmProviderConfig, partition: SlurmPartition) -> None:
+        self.config = config
         self.partition = partition
         self.name = "orbit-" + uuid.uuid4().hex
-        self.directory = cache() / self.name
+        self.directory = cache(config) / self.name
         self.id = ""
 
     @property
@@ -138,11 +140,13 @@ class Job:
         return self.id or self.name
 
     def stage(self, spec: dict[str, object], *, name: str = "allocation.json") -> None:
-        """Give the job its directory, the worker and the worker's input, as ``name``."""
-        cache().mkdir(mode=0o700, parents=True, exist_ok=True)
+        """Give the job its directory, the worker and the worker's input, as ``name``, with
+        where its nodes keep their stores."""
+        cache(self.config).mkdir(mode=0o700, parents=True, exist_ok=True)
         self.directory.mkdir(mode=0o700)
         (self.directory / "stop").touch()
         shutil.copyfile(Path(__file__).with_name("worker.py"), self.directory / "worker.py")
+        spec = {**spec, "node_local_dir": self.config.node_local_dir}
         write(self.directory / name, json.dumps(spec).encode())
 
     async def submit(
@@ -173,6 +177,10 @@ class Job:
         ]
         if self.partition.qos:
             args.append("--qos=" + self.partition.qos)
+        if self.config.account:
+            args.append("--account=" + self.config.account)
+        if self.partition.constraint:
+            args.append("--constraint=" + self.partition.constraint)
         if gpus:
             args.append(f"--gres=gpu:{gpus}")
         args.append(f"--wrap=exec python3 -I worker.py {command}")
@@ -254,10 +262,10 @@ class Job:
 
     async def save(
         self, index: str, *, nodes: int, timeout: int = 1800
-    ) -> list[tuple[str, dict[str, dict[str, object]]]]:
+    ) -> list[tuple[str, dict[str, dict[str, object]], int]]:
         """Stop a Sandbox and commit the disk of each of its ``nodes`` to that node's store;
-        return, for each by its number, the image and each volume's stack of layers, by
-        path."""
+        return, for each by its number, the image, each volume's stack of layers, by path,
+        and what the node holds over its image, in bytes."""
         box = self.directory / "sandboxes" / index
         (box / "stop").write_text("save")
         deadline = asyncio.get_running_loop().time() + timeout
@@ -266,7 +274,11 @@ class Job:
             if all(saved):
                 records = [json.loads(each) for each in saved]
                 return [
-                    ("sha256:" + str(record["image"]), dict(record.get("stacks") or {}))
+                    (
+                        "sha256:" + str(record["image"]),
+                        dict(record.get("stacks") or {}),
+                        int(record.get("written") or 0),
+                    )
                     for record in records
                 ]
             if error := read(box / "error"):
@@ -420,10 +432,20 @@ class JobTransport(StdioTransport):
                     f"Slurm ended job {job.id} ({ended}): what the Sandbox held since its "
                     "last save written out is lost"
                 )
+        box = job.directory / "sandboxes" / self.steps.index
+        for rank in range(len(self.watchers)):
+            if found := read(box / "nodes" / str(rank) / "storage"):
+                past = json.loads(found)
+                message = (
+                    f"Orbit's storage watch stopped the Sandbox: node {rank} wrote "
+                    f"{past['written_mb']} MiB over its image, past the {past['storage_mb']} MiB "
+                    "its Task declares"
+                )
+                logging.getLogger("orbit.execution").warning(message)
+                return StorageExhaustedError(message)
         for watcher in self.watchers:
             if counted := watcher.oom_killed():
                 return MemoryExhaustedError(f"Slurm job {job.id}: {counted} ({error})")
-        box = job.directory / "sandboxes" / self.steps.index
         counters = [box / "nodes" / str(rank) / "memory" for rank in range(len(self.watchers))]
         with contextlib.suppress(ProviderStartError):
             for _ in range(5):

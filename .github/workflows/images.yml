@@ -2,10 +2,13 @@ name: images
 
 # Every Orbit image is published once per version and never again: a version the registry
 # already has is skipped, so an image never changes under the engines and Tasks that use it.
-# The builder and runner share the engine's version (packages/orbit-run/pyproject.toml); a
-# base has its own (BASES in packages/orbit-run/src/orbit/run/__init__.py), and so does the
-# gVisor runtime (VERSION in images/runtimes/gvisor/build.sh). To publish a changed image,
-# raise its version.
+# The builder, the runners and the framework's OpenSSH share the engine's version
+# (packages/orbit-run/pyproject.toml); a base has its own (BASES in
+# packages/orbit-run/src/orbit/run/__init__.py). To publish a changed image, raise its
+# version. The gVisor runtime is the exception: its version
+# (VERSION in images/runtimes/gvisor/build.sh) stays 0.1.0 while Orbit is in development,
+# and it is published again whenever its build id (`build.sh --id`) changes, which every
+# engine checks its build against.
 
 on:
   push:
@@ -59,6 +62,9 @@ jobs:
           - repository: orbit-firecracker-runner
             dockerfile: images/runtimes/firecracker-runner/Dockerfile
             context: images/runtimes/firecracker-runner
+          - repository: orbit-multinode-ssh
+            dockerfile: images/framework/multinode-ssh/Dockerfile
+            context: images/framework/multinode-ssh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -168,7 +174,8 @@ jobs:
           "${{ steps.release.outputs.image }}"
 
   # Orbit's gVisor runtime is built by gVisor's own Bazel build, which build.sh runs before
-  # it builds the image, and has its own version: VERSION in that script.
+  # it builds the image, and is published whenever its build id (build.sh --id) differs from
+  # the registry's.
   gvisor:
     if: github.event_name != 'workflow_dispatch' || inputs.promote_repository == ''
     runs-on: ubuntu-latest
@@ -187,15 +194,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check whether this version is published
+      - name: Check whether this build is published
         id: release
         run: |
           version=$(sed -n 's/^VERSION=\([0-9.]*\)$/\1/p' images/runtimes/gvisor/build.sh)
           [ -n "$version" ] || { echo "::error::no version for orbit-gvisor"; exit 1; }
+          build=$(images/runtimes/gvisor/build.sh --id)
           image="ghcr.io/agentslastexam/orbit-gvisor:$version"
           echo "image=$image" >> "$GITHUB_OUTPUT"
-          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
-            echo "$image is already published and stays as it is"
+          published=$(docker buildx imagetools inspect "$image" --format '{{json .Image}}' \
+            2>/dev/null | python3 -c 'import json, sys
+          image = json.load(sys.stdin)
+          image = image if "config" in image else next(iter(image.values()))
+          print(image["config"].get("Labels", {}).get("orbit.gvisor.build", ""))' || true)
+          if [ "$published" = "$build" ]; then
+            echo "$image is build $build already"
             echo "published=true" >> "$GITHUB_OUTPUT"
           else
             echo "published=false" >> "$GITHUB_OUTPUT"

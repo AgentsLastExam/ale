@@ -10,6 +10,7 @@ import dataclasses
 import json
 import re
 import socket
+import subprocess
 import time
 from ipaddress import IPv4Network
 from pathlib import Path
@@ -46,6 +47,7 @@ from orbit.core.sandbox import (
 from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Resources
 from orbit.run import guestd, iptables
 from orbit.run.providers import memory
+from orbit.run.providers import storage as storage_rule
 from orbit.run.providers.docker import (
     gpu_sharing,
     gvisor,
@@ -1147,11 +1149,16 @@ async def test_a_watcher_counts_the_oom_kills_docker_does_not_record(
 
 
 def test_the_gvisor_build_orbit_runs_is_the_one_its_build_script_makes() -> None:
-    """And the one both READMEs name, in its version string and the path it installs to."""
+    """Its version and the id of the build its patches and Dockerfile make, and the version
+    both READMEs name, in its version string and the path it installs to."""
     root = Path(orbit.run.__file__).parents[5]
-    build = (root / "images/runtimes/gvisor/build.sh").read_text()
-    (version,) = re.findall(r"^VERSION=([0-9.]+)$", build, re.MULTILINE)
-    assert version == gvisor.VERSION and f"+orbit.{version}" == gvisor.BUILD
+    script = root / "images/runtimes/gvisor/build.sh"
+    (version,) = re.findall(r"^VERSION=([0-9.]+)$", script.read_text(), re.MULTILINE)
+    made = subprocess.run(
+        ["bash", str(script), "--id"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert (version, made) == (gvisor.VERSION, gvisor.BUILD_ID), "update gvisor.py's BUILD_ID"
+    assert f"+orbit.{version}.{made}" == gvisor.BUILD
     for readme in ("images/runtimes/gvisor", "packages/orbit-run/src/orbit/run/providers"):
         path = root / readme / "README.md"
         text = path.read_text()
@@ -1837,7 +1844,8 @@ def _measured(
         return left.pop(0) if len(left) > 1 else left[0]
 
     monkeypatch.setattr(storage, "run", run)
-    monkeypatch.setattr(storage, "WATCH_SEC", 0.0)
+    monkeypatch.setattr(storage_rule, "MIN_SEC", 0.0)
+    monkeypatch.setattr(storage_rule, "MAX_SEC", 0.0)
     return asked
 
 
@@ -1973,6 +1981,33 @@ async def test_the_storage_watch_measures_only_while_a_sandbox_is_driven(
     await sandbox._release()
 
 
+async def test_the_storage_watch_measures_as_often_as_the_room_left_asks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each wait before a measurement follows the room the Sandbox has left below its limit,
+    what the snapshot it booted from holds counted; the measurement past it acts once."""
+    gib = 1 << 30
+    _measured(
+        monkeypatch, (0, f"{30 * gib}\n", ""), (0, f"{89 * gib}\n", ""), (0, f"{95 * gib}\n", "")
+    )
+    headrooms: list[int] = []
+
+    def interval(headroom: int) -> float:
+        headrooms.append(headroom)
+        return 0.0
+
+    monkeypatch.setattr(storage_rule, "interval", interval)
+    acted: list[int] = []
+
+    async def act(size: int) -> None:
+        acted.append(size)
+
+    watch = storage.Watch("c", 100 * 1024, act, base=10 * gib)
+    await _until(lambda: watch._task.done())
+    assert headrooms == [90 * gib, 60 * gib, gib]
+    assert acted == [105 * gib]
+
+
 async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1984,7 +2019,9 @@ async def test_a_docker_leaf_on_an_arm64_machine_serves_no_linux_task(
     ) == ("runs arm64, not x86_64",)
 
 
-_RUNSC = "/usr/local/lib/orbit-gvisor/0.1.5/runsc"
+_RUNSC = f"/usr/local/lib/orbit-gvisor/{gvisor.VERSION}.{gvisor.BUILD_ID}/runsc"
+#: What it reports: the release, then Orbit's build of it.
+_BUILT = f"runsc version release-20261109.0{gvisor.BUILD}\n"
 _REGISTERED = dict(gvisor.ARGUMENTS)
 #: Part of what ``runsc flags`` of Orbit's build lists.
 _FLAGS = (
@@ -2008,7 +2045,7 @@ def _preflight_host(
     *,
     shims: tuple[str, ...] = (),
     devices: tuple[str, ...] = (),
-    version: str = "runsc version release-20261109.0+orbit.0.1.5\nspec: 1.2.1\n",
+    version: str = _BUILT + "spec: 1.2.1\n",
     drivers: str = "570.124.06\n580.95.05\n",
     flags: str = _FLAGS,
     flags_code: int = 0,
@@ -2142,13 +2179,15 @@ async def test_the_gvisor_preflight_finds_the_runtimes_its_sandboxes_need(
     ("version", "drivers", "needs_gpus", "refused"),
     [
         ("runsc version release-20261109.0\nspec: 1.2.1\n", "", 0, "needs Orbit's build"),
-        ("runsc version release-20261109.0+orbit.0.1.51\n", "", 0, "orbit.0.1.5 of"),
-        ("runsc version release-20261109.0+orbit.0.1.1\n", "", 0, "orbit.0.1.5 of"),
-        ("runsc version release-20261109.0+orbit.0.1.5\n", "580.95.05\n", 0, None),
-        ("runsc version release-20261109.0+orbit.0.1.5\n", "580.95.05\n", 1, "driver 570.124.06"),
-        ("runsc version release-20261109.0+orbit.0.1.5\n", "570.124.06\n", 1, None),
+        # Another build of the version, a longer id, another version.
+        (f"runsc version release-20261109.0+orbit.{gvisor.VERSION}.000000000000\n", "", 0, " of"),
+        (_BUILT.replace("\n", "0\n"), "", 0, " of"),
+        ("runsc version release-20261109.0+orbit.0.1.5\n", "", 0, " of"),
+        (_BUILT, "580.95.05\n", 0, None),
+        (_BUILT, "580.95.05\n", 1, "driver 570.124.06"),
+        (_BUILT, "570.124.06\n", 1, None),
         # With no needs, as a Node lends it, its profile offers the Host's GPUs.
-        ("runsc version release-20261109.0+orbit.0.1.5\n", "580.95.05\n", None, "570.124.06"),
+        (_BUILT, "580.95.05\n", None, "570.124.06"),
     ],
 )
 async def test_a_gvisor_leaf_runs_the_build_of_orbit_which_must_support_the_gpu_driver_here(
@@ -2170,7 +2209,7 @@ async def test_a_gvisor_leaf_runs_the_build_of_orbit_which_must_support_the_gpu_
             await preflight
     else:
         await preflight
-    if needs_gpus != 0 and "+orbit.0.1.5\n" in version:
+    if needs_gpus != 0 and version == _BUILT:
         assert ran[-1] == (_RUNSC, "nvproxy", "list-supported-drivers")
     else:
         assert all(argv[1] == "--version" for argv in ran)

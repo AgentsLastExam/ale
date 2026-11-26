@@ -1,7 +1,8 @@
 # gVisor runtime
 
 This directory builds Orbit's gVisor runtime: `runsc` from an official gVisor release with
-the patches in [`patches/`](patches/) applied in order. The patches are Orbit's own and are
+the patches in [`patches/`](patches/) applied in order, and the OpenSSH that the nodes of a
+Sandbox of several machines run. The patches are Orbit's own and are
 not sent upstream, apart from backports of upstream changes that no release has yet; a stock
 `runsc` lacks them.
 
@@ -18,6 +19,7 @@ not sent upstream, apart from backports of upstream changes that no release has 
 | `0009-runsc-sentry-oom-killer-below-cgroup-limit` | A container whose cgroup has a memory limit and no swap loses only the process the Sentry's own OOM killer chooses when its memory runs out, as under runc, instead of, at times, the whole sandbox; the Sentry counts its kills in `memory.oom_control` ([Out of memory](#out-of-memory)). |
 | `0011-rdmaproxy-mlx5-data-direct` | Under `--rdmaproxy`, NCCL in an image with a newer rdma-core's libmlx5, such as the AWS EFA installer's, uses InfiniBand on Mellanox HCAs instead of falling back to TCP sockets without an error; a backport of upstream gVisor's [#17524](https://github.com/google/gvisor/pull/17524), which no release has yet. |
 | `0012-rdmaproxy-bind-mounted-uverbs-devices` | Under `--rdmaproxy`, a container that rootless Podman gives an InfiniBand device with `--device /dev/infiniband/uverbsN` can use it, instead of finding no RDMA device (`Failed to get IB devices list: Function not implemented`) because Podman bind-mounts the device rather than listing it among the spec's devices. |
+| `0013-runsc-shared-mount` | `--shared-mount=PATH=UID:GID` makes the bind mount at `PATH` a directory other machines share, as a Slurm Sandbox's `/shared` on the cluster's network file system: an ordinary account in the sandbox can create files there, every file belongs to `UID:GID` in the sandbox while the host account keeps owning it, and the sandbox sees what other machines add to it, instead of `Operation not permitted` and listings that miss other machines' new files. |
 
 Each patch's header says what it changes, why, and how it was verified.
 
@@ -35,20 +37,29 @@ gVisor's release tarball:
                              runsc-fd-parking, gvisor-sentry-prewarmer, gvisor-proc-umounter
 ```
 
-`runsc` and its sidecars come from one build and are installed together. The image's
-version is `VERSION` in [`build.sh`](build.sh), and `runsc --version` reports the release
-and that version, such as `release-20261109.0+orbit.0.1.5`. Nothing in it depends on the
-engine, so it has its own version, raised when the build changes.
+`runsc` and its sidecars come from one build and are installed together.
+
+The image's version is `VERSION` in [`build.sh`](build.sh), 0.1.0 while Orbit is in
+development. Its build id, which `build.sh --id` prints, is a digest of the gVisor release,
+each patch's change and the `Dockerfile`'s instructions; the image carries it as the label
+`orbit.gvisor.build`, and `runsc --version` reports the release, the version and the id,
+as `release-20261109.0+orbit.0.1.0.<build id>`. A changed build is published under
+the same version, and each engine names the build it runs (`BUILD_ID` in
+`packages/orbit-run/src/orbit/run/providers/docker/gvisor.py`): Docker's preflight refuses a
+Host whose `runsc` is another build, and a Slurm node the registry's image when it is.
 
 ## Install on a Host
 
-Copy `/gvisor` into a directory of its own version, so that an upgrade never replaces the
+Copy `/gvisor` into a directory of its own build, so that an upgrade never replaces the
 binaries of a sandbox that is running:
 
 ```bash
-version=0.1.5
-dir=/usr/local/lib/orbit-gvisor/$version
-id=$(docker create ghcr.io/agentslastexam/orbit-gvisor:$version)
+version=0.1.0
+image=ghcr.io/agentslastexam/orbit-gvisor:$version
+docker pull "$image"
+build=$(docker inspect -f '{{index .Config.Labels "orbit.gvisor.build"}}' "$image")
+dir=/usr/local/lib/orbit-gvisor/$version.$build
+id=$(docker create "$image")
 sudo mkdir -p "$dir"
 docker cp "$id":/gvisor/. - | sudo tar -x -C "$dir"
 docker rm "$id"
@@ -56,14 +67,14 @@ docker rm "$id"
 ```
 
 Register it three times in `/etc/docker/daemon.json`, the same on every Host, with GPUs or
-without, and apply it with `sudo systemctl reload docker`, which leaves running containers
-alone:
+without, with the build in place of `<build>`, and apply it with `sudo systemctl reload
+docker`, which leaves running containers alone:
 
 ```json
 {
   "runtimes": {
     "runsc": {
-      "path": "/usr/local/lib/orbit-gvisor/0.1.5/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.0.<build>/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -71,7 +82,7 @@ alone:
       ]
     },
     "runsc-net-raw": {
-      "path": "/usr/local/lib/orbit-gvisor/0.1.5/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.0.<build>/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -80,7 +91,7 @@ alone:
       ]
     },
     "runsc-nested": {
-      "path": "/usr/local/lib/orbit-gvisor/0.1.5/runsc",
+      "path": "/usr/local/lib/orbit-gvisor/0.1.0.<build>/runsc",
       "runtimeArgs": [
         "--overlay2=none",
         "--allow-suid",
@@ -135,11 +146,11 @@ arguments than these, or is not this build
   NVIDIA Container Toolkit mounts into them.
 
 Under rootless Docker, copy `/gvisor` without `sudo` into a directory of the user's, such as
-`~/.local/lib/orbit-gvisor/$version`, register it in `~/.config/docker/daemon.json`, and run
-`systemctl --user reload docker`. Limits need the systemd cgroup driver and a user manager
-that delegates the `memory`, `cpu` and `pids` controllers; `runsc` reaches the manager over
-the session bus at `$DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`, else
-`/run/user/<uid>/bus`.
+`~/.local/lib/orbit-gvisor/$version.$build`, register it in `~/.config/docker/daemon.json`,
+and run `systemctl --user reload docker`. Limits need the systemd cgroup driver and a user
+manager that delegates the `memory`, `cpu` and `pids` controllers; `runsc` reaches the
+manager over the session bus at `$DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`,
+else `/run/user/<uid>/bus`.
 
 ## Out of memory
 
@@ -280,12 +291,14 @@ every patch in `patches/` in name order, and builds `//debian:gvisor-release-tar
 gVisor's Makefile, which runs Bazel in gVisor's builder container with the options of
 gVisor's own release pipeline. It then checks the tarball's layout and the version `runsc`
 reports, and builds `ghcr.io/agentslastexam/orbit-gvisor:$VERSION` from this directory's
-`Dockerfile`. When that version is already published, it warns that the local image only
-shadows the published one. It needs a rootful Docker daemon and about 15 GB in `WORKDIR`
-and Docker's storage together. On a 112-core Host it takes 5.5 minutes with an empty
-`WORKDIR`, plus the pull of gVisor's builder image the first time, and under 2 minutes
-again with the Bazel cache in `WORKDIR`.
+`Dockerfile`. When that version is already
+published, it warns that the local image only shadows the published one. It needs a rootful
+Docker daemon and about 15 GB in `WORKDIR` and Docker's storage together. On a 112-core Host
+it takes 5.5 minutes with an empty `WORKDIR`, plus the pull of gVisor's builder image the
+first time, and under 2 minutes again with the Bazel cache in `WORKDIR`.
 
-`.github/workflows/images.yml` runs it and publishes each version once. To move to another
-gVisor release, set `GVISOR_TAG` and `GVISOR_COMMIT`, rebase the patches, verify them again,
-and raise `VERSION`; a patch added or changed also raises `VERSION`.
+`.github/workflows/images.yml` runs it and publishes the image whenever the registry's has
+another build id. A patch added or changed, or a new gVisor release (`GVISOR_TAG` and
+`GVISOR_COMMIT`, with the patches rebased and verified again), changes the id: set
+`BUILD_ID` in `gvisor.py` to what `build.sh --id` prints, and every Host to the new build
+after it is published.

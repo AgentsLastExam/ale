@@ -9,7 +9,8 @@ __all__ = ["HELPER_RUNTIME", "IMAGE_REGISTRY", "__version__", "orbit_image"]
 
 __version__ = "0.2.0"
 
-#: Where Orbit publishes its images, each version once and never overwritten.
+#: Where Orbit publishes its images, each version once and never overwritten, but the gVisor
+#: runtime, which is published again as its build id changes.
 IMAGE_REGISTRY = "ghcr.io/agentslastexam"
 
 #: The current version of each Linux base. A base carries no part of the framework, so it

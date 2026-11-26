@@ -56,6 +56,7 @@ class Recipe:
     source_identity: str | None = None
     user: str = "user"
     keep_alive: bool = False
+    multinode: bool = False
     timeout_sec: float = 3600.0
 
 
@@ -71,7 +72,13 @@ async def pin(reference: str) -> str:
 
 
 def key(
-    source: str, *, reference: str | None, context: str | None, user: str, keep_alive: bool
+    source: str,
+    *,
+    reference: str | None,
+    context: str | None,
+    user: str,
+    keep_alive: bool,
+    multinode: bool,
 ) -> str:
     """The key of an image prepared from a pinned ``reference``, or a build context whose
     identity is ``context``, with the framework for ``user``: everything that goes into it."""
@@ -80,7 +87,7 @@ def key(
             "source": source,
             "reference": reference,
             "context": context,
-            "framework": framework_identity(user=user, vm=False),
+            "framework": framework_identity(user=user, vm=False, multinode=multinode),
             # Only when set, so every other image keeps its key.
             **({"command": KEEP_ALIVE} if keep_alive else {}),
         }
@@ -97,23 +104,23 @@ def build_partition(config: SlurmProviderConfig) -> SlurmPartition:
     return next((part for part in config.partitions if not part.max_gpus), config.partitions[0])
 
 
-def recorded(image: PreparedTaskImage) -> dict[str, object] | None:
+def recorded(config: SlurmProviderConfig, image: PreparedTaskImage) -> dict[str, object] | None:
     """What the cache records of ``image``, if it still holds it as it was prepared."""
-    record = cache() / IMAGES / f"{image.input_identity.removeprefix('sha256:')}.json"
+    record = cache(config) / IMAGES / f"{image.input_identity.removeprefix('sha256:')}.json"
     try:
         prepared = json.loads(record.read_text())
     except (OSError, ValueError):
         return None
     if prepared.get("image") != image.prepared_identity:
         return None
-    return prepared if (cache() / image.runtime_ref).is_file() else None
+    return prepared if (cache(config) / image.runtime_ref).is_file() else None
 
 
 async def prepare(config: SlurmProviderConfig, recipe: Recipe) -> tuple[PreparedTaskImage, bool]:
     """The image ``recipe`` describes, prepared once per key, and whether an earlier
     preparation had prepared it."""
     key = recipe.key.removeprefix("sha256:")
-    images = cache() / IMAGES
+    images = cache(config) / IMAGES
     images.mkdir(mode=0o700, parents=True, exist_ok=True)
     record = images / f"{key}.json"
     with (images / f"{key}.lock").open("a") as lock:
@@ -123,7 +130,7 @@ async def prepare(config: SlurmProviderConfig, recipe: Recipe) -> tuple[Prepared
                 prepared = json.loads(record.read_text())
             except (OSError, ValueError):
                 prepared = None
-            reused = prepared is not None and (cache() / archive(recipe.key)).is_file()
+            reused = prepared is not None and (cache(config) / archive(recipe.key)).is_file()
             if not reused:
                 prepared = await _prepare(config, recipe) | {"user": recipe.user}
                 write(record, json.dumps(prepared).encode())
@@ -147,9 +154,11 @@ async def prepare(config: SlurmProviderConfig, recipe: Recipe) -> tuple[Prepared
 async def _prepare(config: SlurmProviderConfig, recipe: Recipe) -> dict[str, object]:
     """Run the job that prepares ``recipe``; what it prepared."""
     part = build_partition(config)
-    body, tail_lines = container_framework(user=recipe.user, keep_alive=recipe.keep_alive)
-    context, python = await asyncio.to_thread(_framework, recipe.user)
-    job = Job(part)
+    body, tail_lines = container_framework(
+        user=recipe.user, keep_alive=recipe.keep_alive, multinode=recipe.multinode
+    )
+    context, python = await asyncio.to_thread(_framework, config, recipe.user)
+    job = Job(config, part)
     try:
         job.stage(
             dict(
@@ -227,9 +236,9 @@ async def _prepared(job: Job, queue_timeout: int, recipe: Recipe) -> dict[str, o
         await asyncio.sleep(2)
 
 
-def _framework(user: str) -> tuple[Path, Path]:
+def _framework(config: SlurmProviderConfig, user: str) -> tuple[Path, Path]:
     """The framework layer's files and its Python, below the cache, staged once."""
-    root = cache() / FRAMEWORK
+    root = cache(config) / FRAMEWORK
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     identity = framework_identity(user=user, vm=False).removeprefix("sha256:")
     staged = root / identity

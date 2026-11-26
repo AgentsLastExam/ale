@@ -1,0 +1,354 @@
+runsc: --shared-mount, a bind mount that other machines share
+
+What: runsc takes --shared-mount=PATH=UID:GID. The bind mount whose destination
+is PATH is mounted with shared file access (cache=remote_revalidating), as
+--file-access-mounts=shared mounts every bind mount, and with the gofer mount
+option shared_owner=UID:GID. Through directfs, such a filesystem lists a
+directory from a host FD opened for that listing, not the one the dentry
+keeps. On such a filesystem every file belongs to UID
+and GID in the sandbox, whatever its owner on the host; files, directories,
+symlinks and sockets are created without changing their owner on the host,
+through directfs and lisafs alike; synthetic files take that owner too; and a
+change of owner (chown, fchown, lchown) by a caller allowed to make it succeeds
+without changing anything, as on a file system without owners. Permissions
+are checked against that owner and the file's mode, which chmod changes as
+before.
+
+Why: a Sandbox spread over several machines shares one directory on the
+cluster's network file system, which rootless Podman bind-mounts into each
+machine's container. The gofer runs as the job's account, which an NFS server
+lets own files only for itself: gVisor created a file and then gave it the
+creating process's owner, mapped to another host uid, and NFS refused that
+(EPERM), so an ordinary account in the sandbox could create nothing there,
+while root's files took the account's own owner. And a file another machine
+added to a directory the sandbox had listed stayed missing from the
+sandbox's listings, so Python could not import it: the sentry kept the
+directory's entries as an exclusive mount does, and even uncached, listed it
+through an FD it kept open, which the NFS client answers from its cache.
+
+Verified on OpenRSI's H100 Slurm nodes (Linux 6.8, an NFSv3 home, rootless
+Podman 4.9.3), a directory of the home mounted at /shared with
+--shared-mount=/shared=1000:1000 in containers on two machines:
+- As uid 1000 and as root: creating files, hard links, symlinks, a unix
+  socket and a FIFO, renaming, chmod, flock, mmap and fsync all worked. Every
+  file showed as 1000:1000. Root's chown succeeded without changing anything.
+  The job's account removed everything on the host.
+- Node 1 saw at once each change node 0 made: a new file, rewrites in place,
+  replacement by rename, deletion and re-creation, a module in a new
+  directory and its edit, and a module added to a directory node 1 had
+  already listed. Before the listing change, Python could not import that
+  last module.
+- uid 1000 wrote 4 GiB at 1.2 GB/s, the bare node's speed.
+diff --git a/pkg/sentry/fsimpl/gofer/directfs_inode.go b/pkg/sentry/fsimpl/gofer/directfs_inode.go
+index 550a342..dd5cc86 100644
+--- a/pkg/sentry/fsimpl/gofer/directfs_inode.go
++++ b/pkg/sentry/fsimpl/gofer/directfs_inode.go
+@@ -181,10 +181,10 @@ func (fs *filesystem) newDirectfsDentry(controlFD int) (*dentry, error) {
+ 			temp.i.inode.init(&temp.i)
+ 			inode := &temp.i.inode
+ 			if stat.Mask&linux.STATX_UID != 0 {
+-				inode.uid = atomicbitops.FromUint32(stat.Uid)
++				inode.uid = atomicbitops.FromUint32(fs.ownerUID(stat.Uid))
+ 			}
+ 			if stat.Mask&linux.STATX_GID != 0 {
+-				inode.gid = atomicbitops.FromUint32(stat.Gid)
++				inode.gid = atomicbitops.FromUint32(fs.ownerGID(stat.Gid))
+ 			}
+ 			if stat.Mask&linux.STATX_SIZE != 0 {
+ 				inode.size = atomicbitops.FromUint64(stat.Size)
+@@ -401,10 +401,10 @@ func (i *directfsInode) updateMetadataFromStatxLocked(stat *unix.Statx_t) {
+ 		i.inode.mode.Store(uint32(stat.Mode))
+ 	}
+ 	if stat.Mask&linux.STATX_UID != 0 {
+-		i.inode.uid.Store(stat.Uid)
++		i.inode.uid.Store(i.fs.ownerUID(stat.Uid))
+ 	}
+ 	if stat.Mask&linux.STATX_GID != 0 {
+-		i.inode.gid.Store(stat.Gid)
++		i.inode.gid.Store(i.fs.ownerGID(stat.Gid))
+ 	}
+ 	if stat.Blksize != 0 {
+ 		i.inode.blockSize.Store(stat.Blksize)
+@@ -705,6 +705,7 @@ func (i *directfsInode) removeXattr(ctx context.Context, name string, d *dentry)
+ // getCreatedChild opens the newly created child, sets its uid/gid, constructs
+ // a disconnected dentry and returns it.
+ func (i *directfsInode) getCreatedChild(name string, uid auth.KUID, gid auth.KGID, isDir bool, createDentry bool, d *dentry) (*dentry, error) {
++	uid, gid = i.fs.hostOwner(uid, gid)
+ 	unlinkFlags := 0
+ 	extraOpenFlags := 0
+ 	if isDir {
+@@ -781,7 +782,8 @@ func (i *directfsInode) bindAt(ctx context.Context, name string, creds *auth.Cre
+ 		return nil, err
+ 	}
+ 	sockType := opts.Endpoint.(transport.Endpoint).Type()
+-	childInode, boundSocketFD, err := i.controlFDLisa.BindAt(ctx, sockType, name, opts.Mode, lisafs.UID(creds.FilesystemKUID), lisafs.GID(creds.FilesystemKGID))
++	uid, gid := i.fs.hostOwner(creds.FilesystemKUID, creds.FilesystemKGID)
++	childInode, boundSocketFD, err := i.controlFDLisa.BindAt(ctx, sockType, name, opts.Mode, lisafs.UID(uid), lisafs.GID(gid))
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -855,7 +857,17 @@ func (i *directfsInode) openCreate(name string, accessFlags uint32, mode linux.F
+ 
+ func (i *directfsInode) getDirentsLocked(recordDirent func(name string, key inoKey, dType uint8), d *dentry) error {
+ 	readFD := int(i.readFD.RacyLoad())
+-	if _, err := unix.Seek(readFD, 0, 0); err != nil {
++	if i.fs.opts.shared {
++		// A network file system's client lists a directory that stays open from what it
++		// cached of it, which misses what another machine added; one opened anew asks the
++		// server, as close-to-open consistency has it.
++		fd, err := unix.Openat(i.controlFD, ".", unix.O_RDONLY|unix.O_NONBLOCK|unix.O_DIRECTORY|hostOpenFlags, 0)
++		if err != nil {
++			return err
++		}
++		defer unix.Close(fd)
++		readFD = fd
++	} else if _, err := unix.Seek(readFD, 0, 0); err != nil {
+ 		return err
+ 	}
+ 
+diff --git a/pkg/sentry/fsimpl/gofer/directory.go b/pkg/sentry/fsimpl/gofer/directory.go
+index 88e92b1..064ef0e 100644
+--- a/pkg/sentry/fsimpl/gofer/directory.go
++++ b/pkg/sentry/fsimpl/gofer/directory.go
+@@ -132,8 +132,8 @@ func (fs *filesystem) newSyntheticDentry(opts *createSyntheticOpts) *dentry {
+ 			ino:        fs.nextIno(),
+ 			devMinor:   fs.devMinor,
+ 			mode:       atomicbitops.FromUint32(uint32(opts.mode)),
+-			uid:        atomicbitops.FromUint32(uint32(opts.kuid)),
+-			gid:        atomicbitops.FromUint32(uint32(opts.kgid)),
++			uid:        atomicbitops.FromUint32(fs.ownerUID(uint32(opts.kuid))),
++			gid:        atomicbitops.FromUint32(fs.ownerGID(uint32(opts.kgid))),
+ 			blockSize:  atomicbitops.FromUint32(uint32(hostarch.PageSize)), // arbitrary
+ 			atime:      atomicbitops.FromInt64(now),
+ 			mtime:      atomicbitops.FromInt64(now),
+diff --git a/pkg/sentry/fsimpl/gofer/gofer.go b/pkg/sentry/fsimpl/gofer/gofer.go
+index 9fca076..29dcfca 100644
+--- a/pkg/sentry/fsimpl/gofer/gofer.go
++++ b/pkg/sentry/fsimpl/gofer/gofer.go
+@@ -93,6 +93,7 @@ const (
+ 	moptDisableFifoOpen          = "disable_fifo_open"
+ 	moptCharDevicePolicy         = "char_device_policy"
+ 	moptVirtualInodeNumbers      = "virtual_inode_numbers"
++	moptSharedOwner              = "shared_owner"
+ 
+ 	// Directfs options.
+ 	moptDirectfs = "directfs"
+@@ -334,6 +335,14 @@ type filesystemOptions struct {
+ 	// sentry-handled page faults on files for which a host FD is available.
+ 	limitHostFDTranslation bool
+ 
++	// If shared is true, the filesystem is a directory that other machines share, such as
++	// one on a network file system, which may let its account own files only: every file
++	// in it belongs to sharedUID and sharedGID in the sandbox, files are created without
++	// changing their owner on the host, and changing an owner does nothing.
++	shared    bool
++	sharedUID uint32
++	sharedGID uint32
++
+ 	// If overlayfsStaleRead is true, O_RDONLY host FDs provided by the remote
+ 	// filesystem may not be coherent with writable host FDs opened later, so
+ 	// all uses of the former must be replaced by uses of the latter. This is
+@@ -616,6 +625,14 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
+ 		delete(mopts, moptLimitHostFDTranslation)
+ 		fsopts.limitHostFDTranslation = true
+ 	}
++	if owner, ok := mopts[moptSharedOwner]; ok {
++		delete(mopts, moptSharedOwner)
++		if n, err := fmt.Sscanf(owner, "%d:%d", &fsopts.sharedUID, &fsopts.sharedGID); err != nil || n != 2 {
++			ctx.Warningf("gofer.FilesystemType.GetFilesystem: invalid owner: %s=%s", moptSharedOwner, owner)
++			return nil, nil, linuxerr.EINVAL
++		}
++		fsopts.shared = true
++	}
+ 	if _, ok := mopts[moptOverlayfsStaleRead]; ok {
+ 		delete(mopts, moptOverlayfsStaleRead)
+ 		fsopts.overlayfsStaleRead = true
+@@ -1490,6 +1507,31 @@ func (d *dentry) statTo(stat *linux.Statx) {
+ 	stat.RdevMinor = d.inode.rdevMinor
+ }
+ 
++// ownerUID returns the owner a file whose host owner is uid has in the sandbox.
++func (fs *filesystem) ownerUID(uid uint32) uint32 {
++	if fs.opts.shared {
++		return fs.opts.sharedUID
++	}
++	return uid
++}
++
++// ownerGID returns the group a file whose host group is gid has in the sandbox.
++func (fs *filesystem) ownerGID(gid uint32) uint32 {
++	if fs.opts.shared {
++		return fs.opts.sharedGID
++	}
++	return gid
++}
++
++// hostOwner returns the owner a file created for uid and gid is given on the host: none,
++// leaving the creating account's, where the filesystem is shared.
++func (fs *filesystem) hostOwner(uid auth.KUID, gid auth.KGID) (auth.KUID, auth.KGID) {
++	if fs.opts.shared {
++		return auth.NoID, auth.NoID
++	}
++	return uid, gid
++}
++
+ // Precondition: fs.renameMu is locked.
+ func (d *dentry) setStat(ctx context.Context, creds *auth.Credentials, opts *vfs.SetStatOptions, mnt *vfs.Mount) error {
+ 	stat := &opts.Stat
+@@ -1503,6 +1545,13 @@ func (d *dentry) setStat(ctx context.Context, creds *auth.Credentials, opts *vfs
+ 	if err := vfs.CheckSetStat(ctx, creds, opts, mode, nil, auth.KUID(d.inode.uid.Load()), auth.KGID(d.inode.gid.Load())); err != nil {
+ 		return err
+ 	}
++	if d.inode.fs.opts.shared {
++		// Every file here has the one owner, as on a file system without owners.
++		stat.Mask &^= linux.STATX_UID | linux.STATX_GID
++		if stat.Mask == 0 {
++			return nil
++		}
++	}
+ 	if opts.NeedWritePerm {
+ 		// truncate(2), unlike ftruncate(2), acquires write access to the file
+ 		// and so fails with ETXTBSY if it is being executed. See
+diff --git a/pkg/sentry/fsimpl/gofer/lisafs_inode.go b/pkg/sentry/fsimpl/gofer/lisafs_inode.go
+index 15db5ff..5ef8eaf 100644
+--- a/pkg/sentry/fsimpl/gofer/lisafs_inode.go
++++ b/pkg/sentry/fsimpl/gofer/lisafs_inode.go
+@@ -162,10 +162,10 @@ func (fs *filesystem) newLisafsDentry(ctx context.Context, ino *lisafs.Inode) (*
+ 			temp.i.inode.init(&temp.i)
+ 			inode := &temp.i.inode
+ 			if ino.Stat.Mask&linux.STATX_UID != 0 {
+-				inode.uid = atomicbitops.FromUint32(dentryUID(lisafs.UID(ino.Stat.UID)))
++				inode.uid = atomicbitops.FromUint32(fs.ownerUID(dentryUID(lisafs.UID(ino.Stat.UID))))
+ 			}
+ 			if ino.Stat.Mask&linux.STATX_GID != 0 {
+-				inode.gid = atomicbitops.FromUint32(dentryGID(lisafs.GID(ino.Stat.GID)))
++				inode.gid = atomicbitops.FromUint32(fs.ownerGID(dentryGID(lisafs.GID(ino.Stat.GID))))
+ 			}
+ 			if ino.Stat.Mask&linux.STATX_SIZE != 0 {
+ 				inode.size = atomicbitops.FromUint64(ino.Stat.Size)
+@@ -308,10 +308,10 @@ func (i *lisafsInode) updateMetadataFromStatxLocked(stat *lisafs.Statx) {
+ 		i.inode.mode.Store(uint32(stat.Mode))
+ 	}
+ 	if stat.Mask&linux.STATX_UID != 0 {
+-		i.inode.uid.Store(dentryUID(lisafs.UID(stat.UID)))
++		i.inode.uid.Store(i.fs.ownerUID(dentryUID(lisafs.UID(stat.UID))))
+ 	}
+ 	if stat.Mask&linux.STATX_GID != 0 {
+-		i.inode.gid.Store(dentryGID(lisafs.GID(stat.GID)))
++		i.inode.gid.Store(i.fs.ownerGID(dentryGID(lisafs.GID(stat.GID))))
+ 	}
+ 	if stat.Blksize != 0 {
+ 		i.inode.blockSize.Store(stat.Blksize)
+@@ -489,7 +489,8 @@ func (i *lisafsInode) newChildDentry(ctx context.Context, childIno *lisafs.Inode
+ 
+ func (i *lisafsInode) mknod(ctx context.Context, name string, creds *auth.Credentials, opts *vfs.MknodOptions) (*dentry, error) {
+ 	if _, ok := opts.Endpoint.(transport.HostBoundEndpoint); !ok {
+-		childInode, err := i.controlFD.MknodAt(ctx, name, opts.Mode, lisafs.UID(creds.FilesystemKUID), lisafs.GID(creds.FilesystemKGID), opts.DevMinor, opts.DevMajor)
++		hostUID, hostGID := i.hostOwner(creds.FilesystemKUID, creds.FilesystemKGID)
++		childInode, err := i.controlFD.MknodAt(ctx, name, opts.Mode, hostUID, hostGID, opts.DevMinor, opts.DevMajor)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -498,7 +499,8 @@ func (i *lisafsInode) mknod(ctx context.Context, name string, creds *auth.Creden
+ 
+ 	// This mknod(2) is coming from unix bind(2), as opts.Endpoint is set.
+ 	sockType := opts.Endpoint.(transport.Endpoint).Type()
+-	childInode, boundSocketFD, err := i.controlFD.BindAt(ctx, sockType, name, opts.Mode, lisafs.UID(creds.FilesystemKUID), lisafs.GID(creds.FilesystemKGID))
++	hostUID, hostGID := i.hostOwner(creds.FilesystemKUID, creds.FilesystemKGID)
++	childInode, boundSocketFD, err := i.controlFD.BindAt(ctx, sockType, name, opts.Mode, hostUID, hostGID)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -531,7 +533,8 @@ func (i *lisafsInode) link(ctx context.Context, target *lisafsInode, name string
+ }
+ 
+ func (i *lisafsInode) mkdir(ctx context.Context, name string, mode linux.FileMode, uid auth.KUID, gid auth.KGID, createDentry bool) (*dentry, error) {
+-	childDirInode, err := i.controlFD.MkdirAt(ctx, name, mode, lisafs.UID(uid), lisafs.GID(gid))
++	hostUID, hostGID := i.hostOwner(uid, gid)
++	childDirInode, err := i.controlFD.MkdirAt(ctx, name, mode, hostUID, hostGID)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -542,7 +545,8 @@ func (i *lisafsInode) mkdir(ctx context.Context, name string, mode linux.FileMod
+ }
+ 
+ func (i *lisafsInode) symlink(ctx context.Context, name, target string, creds *auth.Credentials) (*dentry, error) {
+-	symlinkInode, err := i.controlFD.SymlinkAt(ctx, name, target, lisafs.UID(creds.FilesystemKUID), lisafs.GID(creds.FilesystemKGID))
++	hostUID, hostGID := i.hostOwner(creds.FilesystemKUID, creds.FilesystemKGID)
++	symlinkInode, err := i.controlFD.SymlinkAt(ctx, name, target, hostUID, hostGID)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -550,7 +554,8 @@ func (i *lisafsInode) symlink(ctx context.Context, name, target string, creds *a
+ }
+ 
+ func (i *lisafsInode) openCreate(ctx context.Context, name string, flags uint32, mode linux.FileMode, uid auth.KUID, gid auth.KGID, createDentry bool) (*dentry, handle, error) {
+-	ino, openFD, hostFD, err := i.controlFD.OpenCreateAt(ctx, name, flags, mode, lisafs.UID(uid), lisafs.GID(gid))
++	hostUID, hostGID := i.hostOwner(uid, gid)
++	ino, openFD, hostFD, err := i.controlFD.OpenCreateAt(ctx, name, flags, mode, hostUID, hostGID)
+ 	if err != nil {
+ 		return nil, noHandle, err
+ 	}
+@@ -753,3 +758,10 @@ func doRevalidationLisafs(ctx context.Context, vfsObj *vfs.VirtualFilesystem, st
+ 	}
+ 	return nil
+ }
++
++// hostOwner returns the owner a file created for uid and gid is given on the host, in the
++// form lisafs takes: none to change, where the filesystem is shared.
++func (i *lisafsInode) hostOwner(uid auth.KUID, gid auth.KGID) (lisafs.UID, lisafs.GID) {
++	uid, gid = i.fs.hostOwner(uid, gid)
++	return lisafs.UID(uid), lisafs.GID(gid)
++}
+diff --git a/runsc/boot/vfs.go b/runsc/boot/vfs.go
+index f3b2801..3934a06 100644
+--- a/runsc/boot/vfs.go
++++ b/runsc/boot/vfs.go
+@@ -1127,7 +1127,17 @@ func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo,
+ 		if err != nil {
+ 			return "", nil, err
+ 		}
+-		data = append(data, goferMountData(m.goferFD.Release(), getMountAccessType(conf, m.hint), conf, m.hint != nil && m.hint.SuppressDirectFS)...)
++		access := getMountAccessType(conf, m.hint)
++		path, owner, shared := strings.Cut(conf.SharedMount, "=")
++		shared = shared && path == m.mount.Destination
++		if shared {
++			// Other machines change it: every access revalidates.
++			access = config.FileAccessShared
++		}
++		data = append(data, goferMountData(m.goferFD.Release(), access, conf, m.hint != nil && m.hint.SuppressDirectFS)...)
++		if shared {
++			data = append(data, "shared_owner="+owner)
++		}
+ 		internalData = gofer.InternalFilesystemOptions{
+ 			UniqueID: checkpoint.ResourceID{
+ 				ContainerName: containerName,
+diff --git a/runsc/config/config.go b/runsc/config/config.go
+index aa6bc55..77edaa0 100644
+--- a/runsc/config/config.go
++++ b/runsc/config/config.go
+@@ -434,6 +434,12 @@ type Config struct {
+ 	// Its limit applies to the sandbox without runsc creating or joining a cgroup.
+ 	EnclosingMemoryCgroup string `flag:"enclosing-memory-cgroup"`
+ 
++	// SharedMount is PATH=UID:GID: the bind mount at PATH is a directory other machines
++	// share, such as one on a network file system that lets the sandbox's host account own
++	// files only. It is revalidated on every access, every file in it belongs to UID and GID
++	// in the sandbox, and no file's owner on the host is ever changed.
++	SharedMount string `flag:"shared-mount"`
++
+ 	// TPUProxy enables support for TPUs.
+ 	TPUProxy bool `flag:"tpuproxy"`
+ 
+diff --git a/runsc/config/flags.go b/runsc/config/flags.go
+index 1f0abad..1f54fdd 100644
+--- a/runsc/config/flags.go
++++ b/runsc/config/flags.go
+@@ -204,6 +204,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
+ 	flagSet.Bool("nvproxy-docker", false, "LEGACY: Injects nvidia-container-runtime-hook as a prestart hook. Try to use nvidia-container-runtime or `docker run --gpus` instead. Or manually add nvidia-container-runtime-hook as a prestart hook and set up NVIDIA_VISIBLE_DEVICES container environment variable.")
+ 	flagSet.String("nvproxy-driver-version", "", "NVIDIA driver ABI version to use. If empty, autodetect installed driver version. The special value 'latest' may also be used to use the latest ABI.")
+ 	flagSet.Bool("nvproxy-allow-unsupported-driver", false, "allow nvproxy to be initialized with an unsupported driver version.")
++	flagSet.String("shared-mount", "", "PATH=UID:GID: the bind mount at PATH is a directory other machines share; its files belong to UID and GID in the sandbox and keep their owner on the host.")
+ 	flagSet.String("enclosing-memory-cgroup", "", "read the sandbox memory limit from this externally managed cgroup v2 directory (with --ignore-cgroups)")
+ 	flagSet.Uint64(flagMemoryLimitHeadroom, 16<<20, "the memory, in bytes, that the sandbox keeps free below the memory limit of its host cgroup when the cgroup has no swap; an allocation that would take it closer makes the sandbox kill the application process that uses the most memory, as a guest kernel would. 0 leaves the limit to the host's OOM killer alone.")
+ 	flagSet.Uint64(flagNVProxyGPUMemoryLimit, 0, "the most device memory, in bytes, that the sandbox may allocate through nvproxy on each of its GPUs; an allocation beyond it fails as out of memory. Memory the driver allocates for itself and managed (unified) memory are not counted. 0 means no limit.")

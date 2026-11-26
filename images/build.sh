@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Make the Orbit images this engine uses available locally.
 #
-# Every Orbit image is published once per version and never overwritten. The builder and
-# runner share the engine's version (packages/orbit-run/pyproject.toml); a base has its own
-# (BASES in packages/orbit-run/src/orbit/run/__init__.py). A version the registry already
+# Every Orbit image but the gVisor runtime is published once per version and never
+# overwritten. The builder, the runners and the framework's OpenSSH share the engine's
+# version (packages/orbit-run/pyproject.toml); a base has its own (BASES in
+# packages/orbit-run/src/orbit/run/__init__.py). A version the registry already
 # has is pulled; one not published yet is built here, for testing before CI publishes it.
 # The gVisor runtime is installed on a Host rather than used from here; its own build.sh
 # builds it.
@@ -26,7 +27,7 @@ command -v "$runtime" >/dev/null 2>&1 || {
 
 engine=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/orbit-run/pyproject.toml)
 images=("$@")
-(( ${#images[@]} )) || images=(container-ubuntu22-base orbit-vm-materializer vm-ubuntu24-base orbit-qemu-runner orbit-firecracker-runner)
+(( ${#images[@]} )) || images=(container-ubuntu22-base orbit-vm-materializer vm-ubuntu24-base orbit-qemu-runner orbit-firecracker-runner orbit-multinode-ssh)
 
 for repository in "${images[@]}"; do
     case "$repository" in
@@ -35,6 +36,7 @@ for repository in "${images[@]}"; do
         orbit-vm-materializer)    dockerfile=images/builders/vm-materializer/Dockerfile context=images/builders/vm-materializer ;;
         orbit-qemu-runner)        dockerfile=images/runtimes/qemu-runner/Dockerfile context=images/runtimes/qemu-runner ;;
         orbit-firecracker-runner) dockerfile=images/runtimes/firecracker-runner/Dockerfile context=images/runtimes/firecracker-runner ;;
+        orbit-multinode-ssh)      dockerfile=images/framework/multinode-ssh/Dockerfile context=images/framework/multinode-ssh ;;
         *) echo "ERROR: unknown image: $repository" >&2; exit 1 ;;
     esac
     case "$repository" in

@@ -4,6 +4,7 @@
 # built by gVisor's own Bazel build the way gVisor builds its release tarball.
 #
 #   images/runtimes/gvisor/build.sh WORKDIR
+#   images/runtimes/gvisor/build.sh --id      prints the build's id
 #
 # WORKDIR holds the gVisor checkout, the Bazel cache (about 10 GB) and the built tarball;
 # put it on a fast local disk. The build runs Bazel in a privileged container on the local
@@ -11,25 +12,36 @@
 # ghcr.io/agentslastexam/orbit-gvisor:$VERSION; .github/workflows/images.yml publishes it.
 set -euo pipefail
 
-# This image's own version: raise it to publish a changed build. A published version is
-# never rebuilt.
-VERSION=0.1.5
+# This image's own version, which stays 0.1.0 while Orbit is in development: a changed
+# build is published under it again, and the build's id tells the builds apart.
+VERSION=0.1.0
 GVISOR_TAG=release-20261109.0
 GVISOR_COMMIT=a0e6be6fb5e03d8ebea13592f36a097c7e9a41b9
 
-(( $# == 1 )) || { echo "usage: $0 WORKDIR" >&2; exit 2; }
 here=$(cd "$(dirname "$0")" && pwd)
+# What goes into the build: the release, each patch's change in name order (not its header)
+# and this Dockerfile's instructions (not its comments). BUILD_ID in packages/orbit-run/src/orbit/run/providers/docker/gvisor.py
+# names it too, which its unit test checks.
+build_id() {
+    {
+        echo "$GVISOR_COMMIT"
+        for patch in "$here"/patches/*.patch; do sed -n '/^diff --git /,$p' "$patch"; done
+        grep -v '^[[:space:]]*#' "$here/Dockerfile"
+    } | sha256sum | cut -c1-12
+}
+if [[ ${1-} == --id ]]; then build_id; exit 0; fi
+(( $# == 1 )) || { echo "usage: $0 WORKDIR" >&2; exit 2; }
 mkdir -p "$1"
 work=$(cd "$1" && pwd)
 src=$work/gvisor
 out=$work/out
 image=ghcr.io/agentslastexam/orbit-gvisor:$VERSION
+id=$(build_id)
 # runsc reports this as its version: the upstream release, then Orbit's build of it.
-stamp=$GVISOR_TAG+orbit.$VERSION
+stamp=$GVISOR_TAG+orbit.$VERSION.$id
 
 if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
-    echo "WARNING: $image is already published; this build replaces it in the local" >&2
-    echo "         Docker only. If the patches or the release changed, raise VERSION." >&2
+    echo "WARNING: $image is published; this build replaces it in the local Docker only." >&2
 fi
 
 echo ">> checking out gVisor $GVISOR_TAG"
@@ -93,4 +105,4 @@ rm -rf "$out/check"
 
 echo ">> building $image"
 docker build --file "$here/Dockerfile" --build-arg "GVISOR_TAG=$GVISOR_TAG" \
-    --tag "$image" "$out"
+    --build-arg "BUILD_ID=$id" --tag "$image" "$out"

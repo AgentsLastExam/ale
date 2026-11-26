@@ -58,27 +58,27 @@ leaves its profiles name:
 |---|---|---|---|---|---|
 | `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models and memory nvidia-smi reports, shared by `gpu_memory_mb` and watched ([GPU memory](#gpu-memory)); none without a working nvidia-smi | yes | `raw_sockets` | — |
 | `docker:kata` | Linux containers, on the machine's architecture | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
-| `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes, but not with `nested_containers` | `user_namespaces`, `fuse` and `mount`, with `raw_sockets` in one profile and `nested_containers` in another | — |
-| `slurm` | Linux x86-64 containers on configured partitions, a Sandbox on up to a partition's `max_nodes` nodes ([Slurm nodes](#slurm-nodes)) | whole GPUs of the configured partition model, on each node | 200 in a row, but not with `nested_containers` | as the two gVisor profiles above | a solver that, with the verifier booted from its snapshot, needs more than a partition supplies; explicit writable storage limits |
+| `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes | `user_namespaces`, `fuse` and `mount`, with `raw_sockets` in one profile and `nested_containers` in another | — |
+| `slurm` | Linux x86-64 containers on configured partitions, a Sandbox on up to a partition's `max_nodes` nodes ([Slurm nodes](#slurm-nodes)) | whole GPUs of the configured partition model, on each node | 200 in a row | as the two gVisor profiles above | a solver that, with the verifier booted from its snapshot, needs more than a partition supplies |
 | `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
 | `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
 | `daytona` (scheduler) | Linux containers on x86-64 | Daytona's, whole | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
 | `fleet` (scheduler) | what the leaves lent by its registered Nodes that run this engine's framework start, online or not, read once per Run | as those leaves | as those leaves | as those leaves | as those leaves |
 
-Only `slurm` joins nodes into one Sandbox; every other leaf's profiles span one node.
-Every profile applies `open`, `block`, `allowlist` and `blocklist`, apart from Orchard's,
-which applies the last three only where setup's Softnet is the worker's; a macOS Sandbox refused
+Only `slurm` joins nodes into one Sandbox; every other leaf's profiles span one node. Every
+profile applies `open`, `block`, `allowlist` and `blocklist`, apart from Orchard's, which
+applies the last three only where setup's Softnet is the worker's; a macOS Sandbox refused
 for that names the setup that installs it. A Linux Task's container is x86-64, so a Docker
 leaf on an arm64 machine serves none. A Docker leaf reads its GPUs' models and memory once,
 from nvidia-smi, so a GPU Task goes to the next listed Provider on a Host whose GPUs it does
 not accept or have the memory it needs on each. A Sandbox that names `storage_mb` goes only
 to a leaf that holds it to that: under QEMU, Firecracker, Orchard and Daytona by a disk of
-its own, at least that size, as each one's section says, and under Docker by measuring what
-it writes and ending it past the limit, but in `docker:gvisor`'s profile for
-`nested_containers` ([Docker writable storage](#docker-writable-storage)). A Node's profiles
-are its leaves', each limited to the CPUs and memory the Node lends in all. A Node lends
-Docker under any of its runtimes, QEMU and Orchard, but not Firecracker.
+its own, at least that size, as each one's section says, and under Docker and Slurm by
+measuring what it writes and ending it past the limit ([Docker writable
+storage](#docker-writable-storage), [Slurm](#slurm)). A Node's profiles are its leaves',
+each limited to the CPUs and memory the Node lends in all. A Node lends Docker under any of
+its runtimes, QEMU and Orchard, but not Firecracker.
 
 `docker:runc` shares the Host's kernel with its Sandboxes, so a kernel exploit in one
 reaches the Host. `docker:kata` and `firecracker` give each Sandbox a VM's kernel and attach
@@ -153,7 +153,7 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the Orbit cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
 | Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the Orbit cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so its profile saves none |
-| Slurm | `podman stop`, then `podman commit` to `localhost/orbit-snapshot:<index>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there, or that the allocation would not last, gets an allocation of its own, which loads the snapshot written out with `podman save` to the shared `~/.cache/orbit/slurm/snapshots`; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
+| Slurm | `podman stop`, then `podman commit` to `localhost/orbit-snapshot:<index>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there, or that the allocation would not last, gets an allocation of its own, which loads the snapshot written out with `podman save` to `snapshots` in the cache; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
 | Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `orbit-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
 | Fleet | The Node's Provider saves it on that Node, as in its row, and Sandboxes that boot from it are placed there, on the leaf that saved it ([Placement](../../../../../../docs/specs/fleet.md#placement)). The Fleet's handle for it is `fleet:snapshot:<sandbox>`; destroying it has the Node's Provider destroy it at the Node's next heartbeat |
 
@@ -166,6 +166,7 @@ How each counts what a snapshot holds against the `storage_mb` of a Sandbox boot
 | QEMU | The overlay is the larger of the snapshot's virtual size and `storage_mb` plus its overhead, and the guest's root filesystem already holds what the solver wrote |
 | Firecracker | `snapshot.json` records `written_mb`, the writable disk's use as the guest's `df /` showed it before shutdown plus what the snapshot it booted from held; a microVM booted from it gets a writable disk of `storage_mb` less that, plus the overhead, and one whose `storage_mb` that already fills is refused before it boots, as the Task's error. Each save stacks one more layer, of eight at most, so the profile saves eight in a row (`max_saves`), and a Sandbox whose snapshot's layers and [planned saves](../../../../../../docs/specs/sandbox-image.md#provider-selection) together would exceed eight is refused before it boots |
 | Orchard | The clone is the snapshot's disk, at least `storage_mb`, with the solver's files on it |
+| Slurm | Each node's step measures, once the container has stopped, what the node holds over the image, its writable layer and its volumes' layers, plus what the snapshot it booted from held there, and the snapshot records it, written out too; a Sandbox booted from it counts that on each node, and on node 0 its `/shared` copy whole, a verifier booted from it the snapshot's own `/shared` |
 
 ## Volumes
 
@@ -178,7 +179,7 @@ of every artifact, as of any other.
 | Provider | A volume | What a snapshot keeps of it | A separate verifier's view | `storage_mb` |
 |---|---|---|---|---|
 | Docker | a named volume of its own, which Docker fills from the image | its top layer, in a stack of layers | an overlay volume of the stack under a layer of its own | counted by a helper that measures the volumes ([below](#docker-volumes)) |
-| Slurm | a Podman volume in the allocation's store, which Podman fills from the image | its top layer, in a stack of layers in the store | an overlay of the stack under a layer of its own, in the solver's allocation ([below](#slurm-volumes)) | not held |
+| Slurm | a Podman volume in the allocation's store, which Podman fills from the image | its top layer, in a stack of layers in the store | an overlay of the stack under a layer of its own, in the solver's allocation ([below](#slurm-volumes)) | counted with the writable layer by the step on its node |
 | Firecracker | an overlay of the image's directory and of each layer's, under a layer on the writable disk | the writable disk, with the root | the snapshot's disks attached read-only, and the same overlay under a layer of its own | counted with the writable disk |
 | QEMU, Linux | an overlay of the disk's own directory under `/opt/orbit/volumes/<hash>` on the disk | the disk | the snapshot's disk attached read-only once the guest is up, and an overlay of what it holds there under a layer of its own | counted with the disk |
 | QEMU, Windows | the directory on the disk, which stays one | the disk | a junction to it on a copy-on-write overlay of the snapshot's disk, attached once the guest is up | counted with the disk |
@@ -224,7 +225,7 @@ network namespace holds the Sandbox's namespace, with its slirp4netns tap and `p
 gVisor's netstack takes both. The other end of `peers` is in a second pod's namespace, the
 router's, which only the worker enters: it reaches the node's network through pasta, which
 forwards one UDP port, and holds a WireGuard device to every other node's router, whose keys
-and endpoints the nodes exchange through the job's directory on the shared home and which
+and endpoints the nodes exchange through the job's directory in the cache and which
 the worker configures over generic netlink. Policy routing in the router forwards from the
 Sandbox only to the nodes' addresses through the tunnel, and from the tunnel only to the
 Sandbox, so nothing reaches the router's uplink; WireGuard takes from each peer only its one
@@ -237,16 +238,38 @@ none of an Ethernet one, nor `rdma_cm`, `umad` or `issm`; where it has any, it r
 traffic passes no network filter of the nodes' machines; its boundary is the fabric's
 partition, which the site sets and Orbit does not.
 
-Every command on a node, node 0's through guestd and any through `orbit-exec`, gets
-`ORBIT_NODES`, `ORBIT_NODE_RANK`, `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` naming
-`peers` and, where every node has InfiniBand, `NCCL_NET=IB`, so NCCL's fallback to sockets
-is an error rather than a slow job. A command's own variables override them. `orbit-exec`
-is a shell client of a root daemon on each node ([`guestd/peers.py`](../guestd/peers.py)),
-which takes a request through a spool directory, runs it on the named node as the account
-that asked, over the nodes' network with a secret the daemons share, and gives it the
-variables the caller exported, except those that describe a node, such as
-`ORBIT_NODE_RANK`, `HOME` and the proxy's, which the running node's daemon supplies: its
-node's group variables and, while the Sandbox is sealed, its relay's proxy variables.
+Every command on a node, node 0's through guestd and every ssh session, gets `ORBIT_NODES`,
+`ORBIT_NODE_RANK`, `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` naming `peers` and, where
+every node has InfiniBand, `NCCL_NET=IB`, so NCCL's fallback to sockets is an error rather
+than a slow job. A command's own variables override them.
+
+The nodes reach one another with ssh, as nodes of a cluster do. The framework layer of a
+Task one of whose Sandboxes spans several nodes adds Orbit's static OpenSSH, from
+[`orbit-multinode-ssh`](../../../../../../images/framework/multinode-ssh/Dockerfile), at
+`/opt/orbit-ssh`, and every node runs it; a node whose image lacks it fails as it starts,
+naming the cause. As the Sandbox starts, its node 0 makes new ed25519 keys, and guestd runs
+[`guestd/nodes.py`](../guestd/nodes.py) as root on every node, the keys by its environment:
+it starts sshd on the node's address on `peers`, gives root and the agent account a key at
+`~/.ssh/id_ed25519`, which only the account's own public key matches on every node, puts the
+nodes' host key in `/etc/ssh/ssh_known_hosts`, where any OpenSSH client looks, and links
+`ssh`, `scp` and `sftp` into `/usr/local/bin` where the image has none. A session gets,
+above what sshd sets for the account, the variables of the container's first process, the
+image's and the Task's, then its node's group variables and, while the Sandbox is sealed,
+its relay's proxy variables: sshd takes them in one `SetEnv`, which `nodes.py` writes again,
+and sshd rereads, as the Sandbox is sealed or opened. A Sandbox of one node booted from a
+snapshot of several has no `node1`, and no sshd runs there.
+
+`/shared` is a directory of the Sandbox below the cache, on the cluster's shared file
+system, which every node mounts there. The job's account owns every file in it on the host,
+as an NFS server lets it own files for itself alone, and gVisor's `--shared-mount` ([patch
+0013](../../../../../../images/runtimes/gvisor/README.md)) shows each as the agent account's
+in the Sandbox, and shows what another node added at once. A Sandbox of several nodes gets
+one of its own, and its snapshot keeps it as it is: a verifier booted from the snapshot, or
+a separate one viewing its volumes, mounts it read-only on every node, and any other Sandbox
+booted from the snapshot, the next turn's solver, a moved one or a fork, a copy of its own,
+which node 0 makes with 32 files at once, preserving modes, times, links and hard links. A
+directory goes once no running Sandbox and no snapshot, this process's or one written out,
+names it.
 
 A snapshot commits every node to its own store. Node `k` of a Sandbox booted from it starts
 from node `k`'s commit, and node `k` of a separate verifier views node `k`'s volumes, one
@@ -254,7 +277,7 @@ beyond the snapshot's nodes viewing none. Written out, each node writes its own 
 layers at once, which node `k` of the next allocation loads. The batch step holds the first
 node's store, and a step of its own every other node's, for as long as the allocation runs.
 Compute nodes need, for a Sandbox of several nodes, pasta, catatonit for Podman's pods, and
-the kernel's WireGuard module.
+the kernel's WireGuard module ([Compute nodes](#slurm-compute-nodes)).
 
 Measured on OpenRSI (H100, Linux 6.8, Podman 4.9.3, NCCL 2.27.5, November 2026), each once,
 in gVisor containers on the network above, given their devices as patch 0012 gives them,
@@ -267,10 +290,20 @@ against the same steps on the bare nodes:
 | NCCL all-reduce, 2 × 8 H100, 64 MiB | 213.9 GB/s | 260.3 GB/s |
 | DDP, 134M parameters, 2 × 8 H100 | 26.42 steps/s | 26.65 steps/s |
 
-In a Sandbox of two nodes that Orbit started with runsc 0.1.5, the episode of
+In a Sandbox of two nodes that Orbit started, the episode of
 [`test_slurm_nodes.py`](../../../../../../tests/integration/test_slurm_nodes.py) all-reduced
-1 GiB across its 16 H100s at 412 GB/s, node 1's ranks started from node 0 through
-`orbit-exec`.
+1 GiB across 16 H100s at 412 GB/s, and, its node 1's ranks started from node 0 over ssh,
+across 2 × 2 H100s at 129 GB/s.
+
+A container that Docker, nested in a Sandbox of several nodes, starts reaches the node's
+GPUs and InfiniBand as the Sandbox does when it is given their devices (`--device
+/dev/nvidia<k>`, `/dev/nvidiactl`, `/dev/nvidia-uvm` and `/dev/infiniband/uverbs<k>`), the
+driver's libraries (`libcuda.so.*` and `libnvidia-*.so.*` from `/usr/lib/x86_64-linux-gnu`),
+the host network and the Sandbox's own `/sys` (`-v /sys:/sys:ro`): the `/sys` Docker mounts
+lists no InfiniBand device and no PCI bus, and NCCL, finding no place for the HCA, fails
+(`Could not find NET with id 0`). Measured once, two such containers on two nodes of two
+H100s each trained with DDP over InfiniBand with GPUDirect RDMA and all-reduced 1 GiB at
+130.8 GB/s, against 131.2 GB/s from the Sandboxes themselves.
 
 ### Slurm volumes
 
@@ -725,7 +758,8 @@ store, a fresh Docker 29's default, which accepts `--storage-opt size` and ignor
 under rootless Docker, whose `overlay2` refuses it; only the classic `overlay2` driver on
 xfs mounted with `pquota`, rootful, enforces one. So a Docker leaf holds a Sandbox that
 names `storage_mb` to it as Kubernetes holds a Pod to its `ephemeral-storage`
-([`docker/storage.py`](docker/storage.py)): every 5 s while a Run or a Node drives it, the
+([`docker/storage.py`](docker/storage.py)): while a Run or a Node drives it, as often as the
+room it has left asks ([`storage.py`](storage.py)), the
 leaf reads what the Sandbox has written over its image, `SizeRw` of
 `docker container inspect --size`, which the daemon counts on the Host, outside the
 Sandbox's reach. Once that passes `storage_mb` MiB the leaf kills the container and logs, in
@@ -842,8 +876,9 @@ Sandbox runs under `runsc` unless it asks for `raw_sockets` or `nested_container
 entirely under `runsc-net-raw` or `runsc-nested`; no profile gives both, so a Sandbox that
 asks for both is refused before anything starts. Besides finding each name the Run's
 Sandboxes run under, registered with exactly those arguments, the preflight checks that
-`runsc --version` reports the build this engine runs (`+orbit.0.1.5`, `VERSION` in its
-`build.sh`; a stock `runsc` lacks the rootless and out-of-memory fixes) and, whenever GPUs
+`runsc --version` reports the build this engine runs (`+orbit.0.1.0.<build>`, its
+`build.sh`'s `VERSION` and build id; a stock `runsc` lacks the rootless and out-of-memory
+fixes) and, whenever GPUs
 may be attached, a Sandbox needing them or a Node whose profiles offer the Host's, that
 `runsc nvproxy list-supported-drivers` lists the Host's NVIDIA driver, and, whenever a
 Sandbox may share GPUs, that `runsc flags` lists the flag that limits its GPU memory. In the
@@ -899,8 +934,9 @@ the preflight's check: about 15 s with that image.
 
 ## Slurm
 
-Orbit runs on a login node of the cluster, where Slurm's commands work and whose home every
-compute node shares, and a Run drives that one cluster. A Sandbox not booted from a
+Orbit runs on a login node of the cluster, where Slurm's commands work, and keeps its files
+in a directory of the cluster's shared file system, its cache, which every compute node sees
+at the same path; a Run drives that one cluster. A Sandbox not booted from a
 snapshot, a separate verifier that copies included, gets a batch job of its own, its
 allocation, of as many alike nodes as the most it or a verifier its request names spans,
 each sized for the largest of them, which boot from its snapshot or view its
@@ -916,17 +952,18 @@ in a job of its own on the first partition without GPUs, of 8 CPUs and 32 GiB at
 named image is pinned by the digest its registry gives it now, read over HTTP, and pulled
 there; a Task's own build context, copied below the cache without `setup/`, is built there
 with Podman, whose Buildah 1.33 refuses what only BuildKit reads, such as a heredoc in
-`RUN`. A private registry's credentials are those `~/.docker/config.json` on the shared home
-saves, which both the pin and Podman read. The job adds the framework layer for the account
-the Task's image declares, or `user` for an image a caller names by reference alone, as the
-conformance suite does, and saves the result, compressed, to `~/.cache/orbit/slurm/images`,
-from which each allocation loads it into its own Podman store on its node; only the Task's
-own build failing there is the Task's error. Compute nodes need Python 3, rootless Podman
-with slirp4netns, iproute2, and cgroup v2 with enforced CPU affinity, a memory limit and
-zero swap for each step. GPU partitions need NVIDIA CDI and a driver supported by the pinned
-Orbit gVisor runtime. The compute node pulls the build `docker:gvisor` runs from GHCR into a
-private, versioned cache below the shared home. Tasks run without the login home, agent
-socket or Slurm credentials.
+`RUN`. A private registry's credentials are those `~/.docker/config.json` saves, which both
+the pin and Podman read, so for one the compute nodes share the account's home. The job adds
+the framework layer for the account the Task's image declares, or `user` for an image a
+caller names by reference alone, as the conformance suite does. The layer of a Task one of
+whose Sandboxes spans several nodes copies the nodes' OpenSSH from its GHCR image, and so
+does that of an image named alone, as no Task says how many nodes it spans. The job saves
+the result, compressed, to `images` in the cache, from which each allocation loads it into
+its own Podman store on its node; only the Task's own build failing there is the Task's
+error. Compute nodes need what [Compute nodes](#slurm-compute-nodes) lists. The first
+allocation of an engine pulls the gVisor build `docker:gvisor` runs from GHCR into the
+cache, once for all nodes, as `gvisor-<version>.<build>`, and refuses another build of the
+version. Tasks run without the login home, agent socket or Slurm credentials.
 
 ```toml
 [sandbox]
@@ -936,6 +973,9 @@ providers = ["slurm"]
 walltime_minutes = 180
 drain_minutes = 10
 queue_timeout_sec = 900
+account = "project-a"                # sbatch --account; none by default
+shared_fs_dir = "/scratch/me/orbit"  # on the shared file system; ~/.cache/orbit/slurm
+node_local_dir = "/local/$USER"      # each node's own disk's; $SLURM_TMPDIR, else /tmp
 
 [[sandbox.slurm.partitions]]
 name = "cpu_1"
@@ -951,6 +991,7 @@ max_memory_mb = 1593403
 gpu_model = { name = "NVIDIA H100 80GB HBM3", memory_mb = 81559 }
 max_gpus = 8
 max_nodes = 2
+constraint = "ib"                    # sbatch --constraint; none by default
 ```
 
 Each entry describes a homogeneous partition's effective per-node limits for that QoS, and
@@ -964,12 +1005,21 @@ waits for as long as Slurm keeps it pending, and says why every ten minutes. `sa
 the job ID and the Sandbox's index in the job; the allocation records the compute node, or
 every node of a Sandbox of several, and runtime.
 
+Every job goes to its partition's QoS and `constraint` and the configured `account`, where
+those are set. `shared_fs_dir` is Orbit's directory on the cluster's shared file system, at
+the same path on the login node and every compute node: the images prepared for the
+cluster, each allocation's files, snapshots written out and the shared directories of
+Sandboxes of several nodes, so it belongs on a shared file system with room, such as a
+scratch one, rather than in a home with a small quota. `node_local_dir`, expanded on each
+node, is where on the node's own disk each allocation keeps its Podman store, its images
+and what its Sandboxes write.
+
 Running jobs have a Slurm wall time even when Orbit is lost: `walltime_minutes`, within the
 QoS's limit, is each allocation's, and the solver of an episode longer than one
 [moves](../../../../../../docs/specs/episode-protocol.md#moves) as each allocation's
 deadline comes. That deadline is what Slurm reports the allocation has left once it runs
 (`squeue -o %L`), Slurm's own count, so no two clocks need agree, less `drain_minutes`,
-which committing a solver, writing it out to the shared home and ending the allocation take;
+which committing a solver, writing it out to the cache and ending the allocation take;
 each profile holds a Sandbox for `walltime_minutes` less `drain_minutes` at most, so a Run
 whose verifier's limit is longer is refused before anything is prepared. A Sandbox booted
 from a snapshot starts in a running allocation only while that lasts the time its request
@@ -996,10 +1046,25 @@ gets an allocation of its own, which loads the snapshot written out with `podman
 snapshot the Run keeps (`sandbox_retention.solver = "snapshot"`) is written out as it is
 saved, as its allocation ends with the episode, and costs that copy.
 `orbit sandbox destroy slurm:<job name>/<index>` removes one; `orbit sandbox list` lists
-those written out below the cache. A chain of 200 commits, each booted from the one before,
+those written out in the cache, each with `--config` naming the Run configuration where it
+sets another `shared_fs_dir`. A chain of 200 commits, each booted from the one before,
 over a one-layer image was measured, so each profile saves 200 in a row; a container
 engine's storage is volumes, which a snapshot keeps as layers beside its commit. Slurm keeps
-no running Sandbox and limits no writable storage.
+no running Sandbox.
+
+A Sandbox that names `storage_mb` is held to it on each of its nodes by its step there,
+outside the Sandbox, as a Docker leaf holds one ([Docker writable
+storage](#docker-writable-storage)): in Podman's namespace it measures the blocks its
+writable layer and its volumes take below the store, less what its volumes held as it
+started, plus what the snapshot it booted from held on that node, and on node 0 its shared
+directory too, unless it only views another Sandbox's volumes; once that passes `storage_mb`
+it kills the container, records the sizes and fails, which ends the Sandbox on every node,
+and the Sandbox's calls raise `StorageExhaustedError` (`Orbit's storage watch stopped the
+Sandbox: node 1 wrote 4102 MiB over its image, past the 4096 MiB its Task declares`). It
+measures as often as the room left asks ([`storage.py`](storage.py)), counting every node of
+the Sandbox as a writer of what it measures, as each writes the shared directory. A
+measurement took 0.02 s of a new Sandbox and 0.14 s with 100,000 files of 1 KiB, on a node's
+ext4 disk, and 0.32 s of a shared directory of 20,000 files (OpenRSI, November 2026).
 
 `srun --overlap --unbuffered` from the login node opens guestd's command and file sessions,
 a watcher of the Sentry's OOM kills and a tunnel, which carries the Run's Gateway, on the
@@ -1019,6 +1084,33 @@ reads the limit and usage of the nearest cgroup above the step that has a `memor
 which is where Slurm limits it, so memory pressure ends a process inside the sandbox.
 Confirm a site from its login node with
 `ORBIT_TEST_SLURM_CONFIG=run.toml uv run pytest -m needs_slurm tests`.
+
+### Slurm compute nodes
+
+Every compute node needs, for the account that runs Orbit: Python 3; rootless Podman with
+slirp4netns, and pasta and catatonit for a Sandbox of several nodes; iproute2; the kernel's
+WireGuard module for a Sandbox of several nodes; a range of subordinate uids and gids of its
+own; and Slurm's cgroup v2 task plugin holding each step to its CPUs (`ConstrainCores`), its
+memory (`ConstrainRAMSpace`) and no swap (`ConstrainSwapSpace`, `AllowedSwapSpace=0`). GPU
+nodes need the NVIDIA Container Toolkit's CDI specification and a driver the gVisor build
+supports (`runsc nvproxy list-supported-drivers`). The packages and the uid range are a site
+administrator's to install, once:
+
+```bash
+# Debian and Ubuntu
+sudo apt-get install -y podman slirp4netns passt catatonit uidmap iproute2 python3
+# RHEL, Rocky and Alma
+sudo dnf install -y podman slirp4netns passt catatonit shadow-utils iproute python3
+# 65,536 ids that no other account's range overlaps, the same on every node
+sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 ACCOUNT
+# On GPU nodes
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+```
+
+Then, as the account on a node, `podman unshare cat /proc/self/uid_map` shows the range and
+`podman run --rm docker.io/library/busybox true` runs a container. Orbit runs `runsc` only
+under rootless Podman, which Ubuntu 24.04's AppArmor lets create user namespaces where an
+unconfined program may not.
 
 ## Daytona
 

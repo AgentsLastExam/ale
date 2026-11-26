@@ -105,7 +105,7 @@ def skip_without_gvisor() -> None:
 
 def slurm_config() -> SlurmProviderConfig:
     """The cluster ``$ORBIT_TEST_SLURM_CONFIG`` names: a Run TOML with ``sandbox.slurm``
-    settings, whose partitions' login hosts share the account's home with their nodes."""
+    settings, whose login host shares Orbit's cache with the partitions' nodes."""
     path = os.environ.get("ORBIT_TEST_SLURM_CONFIG")
     if not path:
         pytest.skip("set ORBIT_TEST_SLURM_CONFIG to a Run TOML with sandbox.slurm settings")

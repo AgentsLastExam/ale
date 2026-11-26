@@ -88,6 +88,13 @@ framework-owned `TaskEnv`. The evaluated solver and
 the oracle, which runs a calibration case, both run as the image's agent account. Windows
 autonomous CLI Harnesses use the base's native Node.js and Git Bash.
 
+Below the instruction, the first prompt of an autonomous Harness states the machine the
+agent has, as its Sandbox was given it rather than as the Task asked: its CPUs, memory,
+disk limit and GPUs, since tools in a container, such as `nproc` and `nvidia-smi`, may
+report the Host's. For a Sandbox of several [nodes](task-authoring.md#nodes) it states
+each node's, names the nodes, and says that `ssh` reaches them and that `/shared` is one
+directory they all see.
+
 Only the directory of the calibration case the oracle runs is uploaded, the reference
 solution's under `orbit run --agent oracle`, and only for an oracle episode; none is present
 for an evaluated solver. `tests/` and `validation/` are also absent throughout this phase,

@@ -691,7 +691,8 @@ under rootless Docker and off xfs mounted with `pquota`, so there such a Sandbox
 - A ready Sandbox of the container base holds 3.4 MiB in its layer, and 16 MiB 30 s later.
 
 **Solution.** Every Docker leaf holds a Sandbox that names `storage_mb` to it by measuring:
-[`storage.py`](storage.py) reads its `SizeRw` every 5 s while this process drives it, and
+[`storage.py`](storage.py) reads its `SizeRw` while this process drives it, as often as the
+room it has left asks (`providers/storage.py`), and
 past `storage_mb` MiB the Sandbox kills the container, logs the stop to the execution trace
 as the GPU watchdog logs a kill, and has its sessions raise `StorageExhaustedError`, which
 the episode records as `storage_exhausted`. A Sandbox's volumes count too, measured by a
@@ -707,9 +708,11 @@ helper ([Volumes](#volumes)). What measuring leaves to the agent is
 - Everything over the image counts, from the start, what Orbit and the image write included,
   as on a disk of that size: a baseline taken when the Sandbox is ready would leave out
   3.4 MiB, and what the framework and the desktop write after it would count anyway.
-- Every 5 s, not Kubernetes' 10 s: a Sandbox writing at the disk's 0.95 GB/s overshoots by
-  about 5 GiB rather than 10, at about 1 s of the daemons' CPU per 100,000 files measured
-  per measurement, 1 core for 50 Sandboxes of 10,000 files each.
+- Near its limit, every 5 s, not Kubernetes' 10 s: a Sandbox writing at the disk's
+  0.95 GB/s overshoots by about 5 GiB rather than 10. Far below it, when it could first
+  reach it writing 2 GiB a second, up to every 5 minutes: each measurement costs about 1 s
+  of the daemons' CPU per 100,000 files, which at 5 s for everything was 1 core for 50
+  Sandboxes of 10,000 files each.
 - One task per Sandbox, so that a layer of many files, slow to walk, delays no other
   Sandbox's measurement; and `inspect` per container, which ran 51 of them in 0.6 s where
   one `inspect` naming all 51 took 3.1 s and `docker ps --size` 1.3 s.

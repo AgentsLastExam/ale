@@ -18,7 +18,7 @@ FILES = (
     "service.py",
     "tunnel.py",
     "egress.py",
-    "peers.py",
+    "nodes.py",
 )
 #: The port a QEMU VM's guest service listens on, forwarded to an ephemeral Host port.
 PORT = 7411

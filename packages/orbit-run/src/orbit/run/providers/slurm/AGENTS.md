@@ -71,12 +71,12 @@ at the default of 10, and the next allocation's load lengthens the move's gap; a
 snapshot is removed once the next save succeeds, so the space is held briefly.
 
 A boot that does not fit beside what runs gets an allocation of its own, loading the
-snapshot from a `podman save` archive on the shared home, as does a snapshot the Run keeps,
+snapshot from a `podman save` archive in the cache, as does a snapshot the Run keeps,
 whose allocation ends with the episode.
 
 The batch step, not Orbit, starts each Sandbox's step (`srun --exact`), so Orbit's own
-process ending never ends it; Orbit only writes the request and reads the step's files on
-the shared home. With `--ignore-cgroups` alone, one allocating process could take down the
+process ending never ends it; Orbit only writes the request and reads the step's files in
+the cache. With `--ignore-cgroups` alone, one allocating process could take down the
 entire Sentry, so the runtime reads the nearest cgroup above the step that has a
 `memory.max`, without joining or modifying it. The batch step holds Podman's pause namespace
 through cleanup. Each job needs private XDG, graph, run and temporary directories so
@@ -169,8 +169,8 @@ its interface to the other nodes still reached only them, the rest refused by th
 The router forwards by policy routing alone, so the nodes need nothing past iproute2 for it,
 and the WireGuard device takes from each peer only that peer's address. The nodes have no
 `wg`, so the worker sets the device's key and peers over generic netlink and derives each
-public key with X25519 itself. Neither the router's private key nor the exec daemons'
-secret is ever on a command line: other accounts' jobs share a node, and any account reads
+public key with X25519 itself. Neither the router's private key nor the nodes' ssh keys
+are ever on a command line: other accounts' jobs share a node, and any account reads
 `/proc/<pid>/cmdline`. Each node writes its router's key and endpoint below the Sandbox's
 directory, and the others read them after listing the directory, as for every file another
 machine writes there.
@@ -185,18 +185,56 @@ so two routers on one node could not reach each other through it; a Sandbox's no
 always distinct.
 
 Decided: the nodes' variables (`ORBIT_NODES`, `ORBIT_NODE_RANK`, NCCL's and Gloo's) are
-given to every command, by the Host to node 0's and by each node's exec daemon to what it
-runs, never set on the container: `podman commit` keeps a container's environment, so a
+given to every command, by the Host to node 0's and by each node's sshd to its sessions,
+never set on the container: `podman commit` keeps a container's environment, so a
 Sandbox of one node, or on nodes without InfiniBand, booted from the snapshot would inherit
 `NCCL_NET=IB` and an interface it lacks.
 
-Decided: an agent starts processes on another node through `orbit-exec`, a POSIX shell
-client of a root daemon on each node, rather than through SSH or a Python client: most
-images have no sshd, the agent's account cannot run the framework's own Python, and an
-image need not have one of its own. It takes `ssh`'s form, so `mpirun`, `pdsh` and the like
-take it as their remote shell, and it runs as the account that asked, so an agent without
-sudo gains nothing on another node. Unlike `ssh` it passes on what its caller exported,
-since the Task's variables reach a command on node 0 only through guestd.
+Decided: an agent starts processes on another node with ssh, through Orbit's own sshd on
+each node, rather than through a command of Orbit's own or Slurm. Asked only to train on
+node0 and node1 with nothing said of how, Codex's ultima-alpha (six times) and Claude Opus,
+Sonnet and Haiku (once each) all reached node1 first with `ssh node1`, as people on a
+cluster do, and `mpirun`, `pdsh` and DeepSpeed use it, so an agent needs to learn nothing;
+Kubeflow's MPI Operator, which replaced ssh with `kubectl exec`, went back to ssh. Slurm's
+own `srun` would hand the agent the job's Slurm credentials, which reach outside the
+Sandbox. Images have no sshd, so the framework layer of a Task one of whose Sandboxes spans
+several nodes adds a static OpenSSH, without OpenSSL (5.4 MB in all), as it adds guestd and
+the framework's Python: the image carries it wherever it runs, under any runtime and
+Provider, and a snapshot keeps it, where a mount would need each Provider to fetch and mount
+it on every boot, which a remote Provider cannot. The image's own `ssh` client, where it has
+one, works with it, as the keys and known hosts are at the paths every OpenSSH client reads.
+A session gets the container's variables and its node's through sshd's `SetEnv`, as a plain
+sshd would drop the image's `PATH` (a conda image's `python` was then the system's): tested
+on the nodes, sshd 10.2 parses quotes, backslashes, `#` and empty values there as given. An
+sshd without PAM refuses an account locked in `/etc/shadow` even its key, and `useradd`
+leaves an account so, as in PyTorch's image, so the OpenSSH is built without shadow
+passwords and never reads it.
+
+Decided: the nodes share `/shared`, a directory of the cache on the cluster's shared file
+system (OpenRSI's NFS home), rather than each
+node holding only its own disk: a program edited on node 0 and run on node 1 from a stale
+copy fails without a word, and data copied to every node takes each node's time. Measured on
+OpenRSI (NFSv3, 100 Gb/s), from a node: 0.7 GB/s writing and 3.0 GB/s reading one stream,
+2.9 GB/s writing and 7.1 GB/s reading eight, against the node's own disk's 0.7, 3.2, 0.9 and
+13.1; 1000 files of 1 KiB took 3.9 s against 0.03 s, so a venv or a build belongs on a
+node's own disk. A file another node creates appeared on a node already polling for it after
+10 to 25 s, in gVisor, crun and on the bare node alike (NFS's cached lookups); edits,
+renames and deletions were seen at once; of 400 lines appended to one file by both nodes at
+once, 238 to 360 were kept. gVisor needed two changes, patch 0013: NFS lets the job's
+account own files for itself alone, so gVisor's chown of a new file to the creating
+account's mapped uid failed (`Operation not permitted`, only root could create files), and a
+directory the Sandbox had listed stayed as listed, as gVisor reread it through a descriptor
+it kept open, which the NFS client answers from its cache (Python could not import a module
+another node added). Its snapshot keeps it, and a Sandbox that may change it gets a copy
+rather than the snapshot's own, so a snapshot stays what every Sandbox booted from it, and a
+failed move's retry, start from; a verifier gets it read-only, so that nothing it writes
+reaches the agent's next turn.
+
+Decided: a Sandbox that names `storage_mb` is measured by its own step on each node, which
+holds its store and so reads it at the disk's speed, rather than by the Host, which would
+reach the store only through Slurm steps. How often follows the room left
+(`providers/storage.py`), as measuring a Sandbox of many files every 5 s far below a large
+limit costs a walk for nothing.
 
 A hold step removes its node's store once the job is stopped or, when the batch step fails,
 released by a file it polls: srun turns a SIGTERM into SIGKILL for its tasks, which would

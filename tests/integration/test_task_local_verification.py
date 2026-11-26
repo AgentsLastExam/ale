@@ -41,7 +41,9 @@ pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 def framework_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fake image identities are not Docker images; the layer is tested on real ones."""
 
-    async def layer(image: str, *, user: str, keep_alive: bool = False) -> str:
+    async def layer(
+        image: str, *, user: str, keep_alive: bool = False, multinode: bool = False
+    ) -> str:
         return image if image.startswith("sha256:") else DIGEST
 
     monkeypatch.setattr("orbit.run.task_images.with_framework", layer)

@@ -193,6 +193,9 @@ class ImageSpec(BaseModel):
     """Whether the framework layer replaces a container image's command with one that runs
     until the Sandbox is destroyed, as Harbor replaces every Task container's: a Harbor
     Task's. A VM has no command to replace."""
+    multinode: bool = Field(default=False, exclude_if=lambda value: not value)
+    """Whether the framework layer adds the OpenSSH that joins the nodes of a Sandbox that
+    spans several machines: a Task one of whose Sandboxes does."""
     build_timeout_sec: float = Field(default=3600, gt=0)
     """How long the Task's own build may run. Not part of the image's identity."""
 

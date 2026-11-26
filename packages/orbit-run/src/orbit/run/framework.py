@@ -16,7 +16,10 @@ image layer:
   start (``providers/privileges.py``), so one prepared image serves a Task with and
   without ``[agent].sudo``;
 - for a Harbor Task (``ImageSpec.keep_alive``), Harbor's command in place of the image's,
-  which keeps the container running whatever the image's own command does.
+  which keeps the container running whatever the image's own command does;
+- for a Task one of whose Sandboxes spans several nodes (``ImageSpec.multinode``), Orbit's
+  static OpenSSH from ``orbit-multinode-ssh`` at ``/opt/orbit-ssh``, which every node's sshd
+  and the agent's ``ssh`` between the nodes run (``guestd/nodes.py``).
 
 The result is an ordinary image built on the Task image, which Docker runs. A label
 records what it was built with, which makes adding the same layer twice a no-op.
@@ -66,6 +69,7 @@ from orbit.core.ids import content_hash
 from orbit.core.sandbox import PreparedTaskImage
 from orbit.core.taskspec import OperatingSystem
 from orbit.run import HELPER_RUNTIME, guestd, orbit_image
+from orbit.run.guestd.nodes import SSH
 from orbit.run.images import (
     acquire_lock,
     base_layer,
@@ -89,6 +93,7 @@ __all__ = [
     "MACOS_PYTHON",
     "MARKER",
     "MATERIALIZER_IMAGE",
+    "MULTINODE_SSH_IMAGE",
     "WINDOWS_MARKER",
     "container_framework",
     "frame_disk",
@@ -115,6 +120,9 @@ WINDOWS_MARKER = "/ProgramData/Orbit/framework"
 #: discards a build layer's free space. Orbit's Linux base disk is made with it as well.
 MATERIALIZER_IMAGE = os.environ.get("ORBIT_VM_MATERIALIZER", orbit_image("orbit-vm-materializer"))
 CUA_DRIVER_VERSION = "0.38.0"
+#: The OpenSSH a multi-node Task's framework layer copies from its ``/openssh``
+#: (``images/framework/multinode-ssh/``), at the engine's version.
+MULTINODE_SSH_IMAGE = orbit_image("orbit-multinode-ssh")
 #: python-build-standalone release of the framework's own Python, and its build per guest
 #: platform with the release's published SHA-256. The Linux build needs glibc.
 PYTHON_RELEASE = "20261013"
@@ -244,7 +252,7 @@ printf '%s\n' "$identity" > /opt/orbit/framework
 """
 
 
-def framework_identity(*, user: str, vm: bool) -> str:
+def framework_identity(*, user: str, vm: bool, multinode: bool = False) -> str:
     """Everything the Linux framework is built from, for a container image or, with its boot
     unit, a VM disk, so a change to any of it rebuilds it."""
     return content_hash(
@@ -256,6 +264,8 @@ def framework_identity(*, user: str, vm: bool) -> str:
             "unit": _GUEST_UNIT if vm else None,
             "volumes": (_VOLUMES_UNIT, _VOLUMES_SCRIPT.read_text()) if vm else None,
             "user": user,
+            # Only when added, so every other Task's image keeps its identity.
+            **({"multinode_ssh": MULTINODE_SSH_IMAGE} if multinode else {}),
         }
     )
 
@@ -330,7 +340,9 @@ def _guestd_digests() -> dict[str, str]:
     }
 
 
-async def with_framework(image: str, *, user: str, keep_alive: bool = False) -> str:
+async def with_framework(
+    image: str, *, user: str, keep_alive: bool = False, multinode: bool = False
+) -> str:
     """Return the local identity of the container image ``image`` with the framework layer
     added.
 
@@ -338,9 +350,10 @@ async def with_framework(image: str, *, user: str, keep_alive: bool = False) -> 
     image that already carries this exact layer is returned unchanged. With ``keep_alive``,
     as a Harbor Task's preparation asks, the layer also replaces the image's command with
     ``KEEP_ALIVE``. The label stays the framework's, so a Provider framing a prepared image
-    again, which never asks for it, keeps the command the image was prepared with.
+    again, which never asks for it, keeps the command the image was prepared with. With
+    ``multinode`` it also carries the nodes' OpenSSH.
     """
-    identity = framework_identity(user=user, vm=False)
+    identity = framework_identity(user=user, vm=False, multinode=multinode)
 
     def carries(config: dict) -> bool:
         framed = (config.get("Labels") or {}).get(LABEL) == identity
@@ -360,7 +373,7 @@ async def with_framework(image: str, *, user: str, keep_alive: bool = False) -> 
             built = await _inspect(tag, missing_ok=True)
             if built and carries(built):
                 return built["Id"]
-            await _build(config, tag, user=user, keep_alive=keep_alive)
+            await _build(config, tag, user=user, keep_alive=keep_alive, multinode=multinode)
             return (await _inspect(tag))["Id"]
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -561,16 +574,20 @@ def _explained(stderr: str, stdout: str = "") -> str:
     return " ".join(said) if said else stderr.strip()[-2000:]
 
 
-def container_framework(*, user: str, keep_alive: bool) -> tuple[list[str], list[str]]:
+def container_framework(
+    *, user: str, keep_alive: bool, multinode: bool = False
+) -> tuple[list[str], list[str]]:
     """The framework layer's instructions below its ``FROM``, which a container image builds
     from a context :func:`stage_container_framework` laid out: those before the base's own
     account is restored, and those after it."""
-    identity = framework_identity(user=user, vm=False)
+    identity = framework_identity(user=user, vm=False, multinode=multinode)
     body = [
         "USER root",
         "COPY guestd/ /opt/orbit/guestd/",
         "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver",
         "COPY setup.sh /opt/orbit/setup.sh",
+        # Outside root's /opt/orbit, as the agent runs its ssh too.
+        *([f"COPY --from={MULTINODE_SSH_IMAGE} /openssh/ {SSH}/"] if multinode else []),
         # Mounted, not copied: a copy would land in the layer once more when setup takes it
         # into /opt/orbit/python.
         "RUN --mount=type=bind,from=python,target=/tmp/python "
@@ -587,7 +604,7 @@ def stage_container_framework(context: Path) -> Path:
     return _python("linux")
 
 
-async def _build(base: dict, tag: str, *, user: str, keep_alive: bool) -> None:
+async def _build(base: dict, tag: str, *, user: str, keep_alive: bool, multinode: bool) -> None:
     base_tag = f"orbit-framework-base:{base['Id'].removeprefix('sha256:')}"
     code, _, stderr = await _run("docker", "tag", base["Id"], base_tag)
     if code != 0:
@@ -595,7 +612,7 @@ async def _build(base: dict, tag: str, *, user: str, keep_alive: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="orbit-framework-") as temporary:
         context = Path(temporary)
         python = await asyncio.to_thread(stage_container_framework, context)
-        body, tail = container_framework(user=user, keep_alive=keep_alive)
+        body, tail = container_framework(user=user, keep_alive=keep_alive, multinode=multinode)
         restored = [f"USER {base['User']}"] if base.get("User") else []
         lines = [f"FROM {base_tag}", *body, *restored, *tail]
         (context / "Dockerfile").write_text("\n".join(lines) + "\n")
