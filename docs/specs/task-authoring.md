@@ -762,17 +762,18 @@ expect = { reward = 0 }
 
 [[calibration]]
 name = "solution"                           # replaces the default { reward = 1 }
-expect = { reward = [0.0, 0.05], tflops = [600, 680] }
+expect = { reward = [0.0, 0.05], speedup = [0.95, 1.05] }
 ```
 
 Every Task has the case `solution`, its reference solution in `solution/`. It
 expects `{ reward = 1 }`, and an entry of that name only replaces the expectation, so the
 directory needs none. An open-ended Task whose reference solution is its baseline rather
 than a full-marks answer declares what that baseline earns, as the last entry above does:
-almost no reward, at a throughput between 600 and 680 TFLOPS. Any other `name`, a lowercase
-slug unique among the entries, is the directory `calibration/<name>/`. To check that the
-start state earns nothing, declare a case whose `solve.sh` does nothing and that expects
-`{ reward = 0 }`.
+almost no reward, at a speedup within 5% of 1 over the baseline its verifier measures beside
+it ([Task quality standard](task-quality-standard.md#3-evaluate-evidence-fairly)). Any other
+`name`, a lowercase slug unique among the entries, is the directory `calibration/<name>/`. To
+check that the start state earns nothing, declare a case whose `solve.sh` does nothing and
+that expects `{ reward = 0 }`.
 
 In each case, its directory's `solve.sh` (`solve.ps1` on Windows) supplies the case's final
 state: it may execute a solution normally or write that state directly from reference data

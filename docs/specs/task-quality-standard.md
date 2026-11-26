@@ -62,6 +62,13 @@ contract. A particular solver output or oracle implementation is not an independ
 truth. An oracle receiving full credit establishes one accepted outcome, not the verifier's
 coverage or fairness.
 
+A result that depends on the machine, such as a time, a throughput, or the outcome of
+simulation or training on a GPU, is compared only with a reference measured on the same
+hardware and container runtime: verification measures that reference beside the candidate,
+alternating with it, so that the comparison holds on whichever machine verifies. A run that
+repeats exactly on one machine can still differ on another. A reference too costly to measure
+in every verification names the machine and runtime it was measured on.
+
 Equivalent expressions of correct content must receive equivalent credit. Superficially similar
 but materially incorrect content must be distinguished from correct content. Deterministic checks
 are suitable when parsing and normalization can reliably preserve these distinctions across the
