@@ -58,7 +58,6 @@ class EvidenceReference:
         "file",
         "reference",
         "task_instruction",
-        "solver_trajectory",
     ]
     location: str | None
     sha256: str
@@ -69,7 +68,6 @@ class EvidenceReference:
             "file",
             "reference",
             "task_instruction",
-            "solver_trajectory",
         }:
             raise ValueError("unknown evidence kind")
         if self.location is not None and not isinstance(self.location, str):

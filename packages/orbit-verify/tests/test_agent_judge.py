@@ -187,12 +187,12 @@ def test_transcript_is_sanitized(
     assert "provider-secret" not in transcript
 
 
-@pytest.mark.parametrize("include_trajectory", [True, False])
 def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
-    monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path], include_trajectory: bool
+    monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, Path]
 ) -> None:
     artifact = agent_env["workspace"] / "report.pdf"
     artifact.write_bytes(b"%PDF-1.7\n\xff\xfe\x00")
+    # The verifier's own trajectory is no resource of the Judge's: it reads what it is given.
     trajectory = agent_env["workspace"] / "trajectory.json"
     trajectory.write_text('{"steps":[]}')
     monkeypatch.setenv("ORBIT_TRAJECTORY_PATH", str(trajectory))
@@ -206,9 +206,8 @@ def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
         assert "Expected totals: accepted=17, rejected=4." in kwargs["input"]
         assert "Create a working program." in kwargs["input"]
         assert f"file: {artifact}" in kwargs["input"]
-        assert (f"solver_trajectory: {trajectory}" in kwargs["input"]) == include_trajectory
-        assert (str(trajectory) in kwargs["input"]) == include_trajectory
-        assert ("ORBIT_TRAJECTORY_PATH" in kwargs["env"]) == include_trajectory
+        assert str(trajectory) not in kwargs["input"]
+        assert "ORBIT_TRAJECTORY_PATH" not in kwargs["env"]
         assert "%PDF" not in kwargs["input"]
         choice = "invalid" if len(calls) == 1 else "yes"
         return completed(event("thread-1", {"choice": choice, "reasoning": "Checked evidence."}))
@@ -221,7 +220,6 @@ def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
             prompt="Compare the artifact against the expected totals.",
             files=[str(artifact)],
             reference="Expected totals: accepted=17, rejected=4.",
-            trajectory=include_trajectory,
             output_schema={
                 "type": "object",
                 "properties": {"choice": {"enum": ["no", "yes"]}},
@@ -234,9 +232,7 @@ def test_agent_receives_selected_evidence_during_initial_and_repair_calls(
     assert calls[1][0][-3:-1] == ["resume", "thread-1"]
     events = [json.loads(line) for line in agent_env["log"].read_text().splitlines()]
     evidence = next(e for e in events if e["event"] == "evidence")
-    assert [item["kind"] for item in evidence["files"]] == ["file", "reference"] + (
-        ["solver_trajectory"] if include_trajectory else []
-    )
+    assert [item["kind"] for item in evidence["files"]] == ["file", "reference"]
 
 
 @pytest.mark.parametrize("unreadable", ["missing", "invalid_utf8"])

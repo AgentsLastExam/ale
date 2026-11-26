@@ -372,7 +372,7 @@ def test_mixed_evidence_reaches_each_protocol_and_survives_repair(
         path.write_bytes(data)
     evidence = (
         inline_evidence("The reference fact is 47.", kind="reference"),
-        inline_evidence("Observed action was inspect.", kind="solver_trajectory"),
+        inline_evidence("Observed action was inspect.", kind="reference"),
         *(read_file_evidence(path) for path in files),
     )
     observed = []

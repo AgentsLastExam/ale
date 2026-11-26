@@ -91,8 +91,6 @@ def run(
             sanitize(exc, (secret,)),
         )
     environment = _environment(adapter, home, config, secret)
-    if not any(reference.kind == "solver_trajectory" for _, reference in evidence):
-        environment.pop("ORBIT_TRAJECTORY_PATH", None)
     attempts: list[JudgeAttempt] = []
     session_id: str | None = None
     repair_error = ""
@@ -425,8 +423,9 @@ def _environment(
     config: Mapping[str, str],
     secret: str,
 ) -> dict[str, str]:
+    # A Judge reads what the Task gives it; the verifier's trajectory is no resource of its own.
     environment = {
-        **os.environ,
+        **{key: value for key, value in os.environ.items() if key != "ORBIT_TRAJECTORY_PATH"},
         "HOME": str(home),
         config["api_key_env"]: secret,
         "NO_COLOR": "1",
@@ -468,15 +467,9 @@ def _prompt(
         instruction, _ = read_text_evidence(instruction_path)
     resources = {
         key: os.environ.get(key)
-        for key in (
-            "ORBIT_HOME",
-            "ORBIT_TASK_INSTRUCTION_PATH",
-            "ORBIT_TRAJECTORY_PATH",
-        )
+        for key in ("ORBIT_HOME", "ORBIT_TASK_INSTRUCTION_PATH")
         if os.environ.get(key)
     }
-    if not any(reference.kind == "solver_trajectory" for _, reference in evidence):
-        resources.pop("ORBIT_TRAJECTORY_PATH", None)
     evidence_lines = "\n".join(
         f"- {reference.kind}: {reference.location or 'inline'} ({reference.sha256})"
         + (f"\n{content}" if reference.location is None else "")
