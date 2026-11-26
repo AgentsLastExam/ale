@@ -19,7 +19,7 @@ image layer:
 - for a Harbor Task (``ImageSpec.keep_alive``), Harbor's command in place of the image's,
   which keeps the container running whatever the image's own command does;
 - for a Task one of whose Sandboxes spans several nodes (``ImageSpec.multinode``), Orbit's
-  static OpenSSH from ``orbit-multinode-ssh`` at ``/opt/orbit-ssh``, which every node's sshd
+  native static OpenSSH at ``/opt/orbit-ssh``, which every node's sshd
   and the agent's ``ssh`` between the nodes run (``guestd/nodes.py``).
 
 The result is an ordinary image built on the Task image, which Docker runs. A label
@@ -125,6 +125,10 @@ CUA_DRIVER_VERSION = "0.38.0"
 #: The OpenSSH a multi-node Task's framework layer copies from its ``/openssh``
 #: (``images/framework/multinode-ssh/``), at the engine's version.
 MULTINODE_SSH_IMAGE = orbit_image("orbit-multinode-ssh")
+_SSH_IMAGES = {
+    Arch.X86_64: MULTINODE_SSH_IMAGE,
+    Arch.ARM64: orbit_image("orbit-multinode-ssh-arm64"),
+}
 #: python-build-standalone release of the framework's own Python, and its build per guest
 #: platform with the release's published SHA-256. The Linux build needs glibc.
 PYTHON_RELEASE = "20261013"
@@ -282,7 +286,7 @@ def framework_identity(
             "volumes": (_VOLUMES_UNIT, _VOLUMES_SCRIPT.read_text()) if vm else None,
             "user": user,
             # Only when added, so every other Task's image keeps its identity.
-            **({"multinode_ssh": MULTINODE_SSH_IMAGE} if multinode else {}),
+            **({"multinode_ssh": _SSH_IMAGES[arch]} if multinode else {}),
         }
     )
 
@@ -604,7 +608,7 @@ def container_framework(
         "COPY --chmod=0755 cua-driver /usr/local/bin/cua-driver",
         "COPY setup.sh /opt/orbit/setup.sh",
         # Outside root's /opt/orbit, as the agent runs its ssh too.
-        *([f"COPY --from={MULTINODE_SSH_IMAGE} /openssh/ {SSH}/"] if multinode else []),
+        *([f"COPY --from={_SSH_IMAGES[arch]} /openssh/ {SSH}/"] if multinode else []),
         # Mounted, not copied: a copy would land in the layer once more when setup takes it
         # into /opt/orbit-python.
         "RUN --mount=type=bind,from=python,target=/tmp/python "

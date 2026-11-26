@@ -43,7 +43,7 @@ permissions:
 jobs:
   build:
     if: github.event_name != 'workflow_dispatch' || inputs.promote_repository == ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -67,6 +67,10 @@ jobs:
           - repository: orbit-multinode-ssh
             dockerfile: images/framework/multinode-ssh/Dockerfile
             context: images/framework/multinode-ssh
+          - repository: orbit-multinode-ssh-arm64
+            dockerfile: images/framework/multinode-ssh/Dockerfile
+            context: images/framework/multinode-ssh
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
