@@ -32,6 +32,8 @@ import csv
 import fcntl
 import json
 import os
+import platform
+import runpy
 import shutil
 import signal
 import socket
@@ -44,6 +46,10 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# A PBS job stages the compute-side adapter beside this script. Isolated Python
+# does not import sibling modules, and guest-controlled directories never go on sys.path.
+batch = None
 
 SANDBOXES = Path("sandboxes")
 #: Below the job's directory: each node's store and runtime, by the node's Slurm name.
@@ -91,11 +97,13 @@ def output(*argv: str) -> str:
 
 def job_nodes() -> list[str]:
     """The job's nodes, in the order Slurm lists them: a Sandbox of ``n`` spans the first."""
+    if batch is not None:
+        return [batch.node]
     return output("scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]).split()
 
 
 def this_node() -> str:
-    return os.environ["SLURMD_NODENAME"]
+    return batch.node if batch is not None else os.environ["SLURMD_NODENAME"]
 
 
 def node_store() -> dict[str, str]:
@@ -170,7 +178,7 @@ def podman(directory: str) -> list[str]:
     os.environ["XDG_RUNTIME_DIR"] = str(xdg)
     os.environ["TMPDIR"] = directory
     return [
-        "podman",
+        *(batch.podman_argv(directory) if batch is not None else ["podman"]),
         "--root",
         directory + "/root",
         "--runroot",
@@ -465,49 +473,57 @@ def volumes(directory: str, operations: list[list[object]]) -> None:
     and mode, unmount one, or remove a layer."""
     os.chdir(directory)
     for operation in operations:
-        match operation:
-            case ["copy", str(source), str(layer)]:
-                subprocess.run(
-                    ["sh", "-c", COPY, "sh", f"{LINKS}/{source}", f"{LAYERS}/{layer}"],
-                    check=True,
-                )
-            case ["view", str(layer), [int(uid), int(gid), int(mode)], list(lowers)]:
-                upper = Path(LAYERS) / layer
-                os.chown(upper, uid, gid)
-                os.chmod(upper, mode)
-                stack = ":".join(f"{LINKS}/{lower}" for lower in lowers)
-                subprocess.run(
-                    [
-                        "mount", "-t", "overlay", "overlay", "-o",
-                        f"lowerdir={stack},upperdir={upper},workdir={WORK}/{layer},userxattr",
-                        f"{VIEWS}/{layer}",
-                    ],
-                    check=True,
-                )  # fmt: skip
-            case ["unmount", str(layer)]:
-                if os.path.ismount(f"{VIEWS}/{layer}"):
-                    subprocess.run(["umount", f"{VIEWS}/{layer}"], check=True)
-                for part in (WORK, VIEWS):
-                    subprocess.run(
-                        ["rm", "-rf", "--one-file-system", f"{part}/{layer}"], check=True
-                    )
-            case ["remove", str(layer)]:
-                link = Path(LINKS) / layer
-                if not link.is_symlink():
-                    continue
-                target = os.readlink(link)
-                if target.startswith("../volumes/"):
-                    # A Podman volume: its directory, emptied here, goes with the store.
-                    subprocess.run(
-                        ["find", str(link) + "/", "-mindepth", "1", "-delete"], check=True
-                    )
-                else:
-                    subprocess.run(
-                        ["rm", "-rf", "--one-file-system", f"{LAYERS}/{layer}"], check=True
-                    )
-                link.unlink()
-            case _:
-                raise ValueError(operation)
+        if not isinstance(operation, (list, tuple)) or not operation:
+            raise ValueError(operation)
+        action, *args = operation
+        if action == "copy" and len(args) == 2 and all(isinstance(a, str) for a in args):
+            source, layer = args
+            subprocess.run(
+                ["sh", "-c", COPY, "sh", f"{LINKS}/{source}", f"{LAYERS}/{layer}"],
+                check=True,
+            )
+        elif (
+            action == "view"
+            and len(args) == 3
+            and isinstance(args[0], str)
+            and isinstance(args[1], (list, tuple))
+            and len(args[1]) == 3
+            and all(isinstance(a, int) for a in args[1])
+            and isinstance(args[2], list)
+        ):
+            layer, (uid, gid, mode), lowers = args
+            upper = Path(LAYERS) / layer
+            os.chown(upper, uid, gid)
+            os.chmod(upper, mode)
+            stack = ":".join(f"{LINKS}/{lower}" for lower in lowers)
+            subprocess.run(
+                [
+                    "mount", "-t", "overlay", "overlay", "-o",
+                    f"lowerdir={stack},upperdir={upper},workdir={WORK}/{layer},userxattr",
+                    f"{VIEWS}/{layer}",
+                ],
+                check=True,
+            )  # fmt: skip
+        elif action == "unmount" and len(args) == 1 and isinstance(args[0], str):
+            layer = args[0]
+            if os.path.ismount(f"{VIEWS}/{layer}"):
+                subprocess.run(["umount", f"{VIEWS}/{layer}"], check=True)
+            for part in (WORK, VIEWS):
+                subprocess.run(["rm", "-rf", "--one-file-system", f"{part}/{layer}"], check=True)
+        elif action == "remove" and len(args) == 1 and isinstance(args[0], str):
+            layer = args[0]
+            link = Path(LINKS) / layer
+            if not link.is_symlink():
+                continue
+            target = os.readlink(link)
+            if target.startswith("../volumes/"):
+                # A Podman volume: its directory, emptied here, goes with the store.
+                subprocess.run(["find", str(link) + "/", "-mindepth", "1", "-delete"], check=True)
+            else:
+                subprocess.run(["rm", "-rf", "--one-file-system", f"{LAYERS}/{layer}"], check=True)
+            link.unlink()
+        else:
+            raise ValueError(operation)
 
 
 def root_of(command: list[str], directory: str, layer: str) -> list[int]:
@@ -844,7 +860,7 @@ def runtime(command: list[str], version: str, build: str) -> Path:
     """Orbit's gVisor build ``build`` of ``version``, copied once from GHCR into the cache,
     which every node shares: the directory that holds its ``runsc``."""
     cache = Path.cwd().parent
-    name = f"gvisor-{version}.{build}"
+    name = f"gvisor-{version}.{build}-{platform.machine()}"
     found = cache / name
     with (cache / (name + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -915,7 +931,11 @@ def load(command: list[str], archive: str, image: str) -> None:
 def stale_stores(node_local_dir: Path) -> list[Path]:
     """The stores on this node of this account's jobs that have ended: one that Slurm
     killed, at its wall time or by preemption, or whose node went down, cleaned up nothing."""
+    # A scheduler may reap this job on timeout or preemption. PBS uses its own store
+    # prefix and job IDs.
     stale = []
+    if batch is not None:
+        return batch.abandoned(node_local_dir)
     for store in node_local_dir.glob(STORE_PREFIX + "*"):
         job = read(store / OWNER)
         if (
@@ -968,10 +988,15 @@ def store(spec: dict[str, object]) -> tuple[str, list[str], Path]:
     else ``$SLURM_TMPDIR``, else ``/tmp``, and the command that uses it; the stores of this
     account's jobs that ended on the node are removed first."""
     named = os.path.expanduser(os.path.expandvars(str(spec.get("node_local_dir") or "")))
-    node_local_dir = Path(named or os.getenv("SLURM_TMPDIR") or "/tmp")
+    node_local_dir = Path(named or os.getenv("TMPDIR" if batch else "SLURM_TMPDIR") or "/tmp")
     node_local_dir.mkdir(parents=True, exist_ok=True)
-    directory = tempfile.mkdtemp(prefix=STORE_PREFIX, dir=node_local_dir)
-    (Path(directory) / OWNER).write_text(os.environ["SLURM_JOB_ID"])
+    prefix = f"orbit-{batch.scheduler}-" if batch is not None else STORE_PREFIX
+    directory = tempfile.mkdtemp(prefix=prefix, dir=node_local_dir)
+    owner = Path(directory) / OWNER
+    if batch is not None:
+        batch.claim(owner)
+    else:
+        owner.write_text(os.environ["SLURM_JOB_ID"])
     # Slurm signals the batch step before it kills it, as a job is cancelled or preempted:
     # clean up then too.
     signal.signal(signal.SIGTERM, terminated)
@@ -993,6 +1018,10 @@ def hold_namespace(command: list[str], node_local_dir: Path) -> None:
 
 
 def clean(command: list[str], directory: str) -> None:
+    if batch is not None and not (Path(directory) / "root").exists():
+        # Preflight may have rejected the node before Podman created a store.
+        shutil.rmtree(directory)
+        return
     try:
         subprocess.run([*command, "rm", "-a", "-f", "-v", "-t", "1"], check=True)
         release(command, directory)
@@ -1009,9 +1038,14 @@ def prepare() -> None:
     framework = recipe["framework"]
     directory, command, node_local_dir = store(recipe)
     archive = Path.cwd().parent / IMAGES / f"{recipe['key']}.tar.gz"
-    part = archive.with_name(f"{archive.name}.{os.environ['SLURM_JOB_ID']}.part")
+    job = batch.job if batch is not None else os.environ["SLURM_JOB_ID"]
+    part = archive.with_name(f"{archive.name}.{job}.part")
     step = "pull"
+    proxy = [batch.build_proxy_flag()] if batch is not None else []
     try:
+        if batch is not None:
+            expected = batch.native(recipe["architecture"])
+            batch.runtime_available(command, sandbox=False)
         hold_namespace(command, node_local_dir)
         reference = recipe.get("reference")
         if reference:
@@ -1027,21 +1061,25 @@ def prepare() -> None:
             # The context was copied without what the image must not hold; its own
             # .dockerignore still applies.
             subprocess.run(
-                [*command, "build", "-q", "--iidfile", "built", "--file", "context/Dockerfile",
-                 "context"],
+                [*command, "build", *proxy, "-q", "--iidfile", "built",
+                 "--file", "context/Dockerfile", "context"],
                 check=True,
                 stdout=subprocess.DEVNULL,
             )  # fmt: skip
             base, digests = read("built"), []
         step = "framework"
         base = "sha256:" + base.removeprefix("sha256:")
+        if batch is not None:
+            actual = output(*command, "image", "inspect", "-f", "{{.Os}}/{{.Architecture}}", base)
+            if actual != expected:
+                raise RuntimeError(f"image {base} is {actual}, allocation requires {expected}")
         tag = "localhost/orbit-framework-base:" + base.removeprefix("sha256:")[:12]
         subprocess.run([*command, "tag", base, tag], check=True)
         user = output(*command, "image", "inspect", "-f", "{{.Config.User}}", base)
         lines = [f"FROM {tag}", *framework["body"], *([f"USER {user}"] if user else [])]
         Path("Framework.Dockerfile").write_text("\n".join([*lines, *framework["tail"]]) + "\n")
         subprocess.run(
-            [*command, "build", "-q", "--iidfile", "framed",
+            [*command, "build", *proxy, "-q", "--iidfile", "framed",
              "--build-context", "python=" + framework["python"],
              "--file", "Framework.Dockerfile", framework["context"]],
             check=True,
@@ -1102,7 +1140,14 @@ def supervise() -> None:
     directory, command, node_local_dir = store(spec)
     steps: dict[str, subprocess.Popen[bytes]] = {}
     holders: subprocess.Popen[bytes] | None = None
+    bridge: subprocess.Popen[bytes] | None = None
     try:
+        if batch is not None:
+            if "architecture" in spec:
+                batch.native(spec["architecture"])
+            # Set up the delegated hierarchy before Podman starts its namespace keeper.
+            batch.open(own_cgroup(), devices() if batch.gpu_count else [])
+            batch.runtime_available(command)
         hold_namespace(command, node_local_dir)
         if len(nodes) > 1:
             # Every other node's store, held by a step there for as long as this one runs,
@@ -1124,18 +1169,34 @@ def supervise() -> None:
                 )
             time.sleep(0.5)
         SANDBOXES.mkdir(exist_ok=True)
+        if batch is not None:
+            Path("sessions").mkdir(mode=0o700)
+            bridge = subprocess.Popen(
+                [sys.executable, "-I", str(Path(__file__).with_name("bridge.py")), "listen"]
+            )
         write("ready", dict(runtime=version, node=nodes[0], nodes=nodes))
         while not read("stop"):
             for request in sorted(SANDBOXES.glob("*/request.json")):
                 index = request.parent.name
                 if index not in steps and not (request.parent / "done").exists():
-                    steps[index] = launch(
-                        index, json.loads(request.read_text()), nodes, gpus=bool(spec["gpus"])
-                    )
+                    data = json.loads(request.read_text())
+                    if batch is None:
+                        steps[index] = launch(index, data, nodes, gpus=bool(spec["gpus"]))
+                    else:
+                        try:
+                            with (request.parent / "step.log").open("wb") as log:
+                                steps[index] = batch.allocation.launch(index, data, __file__, log)
+                        except Exception as exc:
+                            write(request.parent / "error", str(exc))
+                            write(request.parent / "done", 1)
             for index, step in list(steps.items()):
                 if (code := step.poll()) is not None:
+                    if batch is not None:
+                        batch.allocation.end(index, SANDBOXES / index / NODES / "0" / "memory")
                     write(SANDBOXES / index / "done", code)
                     del steps[index]
+            if bridge is not None and bridge.poll() is not None:
+                raise RuntimeError("the batch allocation control channel exited")
             if holders is not None and holders.poll() is not None:
                 raise RuntimeError("a node's store ended: " + read("hold.log")[-2000:])
             time.sleep(0.5)
@@ -1150,6 +1211,8 @@ def supervise() -> None:
             except subprocess.TimeoutExpired:
                 step.kill()
                 step.wait()
+            if batch is not None:
+                batch.allocation.end(index, SANDBOXES / index / NODES / "0" / "memory")
             write(SANDBOXES / index / "done", step.returncode)
         if holders is not None and not read("stop"):
             # Each removes its node's store once the job is stopped or released: a signal
@@ -1157,10 +1220,18 @@ def supervise() -> None:
             write("release", "1")
         # The batch step outlives each Sandbox's step, including an OOM that kills every
         # process there. Keep the job's counters before the allocation goes away.
-        Path("memory").write_text((job_cgroup() / "memory.events").read_text())
+        if bridge is not None:
+            bridge.terminate()
+            bridge.wait()
+        if batch is None:
+            Path("memory").write_text((job_cgroup() / "memory.events").read_text())
+        elif batch.allocation is not None:
+            Path("memory").write_text((batch.allocation.group / "memory.events").read_text())
         try:
             clean(command, directory)
         finally:
+            if batch is not None and batch.allocation is not None:
+                batch.allocation.close()
             if holders is not None:
                 try:
                     holders.wait(timeout=540)
@@ -1191,7 +1262,7 @@ def start(index: str) -> None:
     its container; then hold it until it is saved or destroyed, measuring what
     it writes where it is held to ``storage_mb``."""
     box = SANDBOXES / index
-    rank = int(os.environ["SLURM_PROCID"])
+    rank = 0 if batch is not None else int(os.environ["SLURM_PROCID"])
     own = box / NODES / str(rank)
     deadline = time.monotonic() + GROUP_TIMEOUT_SEC
     while not appeared(box / "request.json"):
@@ -1205,19 +1276,21 @@ def start(index: str) -> None:
         # Every control step finds a node's part of the Sandbox by the node's place in the job.
         raise RuntimeError(f"node {rank} of Sandbox {index} runs on {this_node()}")
     stored = node_store()
-    limit = limit_cgroup()
+    limit = batch.join() if batch is not None else limit_cgroup()
     if (
         int((limit / "memory.max").read_text()) != spec["memory_mb"] << 20
         or (limit / "memory.swap.max").read_text().strip() != "0"
         or len(os.sched_getaffinity(0)) != spec["cpus"]
     ):
         raise RuntimeError(
-            f"Slurm did not enforce the requested CPU, memory and zero-swap allocation on "
+            f"The scheduler did not enforce the requested CPU, memory and zero-swap allocation on "
             f"{this_node()}"
         )
     command = podman(stored["directory"])
     name = container(index)
     gpus = devices() if spec["gpus"] else []
+    if gpus and batch is not None:
+        gpus = batch.devices(gpus)
     if len(gpus) != spec["gpus"]:
         raise RuntimeError(f"{this_node()} gave {len(gpus)} GPUs, requested {spec['gpus']}")
     mounts: list[dict[str, object]] = []
@@ -1238,6 +1311,9 @@ def start(index: str) -> None:
         f"--shm-size={spec['shm_mb']}m",
         *spec["runtime_args"],
     ]
+    if batch is not None:
+        # Keep conmon and the runtime in this exact delegated job step.
+        flags.extend(["--cgroups=no-conmon", "--env-host=false"])
     env = dict(spec["env"])
     if gpus:
         flags += ["--runtime-flag=nvproxy", "-e", "NVIDIA_VISIBLE_DEVICES=void"]
@@ -1306,6 +1382,11 @@ def start(index: str) -> None:
             if str(flag).startswith("--runtime-flag=")
         ]
         conmon = int(output(*command, "inspect", "--format", "{{.State.ConmonPid}}", name))
+        if batch is not None:
+            batch.verify_process(conmon, limit)
+            batch.verify_process(
+                int(output(*command, "inspect", "--format", "{{.State.Pid}}", name)), limit
+            )
         upper = output(*command, "inspect", "--format", "{{.GraphDriver.Data.UpperDir}}", name)
         if spec.get("storage") and not os.path.isdir(upper):
             raise RuntimeError(
@@ -1329,7 +1410,7 @@ def start(index: str) -> None:
                 runtime_flags=runtime_flags,
                 image=node["image"],
                 devices=gpus,
-                step=os.environ["SLURM_STEP_ID"],
+                step=index if batch is not None else os.environ["SLURM_STEP_ID"],
                 volumes=found,
                 node=this_node(),
                 hcas=hcas,
@@ -1558,4 +1639,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    settings = Path(__file__).with_name("batch.json")
+    if settings.is_file():
+        adapter = runpy.run_path(str(settings.with_name("batch_worker.py")))
+        batch = adapter["Batch"](json.loads(settings.read_text()))
     main()
