@@ -22,12 +22,16 @@ from orbit.core.trajectory import (
 )
 from orbit.run.harnesses.base import (
     NativeResult,
+    call_metrics,
+    epoch_time,
     invocations,
+    iso_time,
     json_lines,
     mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -106,11 +110,13 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         ),
     )
     native = _active_branch(entries)
-    turns = _convert(builder, native, context)
+    turns = _convert(builder, native, context, issues)
     if native and turns < len(recorded):
         issues.append({"reason": "prompt_not_in_native_session", "invocation": turns + 1})
     # A turn the session lacks is rebuilt from its own JSON events, which carry the same
-    # messages as they ended.
+    # messages as they ended but no times of their own. A prompt takes its message's
+    # creation time; an assistant message's is when its model call began, so its step
+    # stays untimed.
     for item, stream in zip(recorded[turns:], streams[turns:], strict=True):
         messages = [
             event["message"]
@@ -120,7 +126,19 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if not any(message.get("role") == "user" for message in messages):
             builder.add(source="user", message=item.prompt)
         _convert(
-            builder, [{"type": "message", "message": message} for message in messages], context
+            builder,
+            [
+                {
+                    "type": "message",
+                    "message": message,
+                    "timestamp": None
+                    if message.get("role") == "assistant"
+                    else epoch_time(message.get("timestamp"), 1000),
+                }
+                for message in messages
+            ],
+            context,
+            issues,
         )
     if not recorded and not builder.steps:
         builder.add(source="user", message=context.instruction)
@@ -152,9 +170,16 @@ def _active_branch(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _convert(
-    builder: TrajectoryBuilder, entries: list[dict[str, Any]], context: TrajectoryParseContext
+    builder: TrajectoryBuilder,
+    entries: list[dict[str, Any]],
+    context: TrajectoryParseContext,
+    issues: list[dict[str, Any]],
 ) -> int:
-    """Add the entries' steps; the number of prompts among them."""
+    """Add the entries' steps; the number of prompts among them.
+
+    Each assistant message is one model call: its step lists the call's response ID after
+    the entry's and carries the call's usage.
+    """
     results: dict[str, AtifObservationResult] = {}
     servers: dict[str, dict[str, Any]] = {}
     for entry in entries:
@@ -177,12 +202,9 @@ def _convert(
     prompts = 0
     for entry in entries:
         kind = entry.get("type")
-        timestamp = entry.get("timestamp") if isinstance(entry.get("timestamp"), str) else None
-        extra = (
-            {"orbit": {"native_event_ids": [entry["id"]]}}
-            if isinstance(entry.get("id"), str)
-            else None
-        )
+        timestamp = iso_time(entry.get("timestamp"))
+        ids = [entry["id"]] if isinstance(entry.get("id"), str) else []
+        extra = {"orbit": {"native_event_ids": ids}} if ids else None
         if kind in {"compaction", "branch_summary"} and isinstance(entry.get("summary"), str):
             builder.add(source="system", message=entry["summary"], timestamp=timestamp, extra=extra)
             continue
@@ -223,8 +245,23 @@ def _convert(
             observed = [
                 results[call.tool_call_id] for call in calls if call.tool_call_id in results
             ]
-            usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
+            response_id = message.get("responseId")
+            response_id = response_id if isinstance(response_id, str) and response_id else None
+            if response_id:
+                extra = {"orbit": {"native_event_ids": [*ids, response_id]}}
             if "".join(text) or reasoning or calls:
+                metrics = None
+                if message.get("usage") is not None:
+                    try:
+                        metrics = _metrics(message["usage"])
+                    except ValueError:
+                        issues.append(
+                            {
+                                "reason": "invalid_token_usage",
+                                "entry_id": entry.get("id"),
+                                "response_id": response_id,
+                            }
+                        )
                 builder.add(
                     source="agent",
                     message="".join(text),
@@ -235,7 +272,7 @@ def _convert(
                     reasoning_content="".join(reasoning) or None,
                     tool_calls=calls or None,
                     observation=AtifObservation(results=observed) if observed else None,
-                    metrics=_metrics(usage),
+                    metrics=metrics,
                     extra=extra,
                 )
             if failure := _failure(message):
@@ -262,17 +299,18 @@ def _failure(message: dict[str, Any]) -> str | None:
     )
 
 
-def _metrics(usage: dict[str, Any] | None) -> AtifMetrics | None:
-    if not usage:
-        return None
-    counts = {key: usage.get(key) for key in ("input", "output", "cacheRead")}
-    if not all(isinstance(value, int) for value in counts.values()):
-        return None
-    return AtifMetrics(
-        prompt_tokens=counts["input"],
-        completion_tokens=counts["output"],
-        cached_tokens=counts["cacheRead"],
-    )
+def _metrics(usage: Any) -> AtifMetrics | None:
+    """An assistant message's ``usage``; raises ``ValueError`` when it cannot be read.
+
+    Pi's ``input`` leaves out the cache reads and writes, which the prompt adds back, and
+    its ``output`` already includes reasoning.
+    """
+    if not isinstance(usage, dict):
+        raise ValueError(f"not a usage object: {usage!r}")
+    cached = token_count(usage.get("cacheRead"), optional=True)
+    written = token_count(usage.get("cacheWrite"), optional=True)
+    prompt = token_count(usage.get("input")) + cached + written
+    return call_metrics(prompt, token_count(usage.get("output")), cached)
 
 
 def _content(value: Any, context: TrajectoryParseContext) -> str | list[AtifContentPart]:
