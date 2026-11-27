@@ -743,7 +743,7 @@ class FleetProvider(Provider):
         return SandboxDemand(
             kind=image.kind,
             os=operating_system,
-            arch=Arch.of(operating_system),
+            arch=image.arch or Arch.of(operating_system),
             network_mode=network_mode,
             resources=resources,
             image=image.prepared_identity,

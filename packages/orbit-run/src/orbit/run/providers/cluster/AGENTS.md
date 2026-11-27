@@ -1,7 +1,24 @@
-# Slurm provider
+# Cluster provider
 
-Decided: Orbit runs on a login node of the cluster, never on a machine that reaches one, and
-a Run drives that one cluster; joining clusters or other machines is not this Provider's.
+Decided: one Provider, `ClusterProvider`, serves every workload manager, named by the one a
+Run's configuration selects (`slurm`, `pbs`, `lsf`), as everything but a job's commands and
+how a Sandbox is held to its share of the job is the same on each. A workload manager's
+module (`slurm.py`, `pbs.py`, `lsf.py`) says how a job is submitted, watched, found by its
+unique name and cancelled, and what in its environment names it; Slurm holds each Sandbox in
+a step of the job, and PBS and LSF, which start no steps, delegate the job's cgroup, which
+`delegated.py` and the worker's `delegated_worker.py` split for Orbit and each Sandbox. A
+cluster's configuration names the same common settings whatever its workload manager, and
+adds only its own (Slurm's `qos`, `constraint` and nodes per job; PBS's select chunk), so
+the Provider asks no question of which workload manager it serves.
+
+Decided: a Run is driven from a login node of the cluster, never from a machine that reaches
+one, and drives that one cluster; joining clusters or other machines is not this Provider's.
+Each episode runs in a batch job of its own, the login node's Orbit only submitting it and
+waiting for its result, and Orbit's process in the job, on its first node, runs the episode
+whole, its protocol, Harness, Gateway and Sandboxes, holding the job as the allocation of
+every Sandbox: no control channel from the login node is needed, so PBS's and LSF's file
+bridge over the shared file system goes, and its latency with it, and the login node holds
+no long-lived process.
 OpenRSI's login nodes have no Docker, no Podman and no subordinate ID range for the account,
 so no container runs there, and images are prepared on the cluster. Measured on OpenRSI's
 compute nodes (Podman 4.9.3, Buildah 1.33.7): `COPY --chmod` and
@@ -21,20 +38,21 @@ absence is a failure.
 
 OpenRSI's QoS wall times are 3 h (`short`), 6 h (`dev`, `mid`) and 12 h (`long`, `lowprio`),
 and the others preempt `lowprio` with 120 s of grace (`PreemptMode=REQUEUE`, which cancels
-Orbit's `--no-requeue` jobs). An allocation's deadline is read from Slurm's own count rather
-than from a clock, and `--signal` is not used: everything before the save is Orbit's, on the
-login node, and Slurm states the end exactly as the job starts, so a signal to the batch
-step would only be a later second path. Decided: an allocation that Slurm ends first,
-preempted or on a failed node, loses its node's store and what the Sandbox held, and the
-episode fails, to be retried from its start where the Run allows retries, rather than
-resumed from periodic write-outs, which would cost a whole image's `podman save` to NFS each
-time and lose the work since the last one all the same.
+Orbit's `--no-requeue` jobs). A job's deadline is the end Slurm states in its environment as
+it starts (`SLURM_JOB_END_TIME`), else its start and wall time, less the drain, which the
+job itself computes, asking Slurm nothing; `--signal` is not used: everything before the
+save is Orbit's, in the job, and Slurm states the end exactly as the job starts, so a signal
+to the batch step would only be a later second path. Decided: a job that Slurm ends first,
+preempted or on a failed node, loses its node's store and what the Sandbox held, and Orbit's
+own process with it, and the episode fails, to be retried from its start where the Run
+allows retries, rather than resumed from periodic write-outs, which would cost a whole
+image's `podman save` to NFS each time and lose the work since the last one all the same.
 
 Measured on OpenRSI (`cpu_1`, a 1-CPU Sandbox of `container-ubuntu22-base`, wall times of 10
-minutes, 2 of them to drain): an episode of 720 s of the agent's work ran in three
-allocations, on both nodes, each run cut 120 s before its allocation's deadline; saving the
-solver, writing it out, ending the allocation, queueing and booting it in the next took 140
-s and 214 s, none of it the agent's.
+minutes, 2 of them to drain), with Orbit on the login node: an episode of 720 s of the
+agent's work ran in three allocations, on both nodes, each run cut 120 s before its
+allocation's deadline; saving the solver, writing it out, ending the allocation, queueing
+and booting it in the next took 140 s and 214 s, none of it the agent's.
 
 OpenRSI's H100 and B200 compute nodes run rootless Podman without a delegated user cgroup.
 Slurm owns resource enforcement: it limits each step of a job on its own, at
@@ -43,22 +61,25 @@ job's limit, and a step that asks for `--gres=gpu:0` in a GPU job sees no GPU. B
 Sandbox's step to threads: Slurm can allocate both hardware threads of a core when one CPU
 is requested.
 
-One allocation serves a solver and every Sandbox booted from its snapshots, as the episode
-boots them one at a time: a validation round's verifier and next solver, or a snapshot
-verifier, start from the node's own Podman store, with no copy and no second wait in the
-queue. It is sized for the largest of the solver and the verifier its request names, and
-holds that while the episode works there; that cost was accepted for large checkpoints and
-rounds on a busy queue. Decided: once nothing runs there and every snapshot it holds is
-written out with no Sandbox to boot from it there, as when a verifier went to an allocation
-of its own, it ends at once rather than idle until the episode ends, holding its GPUs. A
-round's next solver that could have had the rest of it waits in the queue instead, which
-spends none of the agent's time; the boot went elsewhere because the allocation was near its
-end or full anyway.
+One job serves its episode, a solver and every Sandbox booted from its snapshots, as the
+episode boots them one at a time: a validation round's verifier and next solver, or a
+snapshot verifier, start from the node's own Podman store, with no copy and no second wait
+in the queue. It is sized for the largest of the solver and the verifiers, a separate one
+included, and holds that while the episode works there; that cost was accepted for large
+checkpoints and rounds on a busy queue. Decided: no Sandbox of an episode gets an allocation
+of its own, and the job's allocation ends with the episode, not as it idles: the Provider in
+the job never submits a job, so a Sandbox that does not fit beside what runs waits for room
+there, and one the job would not last is refused, except a solver booted from a snapshot the
+job saved: that snapshot is written out instead, and the episode's next job, which the login
+node submits, boots from it (`SandboxHandOff`). A snapshot written out by an earlier job
+that this one would not last is refused too, as a later job would not last it either and the
+episode would never end.
 
-Decided: an allocation mid-episode, one that boots a snapshot or a separate verifier's,
-waits in the queue for as long as Slurm keeps it pending, rather than for
-`queue_timeout_sec`: giving up there ended the episode, and for a snapshot destroyed it, the
-agent's only state, over a wait that spends none of its time.
+Decided: the job's worker is a child process of Orbit's, never Orbit's own code, and runs
+until Orbit closes the job's allocation: it changes its environment and its signal handling
+and blocks as it waits, and it alone holds the stores. It gets none of the Host's
+credentials, which reach the job with Orbit, as no process Orbit starts on the cluster does:
+`sbatch` and `srun` hand the environment they are given to the job's processes.
 
 A snapshot written out, the image's `podman save` archive and each volume layer's tar, is
 not compressed. Measured on OpenRSI (`cpu_1`, 8 CPUs, Podman 4.9.3) with a solver of
@@ -67,28 +88,25 @@ GB: committing it took 11 to 13 s; `podman save | gzip -1` to the shared home to
 9.8 GB, as one gzip process writes 41 MB/s, and `podman load` of that took 321 s; `pigz -1`
 on 8 threads took 89 s; uncompressed, the save took 46 s, 2 s more than to `/dev/null`, and
 the load 189 s. A move's save must fit in `drain_minutes`, which the gzipped one barely did
-at the default of 10, and the next allocation's load lengthens the move's gap; a carried
-snapshot is removed once the next save succeeds, so the space is held briefly.
+at the default of 10, and the next job's load lengthens the move's gap; a carried snapshot
+is removed once the next save succeeds, so the space is held briefly. A snapshot the Run
+keeps is written out as it is saved, as the job's stores end with the episode.
 
-A boot that does not fit beside what runs gets an allocation of its own, loading the
-snapshot from a `podman save` archive in the cache, as does a snapshot the Run keeps,
-whose allocation ends with the episode.
+The worker, not Orbit, starts each Sandbox's step (`srun --exact`), which Slurm holds to its
+resources; Orbit only writes the request and reads the step's files in the cache. With
+`--ignore-cgroups` alone, one allocating process could take down the entire Sentry, so the
+runtime reads the nearest cgroup above the step that has a `memory.max`, without joining or
+modifying it. The worker holds Podman's pause namespace through cleanup. Each job needs
+private XDG, graph, run and temporary directories so concurrent jobs of one UID can end
+independently.
 
-The batch step, not Orbit, starts each Sandbox's step (`srun --exact`), so Orbit's own
-process ending never ends it; Orbit only writes the request and reads the step's files in
-the cache. With `--ignore-cgroups` alone, one allocating process could take down the
-entire Sentry, so the runtime reads the nearest cgroup above the step that has a
-`memory.max`, without joining or modifying it. The batch step holds Podman's pause namespace
-through cleanup. Each job needs private XDG, graph, run and temporary directories so
-concurrent jobs of one UID can end independently.
-
-A job's store on the node's `/tmp` outlived it in three ways, 88 of them on two nodes: Podman
-sets an empty store up again at its path as `podman unshare` exits, Python ends at once on
-the SIGTERM Slurm sends a cancelled or preempted job, and a job that Slurm kills at its wall
-time, or whose node goes down, cleans up nothing. The batch step removes what Podman left
-after its release, turns SIGTERM into an exit so that its cleanup runs, and, as it starts,
-removes the stores on its node of this account's jobs that have ended, which each store
-names in its `job` file.
+A job's store on the node's `/tmp` outlived it in three ways, 88 of them on two nodes:
+Podman sets an empty store up again at its path as `podman unshare` exits, Python ends at
+once on the SIGTERM Slurm sends a cancelled or preempted job, and a job that Slurm kills at
+its wall time, or whose node goes down, cleans up nothing. The worker removes what Podman
+left after its release, turns SIGTERM into an exit so that its cleanup runs, and, as it
+starts, removes the stores on its node of this account's jobs that have ended, which each
+store names in its `job` file.
 
 A commit chain of 200, each booted from the one before, worked under rootless Podman 4.9.3
 on Linux 6.8, which is the declared `max_saves`.
@@ -105,10 +123,11 @@ honours, and a container sees the mount because Podman's containers start in tha
 Each layer is named by a short link below the store, `l/<layer>`, and the overlay is mounted
 from the store's root, so its options, which must fit in a page, name a chain of 200 layers;
 Docker's own overlay driver does the same. A container engine's storage is copied, never
-viewed, as on Docker. A snapshot written out for another allocation carries each layer as a
+viewed, as on Docker. A snapshot written out for a later job carries each layer as a
 tar that `tar --xattrs --xattrs-include=user.*` writes in the namespace, which keeps owners,
 whiteouts and the overlay's opaque directories; it is not compressed, as a volume's output
-often is already.
+often is already. A later job loads a snapshot's layers with its image, into its stores as
+its worker starts, or, once it runs, by a control command on each node.
 
 A Sandbox's `/dev/shm` is Podman's `--shm-size` of half its Task's memory
 ([`memory.shm_mb`](../memory.py)). Podman makes it a tmpfs on the node and binds it into the
@@ -231,12 +250,12 @@ failed move's retry, start from; a verifier gets it read-only, so that nothing i
 reaches the agent's next turn.
 
 Decided: a Sandbox that names `storage_mb` is measured by its own step on each node, which
-holds its store and so reads it at the disk's speed, rather than by the Host, which would
-reach the store only through Slurm steps. How often follows the room left
+holds its store and so reads it at the disk's speed, rather than by Orbit's process, which
+reaches the other nodes' stores only through Slurm steps. How often follows the room left
 (`providers/storage.py`), as measuring a Sandbox of many files every 5 s far below a large
 limit costs a walk for nothing.
 
-A hold step removes its node's store once the job is stopped or, when the batch step fails,
+A hold step removes its node's store once the job is stopped or, when the worker fails,
 released by a file it polls: srun turns a SIGTERM into SIGKILL for its tasks, which would
 leave the store. Measured: after each of six such removals, the store's directory came back
 empty, naming no job; a job starting on the node removes the empty ones of this account
@@ -244,17 +263,19 @@ older than ten minutes.
 
 ## Ending a guest session
 
-Each guest session, guestd's two, the memory watcher's and a node's Gateway tunnel, is an
-`srun` on the login node whose step runs `podman exec`. Podman runs a monitor, conmon, for
-the session in that step, which writes the session's exit code to a file below the
-container's directory as it ends. Killing the `srun` ends the step and the monitor with it,
-before that file is written: on OpenRSI (Podman 4.9.3, November 2026) a Sandbox's container
-had four exec monitors on its node, and three 5 s after one session's `srun` was killed.
-`podman stop` then stops the container, but its cleanup waits 5 s for that file and fails
-(`timed out waiting for file …/userdata/<session>/exit/<container>`, exit 125), and the save
-with it. Closing a tunnel used to kill its `srun`, so the first save of every Sandbox that
-reached a Gateway failed this way, and with it every run of a real agent's CLI, at its first
-validation round, snapshot verifier, separate verifier of its volumes or move.
+Each guest session, guestd's two, the memory watcher's and a node's Gateway tunnel, was an
+`srun` on the login node whose step runs `podman exec`, and on the job's other nodes is one
+from Orbit's; on Orbit's own node it is `podman exec` alone, whose monitor no step holds.
+Podman runs a monitor, conmon, for the session in that step, which writes the session's exit
+code to a file below the container's directory as it ends. Killing the `srun` ends the step
+and the monitor with it, before that file is written: on OpenRSI (Podman 4.9.3, November
+2026) a Sandbox's container had four exec monitors on its node, and three 5 s after one
+session's `srun` was killed. `podman stop` then stops the container, but its cleanup waits 5
+s for that file and fails (`timed out waiting for file
+…/userdata/<session>/exit/<container>`, exit 125), and the save with it. Closing a tunnel
+used to kill its `srun`, so the first save of every Sandbox that reached a Gateway failed
+this way, and with it every run of a real agent's CLI, at its first validation round,
+snapshot verifier, separate verifier of its volumes or move.
 
 The Host ends a session as a command ends: it closes the session's input, which ends the
 guest's end of it once that reads it, and kills the `srun` only if it still runs 5 s later
@@ -271,6 +292,26 @@ the first had written and reached its Gateway.
 
 Decided: both, rather than either alone. Ending sessions by their input spares every save
 Podman's 5 s wait for each session and leaves nothing on the node half ended; the second
-stop covers an `srun` lost any other way, by the Host's own kill after 5 s or on the login
-node. The stop is repeated once, on any failure: Podman marks every lost session in the
-first, so a second failure has another cause, which it reports.
+stop covers an `srun` lost any other way, by the Host's own kill after 5 s or on its node.
+The stop is repeated once, on any failure: Podman marks every lost session in the first, so
+a second failure has another cause, which it reports.
+
+## PBS and LSF jobs
+
+PBS and LSF jobs hold one node, so Orbit reaches the worker by commands of its own there and
+by nothing else. Without Slurm's steps, the worker holds each Sandbox to its CPUs, memory
+and no swap in a cgroup of its own, in the job's cgroup v2 hierarchy, which the workload
+manager must delegate to the job's account. Its batch script used to run the worker, which
+moved itself into a leaf of its own and enabled the controllers on the job's cgroup, which
+cgroup v2 allows only of a cgroup that holds no process itself, and killed whatever its
+subtree held as it ended. Orbit's process now runs the script, and the worker as its child.
+
+Decided: before the worker starts, Orbit moves its own process into a leaf of the job's
+cgroup, `orbit-engine`, enables the memory, CPU and, where the workload manager offers it,
+cpuset controllers on the job's cgroup, and gives the worker a sibling subtree,
+`orbit-sandboxes`, whose path it names in `delegated.json`, rather than leave Orbit beside
+the worker or in its subtree: the job's cgroup then holds no process, and nothing the worker
+kills as it ends is Orbit's. A job whose cgroup holds another process, or that the account
+may not write, is refused before any Sandbox starts, naming why, rather than run Sandboxes
+the job's limit alone holds. A job on a PBS queue whose select chunk leaves out a resource
+holds the queue's whole of it, which the job's Orbit admits Sandboxes to.

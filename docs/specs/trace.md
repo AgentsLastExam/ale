@@ -211,7 +211,11 @@ setup ran, and when that work ended, and the agent's time it spent; the RunLock 
 first solver's allocation. Together the segments spend the agent's time, and the time
 between one's end and the next one's start, the save, a wait in a queue and the boot, is no
 one's.
-The agent's phase a move cut has the outcome `moved` among the phase timings.
+The agent's phase a move cut has the outcome `moved` among the phase timings, and so has
+the boot of a solver that goes on in the episode's next process. An episode handed off to
+another process ([Moves](episode-protocol.md#moves)) has no result until the process that
+ends it writes the one result, for the whole episode, with every process's phases, segments,
+rounds and Sandbox outcomes.
 `progress.json`, beside the result, is a projection of the same that the episode rewrites as
 it goes, with the agent's time and rounds, the native session it goes on in and what the
 episode is doing (`agent`, `moving`, `validating` or `verifying`): at each segment's start
@@ -219,8 +223,11 @@ and end and every 60 s while the agent runs, so that it outlives the process tha
 episode.
 
 `runs/<run>/ledger.db` is a rebuildable run-level projection for queued/running/current
-phase/terminal/interrupted state. It uses WAL and stores bounded failures and final reward
-maps, never full trajectory, trace, lock, or native-log documents. Rows are inserted
+phase/terminal/interrupted state. On a cluster the Run's dispatcher alone writes it, from
+the result each [episode job](lexicon.md) writes in its episode's directory, which is all a
+job writes there: SQLite's write-ahead log does not hold across machines. It uses WAL and
+stores bounded failures and final reward maps,
+never full trajectory, trace, lock, or native-log documents. Rows are inserted
 before the concurrency semaphore, marked running before episode orchestration, updated
 by explicit phase callbacks, and projected terminal only after `result.json` is durable.
 On reopen, stale queued/running rows become interrupted. An explicit resumed invocation

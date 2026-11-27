@@ -57,6 +57,9 @@ from orbit.run.images import (
     resolve_loaded_image,
 )
 from orbit.run.process import run
+from orbit.run.providers.cluster import ClusterProvider
+from orbit.run.providers.cluster.images import Recipe, pin
+from orbit.run.providers.cluster.images import key as cluster_key
 from orbit.run.providers.fleet import FleetProvider
 from orbit.run.providers.orchard import OrchardProvider, OrchardSandbox
 from orbit.run.providers.orchard.client import CONTROL_ACCOUNT
@@ -66,9 +69,6 @@ from orbit.run.providers.qemu.provider import (
     RUNNER_IMAGE,
     QemuProvider,
 )
-from orbit.run.providers.slurm import SlurmProvider
-from orbit.run.providers.slurm.images import Recipe, pin
-from orbit.run.providers.slurm.images import key as cluster_key
 from orbit.run.sources import cache_root
 from orbit.run.tasksets.manifest import BUILD_SCRIPTS, SETUP_DIR, describe
 
@@ -213,7 +213,7 @@ async def prepare_task_image_result(task: Task, provider: Provider) -> ImagePrep
     folder = _task_folder(task)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, "solver", provider)
-    if isinstance(provider, SlurmProvider):
+    if isinstance(provider, ClusterProvider):
         return await _on_cluster(task, "solver", provider)
     if spec.base_ref is not None:
         base = await _stage(
@@ -394,7 +394,7 @@ async def prepare_verifier_image_result(
     kind = _kind(declared)
     if isinstance(provider, FleetProvider):
         return _on_fleet(task, role, provider)
-    if isinstance(provider, SlurmProvider):
+    if isinstance(provider, ClusterProvider):
         return await _on_cluster(task, role, provider)
     if declared.ref is not None:
         image = await _stage(
@@ -549,9 +549,9 @@ def _on_fleet(task: Task, role: ImageRole, provider: FleetProvider) -> ImagePrep
 
 
 async def _on_cluster(
-    task: Task, role: ImageRole, provider: SlurmProvider
+    task: Task, role: ImageRole, provider: ClusterProvider
 ) -> ImagePreparationResult:
-    """One of a Task's images as the Slurm Provider prepares it, on the cluster, from what
+    """One of a Task's images as the cluster Provider prepares it, on the cluster, from what
     the Task declares, as no container runtime runs where Orbit does: a named image pinned
     by the digest its registry gives it now, or the Task's own build, with the framework
     layer.
@@ -566,7 +566,7 @@ async def _on_cluster(
     }[role]
     assert image is not None
     if _kind(image) is not ImageKind.CONTAINER or task.spec.os is not OperatingSystem.LINUX:
-        raise TaskDefinitionError("Slurm runs Linux container images only")
+        raise TaskDefinitionError(f"{provider.name} runs Linux container images only")
     folder = _task_folder(task)
     reference: str | None = None
     context: Path | None = None
@@ -593,9 +593,10 @@ async def _on_cluster(
         user=image.user,
         keep_alive=image.keep_alive,
         multinode=image.multinode,
+        arch=provider.architecture,
     )
     prepared, reused = await _stage(
-        "slurm-preparation",
+        f"{provider.name}-preparation",
         provider.prepare_recipe(
             Recipe(
                 key=key,
@@ -613,7 +614,7 @@ async def _on_cluster(
     )
     steps = [
         ImagePreparationStep(
-            "slurm-preparation",
+            f"{provider.name}-preparation",
             "reused" if reused else "executed",
             prepared.prepared_identity,
             reference or "built from the Task's context on the cluster",

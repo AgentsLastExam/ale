@@ -1,10 +1,12 @@
-"""Sandboxes of several nodes on Slurm, run on a login node of an explicitly configured
-cluster with a partition whose `max_nodes` is at least two."""
+"""Sandboxes of several nodes on Slurm, run as Orbit runs each episode, on the first node of a
+batch job of two nodes or more of an explicitly configured cluster
+(``tests.support.provider_in_job``)."""
 
 from __future__ import annotations
 
 import json
 import socket
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -15,15 +17,26 @@ from orbit.core.verdict import Status
 from orbit.run.episode import run_episode
 from orbit.run.harnesses.builtin import OracleHarness
 from orbit.run.protocol.episode_protocol import EpisodeProtocol
-from orbit.run.providers.slurm import SlurmProvider
-from orbit.run.providers.slurm.job import cache
+from orbit.run.providers.cluster import ClusterProvider
+from orbit.run.providers.cluster.job import cache
 from orbit.run.scaffold import scaffold_task
 from orbit.run.task_images import prepare_task_image
 from orbit.run.tasksets.manifest import load_tasks
 from tests.integration.test_volume_artifacts import START_ENGINE
-from tests.support import CONTAINER_BASE, edit_task_config, provider_registry, slurm_config
+from tests.support import CONTAINER_BASE, edit_task_config, provider_in_job, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_slurm]
+
+
+@pytest.fixture
+async def provider() -> AsyncIterator[ClusterProvider]:
+    """The Provider in the job these tests run in, closed after each."""
+    found = provider_in_job()
+    try:
+        yield found
+    finally:
+        await found.close()
+
 
 #: Connect to each target, as the agent; print one line each.
 PROBE = """
@@ -55,7 +68,7 @@ print("default dev peers")
 """
 
 
-def _partition(provider: SlurmProvider, *, gpus: bool = False):  # type: ignore[no-untyped-def]
+def _partition(provider: ClusterProvider, *, gpus: bool = False):  # type: ignore[no-untyped-def]
     for part in provider.config.partitions:
         if part.max_nodes >= 2 and (part.gpu_model is not None or not gpus):
             return part
@@ -73,7 +86,7 @@ def _resources(part, **update: object) -> Resources:  # type: ignore[no-untyped-
     ).model_copy(update=update)
 
 
-async def _request(provider: SlurmProvider, **update: object) -> SandboxRequest:
+async def _request(provider: ClusterProvider, **update: object) -> SandboxRequest:
     image = await provider.prepare_image(ImageRef(kind="container", reference=CONTAINER_BASE))
     base: dict[str, object] = {
         "episode_id": "slurm-nodes",
@@ -93,11 +106,12 @@ def _agent(sandbox):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.asyncio
-async def test_a_sandbox_of_two_nodes_reaches_its_peer_over_ssh_and_nothing_else() -> None:
-    provider = SlurmProvider(slurm_config())
+async def test_a_sandbox_of_two_nodes_reaches_its_peer_over_ssh_and_nothing_else(
+    provider: ClusterProvider,
+) -> None:
     request = await _request(provider, env={"TASK_SETTING": "kept"})
-    # The login node's own address on the cluster's network, which the bare nodes reach.
-    login = next(
+    # This node's own address on the cluster's network, Orbit's, which the bare nodes reach.
+    host_address = next(
         (
             address[4][0]
             for address in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
@@ -105,8 +119,8 @@ async def test_a_sandbox_of_two_nodes_reaches_its_peer_over_ssh_and_nothing_else
         ),
         None,
     )
-    if login is None:
-        pytest.skip("the login node's name resolves to no address but loopback")
+    if host_address is None:
+        pytest.skip("this node's name resolves to no address but loopback")
     async with await provider.create(request) as sandbox:
         nodes = sandbox.allocation.nodes
         assert len(set(nodes)) == 2 and sandbox.allocation.node == nodes[0]
@@ -145,7 +159,7 @@ async def test_a_sandbox_of_two_nodes_reaches_its_peer_over_ssh_and_nothing_else
             "ssh node1 'nohup python3 -m http.server 7000 >/dev/null 2>&1 &' && sleep 2"
         )
         assert code == 0, err
-        outside = f"{login}:22 1.1.1.1:443 140.82.112.4:443"
+        outside = f"{host_address}:22 1.1.1.1:443 140.82.112.4:443"
         for where, peer in (("", "node1:7000"), ("ssh node1 ", "node0:7001")):
             code, out, err = await agent(f"{where}python3 /tmp/probe.py {peer} {outside}")
             assert code == 0, err
@@ -155,13 +169,14 @@ async def test_a_sandbox_of_two_nodes_reaches_its_peer_over_ssh_and_nothing_else
 
 
 @pytest.mark.asyncio
-async def test_a_snapshot_of_two_nodes_keeps_each_node_and_the_shared_directory() -> None:
+async def test_a_snapshot_of_two_nodes_keeps_each_node_and_the_shared_directory(
+    provider: ClusterProvider,
+) -> None:
     """Node 1's disk is in the snapshot and comes back on node 1, and the shared directory
     with them: a copy of its own for a Sandbox that may change it, the snapshot's own,
     read-only, for a verifier. A Sandbox of one node booted from it is one node, which no ssh
     reaches beyond, with none of the nodes' variables; and once nothing keeps them, the
     shared directories are gone."""
-    provider = SlurmProvider(slurm_config())
     request = await _request(provider, planned_saves=1)
     shared = cache(provider.config) / "shared"
     before = set(shared.iterdir()) if shared.exists() else set()
@@ -219,8 +234,9 @@ async def test_a_snapshot_of_two_nodes_keeps_each_node_and_the_shared_directory(
 
 
 @pytest.mark.asyncio
-async def test_an_open_sandbox_of_two_nodes_reaches_out_and_still_its_peer() -> None:
-    provider = SlurmProvider(slurm_config())
+async def test_an_open_sandbox_of_two_nodes_reaches_out_and_still_its_peer(
+    provider: ClusterProvider,
+) -> None:
     request = await _request(provider, network=NetworkPolicy(mode=NetworkMode.OPEN))
     async with await provider.create(request) as sandbox:
         agent = _agent(sandbox)
@@ -233,15 +249,16 @@ async def test_an_open_sandbox_of_two_nodes_reaches_out_and_still_its_peer() -> 
 
 
 @pytest.mark.asyncio
-async def test_root_that_routes_everything_to_the_other_nodes_reaches_only_them() -> None:
+async def test_root_that_routes_everything_to_the_other_nodes_reaches_only_them(
+    provider: ClusterProvider,
+) -> None:
     """Root holds `NET_ADMIN` in a Sandbox that runs nested containers; the router, outside
     it, still forwards only the nodes' own traffic."""
-    provider = SlurmProvider(slurm_config())
     part = _partition(provider)
     request = await _request(
         provider, resources=_resources(part, container_features=("nested_containers",))
     )
-    login = next(
+    host_address = next(
         address[4][0]
         for address in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
         if not address[4][0].startswith("127.")
@@ -260,7 +277,7 @@ async def test_root_that_routes_everything_to_the_other_nodes_reaches_only_them(
         )
         assert code == 0 and "default dev peers" in out, err
         code, out, err = await root(
-            f"python3 /tmp/probe.py node1:7000 {login}:22 1.1.1.1:443 140.82.112.4:443"
+            f"python3 /tmp/probe.py node1:7000 {host_address}:22 1.1.1.1:443 140.82.112.4:443"
         )
         assert code == 0, err
         seen = dict(line.split(" ", 1) for line in out.splitlines())
@@ -285,9 +302,8 @@ BUILD = (
 
 @pytest.mark.asyncio
 async def test_two_nodes_run_containers_that_reach_each_other_and_keep_them_in_a_snapshot(
-    tmp_path: Path,
+    tmp_path: Path, provider: ClusterProvider
 ) -> None:
-    provider = SlurmProvider(slurm_config())
     part = _partition(provider)
     root = scaffold_task(tmp_path / "engines")
     (root / "environment" / "Dockerfile").write_text(ENGINES.format(base=CONTAINER_BASE))
@@ -430,12 +446,11 @@ CMD ["sleep", "infinity"]
 
 @pytest.mark.asyncio
 async def test_a_task_trains_on_two_nodes_and_a_separate_verifier_checks_its_work(
-    tmp_path: Path,
+    tmp_path: Path, provider: ClusterProvider
 ) -> None:
     """`torchrun` on two nodes of every GPU each, over InfiniBand, which the nodes must have,
     started by the agent alone with the agent's network sealed, and checked by a separate
     verifier of one node that sees the agent's output."""
-    provider = SlurmProvider(slurm_config())
     part = _partition(provider, gpus=True)
     root = scaffold_task(tmp_path / "train-two-nodes")
     (root / "environment" / "Dockerfile").write_text(DOCKERFILE)

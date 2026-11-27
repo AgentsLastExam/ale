@@ -60,14 +60,20 @@ __all__ = [
 ]
 
 UNKNOWN_COMMIT = "unknown"
+#: The commit of the checkout an installed copy was installed from, which the installer
+#: writes beside this module, as a cluster's engine is installed below its cache.
+INSTALLED_COMMIT = Path(__file__).with_name("commit")
 
 
 def _git_commit() -> str:
-    """The engine's own commit, or ``unknown`` outside a checkout.
+    """The engine's own commit: its checkout's, or the one an installed copy records, else
+    ``unknown``.
 
     An installed copy legitimately has no git metadata, so this is not an error on its
     own — it only becomes one when such a run tries to report a result.
     """
+    if INSTALLED_COMMIT.is_file():
+        return INSTALLED_COMMIT.read_text().strip() or UNKNOWN_COMMIT
     try:
         result = subprocess.run(
             ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],

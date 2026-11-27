@@ -84,6 +84,8 @@ class PreparedTaskImage(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: ImageKind
+    arch: Arch | None = Field(default=None, exclude_if=lambda value: value is None)
+    """The observed instruction set of a natively prepared cluster image."""
     source: Literal["solver-local", "verifier-local", "validation-local", "external-ref"]
     input_identity: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     image_source_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
@@ -312,7 +314,7 @@ class SandboxRequest(BaseModel):
         return SandboxNeeds(
             kind=self.image_kind,
             os=self.os,
-            arch=Arch.of(self.os),
+            arch=self.prepared_image.arch or Arch.of(self.os),
             network_mode=self.network.mode,
             # The elevation it gets, which an image builder's request grants beyond its
             # size.
@@ -327,6 +329,7 @@ class SandboxRequest(BaseModel):
                     (self.snapshot_verifier, self.verifier_network_mode),
                     (self.round_verifier, self.round_verifier_network_mode),
                 ),
+                arch=self.prepared_image.arch,
             ),
         )
 
@@ -343,6 +346,8 @@ def verifiers_needs(
     kind: ImageKind,
     operating_system: OperatingSystem,
     verifiers: Sequence[tuple[Resources | None, NetworkMode]],
+    *,
+    arch: Arch | None = None,
 ) -> SandboxNeeds | None:
     """What the verifiers that boot from a solver's snapshot need, a snapshot verifier's and
     a validation round's, each of the ``verifiers`` given with its network mode, the next
@@ -353,7 +358,7 @@ def verifiers_needs(
             distinct.append((resources, mode))
     needs = None
     for resources, mode in reversed(distinct):
-        outer = snapshot_verifier_needs(kind, operating_system, resources, mode)
+        outer = snapshot_verifier_needs(kind, operating_system, resources, mode, arch=arch)
         needs = outer if needs is None else outer.model_copy(update={"verifier": needs})
     return needs
 
@@ -363,13 +368,15 @@ def snapshot_verifier_needs(
     operating_system: OperatingSystem,
     resources: Resources,
     network_mode: NetworkMode,
+    *,
+    arch: Arch | None = None,
 ) -> SandboxNeeds:
     """What a snapshot verifier of ``resources`` needs: its solver's image, the verifier's
     ``network_mode``, and a snapshot to boot from."""
     return SandboxNeeds(
         kind=kind,
         os=operating_system,
-        arch=Arch.of(operating_system),
+        arch=arch or Arch.of(operating_system),
         network_mode=network_mode,
         resources=resources,
         snapshot=True,

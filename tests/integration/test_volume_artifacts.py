@@ -19,11 +19,11 @@ from orbit.core.taskspec import ContainerFeature, NetworkMode, NetworkPolicy, Re
 from orbit.core.verdict import Status
 from orbit.run.episode import EpisodeResult, run_episode
 from orbit.run.protocol.episode_protocol import EpisodeProtocol
+from orbit.run.providers.cluster import ClusterProvider
 from orbit.run.providers.docker import DockerProvider
 from orbit.run.providers.docker import volumes as docker_volumes
 from orbit.run.providers.firecracker import FirecrackerProvider
 from orbit.run.providers.qemu import QemuProvider
-from orbit.run.providers.slurm import SlurmProvider
 from orbit.run.scaffold import scaffold_task
 from orbit.run.task_images import prepare_task_image
 from orbit.run.tasksets.manifest import load_tasks
@@ -33,10 +33,10 @@ from tests.support import (
     VM_RESOURCES,
     ScriptedCliHarness,
     edit_task_config,
+    provider_in_job,
     provider_registry,
     skip_without_gvisor,
     skip_without_kata,
-    slurm_config,
     write_task,
 )
 
@@ -371,10 +371,10 @@ async def test_a_container_engines_images_survive_its_sandboxs_snapshot(
     the Sandbox booted from its snapshot, which deletes another file of it: the snapshot's
     copy of the engine's storage keeps its whiteouts, where a view would hide them. On Slurm
     the snapshot, kept by its Run, is written out with its volumes, and the Sandbox booted
-    from it loads them in an allocation of its own."""
-    provider: DockerProvider | SlurmProvider
+    from it loads them in a job's allocation of its own, as the episode's next job would."""
+    provider: DockerProvider | ClusterProvider
     if leaf == "slurm":
-        provider = SlurmProvider(slurm_config())
+        provider = provider_in_job()
     else:
         skip_without_gvisor()
         provider = DockerProvider(runtime="gvisor")
@@ -401,6 +401,9 @@ async def test_a_container_engines_images_survive_its_sandboxs_snapshot(
         retained = await sandbox.snapshot(roles=("solver",), reason="engine")
     finally:
         await sandbox.destroy()
+    if isinstance(provider, ClusterProvider):
+        await provider.close()
+        provider = provider_in_job()
     try:
         async with await provider.create(
             request.model_copy(update={"snapshot": retained.handle, "retention": "destroy"})
@@ -415,3 +418,5 @@ async def test_a_container_engines_images_survive_its_sandboxs_snapshot(
             assert checked.ok and checked.stdout.split() == ["gone", "gone"], checked.stderr
     finally:
         await provider.destroy_retained(retained.handle)
+        if isinstance(provider, ClusterProvider):
+            await provider.close()

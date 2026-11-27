@@ -57,7 +57,7 @@ async def end(process: asyncio.subprocess.Process) -> None:
 
     A session killed first may leave its far end unaware it ended: on Slurm the step takes
     Podman's monitor of its ``podman exec`` with it, and Podman, never told the session
-    ended, then fails to stop the container for a save (the Slurm Provider's AGENTS.md).
+    ended, then fails to stop the container for a save (the cluster Provider's AGENTS.md).
     Nothing waits for a killed process: one whose output nobody reads any more would keep
     that wait from ever returning.
     """

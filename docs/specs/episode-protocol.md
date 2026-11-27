@@ -332,7 +332,7 @@ can set `validation_rounds = 0`.
 A Provider that holds a Sandbox only until a set time, as a scheduler holds an allocation
 for its wall time, gives the Sandbox a deadline: the latest time to begin saving it, which
 leaves what the save and writing it where another Sandbox can boot from it take
-([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#slurm)), and
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#clusters)), and
 declares how long it holds one at most. A run of the agent is bounded, as it launches, by
 that deadline less 120 s for stopping the agent, copying its logs and sanitizing the solver,
 as by the agent's time. Where the deadline ends a run first, the turn is not over: the

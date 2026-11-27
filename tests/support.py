@@ -11,13 +11,13 @@ import tomllib
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict
 
 from orbit.core.capability import CapabilityProfile, SandboxNeeds
-from orbit.core.config import RunConfig, SandboxConfig, SlurmProviderConfig
+from orbit.core.config import ClusterProviderConfig, RunConfig, SandboxConfig, SlurmProviderConfig
 from orbit.core.errors import ProviderStartError
 from orbit.core.harness import (
     AgentRun,
@@ -53,6 +53,9 @@ from orbit.run.harnesses.base import CliHarness
 from orbit.run.providers import ProviderRegistry, machine_arch
 from orbit.run.scaffold import scaffold_task
 from orbit.run.tasksets.manifest import ManifestTask, load_tasks
+
+if TYPE_CHECKING:
+    from orbit.run.providers.cluster import ClusterProvider
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 #: The current Orbit bases, for images a test builds or runs.
@@ -113,6 +116,51 @@ def slurm_config() -> SlurmProviderConfig:
     return SlurmProviderConfig.model_validate(settings)
 
 
+def provider_in_job(config: ClusterProviderConfig | None = None) -> ClusterProvider:
+    """The cluster's Provider in the batch job these tests run in, on its first node, as
+    Orbit runs each episode in one: an ``sbatch``, ``qsub`` or ``bsub`` job's script, or
+    ``srun --overlap --pty`` in an ``salloc``, of a queue ``config`` names, by default
+    ``$ORBIT_TEST_SLURM_CONFIG``'s. It holds the job's CPUs and memory of this node, read
+    from Slurm's variables, or on PBS and LSF from the job's CPU affinity and cgroup, and
+    ``$ORBIT_TEST_BATCH_GPUS`` there. Close it once done: its worker holds the nodes'
+    stores until then."""
+    from datetime import UTC, datetime
+
+    from orbit.run.providers.cluster import ClusterProvider, managers
+
+    config = config if config is not None else slurm_config()
+    job = managers.ALLOCATIONS[type(config)].JOB_VARIABLE
+    if job not in os.environ:
+        pytest.skip(
+            f"run inside a batch job of the configured cluster ({job} is not set), on its "
+            "first node, as Orbit runs each episode in one"
+        )
+    if job == "SLURM_JOB_ID":
+        cpus = int(os.environ["SLURM_CPUS_ON_NODE"])
+        memory_mb = int(os.environ["SLURM_MEM_PER_NODE"])
+        gpus = int(os.environ.get("SLURM_GPUS_ON_NODE") or 0)
+    else:
+        from orbit.run.providers.cluster.delegated import own_cgroup
+
+        cpus = len(os.sched_getaffinity(0))
+        limit = (own_cgroup() / "memory.max").read_text().strip()
+        memory_mb = (
+            int(limit) >> 20
+            if limit.isdecimal()
+            else max(part.max_memory_mb for part in config.partitions)
+        )
+        gpus = int(os.environ.get("ORBIT_TEST_BATCH_GPUS", "0"))
+    current = managers.current_allocation(
+        config,
+        cpus=cpus,
+        memory_mb=memory_mb,
+        gpus=gpus,
+        walltime_minutes=config.walltime_minutes,
+        started_at=datetime.now(UTC),
+    )
+    return ClusterProvider(config, current)
+
+
 def sibling_checkout(name: str) -> Path:
     """Locate a sibling repository from main or any linked worktree."""
     return next(
@@ -127,15 +175,15 @@ def provider_registry(*providers: Provider, only: bool = False) -> ProviderRegis
     ``only``."""
     if not providers:
         return ProviderRegistry(RunConfig())
-    from orbit.run.providers.slurm import SlurmProvider
+    from orbit.run.providers.cluster import ClusterProvider
 
     ids = [provider.id for provider in providers]
     order = ids + ([] if only else [name for name in SandboxConfig().providers if name not in ids])
     sandbox: dict[str, Any] = {"providers": order}
     for provider in providers:
-        if isinstance(provider, SlurmProvider):
-            # A Run that names Slurm configures its partitions.
-            sandbox["slurm"] = provider.config.model_dump(mode="json")
+        if isinstance(provider, ClusterProvider):
+            # A Run that names a cluster configures its partitions.
+            sandbox[provider.name] = provider.config.model_dump(mode="json")
     registry = ProviderRegistry(RunConfig.model_validate({"sandbox": sandbox}))
     for provider in providers:
         registry._instances[provider.id] = provider

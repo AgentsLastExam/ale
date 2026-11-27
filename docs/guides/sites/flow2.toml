@@ -1,0 +1,27 @@
+# Nagoya University Flow 2.0 Type II. Load with orbit run --config <this file>.
+[sandbox]
+providers = ["pbs"]
+
+[sandbox.pbs]
+architecture = "arm64"
+shared_fs_dir = "/data/${USER}/orbit"
+node_local_dir = "/tmp"
+build_queue = "t2-share"
+build_gpus = 1
+
+[[sandbox.pbs.partitions]]
+name = "t2-share"
+max_cpus = 36
+max_memory_mb = 221184
+gpu_model = { name = "NVIDIA GB200" }
+min_gpus = 1
+max_gpus = 1
+chunk_resources = ["ngpus"]
+
+[[sandbox.pbs.partitions]]
+name = "t2-single"
+max_cpus = 144
+max_memory_mb = 884736
+gpu_model = { name = "NVIDIA GB200" }
+max_gpus = 4
+chunk_resources = []

@@ -5,7 +5,7 @@ Providers turn prepared Task images into Sandboxes. Orbit ships the following ba
 | Package | Backend | Prepared input |
 |---|---|---|
 | `docker/` | local Docker container, a Kata microVM per container ([Kata](#docker-on-kata-containers)), or a container on gVisor ([gVisor](#docker-on-gvisor)) | immutable OCI image identity |
-| `slurm/` | a Linux gVisor container on each node a Sandbox spans, in a Slurm batch allocation beside the Sandboxes booted from its snapshots | immutable OCI image identity |
+| `cluster/` | a Linux gVisor container on each node a Sandbox spans, in the batch job its episode runs in, beside the episode's other Sandboxes, on a cluster of Slurm, PBS Professional or Spectrum LSF ([Clusters](#clusters)) | immutable OCI image identity |
 | `qemu/` | QEMU/KVM guest runner | qcow2 disk, or a chain of [layers](#disk-layers) on one |
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona/` | Daytona cloud container | immutable OCI image identity, pushed by digest |
@@ -76,7 +76,7 @@ not accept or have the memory it needs on each. A Sandbox that names `storage_mb
 to a leaf that holds it to that: under QEMU, Firecracker, Orchard and Daytona by a disk of
 its own, at least that size, as each one's section says, and under Docker and Slurm by
 measuring what it writes and ending it past the limit ([Docker writable
-storage](#docker-writable-storage), [Slurm](#slurm)). A Node's profiles are its leaves',
+storage](#docker-writable-storage), [Slurm](#clusters)). A Node's profiles are its leaves',
 each limited to the CPUs and memory the Node lends in all. A Node lends Docker under any of
 its runtimes, QEMU and Orchard, but not Firecracker.
 
@@ -95,7 +95,7 @@ serves it on.
 
 | Provider | Where the fixed port leads |
 |---|---|
-| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a second Slurm step to the Host, the login node Orbit runs on, carrying only the Gateway and, under `allowlist` or `blocklist`, the episode's egress proxy |
+| Slurm | guestd listens on loopback inside the container. Its byte stream crosses a `podman exec` that Orbit runs on the job's first node, where it runs the episode, or a step of the job from another node, to the Host, carrying only the Gateway and, under `allowlist` or `blocklist`, the episode's egress proxy |
 | Docker | `orbit-gateway.internal` names the Host's address on the container's bridge. The helper that holds `NET_ADMIN` in the container's network namespace keeps an `ORBIT_GATEWAY` nat chain sending that address's port 7412 to the Gateway's port; a reattaching run flushes and refills it. `open` Tasks run the helper for this rule alone. Under Kata the helper rewrites the port with tc filters instead ([Kata](#docker-on-kata-containers)); under gVisor the same chain is in the sandbox's own network stack, written by a privileged `docker exec` ([gVisor](#docker-on-gvisor)). Under rootless Docker, whose bridges are in a network namespace of rootlesskit's, the Provider listens at the Gateway's port there and relays each connection to the Host ([Docker runtimes](#docker-runtimes)) |
 | QEMU | The runner's `ORBIT_GATEWAY` nat chain sends `172.30.0.1:7412` from the guest bridge to the Host at the Gateway's port, and a reattaching run refills it |
 | Firecracker | As QEMU, from the guest's tap device in the runner |
@@ -163,7 +163,7 @@ check, which goes over plain HTTP the proxy does not carry, unless it runs with
 | QEMU | The guest shuts down: Windows with `shutdown.exe /s`, Linux with `sync` and then `systemctl poweroff`, since its own power-off leaves files written just before it empty. The overlay itself becomes `qemu-snapshots/<sandbox id>/disk.qcow2` in the Orbit cache, a [layer](#disk-layers) on the disk it booted from, beside `snapshot.json` with its episode, role, OS and prepared image; nothing is copied. When a guest booted from a snapshot is saved as one, its overlay first takes in that snapshot's clusters (`qemu-img rebase` onto the snapshot's parent, which reads only what the snapshot holds), so a snapshot never sits on another one. A VM boots from it through a fresh overlay, once the disk below it is the one it was taken on. It needs every disk below it, so snapshots are destroyed before `vm-builds` is cleared. Destroying it fails while a runner mounts it |
 | Firecracker | The Provider has the guest's init (PID 1) stop every process and unmount the writable disk, so the disk needs no journal replay, and waits for the runner to exit. The writable disk then becomes one more read-only layer: `firecracker-snapshots/<sandbox id>/` in the Orbit cache holds the root disk, any layers under it and a sparse copy of the new one, hard-linked where the filesystem allows, so it outlives the disk cache without copying it, beside `snapshot.json` with its episode, role, OS, prepared image and digest. A microVM boots from it with the layers stacked under a fresh writable disk, eight at most, since Firecracker's devices are few. Destroying it fails while a runner mounts it |
 | Daytona | None: snapshots count against an organization quota shared with other tools, so its profile saves none |
-| Slurm | `podman stop`, then `podman commit` to `localhost/orbit-snapshot:<index>` in the allocation's own store on its node, which keeps the snapshot while a Sandbox its episode boots from it is to come; a Sandbox booted from it there starts in a step of that allocation, from the node's store, so nothing is copied. One that does not fit beside what runs there, or that the allocation would not last, gets an allocation of its own, which loads the snapshot written out with `podman save` to `snapshots` in the cache; a snapshot the Run keeps is written there as it is saved, since its allocation ends with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Slurm](#slurm)) |
+| Slurm | `podman stop`, then `podman commit` to `localhost/orbit-snapshot:<index>` in the store of the job the episode runs in, on its node, which keeps the snapshot for the episode; a Sandbox booted from it starts in a step of the job, from the node's store, so nothing is copied. A solver the job would not last is booted from it by the episode's next job, which loads the snapshot written out with `podman save` to `snapshots` in the cache; a snapshot the Run keeps is written there as it is saved, since the job's stores end with the episode. Destroying it removes the image, then the file, and fails while a Sandbox still runs on it ([Clusters](#clusters)) |
 | Orchard | The guest shuts down from inside, as for a framed or `build.sh` image; `tart clone` then keeps the stopped VM's disk as the local image `orbit-snapshot-<id>`, which copies no data on APFS. A VM boots from its clone at the desktop's resolution, made on first use as for a framed image. Destroying it deletes those clones and then the image, and fails while a VM booted from it remains, since driving that VM again after a crash reads the snapshot's record |
 | Fleet | The Node's Provider saves it on that Node, as in its row, and Sandboxes that boot from it are placed there, on the leaf that saved it ([Placement](../../../../../../docs/specs/fleet.md#placement)). The Fleet's handle for it is `fleet:snapshot:<sandbox>`; destroying it has the Node's Provider destroy it at the Node's next heartbeat |
 
@@ -189,7 +189,7 @@ of every artifact, as of any other.
 | Provider | A volume | What a snapshot keeps of it | A separate verifier's view | `storage_mb` |
 |---|---|---|---|---|
 | Docker | a named volume of its own, which Docker fills from the image | its top layer, in a stack of layers | an overlay volume of the stack under a layer of its own | counted by a helper that measures the volumes ([below](#docker-volumes)) |
-| Slurm | a Podman volume in the allocation's store, which Podman fills from the image | its top layer, in a stack of layers in the store | an overlay of the stack under a layer of its own, in the solver's allocation ([below](#slurm-volumes)) | counted with the writable layer by the step on its node |
+| Slurm | a Podman volume in the job's store, which Podman fills from the image | its top layer, in a stack of layers in the store | an overlay of the stack under a layer of its own, in the solver's job ([below](#slurm-volumes)) | counted with the writable layer by the step on its node |
 | Firecracker | an overlay of the image's directory and of each layer's, under a layer on the writable disk | the writable disk, with the root | the snapshot's disks attached read-only, and the same overlay under a layer of its own | counted with the writable disk |
 | QEMU, Linux | an overlay of the disk's own directory under `/opt/orbit/volumes/<hash>` on the disk | the disk | the snapshot's disk attached read-only once the guest is up, and an overlay of what it holds there under a layer of its own | counted with the disk |
 | QEMU, Windows | the directory on the disk, which stays one | the disk | a junction to it on a copy-on-write overlay of the snapshot's disk, attached once the guest is up | counted with the disk |
@@ -222,15 +222,15 @@ there and still deletes it once booted from its snapshot, where it deletes anoth
 ### Slurm nodes
 
 A Sandbox of several [nodes](../../../../../../docs/specs/task-authoring.md#nodes) runs one
-gVisor container on each, from the same image, as node 0 runs; node `k` is the allocation's
-`k`-th node. Commands and files go to node 0. Every node gets the Task's resources, its
+gVisor container on each, from the same image, as node 0 runs; node `k` is the job's `k`-th
+node. Commands and files go to node 0. Every node gets the Task's resources, its
 account's sudo, a guestd session through which the Provider checks them, the Gateway
 tunnel and, while sealed, the egress relay and the tc seal on its own slirp4netns tap, so
 every node has the network its Task asks for.
 
 The nodes share a network of their own, `10.214.0.0/24`, node `k` at `10.214.0.<k+1>` on an
 interface `peers`, with `/etc/hosts` naming each `node<k>`
-([`slurm/worker.py`](slurm/worker.py)). On each node a Podman pod that shares only its
+([`cluster/worker.py`](cluster/worker.py)). On each node a Podman pod that shares only its
 network namespace holds the Sandbox's namespace, with its slirp4netns tap and `peers`;
 gVisor's netstack takes both. The other end of `peers` is in a second pod's namespace, the
 router's, which only the worker enters: it reaches the node's network through pasta, which
@@ -284,8 +284,9 @@ names it.
 A snapshot commits every node to its own store. Node `k` of a Sandbox booted from it starts
 from node `k`'s commit, and node `k` of a separate verifier views node `k`'s volumes, one
 beyond the snapshot's nodes viewing none. Written out, each node writes its own archive and
-layers at once, which node `k` of the next allocation loads. The batch step holds the first
-node's store, and a step of its own every other node's, for as long as the allocation runs.
+layers at once, which node `k` of the episode's next job loads. The worker, Orbit's child on
+the first node, holds that node's store, and a step of its own every other node's, until
+Orbit closes the job's allocation.
 Compute nodes need, for a Sandbox of several nodes, pasta, catatonit for Podman's pods, and
 the kernel's WireGuard module ([Compute nodes](#slurm-compute-nodes)).
 
@@ -317,25 +318,25 @@ H100s each trained with DDP over InfiniBand with GPUDirect RDMA and all-reduced 
 
 ### Slurm volumes
 
-A Sandbox's volumes are layers in its allocation's Podman store on the node
-([`slurm/worker.py`](slurm/worker.py)): a Podman volume of its own for each candidate that
+A Sandbox's volumes are layers in its job's Podman store on the node
+([`worker.py`](cluster/worker.py)): a Podman volume of its own for each candidate that
 is a directory in the image, with no link on its way, which the step reads from the image
-mounted in the allocation's Podman namespace before the container starts, and for each
-engine path of a Sandbox that asks for `nested_containers`; a view, an overlay that the step
-mounts in the allocation's rootless Podman namespace with `userxattr`, of a snapshot's stack
+mounted in the job's Podman namespace before the container starts, and for each engine path
+of a Sandbox that asks for `nested_containers`; a view, an overlay that the step mounts in
+the job's rootless Podman namespace with `userxattr`, of a snapshot's stack
 under an empty layer of its own, which gVisor's gofer serves as any directory; or a copy
 (`cp -a --reflink=auto`) of an engine's storage. Every layer has a short link below the
-store, by which an overlay's options name the 200 layers of [`MAX_LAYERS`](#slurm) in one
+store, by which an overlay's options name the 200 layers of [`MAX_LAYERS`](#clusters) in one
 page; a stack that a Sandbox booted from a snapshot would view past them is copied, as its
 view shows it, into one layer as the snapshot is saved. A snapshot records each path's
-stack, and a step unmounts its views before the Host hears of its snapshot, as a mounted
-upper layer is no other overlay's lower. A snapshot written out for an allocation of its own
-carries each of its layers beside its image as an uncompressed tar that keeps owners,
-whiteouts and the overlay's extended attributes, which that allocation unpacks before it
-starts anything. The allocation is sized for the separate verifier too where a partition
-holds both, and loads that verifier's image, prepared for the cluster as the solver's is,
-when it starts; destroying a snapshot removes its layers that no other snapshot and no
-running view stacks. Measured on OpenRSI (Linux 6.8, Podman, gVisor 0.1.4): a Podman volume
+stack, and a step unmounts its views before Orbit hears of its snapshot, as a mounted
+upper layer is no other overlay's lower. A snapshot written out for a later job carries
+each of its layers beside its image as an uncompressed tar that keeps owners, whiteouts and
+the overlay's extended attributes, which that job unpacks into its stores with the image
+before a Sandbox boots from it. The job is sized for the separate verifier too, and loads
+that verifier's image, prepared for the cluster as the solver's is, when it starts;
+destroying a snapshot removes its layers that no other snapshot and no running view
+stacks. Measured on OpenRSI (Linux 6.8, Podman, gVisor 0.1.4): a Podman volume
 filled from the image, a view of a stack of two layers, a deletion through it kept as a
 whiteout that the next view honours, and a container engine's images and deletions kept by a
 snapshot written out and loaded in another allocation.
@@ -527,7 +528,7 @@ fails as on a full disk, and a process past what is left is killed alone.
 | `docker:runc` | `--shm-size`, a tmpfs charged to the container's cgroup |
 | `docker:gvisor` | `--shm-size`, which runsc mounts as a tmpfs of the Sentry |
 | `docker:kata` | half the microVM, its guest's own: Kata ignores `--shm-size` ([Docker](docker/AGENTS.md#the-size-of-devshm)) |
-| `slurm` | Podman's `--shm-size`, a tmpfs on the node that runsc reaches through its gofer, charged to the step's cgroup ([Slurm](slurm/AGENTS.md)) |
+| `slurm` | Podman's `--shm-size`, a tmpfs on the node that runsc reaches through its gofer, charged to the step's cgroup ([Clusters](cluster/AGENTS.md)) |
 | `firecracker`, `qemu`, Linux | half the guest's memory, its kernel's default |
 | `daytona` | a tmpfs that root mounts over Daytona's 64 MiB one at start, charged to the sandbox's cgroup ([Daytona](daytona/AGENTS.md#devshm-is-64-mib)) |
 | `qemu`, Windows; `orchard` | none: Windows and macOS have no `/dev/shm` |
@@ -944,38 +945,82 @@ against 0.07 to 0.13 s, and starting the framework's Python 1.2 to 2.4 s against
 0.9 s. A Run with no Task that asks for a container feature starts one Sandbox more, for
 the preflight's check: about 15 s with that image.
 
-## Slurm
+## Clusters
 
-Orbit runs on a login node of the cluster, where Slurm's commands work, and keeps its files
-in a directory of the cluster's shared file system, its cache, which every compute node sees
-at the same path; a Run drives that one cluster. A Sandbox not booted from a
-snapshot, a separate verifier that copies included, gets a batch job of its own, its
-allocation, of as many alike nodes as the most it or a verifier its request names spans,
-each sized for the largest of them, which boot from its snapshot or view its
-[volumes](#slurm-volumes) after it. Each Sandbox runs in its allocation as a job step of its
-own over the allocation's first nodes it spans, one task on each, which the batch step
-starts with `srun --exact` and Slurm holds to the Sandbox's CPUs, memory and GPUs on each; a
-step that asks for no GPU sees none of the job's. The allocation ends once nothing its
-episode still needs is in it.
+On a cluster of Slurm, PBS Professional or Spectrum LSF, one Provider, `ClusterProvider`,
+whose name is the workload manager's, runs each episode in a batch job of its own; each
+workload manager's commands are its module's (`cluster/slurm.py`, `cluster/pbs.py`,
+`cluster/lsf.py`), and what follows holds for each, Slurm's configuration standing for them.
+Orbit submits each episode as a batch job of its own from a login node of the cluster, where
+Slurm's commands work, and keeps its files in a directory of the cluster's shared file
+system, its cache, which every compute node sees at the same path; a Run drives that one
+cluster. In the job, an Orbit process on the job's first node runs the episode whole, its
+protocol, its Harness and a Gateway on `127.0.0.1`, and the Provider there holds the job as
+the allocation of every Sandbox of the episode (`ClusterProvider(config, current)`, with the
+job's [`CurrentAllocation`](cluster/job.py)). The login node sizes the job for its episode
+(`ClusterProvider.episode_job`): as many alike nodes as the most its solver or a verifier
+spans, each with room for the largest of the solver, each verifier booted from its snapshots
+and the separate verifier that views its [volumes](#slurm-volumes), one at a time, and for
+512 MiB of the worker's and 2048 MiB and a CPU of Orbit's own process. The login node starts
+no Sandbox.
+
+The job's first Sandbox starts the worker ([`cluster/worker.py`](cluster/worker.py)'s
+`supervise`) as Orbit's child, in a directory of the job's own below the cache, seeded with
+that Sandbox's image or the snapshot it boots from; every later Sandbox of the episode runs
+in the same job, its image loaded there if it is another's. Each runs as a job step of its
+own over the job's first nodes it spans, one task on each, which the worker starts with
+`srun --exact` and Slurm holds to the Sandbox's CPUs, memory and GPUs on each; a step that
+asks for no GPU sees none of the job's. Orbit reaches a Sandbox on its own node by commands
+it runs there, and on the job's other nodes by `srun --overlap --unbuffered` steps of the
+job: guestd's command and file sessions, a watcher of the Sentry's OOM kills and a tunnel,
+which carries the Gateway. As the episode ends, Orbit closes the job's allocation: the
+worker ends what runs and removes every node's store, and its directory goes; snapshots
+written out stay.
+
+The login node's `orbit run` dispatches ([`cluster/episodes.py`](cluster/episodes.py)). For
+each attempt of an episode it writes a directory below the cache, readable by the account
+alone, with `episode.json`, what the job runs, and `credentials.env`, the Run's `.env` with
+the Host credentials set in its own environment, and submits the job. The job's Orbit runs
+the episode's Gateway with them; the submission, the worker and every other process Orbit
+starts on the cluster run without them. The login node then waits for the job's
+`outcome.json`, which the job writes last: a result, written to the Run's directory as any
+Provider's is; a continuation, which a job submitted at once takes up; or an error. An
+attempt fails as `env_error`, which `episode_retries` retries, when its job ends without an
+outcome or reports an error, or when its first job waits in the queue past
+`queue_timeout_sec`; a later job waits as long as the queue takes, as it spends none of the
+agent's time. The Run's directory (`--runs-dir`) and its Tasks belong on the shared file
+system, where each job reads its Task and writes its episode; the ledger is the login node's
+alone. `--concurrency` is how many episodes have a job submitted at once. A job's directory
+goes as its outcome is read; interrupting `orbit run` cancels the jobs in flight. A Run
+restarted with `--run-id` skips the episodes its ledger records as complete and starts again
+those it does not, whose jobs a lost `orbit run` left. The login node needs `uv` and the
+internet to install the engine; the compute nodes need neither, but reach the agent's model
+and every Judge's endpoint, directly or through the proxy their environment names, which the
+Gateway follows.
 
 The login node needs no container runtime: a Task's images are prepared on the cluster
-([`slurm/images.py`](slurm/images.py)), once per key of everything that goes into them, each
-in a job of its own on the first partition without GPUs, of 8 CPUs and 32 GiB at most. A
-named image is pinned by the digest its registry gives it now, read over HTTP, and pulled
-there; a Task's own build context, copied below the cache without `setup/`, is built there
-with Podman, whose Buildah 1.33 refuses what only BuildKit reads, such as a heredoc in
-`RUN`. A private registry's credentials are those `~/.docker/config.json` saves, which both
-the pin and Podman read, so for one the compute nodes share the account's home. The job adds
-the framework layer for the account the Task's image declares, or `user` for an image a
-caller names by reference alone, as the conformance suite does. The layer of a Task one of
-whose Sandboxes spans several nodes copies the nodes' OpenSSH from its GHCR image, and so
-does that of an image named alone, as no Task says how many nodes it spans. The job saves
-the result, compressed, to `images` in the cache, from which each allocation loads it into
-its own Podman store on its node; only the Task's own build failing there is the Task's
-error. Compute nodes need what [Compute nodes](#slurm-compute-nodes) lists. The first
-allocation of an engine pulls the gVisor build `docker:gvisor` runs from GHCR into the
-cache, once for all nodes, as `gvisor-<version>.<build>`, and refuses another build of the
-version. Tasks run without the login home, agent socket or Slurm credentials.
+([`cluster/images.py`](cluster/images.py)), once per key of everything that goes into them,
+each in a job of its own on the first partition without GPUs, of 8 CPUs and 32 GiB at most,
+which waits in the queue for `queue_timeout_sec` at most and runs the worker with the
+engine's Python for the compute nodes, installed below the cache once
+([`cluster/engine.py`](cluster/engine.py)). A named image is pinned by the digest its
+registry gives it now, read over HTTP, and pulled there; a Task's own build context, copied
+below the cache without `setup/`, is built there with Podman, whose Buildah 1.33 refuses
+what only BuildKit reads, such as a heredoc in `RUN`. A private registry's credentials are
+those `~/.docker/config.json` saves, which both the pin and Podman read, so for one the
+compute nodes share the account's home. A build's `RUN` steps, which run the Task's own
+programs, get the node's proxy only while no proxy variable holds credentials; Podman's own
+pulls use it either way. The job adds the framework layer for the account the Task's image
+declares, or `user` for an image a caller names by reference alone, as the conformance suite
+does. The layer of a Task one of whose Sandboxes spans several nodes copies the nodes'
+OpenSSH from its GHCR image, and so does that of an image named alone, as no Task says how
+many nodes it spans. The job saves the result, compressed, to `images` in the cache, from
+which each episode's job loads it into its own Podman store on its node; only the Task's own
+build failing there is the Task's error. Compute nodes need what [Compute
+nodes](#slurm-compute-nodes) lists. The first job of an engine pulls the gVisor build
+`docker:gvisor` runs from GHCR into the cache, once for all nodes, as
+`gvisor-<version>.<build>`, and refuses another build of the version. Tasks run without the
+login home, agent socket or Slurm credentials.
 
 ```toml
 [sandbox]
@@ -1007,63 +1052,65 @@ constraint = "ib"                    # sbatch --constraint; none by default
 ```
 
 Each entry describes a homogeneous partition's effective per-node limits for that QoS, and
-how many of its nodes one allocation may span (`max_nodes`, one unless it says more).
-CPU-only allocations use CPU entries; an allocation whose solver or verifier needs GPUs
-takes the first matching GPU entry, as whole cards. The provider checks each step's CPU and
-memory limits, the started image and the allocated GPU UUIDs against the devices the guest
-sees. An allocation that boots no snapshot and is no separate verifier's, such as an
-episode's first, waits in the queue for `queue_timeout_sec` at most; any other, mid-episode,
-waits for as long as Slurm keeps it pending, and says why every ten minutes. `sandbox_id` is
-the job ID and the Sandbox's index in the job; the allocation records the compute node, or
+how many of its nodes one job may span (`max_nodes`, one unless it says more). An episode
+without GPUs runs in a job of a CPU entry; one whose solver or verifier needs GPUs in a job
+of the first matching GPU entry, as whole cards, where a verifier without GPUs runs too and
+sees none. The Provider checks each step's CPU and memory limits, the started image and the
+allocated GPU UUIDs against the devices the guest sees, and each GPU against the Task's
+`gpu_types` and memory and the model of the job's partition. Within the job, a Sandbox that
+fits beside what runs starts, one that only waits for what runs beside it to end gets
+`ProviderCapacityError`, and one larger than the job holds is refused. `sandbox_id` is the
+job ID and the Sandbox's index in the job; the allocation records the compute node, or
 every node of a Sandbox of several, and runtime.
 
 Every job goes to its partition's QoS and `constraint` and the configured `account`, where
 those are set. `shared_fs_dir` is Orbit's directory on the cluster's shared file system, at
 the same path on the login node and every compute node: the images prepared for the
-cluster, each allocation's files, snapshots written out and the shared directories of
+cluster, the engine, each job's files, snapshots written out and the shared directories of
 Sandboxes of several nodes, so it belongs on a shared file system with room, such as a
 scratch one, rather than in a home with a small quota. `node_local_dir`, expanded on each
-node, is where on the node's own disk each allocation keeps its Podman store, its images
-and what its Sandboxes write.
+node, is where on the node's own disk each job keeps its Podman store, its images and what
+its Sandboxes write. Slurm runs each job in the node's `/tmp`, from which the job moves to
+its directory, so what a site's epilog writes as root into the job's working directory, as
+OpenRSI's GPU statistics, stays out of the cache.
 
 Running jobs have a Slurm wall time even when Orbit is lost: `walltime_minutes`, within the
-QoS's limit, is each allocation's, and the solver of an episode longer than one
-[moves](../../../../../../docs/specs/episode-protocol.md#moves) as each allocation's
-deadline comes. That deadline is what Slurm reports the allocation has left once it runs
-(`squeue -o %L`), Slurm's own count, so no two clocks need agree, less `drain_minutes`,
-which committing a solver, writing it out to the cache and ending the allocation take;
-each profile holds a Sandbox for `walltime_minutes` less `drain_minutes` at most, so a Run
-whose verifier's limit is longer is refused before anything is prepared. A Sandbox booted
-from a snapshot starts in a running allocation only while that lasts the time its request
-names, a verifier's limit, or five minutes for a solver; otherwise the snapshot is written
-out and the Sandbox gets an allocation of its own. The one it leaves ends then, rather than
-at its wall time, once its deadline has come, its snapshots written out, or once nothing
-runs there and every snapshot it holds is written out with no Sandbox to boot from it there.
-Where Slurm ends an allocation itself, at its wall time, for a job of a QoS that preempts
-it, or as its node fails, the Sandbox's error says which (`sacct`), and what the allocation
-held since its last snapshot written out is lost, a round's snapshot and verifier in it
-included: a Sandbox to boot from such a snapshot fails with `AllocationEndedError`, which
-says so.
+QoS's limit, is each job's. The Provider in the job takes the job's end from Slurm's
+`SLURM_JOB_END_TIME` as the job starts, or, where Slurm sets none, from the job's start and
+its wall time, asking Slurm nothing; its deadline is that end less `drain_minutes`, which
+saving a solver and writing it out to the cache take. Each profile holds a Sandbox for
+`walltime_minutes` less `drain_minutes` at most, so a Run whose verifier's limit is longer
+is refused before anything is prepared. A Sandbox starts in the job only while the deadline
+leaves the time its request names, a verifier's limit, or five minutes for a solver. A
+solver whose turn the deadline cut is saved, and so is one whose job would not last the
+verifier after it; the snapshot the job would not last a solver booted from is written out
+to `snapshots` in the cache instead: the Provider raises `SandboxHandOff`, the episode
+records where it stands and the job's Orbit exits, and the episode's next job boots from
+that snapshot and goes on with the turn or the verification
+([Moves](../../../../../../docs/specs/episode-protocol.md#moves)). Any other Sandbox the job
+would not last is refused, a snapshot written out by an earlier job's among them, as a later
+job would not last it either. Where Slurm ends a job itself, at its wall time, for a job of
+a QoS that preempts it, or as its node fails, Orbit's process ends with it, and what the job
+held since its last snapshot written out is lost.
 
-A snapshot is the stopped container committed to the allocation's store on its node, each
-node's to its own ([Snapshots](#snapshots)). The verifier booted from it, a [validation
+A snapshot is the stopped container committed to the job's store on its node, each node's to
+its own ([Snapshots](#snapshots)). The verifier booted from it, a [validation
 round](../../../../../../docs/specs/episode-protocol.md#validation-rounds)'s, a separate
 verifier that views its volumes and the next turn's solver start there in steps of the same
-allocation while it lasts them, so nothing is copied and nothing waits in the queue again.
-The cost is that the allocation holds the larger of its solver and verifier for its whole
-life: a solver of one GPU for eight hours, verified on eight GPUs for one, holds eight for
-nine hours, 72 GPU-hours, where two allocations would hold 16. A Sandbox booted from a
-snapshot that does not fit beside what runs in its allocation, or that it would not last,
-gets an allocation of its own, which loads the snapshot written out with `podman save`; a
-snapshot the Run keeps (`sandbox_retention.solver = "snapshot"`) is written out as it is
-saved, as its allocation ends with the episode, and costs that copy. `orbit sandbox destroy
-slurm:<job name>/<index>` removes one; `orbit sandbox list` lists those written out in the
-cache, each with `--config` naming the Run configuration where it sets another
-`shared_fs_dir`. A chain of 200 commits, each booted from the one before, over a one-layer
-image was measured; a commit that a Sandbox booted from it would stack past that is rebuilt
-as one layer with its configuration (`podman build --squash-all`), so each profile saves any
-number in a row. A container engine's storage is volumes, which a snapshot keeps as layers
-beside its commit. Slurm keeps no running Sandbox.
+job, so nothing is copied and nothing waits in the queue again. The cost is that the job
+holds the larger of its solver and verifier for its whole life: a solver of one GPU for
+eight hours, verified on eight GPUs for one, holds eight for nine hours, 72 GPU-hours, where
+two jobs would hold 16. A snapshot written out, for the episode's next job or for the Run
+that keeps it (`sandbox_retention.solver = "snapshot"`), which is written out as it is saved
+as the job's stores end with the episode, is each node's commit saved with `podman save` and
+its volumes' layers, which a later job loads into its stores; writing it out costs that
+copy. `orbit sandbox destroy slurm:<allocation>/<index>` removes one; `orbit sandbox list`
+lists those written out in the cache, each with `--config` naming the Run configuration
+where it sets another `shared_fs_dir`. A chain of 200 commits, each booted from the one
+before, over a one-layer image was measured; a commit that a Sandbox booted from it would
+stack past that is rebuilt as one layer with its configuration (`podman build
+--squash-all`), so each profile saves any number in a row. A container engine's storage is
+volumes, which a snapshot keeps as layers beside its commit. Slurm keeps no running Sandbox.
 
 A Sandbox that names `storage_mb` is held to it on each of its nodes by its step there,
 outside the Sandbox, as a Docker leaf holds one ([Docker writable
@@ -1079,29 +1126,99 @@ the Sandbox as a writer of what it measures, as each writes the shared directory
 measurement took 0.02 s of a new Sandbox and 0.14 s with 100,000 files of 1 KiB, on a node's
 ext4 disk, and 0.32 s of a shared directory of 20,000 files (OpenRSI, November 2026).
 
-`srun --overlap --unbuffered` from the login node opens guestd's command and file sessions,
-a watcher of the Sentry's OOM kills and a tunnel, which carries the Run's Gateway, on the
-login node, to the Sandbox. Blocking drops packets on the sandbox's private tap outside
-gVisor. Opening removes the filters while the container keeps running. `allowlist` and
-`blocklist` use the same seal and the Run's authenticated proxy through the tunnel. The
-runtime modes grant nested Docker or raw sockets separately.
+Blocking drops packets on the sandbox's private tap outside gVisor. Opening removes the
+filters while the container keeps running. `allowlist` and `blocklist` use the same seal and
+the Run's authenticated proxy through the tunnel. The runtime modes grant nested Docker or
+raw sockets separately.
 
-When Orbit is done with one of these sessions, it closes its input, and kills its `srun`
-only if it still runs 5 s later. A save whose first `podman stop` fails, as it does when a
-session's `srun` was killed, stops the container once more
-([Slurm](slurm/AGENTS.md#ending-a-guest-session)).
+When Orbit is done with one of its sessions, it closes its input, and kills its process,
+its own `podman exec` or another node's `srun`, only if it still runs 5 s later. A save
+whose first `podman stop` fails, as it does when a session's `srun` was killed, stops the
+container once more
+([Clusters](cluster/AGENTS.md#ending-a-guest-session)).
 
 A Sandbox's step gets the Task's memory plus what `docker:gvisor` adds for the Sentry
 ([Docker on gVisor](#docker-on-gvisor)) and 32 MiB for the step's own process and conmon;
-the job adds 512 MiB for its batch step, Podman's namespace and every Sandbox's control
-steps. GPUs of one node talk to each other through nvproxy as on the bare node: NCCL 2.27.5
-all-reduced 1 GiB across four NVLinked H100s at 356 GB/s of bus bandwidth in a Sandbox,
-against 359 GB/s in a plain step of the same node (304 against 315 GB/s at 64 MiB). A
-profile's memory limit is the largest Sandbox that fits its partition with both. The runtime
-reads the limit and usage of the nearest cgroup above the step that has a `memory.max`,
-which is where Slurm limits it, so memory pressure ends a process inside the sandbox.
-Confirm a site from its login node with
-`ORBIT_TEST_SLURM_CONFIG=run.toml uv run pytest -m needs_slurm tests`.
+the job adds 512 MiB for its worker, Podman's namespace and every Sandbox's control
+commands, and 2048 MiB and a CPU for Orbit's own process. GPUs of one node talk to each
+other through nvproxy as on the bare node: NCCL 2.27.5 all-reduced 1 GiB across four
+NVLinked H100s at 356 GB/s of bus bandwidth in a Sandbox, against 359 GB/s in a plain step
+of the same node (304 against 315 GB/s at 64 MiB). A profile's memory limit is the largest
+Sandbox that fits its partition beside all of them, and its CPUs leave Orbit its own. The
+runtime reads the limit and usage of the nearest cgroup above the step that has a
+`memory.max`, which is where Slurm limits it, so memory pressure ends a process inside the
+sandbox. Confirm a site from inside a job of it, on the job's first node, as a job's script
+runs: `ORBIT_TEST_SLURM_CONFIG=run.toml uv run pytest -m needs_slurm tests`; the tests of
+[several nodes](#slurm-nodes) need a job of two.
+
+### PBS Professional and Spectrum LSF
+
+Run Orbit on the submit host with `providers = ["pbs"]` or `["lsf"]` under `[sandbox]`. As
+on Slurm, each episode runs in a batch job of its own, which the submit host
+sizes for it, and Orbit runs the episode in the job, on its one node, where the Provider
+holds the job as the allocation of every Sandbox of the episode; images are prepared in
+batch jobs; the solver and verifiers run in rootless gVisor. A job holds one compute node
+or a share of one. The Task does not need a workload manager's commands or a site name.
+
+The [Flow2 configuration](../../../../../../docs/guides/sites/flow2.toml) targets ARM64
+GB200 nodes. It sends single-GPU jobs to `t2-share` and larger jobs, up to four GPUs, to
+`t2-single`. A shared job requests `select=1:ngpus=1`; a whole-node job requests `select=1`
+and the queue assigns four GPUs. Builds use one GPU in `t2-share`. From the checkout, run
+`uv run orbit prepare TASK --config docs/guides/sites/flow2.toml` before
+`uv run orbit run TASK --agent oracle --config docs/guides/sites/flow2.toml`. The Task image
+and any binaries it installs must run on ARM64.
+
+For another PBS or LSF site, describe queues in preference order. For example:
+
+```toml
+[sandbox]
+providers = ["lsf"]
+
+[sandbox.lsf]
+shared_fs_dir = "/shared/home/me/orbit"
+# account = "project"     # bsub -P (qsub -A on PBS)
+build_queue = "cpu"
+
+[[sandbox.lsf.partitions]]
+name = "cpu"
+max_cpus = 32
+max_memory_mb = 65536
+```
+
+`shared_fs_dir` must resolve to the same path on the submit and compute nodes.
+Each queue declares its effective per-job CPU, memory and whole-GPU capacity. PBS
+`chunk_resources` controls which of `ncpus`, `mem`, and `ngpus` appear in the select
+chunk; omit resource fields supplied by the queue itself, and the job holds, and Orbit
+admits Sandboxes to, the queue's whole of each one omitted. `min_gpus` declares GPUs the
+queue requires even for a CPU-only guest. Set `build_queue` and `build_gpus` when builds
+need a particular queue or GPU reservation. LSF uses one-host placement, and its jobs get
+none of the submit host's environment (`bsub -env none`).
+
+The submit host needs the workload manager's commands. Each compute node needs Python 3.9 or newer,
+rootless Podman with its helpers on the job's PATH (or an absolute `podman` path), working
+subordinate UID and GID mappings, and the job's cgroup v2 hierarchy delegated to the job's
+account, with the memory and CPU controllers. Before the job's first Sandbox starts, Orbit
+moves its own process into a cgroup of its own below the job's, `orbit-engine`, and gives
+the worker another, `orbit-sandboxes`, where it holds each Sandbox to its CPUs, memory and
+no swap, so that nothing the worker ends there is Orbit's; a job whose cgroup it cannot
+split so, one it may not write or that holds another process, is refused, naming why. GPU
+jobs also need NVIDIA CDI devices and driver libraries compatible with Orbit's patched
+gVisor. The worker checks these prerequisites before admitting a Sandbox. Registry pulls can
+use the site's proxy credentials. Image build commands receive credential-free proxy
+settings, and solver and verifier containers receive the environment declared by their
+image, Task and Orbit. A successful bare `runsc` probe alone does not validate a site's
+Podman or job cgroups. The Flow2 preset records queue policy; deployment must qualify these
+compute-node prerequisites. In a job of the site's, run the solver and its snapshot verifier
+with:
+
+```sh
+ORBIT_TEST_PBS_CONFIG=docs/guides/sites/flow2.toml ORBIT_TEST_BATCH_GPUS=1 \
+  uv run pytest -q -m needs_pbs tests/integration/test_batch_episodes.py
+```
+
+Use four GPUs to exercise the whole-node queue. For LSF, set `ORBIT_TEST_LSF_CONFIG`
+to the site's Run TOML and select `-m needs_lsf`. The GPU test writes device memory
+and reads it back in both Sandboxes.
 
 ### Slurm compute nodes
 

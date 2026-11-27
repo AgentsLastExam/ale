@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
+import logging
 import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -26,16 +29,32 @@ from orbit.core.calibration import (
     TaskCalibrationObservation,
 )
 from orbit.core.capability import round_verifier_resources
-from orbit.core.config import RunConfig, SandboxRetentionConfig, load_run_config, select_agent_name
+from orbit.core.config import (
+    RunConfig,
+    RunTimeouts,
+    SandboxRetentionConfig,
+    load_run_config,
+    select_agent_name,
+)
+from orbit.core.episode import EpisodeContinuation
 from orbit.core.errors import ConfigError, OrbitError, ProviderCapabilityError, TaskDefinitionError
 from orbit.core.fleet import RunPlan
 from orbit.core.harness import EffectiveAgentResources, Harness
 from orbit.core.ids import content_hash, task_component
-from orbit.core.lock import AgentVariableProvenance, AssetProvenance, ResumedFrom, RunLock
+from orbit.core.lock import (
+    AgentProvenance,
+    AgentVariableProvenance,
+    AssetProvenance,
+    GatewayProvenance,
+    ResumedFrom,
+    RunLock,
+    TaskSource,
+)
 from orbit.core.result import ResultRecord, SandboxOutcome
 from orbit.core.sandbox import (
     ImageKind,
     PreparedTaskImage,
+    Provider,
     ResolvedImage,
     Sandbox,
     SandboxRequest,
@@ -44,6 +63,7 @@ from orbit.core.sandbox import (
 from orbit.core.task import Stage, TaskAssetObservation
 from orbit.core.taskspec import CalibrationCase, Expectation, VerificationMode
 from orbit.core.trajectory import AtifTrajectory
+from orbit.core.verdict import FailureInfo as VerdictFailure
 from orbit.core.verdict import Status, Verdict
 from orbit.run.agent_resources import resolve_agent_resources
 from orbit.run.assets import observe_task_assets
@@ -88,12 +108,35 @@ from orbit.run.provenance import (
     framework_provenance,
     gateway_provenance,
 )
-from orbit.run.providers import ProviderRegistry
+from orbit.run.providers import ProviderRegistry, episode_needs
+from orbit.run.providers.cluster import ClusterProvider
+from orbit.run.providers.cluster.engine import engine
+from orbit.run.providers.cluster.episodes import (
+    CONTINUATION,
+    CREDENTIALS,
+    Dispatcher,
+    EpisodeJobSpec,
+    credentials,
+    finish,
+    read_spec,
+    write_private,
+)
+from orbit.run.providers.cluster.managers import current_allocation
 from orbit.run.providers.fleet import FleetClient, FleetProvider
 from orbit.run.recording import atomic_write_json
-from orbit.run.secrets import host_credentials, provider_credentials, resolve_task_variables
+from orbit.run.secrets import (
+    find_env_file,
+    host_credentials,
+    load_env,
+    provider_credentials,
+    resolve_task_variables,
+)
 from orbit.run.sources import resolve
-from orbit.run.subscription import SubscriptionCredential, resolve_authentication
+from orbit.run.subscription import (
+    ResolvedAuthentication,
+    SubscriptionCredential,
+    resolve_authentication,
+)
 from orbit.run.task_images import (
     ImagePreparationResult,
     ImagePreparationStep,
@@ -311,42 +354,32 @@ async def _run_one(
 
     run_id = run_id or uuid.uuid4().hex[:8]
     run_dir = runs_dir / run_id
-    gateway = None
-    limits = None
-    gateway_url = ""
-    needs_model = settings.agent.name not in {"oracle", "nop"}
-
-    if needs_model:
-        if authentication.mode == "subscription":
-            assert subscription is not None
-            gateway = Gateway(subscription=subscription, host=_gateway_host())
+    site = settings.sandbox.cluster
+    dispatcher: Dispatcher | None = None
+    services = _Services()
+    try:
+        if site is None:
+            services = await _services(settings, authentication, subscription, tasks)
         else:
-            try:
-                api_key, upstream = provider_credentials(
+            # Each episode's job runs its own Gateway; the credentials go to it, checked here.
+            if settings.agent.name not in {"oracle", "nop"}:
+                provider_credentials(
                     settings.gateway.provider,
                     base_url=settings.gateway.base_url,
                     key_var=settings.gateway.api_key_env,
                 )
-            except OrbitError as error:
-                typer.echo(f"{error}", err=True)
-                await providers.close()
-                return EXIT_BAD_REFERENCE
-            gateway = Gateway(
-                api_key=api_key,
-                upstream=upstream,
-                dialect=settings.gateway.dialect,
-                host=_gateway_host(),
-            )
-        gateway_url = await gateway.start()
-        limits = Limits(
-            **{
-                key: None if value == "unlimited" else value
-                for key, value in settings.gateway.limits.model_dump().items()
-            }
-        )
-    elif (gateway := await _judge_gateway(settings)) is not None:
-        gateway_url = gateway.base_url
-    proxy, sessions = await _egress_proxy(tasks, gateway)
+            dispatcher = Dispatcher(site, await engine(site))
+    except OrbitError as error:
+        typer.echo(f"{error}", err=True)
+        await providers.close()
+        return EXIT_BAD_REFERENCE
+    gateway, gateway_url, limits = services.gateway, services.gateway_url, services.limits
+    proxy, sessions = services.proxy, services.sessions
+    secrets = (
+        credentials(find_env_file(), host_credentials(_protected(settings)))
+        if dispatcher is not None
+        else ""
+    )
 
     profile = authentication.profile_slot_id or "none"
     typer.echo(
@@ -374,17 +407,22 @@ async def _run_one(
         agent_resources: EffectiveAgentResources,
     ) -> Status | None:
         async def execute() -> EpisodeResult:
-            return await run_episode(
+            if dispatcher is not None:
+                assert site is not None
+                return await _dispatched(
+                    dispatcher,
+                    providers.get(site.workload_manager),
+                    task,
+                    settings,
+                    run_dir=run_dir,
+                    episode_id=episode_id,
+                    inputs=inputs,
+                    secrets=secrets,
+                    continue_from=continue_from,
+                )
+            result = await run_episode(
                 task,
-                EpisodeProtocol(
-                    harness,
-                    max_steps=settings.agent.max_steps,
-                    timeouts=settings.timeouts,
-                    resume=resume,
-                    validation_rounds=inputs.validation_rounds,
-                    instruction_prefix=settings.agent.instruction_prefix,
-                    instruction_suffix=settings.agent.instruction_suffix,
-                ),
+                _protocol(harness, settings, inputs.validation_rounds, resume),
                 providers,
                 run_dir=run_dir,
                 gateway_url=gateway_url,
@@ -407,6 +445,8 @@ async def _run_one(
                 authentication=authentication.mode,
                 profile_slot_id=authentication.profile_slot_id,
             )
+            assert isinstance(result, EpisodeResult), "no Provider of a local Run hands off"
+            return result
 
         async with gate:
             ledger.mark_running(episode_id)
@@ -524,10 +564,7 @@ async def _run_one(
     finally:
         ledger.close()
         await providers.close()
-        if proxy is not None:
-            await proxy.stop()
-        if gateway is not None:
-            await gateway.stop()
+        await services.stop()
 
     typer.echo(f"run {run_id}: {total - failures}/{total} completed")
     return 0 if failures == 0 else EXIT_SOME_FAILED
@@ -1290,7 +1327,307 @@ async def _prepare_only(reference: str, settings: RunConfig) -> int:
     return 0
 
 
-async def _judge_gateway(settings: RunConfig) -> Gateway | None:
+@dataclass
+class _Services:
+    """What a Run's episodes reach on the Host: the Gateway and the egress proxy."""
+
+    gateway: Gateway | None = None
+    gateway_url: str = ""
+    limits: Limits | None = None
+    proxy: EgressProxy | None = None
+    sessions: SessionRegistry | None = None
+
+    async def stop(self) -> None:
+        if self.proxy is not None:
+            await self.proxy.stop()
+        if self.gateway is not None:
+            await self.gateway.stop()
+
+
+async def _services(
+    settings: RunConfig,
+    authentication: ResolvedAuthentication,
+    subscription: SubscriptionCredential | None,
+    tasks: list[ManifestTask],
+    *,
+    host: str | None = None,
+) -> _Services:
+    """Start the Gateway the Run's agent or Judges call through, bound at ``host``, and the
+    egress proxy its Tasks' networks need."""
+    host = host or _gateway_host()
+    services = _Services()
+    if settings.agent.name not in {"oracle", "nop"}:
+        if authentication.mode == "subscription":
+            assert subscription is not None
+            services.gateway = Gateway(subscription=subscription, host=host)
+        else:
+            api_key, upstream = provider_credentials(
+                settings.gateway.provider,
+                base_url=settings.gateway.base_url,
+                key_var=settings.gateway.api_key_env,
+            )
+            services.gateway = Gateway(
+                api_key=api_key, upstream=upstream, dialect=settings.gateway.dialect, host=host
+            )
+        services.gateway_url = await services.gateway.start()
+        services.limits = Limits(
+            **{
+                key: None if value == "unlimited" else value
+                for key, value in settings.gateway.limits.model_dump().items()
+            }
+        )
+    elif (judges := await _judge_gateway(settings, host)) is not None:
+        services.gateway, services.gateway_url = judges, judges.base_url
+    services.proxy, services.sessions = await _egress_proxy(tasks, services.gateway, host)
+    return services
+
+
+def _protected(settings: RunConfig) -> tuple[str | None, ...]:
+    """The variables beyond the ``ORBIT_`` ones that hold the Host's own credentials."""
+    return (settings.gateway.api_key_env, settings.sandbox.daytona.api_key_env)
+
+
+def _protocol(
+    harness: Harness,
+    settings: RunConfig,
+    rounds: int | Literal["unlimited"],
+    resume: Resume | None,
+) -> EpisodeProtocol:
+    """The protocol of an episode of ``settings``' Run, where it runs or in its cluster's job."""
+    return EpisodeProtocol(
+        harness,
+        max_steps=settings.agent.max_steps,
+        timeouts=settings.timeouts,
+        resume=resume,
+        validation_rounds=rounds,
+        instruction_prefix=settings.agent.instruction_prefix,
+        instruction_suffix=settings.agent.instruction_suffix,
+    )
+
+
+async def _dispatched(
+    dispatcher: Dispatcher,
+    provider: Provider,
+    task: ManifestTask,
+    settings: RunConfig,
+    *,
+    run_dir: Path,
+    episode_id: str,
+    inputs: ProvenanceInputs,
+    secrets: str,
+    continue_from: Path | None,
+) -> EpisodeResult:
+    """Run one attempt of an episode in its cluster's jobs, and read its result."""
+    assert isinstance(provider, ClusterProvider)
+    solver, separate = episode_needs(task, settings)
+    sizes = [provider.episode_job(solver, each) for each in (separate or (None,))]
+    size = max(
+        (each for each in sizes if each is not None),
+        key=lambda each: (each.gpus, each.memory_mb, each.cpus),
+        default=None,
+    )
+    if size is None or None in sizes:
+        raise ProviderCapabilityError(
+            f"no {provider.name} queue holds an episode of {task.spec.name}"
+        )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    spec = EpisodeJobSpec(
+        run_dir=str(run_dir.resolve()),
+        episode_id=episode_id,
+        task=str(task.folder.root.resolve()),
+        task_digest=task.task_digest,
+        config=settings.model_dump(mode="json"),
+        provenance={
+            "source": inputs.source.model_dump(mode="json"),
+            "agent": inputs.agent.model_dump(mode="json"),
+            "gateway": inputs.gateway.model_dump(mode="json"),
+            "config_hash": inputs.config_hash,
+            "timeouts": inputs.timeouts.model_dump(mode="json"),
+        },
+        prepared={
+            role: image.model_dump(mode="json")
+            for role, image in (
+                ("solver", task.prepared_image),
+                ("verifier", task.prepared_verifier_image),
+                ("validation", task.prepared_validation_image),
+            )
+            if image is not None
+        },
+        validation_rounds=inputs.validation_rounds,
+        cpus=size.cpus,
+        memory_mb=size.memory_mb,
+        gpus=size.gpus,
+        nodes=size.nodes,
+        walltime_minutes=dispatcher.config.walltime_minutes,
+        continue_from=str(continue_from.expanduser().resolve()) if continue_from else None,
+    )
+    await dispatcher.attempt(spec, size, secrets)
+    return _recorded(run_dir / episode_id)
+
+
+def _recorded(episode: Path) -> EpisodeResult:
+    """The result an episode's job wrote."""
+    record = ResultRecord.model_validate_json((episode / "result.json").read_text())
+    lock = (
+        RunLock.model_validate_json((episode / "lock.json").read_text())
+        if (episode / "lock.json").is_file()
+        else None
+    )
+    return EpisodeResult(
+        episode_id=record.episode_id,
+        verdict=Verdict(
+            status=record.status,
+            rewards=record.rewards,
+            metrics=record.metrics,
+            failure=VerdictFailure(
+                error_class=record.failure.error_type,
+                message=record.failure.message,
+                phase=record.failure.phase,
+            )
+            if record.failure is not None
+            else None,
+        ),
+        run_dir=episode,
+        duration_sec=(record.finished_at - record.started_at).total_seconds(),
+        record=record,
+        lock=lock,
+    )
+
+
+async def episode_job(directory: Path) -> int:
+    """Run the part of an episode one of its cluster's jobs holds, as the dispatcher asked in
+    ``directory``: the whole episode from its start, or from where the previous job's wall
+    time stopped it; then say how it ended."""
+    started = datetime.now(UTC)
+    directory = directory.resolve()
+    spec = read_spec(directory)
+    env_file = directory / CREDENTIALS
+    os.environ["ORBIT_ENV_FILE"] = str(env_file)
+    load_env(env_file, override=True)
+    provider: ClusterProvider | None = None
+    services = _Services()
+    try:
+        settings = RunConfig.model_validate(spec.config)
+        site = settings.sandbox.cluster
+        if site is None:
+            raise ConfigError("an episode's job runs only on a cluster")
+        for seen in (spec.run_dir, spec.task):
+            if not Path(seen).is_dir():
+                raise ConfigError(
+                    f"this node does not see {seen}: the Run's directory and its Tasks "
+                    "belong on the cluster's shared file system"
+                )
+        authentication = resolve_authentication(settings.agent)
+        harness = _harness(settings)
+        (task,) = [each for each in _load(Path(spec.task)) if each.task_digest == spec.task_digest]
+        task.validations = spec.validation_rounds
+        task.provider = task.verifier_provider = site.workload_manager
+        images = {
+            role: PreparedTaskImage.model_validate(image) for role, image in spec.prepared.items()
+        }
+        task.prepared_image = images["solver"]
+        task.prepared_verifier_image = images.get("verifier")
+        task.prepared_validation_image = images.get("validation")
+        oracle = settings.agent.name == "oracle"
+        _resolve_variables([task], settings, oracle=oracle, agent=not oracle)
+        # Everything the file holds is in this process now; it lies on a shared file system.
+        env_file.unlink(missing_ok=True)
+        source = TaskSource.model_validate(spec.provenance["source"])
+        agent_resources = resolve_agent_resources(
+            task=task.spec.tools,
+            agent_skills=settings.agent.skills,
+            agent_mcp_servers=settings.agent.mcp_servers,
+            task_source=source,
+            network=task.spec.network,
+            operating_system=task.spec.os,
+            mcp_headers=task.variables.values.mcp_headers if task.variables else None,
+        )
+        inputs = ProvenanceInputs(
+            source=source,
+            agent=AgentProvenance.model_validate(spec.provenance["agent"]),
+            gateway=GatewayProvenance.model_validate(spec.provenance["gateway"]),
+            config_hash=spec.provenance["config_hash"],
+            timeouts=RunTimeouts.model_validate(spec.provenance["timeouts"]),
+            validation_rounds=spec.validation_rounds,
+        )
+        provider = ClusterProvider(
+            site,
+            current=current_allocation(
+                site,
+                cpus=spec.cpus,
+                memory_mb=spec.memory_mb,
+                gpus=spec.gpus,
+                walltime_minutes=spec.walltime_minutes,
+                started_at=started,
+            ),
+        )
+        # Sandboxes reach the Gateway through their control channel, which this process
+        # opens: nothing outside the node needs to reach it.
+        services = await _services(settings, authentication, None, [task], host="127.0.0.1")
+        continuation = (
+            EpisodeContinuation.model_validate_json((directory / spec.continuation).read_text())
+            if spec.continuation is not None
+            else None
+        )
+        registry = ProviderRegistry(settings, {site.workload_manager: provider})
+        resume = (
+            _continuation(
+                _continued(Path(spec.continue_from), [task], settings),
+                task,
+                settings,
+                harness,
+                registry,
+            )
+            if spec.continue_from is not None
+            else None
+        )
+        outcome = await run_episode(
+            task,
+            _protocol(harness, settings, spec.validation_rounds, resume),
+            registry,
+            run_dir=Path(spec.run_dir),
+            gateway_url=services.gateway_url,
+            model=settings.agent.model,
+            gateway=services.gateway,
+            session_registry=services.sessions,
+            limits=services.limits,
+            seed=settings.seed,
+            collect_artifacts=settings.artifacts.collect == "host",
+            provenance=inputs,
+            proxy_url=services.proxy.url if services.proxy is not None else "",
+            agent_resources=agent_resources,
+            episode_id=spec.episode_id,
+            logging_policy=settings.logging,
+            verification_config=settings.verification,
+            sandbox_retention=settings.sandbox_retention,
+            desktop_resolution=settings.desktop_resolution,
+            destroy_failed_sandboxes=settings.episode_retries > 0,
+            authentication=authentication.mode,
+            profile_slot_id=authentication.profile_slot_id,
+            continuation=continuation,
+        )
+        if isinstance(outcome, EpisodeContinuation):
+            # It holds the episode's tokens: for the next job alone.
+            write_private(directory / CONTINUATION, outcome.model_dump_json())
+            await provider.close()
+            finish(directory, "continuation")
+        else:
+            await provider.close()
+            finish(directory, "result")
+        return 0
+    except Exception as error:
+        logging.getLogger("orbit.execution").exception("the episode's job failed")
+        if provider is not None:
+            with contextlib.suppress(Exception):
+                await provider.close()
+        finish(directory, "error", f"{type(error).__name__}: {error}")
+        return 1
+    finally:
+        await services.stop()
+        env_file.unlink(missing_ok=True)
+
+
+async def _judge_gateway(settings: RunConfig, host: str | None = None) -> Gateway | None:
     """A Gateway for Judge sessions when no agent needs one, as for oracle runs.
 
     Judges always reach their endpoint through the Gateway, so their keys stay on the
@@ -1298,13 +1635,13 @@ async def _judge_gateway(settings: RunConfig) -> Gateway | None:
     """
     if settings.verification.llm is None and settings.verification.agent is None:
         return None
-    gateway = Gateway(host=_gateway_host())
+    gateway = Gateway(host=host or _gateway_host())
     await gateway.start()
     return gateway
 
 
 async def _egress_proxy(
-    tasks: list[ManifestTask], gateway: Gateway | None
+    tasks: list[ManifestTask], gateway: Gateway | None, host: str | None = None
 ) -> tuple[EgressProxy | None, SessionRegistry | None]:
     """The egress proxy when a Task's agent or a verifier, of ``tests/`` or of its rounds, has
     a proxied policy, an allowlist or a blocklist, and the sessions only it serves.
@@ -1325,7 +1662,7 @@ async def _egress_proxy(
     ):
         return None, None
     registry = gateway.sessions if gateway is not None else SessionRegistry()
-    proxy = EgressProxy(registry, host=_gateway_host())
+    proxy = EgressProxy(registry, host=host or _gateway_host())
     await proxy.start()
     return proxy, None if gateway is not None else registry
 
@@ -1339,9 +1676,7 @@ def _resolve_variables(
     resolved = resolve_task_variables(
         tasks,
         oracle=oracle,
-        protected=host_credentials(
-            (settings.gateway.api_key_env, settings.sandbox.daytona.api_key_env)
-        ),
+        protected=host_credentials(_protected(settings)),
         agent=settings.agent.env if agent else None,
     )
     return resolved if agent else None

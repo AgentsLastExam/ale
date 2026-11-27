@@ -1,8 +1,9 @@
-"""Images prepared on the cluster, as the machine Orbit runs on has no container runtime.
+"""Images prepared on the cluster, as its login node has no container runtime.
 
 A Task's image is pulled, or built from its context, the framework layer is added, and the
 result is saved below the shared cache under a key of everything that went into it, by a job
-of its own on a compute node. Every allocation loads it from there.
+of its own on a compute node, which runs the worker with the engine's Python
+([`engine`](engine.py)). Every episode's job loads it from there.
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from orbit.core.config import SlurmPartition, SlurmProviderConfig
+from orbit.core.capability import Arch
+from orbit.core.config import ClusterPartition, ClusterProviderConfig
 from orbit.core.errors import ProviderStartError, TaskDefinitionError
 from orbit.core.ids import content_hash
 from orbit.core.sandbox import ImageKind, PreparedTaskImage
@@ -30,7 +32,9 @@ from orbit.run.framework import (
 )
 from orbit.run.images import acquire_lock
 from orbit.run.oci import Reference, Registry, api, qualified
-from orbit.run.providers.slurm.job import IMAGES, Job, cache, read, tail, write
+from orbit.run.providers.cluster.engine import engine
+from orbit.run.providers.cluster.job import IMAGES, Job, cache, read, tail, write
+from orbit.run.providers.cluster.managers import create_job
 
 #: What a preparation job holds, at most: Podman builds, pulls and saves in it.
 BUILD_CPUS = 8
@@ -79,6 +83,7 @@ def key(
     user: str,
     keep_alive: bool,
     multinode: bool,
+    arch: Arch = Arch.X86_64,
 ) -> str:
     """The key of an image prepared from a pinned ``reference``, or a build context whose
     identity is ``context``, with the framework for ``user``: everything that goes into it."""
@@ -87,7 +92,7 @@ def key(
             "source": source,
             "reference": reference,
             "context": context,
-            "framework": framework_identity(user=user, vm=False, multinode=multinode),
+            "framework": framework_identity(user=user, vm=False, multinode=multinode, arch=arch),
             # Only when set, so every other image keeps its key.
             **({"command": KEEP_ALIVE} if keep_alive else {}),
         }
@@ -99,12 +104,16 @@ def archive(key: str) -> str:
     return f"{IMAGES}/{key.removeprefix('sha256:')}.tar.gz"
 
 
-def build_partition(config: SlurmProviderConfig) -> SlurmPartition:
+def build_partition(config: ClusterProviderConfig) -> ClusterPartition:
     """Where images are prepared: the first partition without GPUs, else the first."""
+    if not config.partitions:
+        raise ProviderStartError("image preparation needs at least one configured cluster queue")
+    if config.build_queue:
+        return next(part for part in config.partitions if part.name == config.build_queue)
     return next((part for part in config.partitions if not part.max_gpus), config.partitions[0])
 
 
-def recorded(config: SlurmProviderConfig, image: PreparedTaskImage) -> dict[str, object] | None:
+def recorded(config: ClusterProviderConfig, image: PreparedTaskImage) -> dict[str, object] | None:
     """What the cache records of ``image``, if it still holds it as it was prepared."""
     record = cache(config) / IMAGES / f"{image.input_identity.removeprefix('sha256:')}.json"
     try:
@@ -116,7 +125,7 @@ def recorded(config: SlurmProviderConfig, image: PreparedTaskImage) -> dict[str,
     return prepared if (cache(config) / image.runtime_ref).is_file() else None
 
 
-async def prepare(config: SlurmProviderConfig, recipe: Recipe) -> tuple[PreparedTaskImage, bool]:
+async def prepare(config: ClusterProviderConfig, recipe: Recipe) -> tuple[PreparedTaskImage, bool]:
     """The image ``recipe`` describes, prepared once per key, and whether an earlier
     preparation had prepared it."""
     key = recipe.key.removeprefix("sha256:")
@@ -141,6 +150,7 @@ async def prepare(config: SlurmProviderConfig, recipe: Recipe) -> tuple[Prepared
         PreparedTaskImage(
             kind=ImageKind.CONTAINER,
             source=recipe.source,
+            arch=config.architecture,
             input_identity=recipe.key,
             image_source_identity=recipe.source_identity,
             runtime_ref=archive(recipe.key),
@@ -151,19 +161,21 @@ async def prepare(config: SlurmProviderConfig, recipe: Recipe) -> tuple[Prepared
     )
 
 
-async def _prepare(config: SlurmProviderConfig, recipe: Recipe) -> dict[str, object]:
+async def _prepare(config: ClusterProviderConfig, recipe: Recipe) -> dict[str, object]:
     """Run the job that prepares ``recipe``; what it prepared."""
     part = build_partition(config)
+    arch = config.architecture
     body, tail_lines = container_framework(
-        user=recipe.user, keep_alive=recipe.keep_alive, multinode=recipe.multinode
+        user=recipe.user, keep_alive=recipe.keep_alive, multinode=recipe.multinode, arch=arch
     )
     context, python = await asyncio.to_thread(_framework, config, recipe.user)
-    job = Job(config, part)
+    job = create_job(config, part)
     try:
         job.stage(
             dict(
                 key=recipe.key.removeprefix("sha256:"),
                 reference=recipe.reference,
+                architecture=arch.value,
                 framework=dict(
                     context=str(context), python=str(python), body=body, tail=tail_lines
                 ),
@@ -186,15 +198,16 @@ async def _prepare(config: SlurmProviderConfig, recipe: Recipe) -> dict[str, obj
         await job.submit(
             cpus=min(BUILD_CPUS, part.max_cpus),
             memory_mb=min(BUILD_MEMORY_MB, part.max_memory_mb),
-            gpus=0,
+            gpus=config.build_gpus,
             minutes=math.ceil(recipe.timeout_sec / 60) + BUILD_MARGIN_MINUTES,
-            command="prepare",
+            argv=[str(await engine(config)), "-I", "worker.py", "prepare"],
         )
         return await _prepared(job, config.queue_timeout_sec, recipe)
     finally:
-        # Its batch step reads no stop, and the job's own outcome is what stands.
+        # A worker with a reported outcome still owns its node-local store until cleanup ends.
+        finished = bool(read(job.directory / "prepared") or read(job.directory / "error"))
         try:
-            await asyncio.shield(job.stop(cancel=True))
+            await asyncio.shield(job.stop(cancel=not finished))
         except ProviderStartError as error:
             logging.getLogger("orbit.execution").warning(
                 "an image preparation job did not end cleanly",
@@ -216,7 +229,7 @@ async def _prepared(job: Job, queue_timeout: int, recipe: Recipe) -> dict[str, o
             build = read(job.directory / "failed") == "build"
             failure = TaskDefinitionError if build else ProviderStartError
             raise failure(
-                f"Slurm job {job.id} could not prepare {what}: {error}\n"
+                f"{job.job_label} could not prepare {what}: {error}\n"
                 + tail(job.directory / "job.log")
             )
         state = "" if ended is not None else await job.state()
@@ -228,19 +241,20 @@ async def _prepared(job: Job, queue_timeout: int, recipe: Recipe) -> dict[str, o
             ended = loop.time() if ended is None else ended
             if loop.time() - ended > NFS_SETTLE_SEC:
                 raise ProviderStartError(
-                    f"Slurm job {job.id} ended before it prepared the image: "
+                    f"{job.job_label} ended before it prepared the image: "
                     + tail(job.directory / "job.log")
                 )
         if loop.time() > deadline:
-            raise ProviderStartError(f"Slurm job {job.id} timed out during queueing")
+            raise ProviderStartError(f"{job.job_label} timed out during queueing")
         await asyncio.sleep(2)
 
 
-def _framework(config: SlurmProviderConfig, user: str) -> tuple[Path, Path]:
+def _framework(config: ClusterProviderConfig, user: str) -> tuple[Path, Path]:
     """The framework layer's files and its Python, below the cache, staged once."""
     root = cache(config) / FRAMEWORK
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    identity = framework_identity(user=user, vm=False).removeprefix("sha256:")
+    arch = config.architecture
+    identity = framework_identity(user=user, vm=False, arch=arch).removeprefix("sha256:")
     staged = root / identity
     with (root / f"{identity}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -248,7 +262,7 @@ def _framework(config: SlurmProviderConfig, user: str) -> tuple[Path, Path]:
             # Whole or not at all: staged apart, then renamed into place.
             partial = root / f".{identity}.part"
             shutil.rmtree(partial, ignore_errors=True)
-            source = stage_container_framework(partial / "context")
+            source = stage_container_framework(partial / "context", arch)
             # Copied, as the engine's own cache need not be on the shared file system.
             shutil.copytree(source, partial / "python", symlinks=True)
             partial.rename(staged)
