@@ -291,8 +291,8 @@ def _check(result: EpisodeResult, mode: str, validation: str | None) -> None:
     ]
     verification = json.loads((result.run_dir / "verification.json").read_text())
     assert verification["lines"][1:] == [
-        "Your work was scored: reward 0.33.",
-        "Your work was scored: reward 0.67.",
+        "Validation round 1 of 2: reward 0.33.",
+        "Validation round 2 of 2: reward 0.67.",
     ]
     # A separate verifier's view is what copying would have given it; the others see the
     # solver's disk as it is. None sees what an earlier verifier wrote.

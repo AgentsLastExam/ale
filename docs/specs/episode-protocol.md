@@ -301,11 +301,11 @@ to the agent as unscored, and the episode goes on; a save or boot that fails end
 episode without a score, as a failed save for a snapshot verifier does.
 
 The prompts are framework-owned and minimal. The first states the agent's time limit below
-the instruction, as for every episode. Each round's prompt gives its reward, or that it has
-none and why, the [feedback](verification.md#feedback) of the stage that validated
-verbatim, if it wrote any, and the time left, where it is limited. Neither says what ending
-a turn does, how many rounds there are, or what scores the final state: what rounds are for
-is the instruction's to say.
+the instruction, as for every episode. Each round's prompt gives which round it was of how
+many and its reward, or that it has none and why, the [feedback](verification.md#feedback)
+of the stage that validated verbatim, if it wrote any, the rounds left and, where the
+agent's time is limited, the time left. Neither says what ending a turn does or what scores
+the final state: what rounds are for is the instruction's to say.
 
 Rounds need what each step does: a Harness with native resume, since every turn after the
 first resumes the session, and a leaf that saves as many snapshots in a row as the solver

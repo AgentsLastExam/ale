@@ -77,6 +77,12 @@ pytestmark = pytest.mark.unit
 _TIME = "Your time limit is 10 minutes. If it runs out, your work is scored as it is then."
 _TIME_LEFT = "Time left: 10 minutes. If it runs out, your work is scored as it is then."
 
+
+def _left(rounds: str) -> str:
+    """The last line of a round's prompt with ``rounds`` left and no time passed."""
+    return f"Validation rounds left: {rounds}. {_TIME_LEFT}"
+
+
 IMAGE = PreparedTaskImage(
     kind="container",
     source="external-ref",
@@ -187,9 +193,9 @@ async def test_n_rounds_give_n_validations_and_n_plus_one_turns_then_tests_once(
 async def test_the_prompts_state_the_time_alone_and_show_validation_never_tests(
     tmp_path: Path, verifiers: Verifiers
 ) -> None:
-    """Below the instruction only the agent's time; each round's prompt is its reward, the
-    feedback and the time left. How the work is verified, how often, and what scores the
-    final state are the instruction's to say."""
+    """Below the instruction only the agent's time; each round's prompt is which round of
+    how many it was, its reward, the feedback, and the rounds and time left. How the work is
+    verified and what scores the final state are the instruction's to say."""
     harness = TurnsHarness()
     task = _task(tmp_path, rounds=2)
     result = await _run(tmp_path, RoundsProvider(), task, harness)
@@ -199,20 +205,21 @@ async def test_the_prompts_state_the_time_alone_and_show_validation_never_tests(
     # The instruction stays verbatim above what the framework states.
     assert first.startswith(task.spec.instruction + "\n\n---\n\n" + _TIME + "\n")
     for prompt in harness.prompts:
-        for unsaid in ("validation set", "test set", "round", "survive", "process", "turn"):
+        for unsaid in ("validation set", "test set", "survive", "process", "turn"):
             assert unsaid not in prompt.removeprefix(task.spec.instruction).lower()
+    assert "round" not in first.removeprefix(task.spec.instruction).lower()
     assert second.splitlines() == [
-        "Your work was scored: reward 0.33.",
+        "Validation round 1 of 2: reward 0.33.",
         "",
         "Feedback:",
         "<feedback>",
         "1 lines; write more",
         "</feedback>",
         "",
-        _TIME_LEFT,
+        _left("1"),
     ]
-    assert third.splitlines()[0] == "Your work was scored: reward 0.67."
-    assert third.splitlines()[-1] == _TIME_LEFT
+    assert third.splitlines()[0] == "Validation round 2 of 2: reward 0.67."
+    assert third.splitlines()[-1] == _left("none")
     # What tests/ says never reaches the agent.
     assert not any("hidden test detail" in prompt for prompt in harness.prompts)
 
@@ -354,8 +361,8 @@ async def test_each_turn_has_what_is_left_of_the_agents_time(
     assert harness.timeouts == [600, 540, 480]
     # Each round's prompt says what is left.
     assert [prompt.splitlines()[-1].partition(" minutes")[0] for prompt in harness.prompts[1:]] == [
-        "Time left: 9",
-        "Time left: 8",
+        "Validation rounds left: 1. Time left: 9",
+        "Validation rounds left: none. Time left: 8",
     ]
 
 
@@ -385,12 +392,14 @@ async def test_an_agent_whose_time_is_unlimited_runs_without_a_limit_and_is_told
     first, second = harness.prompts
     assert "time limit" not in first.lower() and "time left" not in second.lower()
     assert second.splitlines() == [
-        "Your work was scored: reward 0.33.",
+        "Validation round 1 of 1: reward 0.33.",
         "",
         "Feedback:",
         "<feedback>",
         "1 lines; write more",
         "</feedback>",
+        "",
+        "Validation rounds left: none.",
     ]
     # Its progress names no limit.
     assert "agent_sec" not in json.loads((result.run_dir / "progress.json").read_text())
@@ -537,9 +546,9 @@ async def test_a_round_without_a_score_is_reported_as_such_and_the_loop_goes_on(
     assert first.failure is not None and first.failure.phase == "validate"
     assert (second.status, second.reward) == (Status.COMPLETED, 0.67)
     assert harness.prompts[1].splitlines() == [
-        "Your work could not be scored (task_error).",
+        "Validation round 1 of 2: no score (task_error).",
         "",
-        _TIME_LEFT,
+        _left("1"),
     ]
     assert len(harness.prompts) == 3
     # The failed round leaves the episode's own failure phase alone.
@@ -556,7 +565,7 @@ async def test_a_validation_verifier_that_cannot_start_is_an_unscored_round(
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     (round_,) = result.record.validation_rounds
     assert round_.status is Status.ENV_ERROR
-    assert "could not be scored (env_error)" in harness.prompts[1]
+    assert "no score (env_error)" in harness.prompts[1]
     assert provider.snapshots == {}
 
 
@@ -812,13 +821,13 @@ async def test_without_validation_tests_validates_each_round_as_a_copy_of_it_wou
     # The prompts read as they do where validation/ validates.
     assert first.removeprefix(task.spec.instruction).startswith("\n\n---\n\n" + _TIME + "\n")
     assert second.splitlines()[:5] == [
-        "Your work was scored: reward 0.33.",
+        "Validation round 1 of 2: reward 0.33.",
         "",
         "Feedback:",
         "<feedback>",
         "hidden test detail",
     ]
-    assert third.splitlines()[0] == "Your work was scored: reward 0.67."
+    assert third.splitlines()[0] == "Validation round 2 of 2: reward 0.67."
 
     # The RunLock says the agent's rounds were the test set's.
     assert result.lock is not None

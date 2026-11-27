@@ -136,7 +136,10 @@ def _check(result: Any, rounds: int = 2, *, shown: bool = False) -> None:
     # each round's result, which reads the same whichever stage validated.
     assert verification["lines"] == [
         INSTRUCTION.strip(),
-        *(f"Your work was scored: reward {score:.2f}." for score in scores),
+        *(
+            f"Validation round {index} of {rounds}: reward {score:.2f}."
+            for index, score in enumerate(scores, start=1)
+        ),
     ]
     # No process the agent started outlived the turn it started in, and no turn saw
     # validation/, tests/ or what they wrote.

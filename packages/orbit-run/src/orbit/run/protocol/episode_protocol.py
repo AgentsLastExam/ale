@@ -1645,6 +1645,7 @@ class EpisodeProtocol:
             assert ctx.agent_run is not None and ctx.agent_run.continuation is not None
             prompt = _round_prompt(
                 ctx.validation_rounds[-1],
+                self.validation_rounds,
                 feedback,
                 None if budget.total is None else budget.remaining,
             )
@@ -3288,21 +3289,25 @@ def _machine(allocation: ResourceAllocation) -> str:
     return text + "\n"
 
 
-def _round_prompt(record: ValidationRound, feedback: str | None, seconds_left: float | None) -> str:
+def _round_prompt(
+    record: ValidationRound, rounds: int, feedback: str | None, seconds_left: float | None
+) -> str:
     """The prompt that gives the agent one validation round's result: framework-owned and
-    minimal, the reward, or that there is none and why, the feedback of the stage that
-    validates verbatim, if it wrote any, and the time the agent has left, where it is
-    limited."""
+    minimal, which round of how many it was and its reward, or that it has none and why, the
+    feedback of the stage that validates verbatim, if it wrote any, the rounds left and the
+    time the agent has left, where it is limited."""
     result = (
-        f"Your work was scored: reward {record.reward:.2f}."
+        f"reward {record.reward:.2f}"
         if record.reward is not None
-        else f"Your work could not be scored ({record.status.value})."
+        else f"no score ({record.status.value})"
     )
-    lines = [result]
+    lines = [f"Validation round {record.index} of {rounds}: {result}."]
     if feedback is not None:
         lines += ["", "Feedback:", "<feedback>", feedback.rstrip("\n"), "</feedback>"]
+    left = f"Validation rounds left: {rounds - record.index or 'none'}."
     if seconds_left is not None:
-        lines += ["", TIME_LEFT_NOTE.format(minutes=_minutes(seconds_left))]
+        left += " " + TIME_LEFT_NOTE.format(minutes=_minutes(seconds_left))
+    lines += ["", left]
     return "\n".join(lines)
 
 

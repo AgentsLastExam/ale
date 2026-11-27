@@ -251,7 +251,7 @@ async def test_rounds_and_moves_share_the_turns_of_one_session(
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert _moved(harness.prompts) == [False, True, False]
-    assert harness.prompts[2].startswith("Your work was scored: reward")
+    assert harness.prompts[2].startswith("Validation round 1 of 1: reward")
     assert [(item.index, item.reward) for item in result.record.validation_rounds] == [
         (1, round(1 / 3, 2))
     ]
@@ -423,7 +423,7 @@ async def test_a_round_whose_verifier_lost_its_allocation_runs_again_on_its_snap
     assert [(item.index, item.status, item.reward) for item in result.record.validation_rounds] == [
         (1, Status.COMPLETED, round(1 / 3, 2))
     ]
-    assert harness.prompts[1].startswith("Your work was scored: reward 0.33.")
+    assert harness.prompts[1].startswith("Validation round 1 of 1: reward 0.33.")
 
 
 @pytest.mark.asyncio
