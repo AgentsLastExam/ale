@@ -2642,6 +2642,141 @@ def test_openclaw_reports_other_transcripts_but_not_what_it_keeps_beside_them(
     ]
 
 
+def openclaw_entry(second: int | None, role: str, **message: object) -> dict[str, object]:
+    """A transcript entry OpenClaw wrote at ``second``, or without a time."""
+    entry: dict[str, object] = {"type": "message", "message": {"role": role, **message}}
+    return entry if second is None else {"timestamp": at(second), **entry}
+
+
+def openclaw_usage(fresh: int, read: int, written: int, output: int) -> dict[str, object]:
+    return {"input": fresh, "cacheRead": read, "cacheWrite": written, "output": output}
+
+
+def test_openclaw_steps_keep_entry_times_and_each_call_its_usage_and_response(
+    tmp_path: Path,
+) -> None:
+    text = [{"type": "text", "text": "done"}]
+    write_jsonl(
+        tmp_path / OPENCLAW_SESSIONS / "session.jsonl",
+        [
+            openclaw_entry(1, "user", content="Use the task MCP."),
+            openclaw_entry(
+                3,
+                "assistant",
+                content=[{"type": "toolCall", "id": "call-1", "name": "exec", "arguments": {}}],
+                usage=openclaw_usage(3, 0, 1000, 20),
+                responseId="resp-1",
+            ),
+            openclaw_entry(None, "toolResult", toolCallId="call-1", content=text),
+            openclaw_entry(
+                6,
+                "assistant",
+                content=text,
+                usage=openclaw_usage(2, 1000, 5, 4),
+                responseId="msg-2",
+            ),
+            # A message whose usage reports no tokens, and one OpenClaw wrote without a time
+            # or usage.
+            openclaw_entry(7, "assistant", content=text, usage=openclaw_usage(0, 0, 0, 0)),
+            openclaw_entry(None, "assistant", content=text),
+        ],
+    )
+
+    trajectory = OpenClawCliHarness().parse_trajectory(context(tmp_path, "openclaw"))
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", at(1)),
+        ("agent", at(3)),
+        ("agent", at(6)),
+        ("agent", at(7)),
+        ("agent", None),
+    ]
+    # Prompt tokens include cache reads and writes.
+    assert [step.metrics for step in trajectory.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=1003, completion_tokens=20, cached_tokens=0),
+        AtifMetrics(prompt_tokens=1007, completion_tokens=4, cached_tokens=1000),
+        None,
+        None,
+    ]
+    assert [step.extra for step in trajectory.steps] == [
+        None,
+        {"orbit": {"native_event_ids": ["resp-1"]}},
+        {"orbit": {"native_event_ids": ["msg-2"]}},
+        None,
+        None,
+    ]
+    assert (
+        trajectory.final_metrics.total_prompt_tokens,
+        trajectory.final_metrics.total_cached_tokens,
+    ) == (2010, 1000)
+    assert trajectory.extra is None
+
+
+@pytest.mark.parametrize(
+    ("usage", "metrics"),
+    [
+        # A cache count OpenClaw leaves out or gives as null: none.
+        (
+            {"input": 3, "output": 20, "cacheRead": None},
+            AtifMetrics(prompt_tokens=3, completion_tokens=20, cached_tokens=0),
+        ),
+        # A count that is missing or no count: reported.
+        ({"input": 3, "cacheRead": 0, "cacheWrite": 0}, "invalid"),
+        ({**openclaw_usage(3, 0, 0, 20), "cacheRead": "many"}, "invalid"),
+        ("no usage record", "invalid"),
+    ],
+)
+def test_openclaw_reads_a_call_s_usage_only_when_it_holds_its_counts(
+    tmp_path: Path, usage: object, metrics: object
+) -> None:
+    reply = openclaw_entry(
+        2, "assistant", content=[{"type": "text", "text": "done"}], usage=usage, responseId="r1"
+    )
+    write_jsonl(
+        tmp_path / OPENCLAW_SESSIONS / "session.jsonl",
+        [openclaw_entry(1, "user", content="Use the task MCP."), {**reply, "id": "entry-2"}],
+    )
+
+    trajectory = OpenClawCliHarness().parse_trajectory(context(tmp_path, "openclaw"))
+
+    assert trajectory.steps[1].extra == {"orbit": {"native_event_ids": ["r1"]}}
+    if metrics == "invalid":
+        assert trajectory.steps[1].metrics is None
+        assert trajectory.final_metrics is None
+        assert trajectory.extra["orbit"]["parse_issues"] == [
+            {"reason": "invalid_token_usage", "session_id": "session", "entry_id": "entry-2"}
+        ]
+    else:
+        assert trajectory.steps[1].metrics == metrics
+        assert trajectory.extra is None
+
+
+def test_openclaw_subagent_steps_keep_their_times_usage_and_responses(tmp_path: Path) -> None:
+    run = openclaw_subagent_run(tmp_path)
+    write_jsonl(
+        tmp_path / OPENCLAW_SESSIONS / "child.jsonl",
+        [
+            openclaw_entry(1, "user", content="[Subagent Task] Write the marker."),
+            openclaw_entry(
+                2,
+                "assistant",
+                content=[{"type": "text", "text": "Wrote the marker."}],
+                usage=openclaw_usage(20, 0, 0, 1),
+                responseId="resp-child",
+            ),
+        ],
+    )
+
+    (subagent,) = OpenClawCliHarness().parse_trajectory(run).subagent_trajectories
+
+    assert [step.timestamp for step in subagent.steps] == [at(1), at(2)]
+    assert subagent.steps[1].metrics == AtifMetrics(
+        prompt_tokens=20, completion_tokens=1, cached_tokens=0
+    )
+    assert subagent.steps[1].extra == {"orbit": {"native_event_ids": ["resp-child"]}}
+
+
 @pytest.mark.parametrize(
     ("workdir", "expected"), [(None, "/home/agent"), ("/srv/project", "/srv/project")]
 )
