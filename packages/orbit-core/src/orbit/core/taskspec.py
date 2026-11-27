@@ -68,6 +68,7 @@ __all__ = [
     "VerifierResources",
     "VerifierTable",
     "VerifySpec",
+    "env_problem",
     "host_listed",
     "is_credential_header",
     "is_credential_name",
@@ -585,12 +586,13 @@ def _valid_env(env: dict[str, str]) -> dict[str, str]:
         reference = VariableReference.parse(value)
         if reference is not None and reference.name.upper().startswith(_RESERVED_PREFIX):
             # The Host's own configuration, model and Judge keys included, never enters a
-            # Sandbox through a Task.
-            raise ValueError(f"{key}: a Task cannot refer to the Host's {reference.name}")
+            # Sandbox through a variable.
+            raise ValueError(f"{key}: the Host's {reference.name} never enters a Sandbox")
     return env
 
 
-#: A Harbor ``env`` table: names to literals or whole-value ``${NAME}`` references.
+#: A Harbor ``env`` table: names to literals or whole-value ``${NAME}`` references; a Run's
+#: ``[agent.env]`` takes the same form.
 TaskEnv = Annotated[dict[str, str], AfterValidator(_valid_env)]
 
 #: A name that marks a credential, as Harbor recognizes one; ``MAX_TOKENS`` is a count and
@@ -605,6 +607,32 @@ _CREDENTIAL_HEADER = re.compile(
 
 def is_credential_name(name: str) -> bool:
     return bool(_CREDENTIAL_NAME.search(name))
+
+
+def env_problem(name: str, value: str) -> str | None:
+    """What is wrong with variable ``name`` set to ``value`` in an ``env`` table, or ``None``.
+
+    A credential, by its name or the name it refers to, given as a literal or with a
+    non-empty default is written down, and a ``task.toml`` or a run configuration is
+    committed, so it holds the variable, never the credential. A ``${...}`` inside other text
+    is kept as written, which is rarely what its author meant.
+    """
+    reference = VariableReference.parse(value)
+    credential = is_credential_name(name) or (
+        reference is not None and is_credential_name(reference.name)
+    )
+    # A default is written down as much as a literal is.
+    if credential and (reference is None or reference.default):
+        return (
+            f"{name} holds a credential; write ${{NAME}} with no default and set NAME in the "
+            "checkout's .env"
+        )
+    if reference is None and "${" in value:
+        return (
+            f"{name}: only a whole value ${{NAME}} is resolved; a ${{...}} inside other text "
+            "stays as written"
+        )
+    return None
 
 
 def is_credential_header(name: str) -> bool:

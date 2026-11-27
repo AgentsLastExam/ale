@@ -426,7 +426,8 @@ Provider gives which feature, and how, is in
 
 ### Variables
 
-Harbor's `env` tables set environment variables for the Task's commands:
+Harbor's `env` tables set environment variables for the Task's commands, and a Run's
+`[agent.env]` for its agent's:
 
 | Table | Received by |
 |---|---|
@@ -436,6 +437,7 @@ Harbor's `env` tables set environment variables for the Task's commands:
 | `[verifier.validation].env`, `[verifier.validation.environment].env` | the verifier of validation rounds, over the two above |
 | `[solution].env` | the oracle |
 | `[[environment.mcp_servers]].headers` | the agent's MCP client |
+| the Run's `[agent.env]` | every command of the agent's turns |
 
 A separate or snapshot verifier without `[verifier.environment]` receives
 `[environment].env`, because Harbor copies `[environment]` for it. `[verifier].env` and
@@ -449,24 +451,40 @@ only exported in the operator's shell, such as their own `GITHUB_TOKEN`, never r
 Sandbox by accident. An empty value counts as unset, as in a shell. `run`, `calibrate` and
 `reverify` resolve every selected Task before any image is built, Sandbox started or model
 called, and fail naming each Task's missing variables; `[solution].env` is resolved only for
-the [oracle](#calibration). As in Harbor, `${...}` inside other text is not a reference and
-stays as written.
+the [oracle](#calibration), and `[agent.env]` never for it; `reverify` resolves it too,
+since a kept solver can hold what its agent received. As in Harbor, `${...}` inside other
+text is not a reference and stays as written.
 Values travel in each command's environment through the guest service, never in an image, a
 Sandbox's configuration or a Host command line, so container and VM, Linux, Windows and
 macOS receive them the same way.
 
 A variable is a credential when its name, or the name it refers to, contains `KEY`, `SECRET`,
 `TOKEN` (not `TOKENS` or `TOKENIZER`), `PASSWORD`, `CREDENTIAL` or `AUTH`. `orbit lint` fails a
-credential written as a literal or with a non-empty default; it is written `${NAME}` and its
-value lives in the `.env`. Credential values from the `.env` are redacted from every record of
+credential written as a literal or with a non-empty default, or a `${...}` inside other
+text, and loading a run configuration fails on either in `[agent.env]`; a credential is
+written `${NAME}` and its value lives in the `.env`. Credential values from the `.env` are
+redacted from every record of
 the episode (see [Trace](trace.md)), except values that are only digits or a boolean word, which
 cannot be told apart from ordinary output. Artifacts are the agent's output and are copied
-exactly. The RunLock records each variable's table, name and source (literal, `.env` or
-default), never its value.
+exactly. The RunLock records each variable's name and source (literal, `.env` or default),
+and a Task variable's table, never a value.
 
-These tables never carry the Host's own credentials. A Task cannot refer to an `ORBIT_`
-variable, and a resolved value equal to a model, Judge or Provider key fails resolution:
-those keys reach a model only through the Gateway
+A Run gives the agent of every Task variables of its own in `[agent.env]`, under these
+rules, for keys an experimenter wants the agent to use:
+
+```toml
+[agent.env]
+WANDB_API_KEY = "${WANDB_API_KEY}"
+WANDB_MODE = "online"
+```
+
+Every command of the agent's turns receives them beside `[environment].env`, and setup, the
+verifier and the oracle never do. A name that one of the Task's `env` tables also sets fails
+resolution, naming both, so one name never holds two values in an episode.
+
+These tables never carry the Host's own credentials. Neither a Task nor a Run can refer to
+an `ORBIT_` variable, and a resolved value equal to a model, Judge or Provider key fails
+resolution: those keys reach a model only through the Gateway
 ([Security](security.md#3-provider-credentials-stay-on-the-host)).
 
 ## environment/

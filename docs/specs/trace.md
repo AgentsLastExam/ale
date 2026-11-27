@@ -161,9 +161,10 @@ validation round records, with its index, its turn's end and the solver's save i
 `provision` phase.
 
 Command output at or below 16 KiB stays inline. Larger output becomes a text BlobRef.
-Credentials, bearer tokens, provider keys, configured secrets and the Task's credential
-variables are redacted before text reaches disk; mirrored native logs, copied while the agent
-runs, are redacted when the agent stops, before conversion. Timeouts kill the process group,
+Credentials, bearer tokens, provider keys, configured secrets and the credential variables
+of the Task and of the Run's `[agent.env]` are redacted before text reaches disk; mirrored
+native logs, copied while the agent runs, are redacted when the agent stops, before
+conversion. Timeouts kill the process group,
 drain both pipes, preserve received output with `complete=false`, and record a terminal
 command outcome. A host restart
 recovers deterministic `.partial` files as incomplete blobs. A torn JSONL suffix is

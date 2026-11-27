@@ -38,7 +38,9 @@ For `run`, `calibrate`, `prepare`, and `reverify`, `ORBIT_RUN_CONFIG` selects th
 run TOML when `--config` is absent. An explicit `--config` replaces that default file;
 `--set` overrides values from the selected file. Use `--set section.key=value` for any
 setting without a dedicated flag. `sandbox.providers` lists the Providers that start a Run's
-Sandboxes ([Choose Providers](../../docs/guides/development.md#choose-providers)). Model
+Sandboxes ([Choose Providers](../../docs/guides/development.md#choose-providers)).
+`[agent.env]` sets variables for every Task's agent
+([Variables](../../docs/specs/task-authoring.md#variables)). Model
 provider API keys belong in the checkout's gitignored `.env` under the `ORBIT_` names in
 [`../../.env.example`](../../.env.example); subscription setup is documented in
 [`../../docs/guides/subscription-auth.md`](../../docs/guides/subscription-auth.md).

@@ -31,7 +31,7 @@ from orbit.core.errors import ConfigError, OrbitError, ProviderCapabilityError, 
 from orbit.core.fleet import RunPlan
 from orbit.core.harness import EffectiveAgentResources, Harness
 from orbit.core.ids import content_hash, task_component
-from orbit.core.lock import AssetProvenance, ResumedFrom, RunLock
+from orbit.core.lock import AgentVariableProvenance, AssetProvenance, ResumedFrom, RunLock
 from orbit.core.result import ResultRecord, SandboxOutcome
 from orbit.core.sandbox import (
     ImageKind,
@@ -291,7 +291,8 @@ async def _run_one(
             # What its Sandboxes plan for: every round, or the next where they are unlimited.
             planned = rounds[str(task.spec.name)]
             task.validations = 1 if planned == "unlimited" else planned
-        _resolve_variables(tasks, settings, oracle=settings.agent.name == "oracle")
+        oracle = settings.agent.name == "oracle"
+        agent_env = _resolve_variables(tasks, settings, oracle=oracle, agent=not oracle)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         continued = (
             _continued(continue_from, tasks, settings) if continue_from is not None else None
@@ -459,6 +460,7 @@ async def _run_one(
                         source=settings.authentication_source,
                         cli_version=harness.version(),
                     ),
+                    agent_env=agent_env,
                 ),
                 gateway=gateway_provenance(settings),
                 config_hash=settings.config_hash,
@@ -542,7 +544,9 @@ async def _reverify(
         providers = ProviderRegistry(settings)
         by_name = {str(task.spec.name): task for task in tasks}
         sources = _retained_source_episodes(source_run)
-        _resolve_variables(tasks, settings, oracle=False)
+        # A kept solver can hold what its agent received, so the Run's [agent.env] is
+        # resolved for its credentials to be redacted; no command here receives it.
+        _resolve_variables(tasks, settings, oracle=False, agent=True)
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         matched = []
         for *_, lock, _ in sources:
@@ -1324,15 +1328,21 @@ async def _egress_proxy(
     return proxy, None if gateway is not None else registry
 
 
-def _resolve_variables(tasks: list[ManifestTask], settings: RunConfig, *, oracle: bool) -> None:
-    """Every Task's variables, before any image, Sandbox or model call; see ``secrets``."""
-    resolve_task_variables(
+def _resolve_variables(
+    tasks: list[ManifestTask], settings: RunConfig, *, oracle: bool, agent: bool = False
+) -> tuple[AgentVariableProvenance, ...] | None:
+    """Every Task's variables, and with ``agent`` the Run's ``[agent.env]``, before any image,
+    Sandbox or model call; see ``secrets``. Return where each ``[agent.env]`` value came
+    from, or ``None`` without ``agent``."""
+    resolved = resolve_task_variables(
         tasks,
         oracle=oracle,
         protected=host_credentials(
             (settings.gateway.api_key_env, settings.sandbox.daytona.api_key_env)
         ),
+        agent=settings.agent.env if agent else None,
     )
+    return resolved if agent else None
 
 
 def _verify_dirs(tasks: list[ManifestTask]) -> list[Path]:

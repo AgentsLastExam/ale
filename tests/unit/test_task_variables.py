@@ -89,7 +89,7 @@ def test_env_tables_reach_the_commands_harbor_gives_them(tmp_path: Path) -> None
         ),
         (
             {"verifier": {"env": {"KEY": "${ORBIT_OPENAI_API_KEY}"}}},
-            r"verifier\.env: KEY: a Task cannot refer to the Host's ORBIT_OPENAI_API_KEY",
+            r"verifier\.env: KEY: the Host's ORBIT_OPENAI_API_KEY never enters a Sandbox",
         ),
     ],
 )

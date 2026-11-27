@@ -1270,7 +1270,7 @@ class EpisodeProtocol:
         left = _left(sandbox, kept)
         timeout = _bound(budget.remaining if left is None else min(left, budget.remaining))
 
-        variables = ctx.variables.values
+        variables = ctx.variables
 
         async def launch() -> None:
             recorded = _RecordedSandbox(
@@ -1278,7 +1278,10 @@ class EpisodeProtocol:
                 sandbox,
                 component="harness-launch",
                 actor="task" if oracle is not None else "framework",
-                env=variables.oracle() if oracle is not None else variables.environment,
+                # The Run's [agent.env] is the evaluated agent's alone, never the oracle's.
+                env=variables.values.oracle()
+                if oracle is not None
+                else {**variables.values.environment, **variables.agent},
             )
             started = budget.running = time.monotonic()
             # Only a prompt the agent was given is looked for in its session.
@@ -3633,7 +3636,7 @@ class _RecordedSandbox:
         self._component = component
         self._actor = actor
         self._env = env or {}
-        """The Task's variables, beneath each command's own."""
+        """The Task's variables, and for the agent the Run's, beneath each command's own."""
 
     def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
         return getattr(self._sandbox, name)

@@ -25,6 +25,7 @@ from orbit.core.harness import EffectiveAgentResources
 from orbit.core.lock import (
     AgentProvenance,
     AgentResourceProvenance,
+    AgentVariableProvenance,
     AssetProvenance,
     AuthenticationProvenance,
     FrameworkProvenance,
@@ -137,11 +138,14 @@ def agent_provenance(
     settings: RunConfig | None = None,
     resources: EffectiveAgentResources | None = None,
     authentication: AuthenticationProvenance | None = None,
+    agent_env: tuple[AgentVariableProvenance, ...] | None = None,
 ) -> AgentProvenance:
     """Read a harness's identity off the harness itself.
 
     The family comes from the harness rather than from the task, which is the whole
-    point of it living there: provenance records what actually ran.
+    point of it living there: provenance records what actually ran. ``agent_env`` is where
+    each of the Run's ``[agent.env]`` values came from, for an agent; ``None`` for an
+    oracle, which receives none of them.
     """
     preset = (
         HarnessPresetProvenance(name=settings.preset_name, digest=settings.preset_digest)
@@ -192,6 +196,7 @@ def agent_provenance(
         resources=resource_records,
         resources_digest=resources.digest if resources else None,
         authentication=authentication or AuthenticationProvenance(),
+        env=agent_env or (),
     )
 
 

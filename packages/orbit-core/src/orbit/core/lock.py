@@ -35,6 +35,7 @@ from orbit.core.taskspec import (
 __all__ = [
     "AgentProvenance",
     "AgentResourceProvenance",
+    "AgentVariableProvenance",
     "AssetProvenance",
     "AuthenticationProvenance",
     "FrameworkProvenance",
@@ -192,6 +193,16 @@ class AuthenticationProvenance(BaseModel):
     validated_cli_version: str = ""
 
 
+class AgentVariableProvenance(BaseModel):
+    """Where one of the Run's ``[agent.env]`` values came from. The value itself is never
+    recorded."""
+
+    model_config = _FROZEN
+
+    name: str = Field(min_length=1)
+    source: Literal["literal", "env_file", "default"]
+
+
 class AgentProvenance(BaseModel):
     model_config = _FROZEN
 
@@ -208,6 +219,8 @@ class AgentProvenance(BaseModel):
     resources: tuple[AgentResourceProvenance, ...] = ()
     resources_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     authentication: AuthenticationProvenance = AuthenticationProvenance()
+    env: tuple[AgentVariableProvenance, ...] = Field(default=(), exclude_if=lambda value: not value)
+    """The Run's ``[agent.env]``, given to every command of the agent's turns."""
 
 
 class HarnessPresetProvenance(BaseModel):

@@ -10,12 +10,7 @@ from typing import Literal
 
 from orbit.core.errors import TaskDefinitionError
 from orbit.core.task import CALIBRATION_DIR, SOLUTION_DIR, Stage, case_entry, case_path
-from orbit.core.taskspec import (
-    SOLUTION_CASE,
-    OperatingSystem,
-    VariableReference,
-    is_credential_name,
-)
+from orbit.core.taskspec import SOLUTION_CASE, OperatingSystem, env_problem
 from orbit.run.tasksets.manifest import (
     BUILD_SCRIPTS,
     ENVIRONMENT_DIR,
@@ -233,29 +228,8 @@ def _check_variables(path: Path, config: dict[str, object]) -> list[Finding]:
     findings: list[Finding] = []
     for table, env in tables:
         for key, value in env.items() if isinstance(env, dict) else ():
-            if not isinstance(value, str):
-                continue
-            reference = VariableReference.parse(value)
-            credential = is_credential_name(key) or (
-                reference is not None and is_credential_name(reference.name)
-            )
-            # A default is written down as much as a literal is.
-            if credential and (reference is None or reference.default):
-                findings.append(
-                    Finding(
-                        path,
-                        f"[{table}].env {key} holds a credential; write ${{NAME}} with no "
-                        "default and set NAME in the checkout's .env",
-                    )
-                )
-            elif reference is None and "${" in value:
-                findings.append(
-                    Finding(
-                        path,
-                        f"[{table}].env {key}: only a whole value ${{NAME}} is resolved; "
-                        "a ${...} inside other text stays as written",
-                    )
-                )
+            if isinstance(value, str) and (problem := env_problem(key, value)):
+                findings.append(Finding(path, f"[{table}].env {problem}"))
     return findings
 
 

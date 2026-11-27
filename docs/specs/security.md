@@ -259,11 +259,14 @@ This deliberately trusts reviewed Task verifier code with the episode's Judge se
 malicious Task author is outside this threat model.
 
 The one credential a Sandbox can receive beyond episode tokens is one its Task declares in an
-`env` table, such as a token for a service the Task itself uses
+`env` table, such as a token for a service the Task itself uses, or one its Run gives the
+agent in `[agent.env]`, such as an experiment tracker's key
 ([Task authoring](task-authoring.md#variables)). It comes from the checkout's `.env` only,
 reaches only the commands its table names, is redacted from every record, and can neither
 refer to an `ORBIT_` variable nor equal a Host credential, so no model or Judge key leaves
-the Gateway this way. `[environment].env` reaches the agent, and the agent can read it.
+the Gateway this way. `[environment].env` and `[agent.env]` reach the agent, which can read
+what it receives and, with network, send it anywhere, so give it only keys scoped to the
+experiment.
 
 ## 4. The agent cannot change what it is measured under
 
@@ -409,8 +412,8 @@ source digest, source and commit when available, exact locally built image conte
 solver and a separate or snapshot verifier the Provider selected and the leaf that started
 the Sandbox with its container runtime, requested and effective resources, GPU allocation and
 sandbox observations, agent version and integrity, harness family, one optional Task-asset
-repository/path/commit/dirty observation, the name and value source of each Task variable,
-the agent's and each verifier's network policies, verification topology and image/resources,
+repository/path/commit/dirty observation, the name and value source of each Task variable
+and of each variable the Run gives the agent, the agent's and each verifier's network policies, verification topology and image/resources,
 the verifier of validation rounds' among them where it has its own,
 sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 Leaves of one kind isolate a Task differently and give it different kernel features, so a
