@@ -20,13 +20,15 @@ not sent upstream, apart from backports of upstream changes that no release has 
 | `0011-rdmaproxy-mlx5-data-direct` | Under `--rdmaproxy`, NCCL in an image with a newer rdma-core's libmlx5, such as the AWS EFA installer's, uses InfiniBand on Mellanox HCAs instead of falling back to TCP sockets without an error; a backport of upstream gVisor's [#17524](https://github.com/google/gvisor/pull/17524), which no release has yet. |
 | `0012-rdmaproxy-bind-mounted-uverbs-devices` | Under `--rdmaproxy`, a container that rootless Podman gives an InfiniBand device with `--device /dev/infiniband/uverbsN` can use it, instead of finding no RDMA device (`Failed to get IB devices list: Function not implemented`) because Podman bind-mounts the device rather than listing it among the spec's devices. |
 | `0013-runsc-shared-mount` | `--shared-mount=PATH=UID:GID` makes the bind mount at `PATH` a directory other machines share, as a Slurm Sandbox's `/shared` on the cluster's network file system: an ordinary account in the sandbox can create files there, every file belongs to `UID:GID` in the sandbox while the host account keeps owning it, and the sandbox sees what other machines add to it, instead of `Operation not permitted` and listings that miss other machines' new files. |
+| `0014-nvproxy-coherent-arm-gpus` | On Grace Blackwell systems such as GB200, systrap associates NVIDIA unified memory with the CUDA application's address space. A live gVisor checkpoint requires the application to release UVM descriptors bound to that address space. Adapted from [gVisor #16643](https://github.com/gvisor/gvisor/pull/16643). |
 
 Each patch's header says what it changes, why, and how it was verified.
 
 ## The image
 
 `ghcr.io/agentslastexam/orbit-gvisor:<version>` holds, under `/gvisor`, the layout of
-gVisor's release tarball:
+gVisor's release tarball. The tag contains native Linux amd64 and arm64 images.
+The arm64 runtime selects 4 KiB or 64 KiB pages at startup from the Host's page size.
 
 ```text
 /gvisor/
@@ -43,7 +45,7 @@ The image's version is `VERSION` in [`build.sh`](build.sh), 0.1.0 while Orbit is
 development. Its build id, which `build.sh --id` prints, is a digest of the gVisor release,
 each patch's change and the `Dockerfile`'s instructions; the image carries it as the label
 `orbit.gvisor.build`, and `runsc --version` reports the release, the version and the id,
-as `release-20261109.0+orbit.0.1.0.<build id>`. A changed build is published under
+as `release-20261116.0+orbit.0.1.0.<build id>`. A changed build is published under
 the same version, and each engine names the build it runs (`BUILD_ID` in
 `packages/orbit-run/src/orbit/run/providers/docker/gvisor.py`): Docker's preflight refuses a
 Host whose `runsc` is another build, and a Slurm node the registry's image when it is.
@@ -286,9 +288,10 @@ with driver 570; graphics, video and GPUDirect RDMA use of the GPU were not test
 images/runtimes/gvisor/build.sh WORKDIR
 ```
 
-The script checks out `GVISOR_TAG`, fails unless it still names `GVISOR_COMMIT`, applies
-every patch in `patches/` in name order, and builds `//debian:gvisor-release-tar-bz2` with
-gVisor's Makefile, which runs Bazel in gVisor's builder container with the options of
+Run the build on the target architecture, x86_64 or aarch64. The script checks out
+`GVISOR_TAG`, verifies it still names `GVISOR_COMMIT`, applies every patch in `patches/` in
+name order, and builds `//debian:gvisor-release-tar-bz2` with gVisor's Makefile. This runs
+Bazel in gVisor's builder container with the options of
 gVisor's own release pipeline. It then checks the tarball's layout and the version `runsc`
 reports, and builds `ghcr.io/agentslastexam/orbit-gvisor:$VERSION` from this directory's
 `Dockerfile`. When that version is already
@@ -297,8 +300,9 @@ Docker daemon and about 15 GB in `WORKDIR` and Docker's storage together. On a 1
 it takes 5.5 minutes with an empty `WORKDIR`, plus the pull of gVisor's builder image the
 first time, and under 2 minutes again with the Bazel cache in `WORKDIR`.
 
-`.github/workflows/images.yml` runs it and publishes the image whenever the registry's has
-another build id. A patch added or changed, or a new gVisor release (`GVISOR_TAG` and
-`GVISOR_COMMIT`, with the patches rebased and verified again), changes the id: set
+`.github/workflows/images.yml` builds and boots each architecture on its own native runner.
+Once both succeed, CI publishes one multi-platform tag to GHCR. A patch added or changed,
+or a new gVisor release (`GVISOR_TAG` and `GVISOR_COMMIT`, with the patches rebased and
+verified again), changes the id: set
 `BUILD_ID` in `gvisor.py` to what `build.sh --id` prints, and every Host to the new build
 after it is published.

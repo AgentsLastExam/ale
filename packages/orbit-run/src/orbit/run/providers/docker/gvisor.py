@@ -85,7 +85,7 @@ ENGINE_STORAGE = ("/var/lib/docker", "/var/lib/containerd", "/var/lib/containers
 #: images/runtimes/gvisor/build.sh; the id of that build, which ``build.sh --id`` prints and
 #: which tells the builds of one version apart; and what ``runsc --version`` reports of it.
 VERSION = "0.1.0"
-BUILD_ID = "f76fcb080776"
+BUILD_ID = "6d913a9f9efd"
 BUILD = f"+orbit.{VERSION}.{BUILD_ID}"
 #: The ``runsc`` command that lists the NVIDIA driver versions nvproxy supports.
 DRIVERS = ("nvproxy", "list-supported-drivers")

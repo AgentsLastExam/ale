@@ -1,0 +1,2097 @@
+nvproxy: use the application's host address space for coherent ARM GPUs
+
+Backport of gvisor/gvisor#16643 at f7611cc8354fa081bd8a4152b983c890c57ccec3
+by Eric Zhang, with contributions from Ryan Daum. On coherent ARM systems
+such as GB200, forcing UVM multi-process sharing disables the address-space
+association required by ATS. In systrap, initialize UVM against the
+application's host address space and prepare its mappings before the GPU
+accesses pageable memory. Reject a live checkpoint that would retain a UVM
+descriptor bound to the old address space.
+
+Apply after Orbit's per-GPU memory limit (0004). The UVM MM file still
+holds its tracked VA-space file on successful initialization, and restore
+recreates both the destination UVM modes and the device-memory accounting.
+Include the UVM tools descriptor guard and ARM-only ioctl policy from Ryan
+Daum's review fixes (rdaum/gvisor commits 57f294f7e780 and 8a0ffa284f18).
+A failed systrap transport returns an I/O error to the application.
+
+The upstream patch was tested on a rootless GB200 with 64 KiB host pages
+and NVIDIA driver 610.57.04 (gvisor/gvisor#18027).
+
+diff --git a/pkg/abi/nvgpu/ctrl.go b/pkg/abi/nvgpu/ctrl.go
+index 9732207..3d2561d 100644
+--- a/pkg/abi/nvgpu/ctrl.go
++++ b/pkg/abi/nvgpu/ctrl.go
+@@ -818,6 +818,31 @@ const (
+ 	NV2080_CTRL_CMD_MC_SERVICE_INTERRUPTS = 0x20801702
+ )
+ 
++// Chip identifiers from src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080mc.h.
++const (
++	NV2080_CTRL_MC_ARCH_INFO_ARCHITECTURE_GH100       = 0x180
++	NV2080_CTRL_MC_ARCH_INFO_ARCHITECTURE_GB100       = 0x1a0
++	NV2080_CTRL_MC_ARCH_INFO_ARCHITECTURE_GR100       = 0x1c0
++	NV2080_CTRL_MC_ARCH_INFO_IMPLEMENTATION_GH100_SOC = 0x1
++	NV2080_CTRL_MC_ARCH_INFO_IMPLEMENTATION_GB100     = 0x0
++	NV2080_CTRL_MC_ARCH_INFO_IMPLEMENTATION_GB110     = 0x3
++	NV2080_CTRL_MC_ARCH_INFO_IMPLEMENTATION_GR100     = 0x0
++)
++
++// NV2080_CTRL_MC_GET_ARCH_INFO_PARAMS is the params type for
++// NV2080_CTRL_CMD_MC_GET_ARCH_INFO, from
++// src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080mc.h.
++//
++// +marshal
++type NV2080_CTRL_MC_GET_ARCH_INFO_PARAMS struct {
++	_              structs.HostLayout
++	Architecture   uint32
++	Implementation uint32
++	Revision       uint32
++	SubRevision    uint8
++	_              [3]byte
++}
++
+ // From src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080nvlink.h:
+ const (
+ 	NV2080_CTRL_CMD_NVLINK_GET_NVLINK_CAPS           = 0x20803001
+diff --git a/pkg/abi/nvgpu/uvm.go b/pkg/abi/nvgpu/uvm.go
+index 2f23336..be1e01b 100644
+--- a/pkg/abi/nvgpu/uvm.go
++++ b/pkg/abi/nvgpu/uvm.go
+@@ -61,6 +61,7 @@ const (
+ 	UVM_TOOLS_FLUSH_EVENTS                = 67
+ 	UVM_ALLOC_SEMAPHORE_POOL              = 68
+ 	UVM_PAGEABLE_MEM_ACCESS_ON_GPU        = 70
++	UVM_POPULATE_PAGEABLE                 = 71
+ 	UVM_VALIDATE_VA_RANGE                 = 72
+ 	UVM_CREATE_EXTERNAL_RANGE             = 73
+ 	UVM_MM_INITIALIZE                     = 75
+@@ -836,6 +837,25 @@ func (p *UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS) SetStatus(status uint32) {
+ 	p.RMStatus = status
+ }
+ 
++// +marshal
++type UVM_POPULATE_PAGEABLE_PARAMS struct {
++	_        structs.HostLayout
++	Base     uint64
++	Length   uint64
++	Flags    uint32
++	RMStatus uint32
++}
++
++// GetStatus implements HasStatus.GetStatus.
++func (p *UVM_POPULATE_PAGEABLE_PARAMS) GetStatus() uint32 {
++	return p.RMStatus
++}
++
++// SetStatus implements HasStatus.SetStatus.
++func (p *UVM_POPULATE_PAGEABLE_PARAMS) SetStatus(status uint32) {
++	p.RMStatus = status
++}
++
+ // +marshal
+ type UVM_VALIDATE_VA_RANGE_PARAMS struct {
+ 	_        structs.HostLayout
+diff --git a/pkg/sentry/devices/nvproxy/BUILD b/pkg/sentry/devices/nvproxy/BUILD
+index 8f94568..bdfddf0 100644
+--- a/pkg/sentry/devices/nvproxy/BUILD
++++ b/pkg/sentry/devices/nvproxy/BUILD
+@@ -61,6 +61,7 @@ go_library(
+         "seccomp_filters.go",
+         "uvm.go",
+         "uvm_mmap.go",
++        "uvm_mode.go",
+         "uvm_tools.go",
+         "uvm_unsafe.go",
+         "version.go",
+@@ -94,6 +95,7 @@ go_library(
+         "//pkg/sentry/kernel/auth",
+         "//pkg/sentry/memmap",
+         "//pkg/sentry/mm",
++        "//pkg/sentry/platform",
+         "//pkg/sentry/vfs",
+         "//pkg/sync",
+         "//pkg/sync/locking",
+@@ -113,6 +115,7 @@ go_test(
+     deps = [
+         "//pkg/abi/nvgpu",
+         "//pkg/context",
++        "//pkg/errors/linuxerr",
+         "//pkg/hostarch",
+         "//pkg/seccomp",
+         "//pkg/sentry/devices/nvproxy/nvconf",
+diff --git a/pkg/sentry/devices/nvproxy/nvconf/BUILD b/pkg/sentry/devices/nvproxy/nvconf/BUILD
+index 04b4bf7..ed0d027 100644
+--- a/pkg/sentry/devices/nvproxy/nvconf/BUILD
++++ b/pkg/sentry/devices/nvproxy/nvconf/BUILD
+@@ -9,6 +9,7 @@ go_library(
+     srcs = [
+         "caps.go",
+         "hostdriver_unsafe.go",
++        "hostgpu_unsafe.go",
+         "hostsettings.go",
+         "nvconf.go",
+         "version.go",
+diff --git a/pkg/sentry/devices/nvproxy/nvconf/hostgpu_unsafe.go b/pkg/sentry/devices/nvproxy/nvconf/hostgpu_unsafe.go
+new file mode 100644
+index 0000000..7cf9f4c
+--- /dev/null
++++ b/pkg/sentry/devices/nvproxy/nvconf/hostgpu_unsafe.go
+@@ -0,0 +1,147 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package nvconf
++
++import (
++	"fmt"
++	"unsafe"
++
++	"golang.org/x/sys/unix"
++	"gvisor.dev/gvisor/pkg/abi/linux"
++	"gvisor.dev/gvisor/pkg/abi/nvgpu"
++)
++
++// GPUArchInfo identifies a GPU chip, as returned by
++// NV2080_CTRL_CMD_MC_GET_ARCH_INFO.
++type GPUArchInfo struct {
++	Architecture   uint32
++	Implementation uint32
++}
++
++// GPUArchitectures returns the host-reported architecture and implementation
++// for each exposed GPU minor. It allocates a temporary RM client and children
++// on ctlFD, which must be a freshly opened /dev/nvidiactl. The caller must close
++// ctlFD afterward to release these resources, and hold an open host FD for
++// each queried GPU until this function returns. The host driver checks those
++// FDs to authorize device allocation.
++func GPUArchitectures(ctlFD int, minors []uint32) (map[uint32]GPUArchInfo, error) {
++	if len(minors) == 0 {
++		return nil, nil
++	}
++
++	var cards [nvgpu.NV_MAX_DEVICES]nvgpu.IoctlCardInfo
++	if err := hostGPUIoctl(ctlFD, nvgpu.NV_ESC_CARD_INFO, unsafe.Pointer(&cards), unsafe.Sizeof(cards)); err != nil {
++		return nil, fmt.Errorf("NV_ESC_CARD_INFO: %w", err)
++	}
++	cardByMinor := make(map[uint32]nvgpu.IoctlCardInfo)
++	for _, card := range cards {
++		if card.Valid != 0 {
++			cardByMinor[card.MinorNumber] = card
++		}
++	}
++	var selected []nvgpu.IoctlCardInfo
++	seen := make(map[uint32]struct{})
++	for _, minor := range minors {
++		if _, ok := seen[minor]; ok {
++			continue
++		}
++		card, ok := cardByMinor[minor]
++		if !ok {
++			return nil, fmt.Errorf("GPU minor %d is exposed but missing from NV_ESC_CARD_INFO", minor)
++		}
++		seen[minor] = struct{}{}
++		selected = append(selected, card)
++	}
++
++	var root nvgpu.NVOS64_PARAMETERS
++	if err := hostGPUIoctl(ctlFD, nvgpu.NV_ESC_RM_ALLOC, unsafe.Pointer(&root), unsafe.Sizeof(root)); err != nil {
++		return nil, fmt.Errorf("allocate GPU architecture query client: %w", err)
++	}
++	if root.Status != nvgpu.NV_OK {
++		return nil, fmt.Errorf("allocate GPU architecture query client: status=%#x", root.Status)
++	}
++	client := root.HObjectNew
++
++	architectures := make(map[uint32]GPUArchInfo, len(selected))
++	for i, card := range selected {
++		id := nvgpu.NV0000_CTRL_GPU_GET_ID_INFO_PARAMS{GpuID: card.GPUID}
++		if err := hostGPUControl(ctlFD, client, client, nvgpu.NV0000_CTRL_CMD_GPU_GET_ID_INFO, uintptr(unsafe.Pointer(&id)), unsafe.Sizeof(id)); err != nil {
++			return nil, fmt.Errorf("query GPU minor %d device instance: %w", card.MinorNumber, err)
++		}
++		device := nvgpu.Handle{Val: uint32(2*i + 1)}
++		subdevice := nvgpu.Handle{Val: uint32(2*i + 2)}
++		deviceParams := nvgpu.NV0080_ALLOC_PARAMETERS{DeviceID: id.DeviceInstance}
++		if err := hostGPUAlloc(ctlFD, client, client, device, nvgpu.NV01_DEVICE_0, uintptr(unsafe.Pointer(&deviceParams)), unsafe.Sizeof(deviceParams)); err != nil {
++			return nil, fmt.Errorf("allocate GPU minor %d device: %w", card.MinorNumber, err)
++		}
++		subdeviceParams := nvgpu.NV2080_ALLOC_PARAMETERS{SubDeviceID: id.SubDeviceInstance}
++		if err := hostGPUAlloc(ctlFD, client, device, subdevice, nvgpu.NV20_SUBDEVICE_0, uintptr(unsafe.Pointer(&subdeviceParams)), unsafe.Sizeof(subdeviceParams)); err != nil {
++			return nil, fmt.Errorf("allocate GPU minor %d subdevice: %w", card.MinorNumber, err)
++		}
++		var arch nvgpu.NV2080_CTRL_MC_GET_ARCH_INFO_PARAMS
++		if err := hostGPUControl(ctlFD, client, subdevice, nvgpu.NV2080_CTRL_CMD_MC_GET_ARCH_INFO, uintptr(unsafe.Pointer(&arch)), unsafe.Sizeof(arch)); err != nil {
++			return nil, fmt.Errorf("query GPU minor %d architecture: %w", card.MinorNumber, err)
++		}
++		architectures[card.MinorNumber] = GPUArchInfo{Architecture: arch.Architecture, Implementation: arch.Implementation}
++	}
++	return architectures, nil
++}
++
++func hostGPUIoctl(fd int, nr uint32, params unsafe.Pointer, size uintptr) error {
++	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(linux.IOWR(nvgpu.NV_IOCTL_MAGIC, nr, uint32(size))), uintptr(params)); errno != 0 {
++		return errno
++	}
++	return nil
++}
++
++// Parameters stored in a P64 must escape the Go stack before the ioctl helper
++// can grow it. uintptrescapes also keeps the target alive throughout this call.
++//
++//go:uintptrescapes
++func hostGPUControl(fd int, client, object nvgpu.Handle, cmd uint32, params uintptr, size uintptr) error {
++	ctrl := nvgpu.NVOS54_PARAMETERS{
++		HClient:    client,
++		HObject:    object,
++		Cmd:        cmd,
++		Params:     nvgpu.P64(params),
++		ParamsSize: uint32(size),
++	}
++	if err := hostGPUIoctl(fd, nvgpu.NV_ESC_RM_CONTROL, unsafe.Pointer(&ctrl), unsafe.Sizeof(ctrl)); err != nil {
++		return err
++	}
++	if ctrl.Status != nvgpu.NV_OK {
++		return fmt.Errorf("control %#x: status=%#x", cmd, ctrl.Status)
++	}
++	return nil
++}
++
++//go:uintptrescapes
++func hostGPUAlloc(fd int, client, parent, object nvgpu.Handle, class nvgpu.ClassID, params uintptr, size uintptr) error {
++	alloc := nvgpu.NVOS64_PARAMETERS{
++		HRoot:         client,
++		HObjectParent: parent,
++		HObjectNew:    object,
++		HClass:        class,
++		PAllocParms:   nvgpu.P64(params),
++		ParamsSize:    uint32(size),
++	}
++	if err := hostGPUIoctl(fd, nvgpu.NV_ESC_RM_ALLOC, unsafe.Pointer(&alloc), unsafe.Sizeof(alloc)); err != nil {
++		return err
++	}
++	if alloc.Status != nvgpu.NV_OK {
++		return fmt.Errorf("allocate class %#x: status=%#x", class, alloc.Status)
++	}
++	return nil
++}
+diff --git a/pkg/sentry/devices/nvproxy/nvproxy.go b/pkg/sentry/devices/nvproxy/nvproxy.go
+index 54ea692..d5f93b5 100644
+--- a/pkg/sentry/devices/nvproxy/nvproxy.go
++++ b/pkg/sentry/devices/nvproxy/nvproxy.go
+@@ -93,6 +93,7 @@ func Register(vfsObj *vfs.VirtualFilesystem, opts *Options) (*DeviceInfo, error)
+ 		useDevGofer:            opts.UseDevGofer,
+ 		procDriverNvidiaParams: opts.HostSettings.ProcDriverNvidiaParams,
+ 		frontendFDs:            make(map[*frontendFD]struct{}),
++		containerUVMModes:      make(map[string]bool),
+ 		clients:                make(map[nvgpu.Handle]*rootClient),
+ 		vidmemLimit:            opts.GPUMemoryLimit,
+ 		vidmemUsed:             make(map[uint32]uint64),
+@@ -259,6 +260,8 @@ type nvproxy struct {
+ 
+ 	fdsMu       fdsMutex `state:"nosave"`
+ 	frontendFDs map[*frontendFD]struct{}
++	// Recomputed from destination hardware during restore; protected by fdsMu.
++	containerUVMModes map[string]bool `state:"nosave"`
+ 
+ 	clientsMu sync.RWMutex `state:"nosave"`
+ 	clients   map[nvgpu.Handle]*rootClient
+diff --git a/pkg/sentry/devices/nvproxy/nvproxy_test.go b/pkg/sentry/devices/nvproxy/nvproxy_test.go
+index a85b954..aba80da 100644
+--- a/pkg/sentry/devices/nvproxy/nvproxy_test.go
++++ b/pkg/sentry/devices/nvproxy/nvproxy_test.go
+@@ -15,11 +15,13 @@
+ package nvproxy
+ 
+ import (
++	"runtime"
+ 	"strings"
+ 	"testing"
+ 
+ 	"golang.org/x/sys/unix"
+ 	"gvisor.dev/gvisor/pkg/abi/nvgpu"
++	"gvisor.dev/gvisor/pkg/errors/linuxerr"
+ 	"gvisor.dev/gvisor/pkg/seccomp"
+ 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
+ )
+@@ -262,6 +264,32 @@ func TestHandlers(t *testing.T) {
+ 	})
+ }
+ 
++func TestPopulatePageableRequiresUVMFile(t *testing.T) {
++	// Missing the UVM file identifies a tools-device ioctl. Reject it before
++	// attempting to use task memory or the driver.
++	if _, err := uvmPopulatePageable(&uvmIoctlState{}); !linuxerr.Equals(linuxerr.EINVAL, err) {
++		t.Errorf("uvmPopulatePageable without a UVM file: got %v, want EINVAL", err)
++	}
++}
++
++// TestHostMMIOIoctlRulesMatchUVMMode checks that stub processes are granted
++// host-mm ioctls only where application-mm UVM can be selected.
++func TestHostMMIOIoctlRulesMatchUVMMode(t *testing.T) {
++	for _, caps := range []nvconf.DriverCaps{
++		0,
++		nvconf.CapVideo,
++		nvconf.CapCompute,
++		nvconf.CapUtility,
++		nvconf.CapCompute | nvconf.CapProfiling,
++		nvconf.ValidCapabilities,
++	} {
++		want := runtime.GOARCH == "arm64" && caps&(nvconf.CapCompute|nvconf.CapUtility) != 0
++		if got := HostMMIOIoctlRules(caps) != nil; got != want {
++			t.Errorf("HostMMIOIoctlRules(%v) non-nil = %t, want %t on %s", caps, got, want, runtime.GOARCH)
++		}
++	}
++}
++
+ // TestFilterCapabilities loosely verifies that the seccomp filters have the
+ // expected number of entries relative to the capabilities that are enabled
+ // by comparing them against what the ABI handlers would suggest.
+@@ -280,7 +308,12 @@ func TestFilterCapabilities(t *testing.T) {
+ 		nvproxyOnlyFrontendIoctls = map[uint32]struct{}{ /* Empty right now. */ }
+ 
+ 		// Set of UVM ioctls that nvproxy accepts but does not forward to the host.
+-		nonForwardedUVMIoctls = map[uint32]struct{}{ /* Empty right now. */ }
++		nonForwardedUVMIoctls = map[uint32]struct{}{
++			// On /dev/nvidia-uvm this ioctl runs in the application's host mm,
++			// not the Sentry. On /dev/nvidia-uvm-tools nvproxy rejects it; see
++			// TestPopulatePageableRequiresUVMFile.
++			nvgpu.UVM_POPULATE_PAGEABLE: {},
++		}
+ 
+ 		// Set of UVM ioctls that nvproxy makes but does not accept from the
+ 		// application.
+diff --git a/pkg/sentry/devices/nvproxy/save_restore.go b/pkg/sentry/devices/nvproxy/save_restore.go
+index 846d7ae..b9fa56a 100644
+--- a/pkg/sentry/devices/nvproxy/save_restore.go
++++ b/pkg/sentry/devices/nvproxy/save_restore.go
+@@ -33,6 +33,9 @@ type saveRestoreGoogleContextID int
+ const (
+ 	// CtxDeviceRemapping is a Context.Value key for a DeviceRemapping.
+ 	CtxDeviceRemapping saveRestoreGoogleContextID = iota
++	// CtxContainerUVMModes is a Context.Value key for a map[string]bool of
++	// container UVM modes selected from the destination host before loading.
++	CtxContainerUVMModes
+ )
+ 
+ // DeviceRemappingFromContext returns the DeviceRemapping associated with ctx,
+@@ -193,6 +196,7 @@ func (nvp *nvproxy) afterLoad(ctx goContext.Context) {
+ 		panic(fmt.Sprintf("driver version %q not found in abis map", nvp.version))
+ 	}
+ 	nvp.abi = abiEntry.cons()
++	nvp.containerUVMModes = ctx.Value(CtxContainerUVMModes).(map[string]bool)
+ 	dr := DeviceRemappingFromContext(ctx)
+ 	if dr != nil {
+ 		// Remap frontendFDs to their new frontendDevices.
+@@ -325,11 +329,19 @@ func (fd *frontendFD) afterLoad(ctx goContext.Context) {
+ 
+ // beforeSave is invoked by stateify.
+ func (fd *uvmFD) beforeSave() {
+-	// no-op
++	if fd.applicationMMInitialized.Load() {
++		panic("nvproxy: checkpointing UVM bound to an application host mm is unsupported")
++	}
+ }
+ 
+ // afterLoad is invoked by stateify.
+ func (fd *uvmFD) afterLoad(ctx goContext.Context) {
++	modes := ctx.Value(CtxContainerUVMModes).(map[string]bool)
++	var ok bool
++	fd.applicationMM, ok = modes[fd.containerName]
++	if !ok {
++		panic(fmt.Sprintf("nvproxy: restored UVM mode is not configured for container %q", fd.containerName))
++	}
+ 	fd.hostFD = openHostDevFileForRestore(ctx, "nvidia-uvm", fd.dev.nvp.useDevGofer, fd.containerName, fd.vfsfd.StatusFlags())
+ 	if err := fdnotifier.AddFD(fd.hostFD, &fd.queue); err != nil {
+ 		panic(fmt.Sprintf("fdnotifier.AddFD(%d) failed for UVM device: %v", fd.hostFD, err))
+diff --git a/pkg/sentry/devices/nvproxy/seccomp_filters.go b/pkg/sentry/devices/nvproxy/seccomp_filters.go
+index 4b7d404..a0d559d 100644
+--- a/pkg/sentry/devices/nvproxy/seccomp_filters.go
++++ b/pkg/sentry/devices/nvproxy/seccomp_filters.go
+@@ -111,7 +111,7 @@ func uvmIoctlFilters(enabledCaps nvconf.DriverCaps) []seccomp.SyscallRule {
+ 		{seccomp.EqualTo(nvgpu.UVM_TOOLS_WRITE_PROCESS_MEMORY), nvconf.ValidCapabilities},
+ 		{seccomp.EqualTo(nvgpu.UVM_MAP_DYNAMIC_PARALLELISM_REGION), compUtil},
+ 		{seccomp.EqualTo(nvgpu.UVM_UNMAP_EXTERNAL), compUtil},
+-		{seccomp.EqualTo(nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU), nvconf.CapVideo},
++		{seccomp.EqualTo(nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU), compUtil | nvconf.CapVideo},
+ 		{seccomp.EqualTo(nvgpu.UVM_ALLOC_SEMAPHORE_POOL), compUtil},
+ 		{seccomp.EqualTo(nvgpu.UVM_VALIDATE_VA_RANGE), compUtil},
+ 		{seccomp.EqualTo(nvgpu.UVM_CREATE_EXTERNAL_RANGE), compUtil},
+@@ -136,6 +136,25 @@ func uvmIoctlFilters(enabledCaps nvconf.DriverCaps) []seccomp.SyscallRule {
+ 	return ioctlRules
+ }
+ 
++// HostMMIOIoctlRules returns the flat UVM ioctls that can run in an
++// application's host mm. Arguments contain no translated host descriptors or
++// Sentry pointers, since the application can modify them during execution.
++//
++// It returns nil when no sandbox on this architecture can select application-mm
++// UVM. The platform then keeps its precompiled stub filter and admits no
++// additional ioctls.
++func HostMMIOIoctlRules(enabledCaps nvconf.DriverCaps) seccomp.SyscallRule {
++	if !applicationMMUVMPossible(enabledCaps) {
++		return nil
++	}
++	return seccomp.Or{
++		seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(nvgpu.UVM_INITIALIZE)},
++		seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(nvgpu.UVM_POPULATE_PAGEABLE)},
++		seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(nvgpu.UVM_SET_PREFERRED_LOCATION)},
++		seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(nvgpu.UVM_UNSET_PREFERRED_LOCATION)},
++	}
++}
++
+ // Filters returns seccomp-bpf filters for this package when using the given
+ // set of capabilities.
+ func Filters(enabledCaps nvconf.DriverCaps) seccomp.SyscallRules {
+diff --git a/pkg/sentry/devices/nvproxy/uvm.go b/pkg/sentry/devices/nvproxy/uvm.go
+index fd8a870..f689a7a 100644
+--- a/pkg/sentry/devices/nvproxy/uvm.go
++++ b/pkg/sentry/devices/nvproxy/uvm.go
+@@ -19,6 +19,7 @@ import (
+ 
+ 	"golang.org/x/sys/unix"
+ 	"gvisor.dev/gvisor/pkg/abi/nvgpu"
++	"gvisor.dev/gvisor/pkg/atomicbitops"
+ 	"gvisor.dev/gvisor/pkg/context"
+ 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
+ 	"gvisor.dev/gvisor/pkg/fdnotifier"
+@@ -28,6 +29,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+ 	"gvisor.dev/gvisor/pkg/sentry/memmap"
++	"gvisor.dev/gvisor/pkg/sentry/platform"
+ 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+ 	"gvisor.dev/gvisor/pkg/usermem"
+ 	"gvisor.dev/gvisor/pkg/waiter"
+@@ -50,6 +52,15 @@ func (dev *uvmDevice) Open(ctx context.Context, mnt *vfs.Mount, vfsd *vfs.Dentry
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	dev.nvp.fdsMu.Lock()
++	applicationMM, ok := dev.nvp.containerUVMModes[fd.containerName]
++	dev.nvp.fdsMu.Unlock()
++	if !ok {
++		unix.Close(int(fd.hostFD))
++		ctx.Warningf("nvproxy: UVM mode is not configured for container %q", fd.containerName)
++		return nil, linuxerr.EIO
++	}
++	fd.applicationMM = applicationMM
+ 	if err := fdnotifier.AddFD(fd.hostFD, &fd.queue); err != nil {
+ 		unix.Close(int(fd.hostFD))
+ 		return nil, err
+@@ -83,6 +94,9 @@ type uvmFD struct {
+ 	containerName string
+ 	hostFD        int32
+ 	memmapFile    uvmFDMemmapFile
++	applicationMM bool `state:"nosave"`
++	// Application-bound UVM cannot be restored against a different host mm.
++	applicationMMInitialized atomicbitops.Bool
+ 
+ 	queue waiter.Queue
+ }
+@@ -165,10 +179,8 @@ func (fd *uvmFD) IsNvidiaDeviceFD() {}
+ 
+ // uvmIoctlState holds the state of a call to uvmIoctl().
+ type uvmIoctlState struct {
+-	nvp    *nvproxy
+-	hostFD int32
+-	// fd is the /dev/nvidia-uvm FD the ioctl was issued on, or nil if it was
+-	// issued on /dev/nvidia-uvm-tools.
++	nvp *nvproxy
++	// fd is the /dev/nvidia-uvm FD, or nil for /dev/nvidia-uvm-tools.
+ 	fd *uvmFD
+ 	// toolsFD is the /dev/nvidia-uvm-tools FD the ioctl was issued on, or
+ 	// nil if it was issued on /dev/nvidia-uvm.
+@@ -176,6 +188,7 @@ type uvmIoctlState struct {
+ 	ctx             context.Context
+ 	t               *kernel.Task
+ 	cmd             uint32
++	hostFD          int32
+ 	ioctlParamsAddr hostarch.Addr
+ }
+ 
+@@ -203,11 +216,39 @@ func uvmIoctlSimple[Params any, PtrParams hasStatusPtr[Params]](ui *uvmIoctlStat
+ 	return n, nil
+ }
+ 
++// uvmIoctlInApplicationMM accepts only flat, application-controlled arguments.
++// Preserve the input fields; only the driver's status is an output.
++func uvmIoctlInApplicationMM[Params any, PtrParams hasStatusPtr[Params]](ui *uvmIoctlState, as platform.HostMMIO, params PtrParams) (uintptr, error) {
++	buf := ui.t.CopyScratchBuffer(params.SizeBytes())
++	params.MarshalUnsafe(buf)
++	result, err := as.IoctlFlat(ui.hostFD, ui.cmd, buf)
++	if err != nil {
++		return 0, err
++	}
++	if result.Errno != 0 {
++		return result.Return, result.Errno
++	}
++	var output Params
++	PtrParams(&output).UnmarshalUnsafe(buf)
++	params.SetStatus(PtrParams(&output).GetStatus())
++	_, err = params.CopyOut(ui.t, ui.ioctlParamsAddr)
++	return result.Return, err
++}
++
+ func uvmInitialize(ui *uvmIoctlState) (uintptr, error) {
+ 	var ioctlParams nvgpu.UVM_INITIALIZE_PARAMS
+ 	if _, err := ioctlParams.CopyIn(ui.t, ui.ioctlParamsAddr); err != nil {
+ 		return 0, err
+ 	}
++	if ui.fd != nil && ui.fd.applicationMM {
++		if as, ok := ui.t.MemoryManager().AddressSpace().(platform.HostMMIO); ok {
++			// ATS requires UVM to retain the application's host mm. Record
++			// the attempt before execution: the returned status is untrusted.
++			ui.fd.applicationMMInitialized.Store(true)
++			return uvmIoctlInApplicationMM(ui, as, &ioctlParams)
++		}
++		return 0, linuxerr.EOPNOTSUPP
++	}
+ 	origFlags := ioctlParams.Flags
+ 	// This is necessary to share the host UVM FD between sentry and
+ 	// application processes.
+@@ -240,6 +281,14 @@ func uvmMMInitialize(ui *uvmIoctlState) (uintptr, error) {
+ 		return 0, uvmFailWithStatus(ui, &ioctlParams, nvgpu.NV_ERR_INVALID_ARGUMENT)
+ 	}
+ 
++	// UVM_MM_INITIALIZE makes this file retain the original UVM file and its
++	// host mm. Mark the attempt before calling the driver, even if another
++	// task has not yet finished initializing the referenced file. Driver
++	// status must not decide whether the resulting state can be checkpointed.
++	if ui.fd != nil && uvmFile.applicationMM {
++		ui.fd.applicationMMInitialized.Store(true)
++	}
++
+ 	origFD := ioctlParams.UvmFD
+ 	ioctlParams.UvmFD = uvmFile.hostFD
+ 	n, err := uvmIoctlInvoke(ui, &ioctlParams)
+@@ -257,6 +306,71 @@ func uvmMMInitialize(ui *uvmIoctlState) (uintptr, error) {
+ 	return n, nil
+ }
+ 
++func uvmPopulatePageable(ui *uvmIoctlState) (uintptr, error) {
++	if ui.fd == nil {
++		// /dev/nvidia-uvm-tools does not implement this ioctl and the driver
++		// returns EINVAL for it. The Sentry's seccomp filters do not allow the
++		// command, so it must not be forwarded from the Sentry.
++		return 0, linuxerr.EINVAL
++	}
++	var ioctlParams nvgpu.UVM_POPULATE_PAGEABLE_PARAMS
++	if _, err := ioctlParams.CopyIn(ui.t, ui.ioctlParamsAddr); err != nil {
++		return 0, err
++	}
++	as, ok := ui.t.MemoryManager().AddressSpace().(platform.HostMMIO)
++	if !ui.fd.applicationMMInitialized.Load() || !ok {
++		return 0, linuxerr.EOPNOTSUPP
++	}
++	// Nonzero flags are reserved for NVIDIA's built-in tests or internal use.
++	if ioctlParams.Flags != 0 {
++		return 0, uvmFailWithStatus(ui, &ioctlParams, nvgpu.NV_ERR_INVALID_ARGUMENT)
++	}
++	ar, valid := hostarch.Addr(ioctlParams.Base).ToRange(ioctlParams.Length)
++	if !valid || ar.Length() == 0 || !ar.IsPageAligned() {
++		return 0, uvmFailWithStatus(ui, &ioctlParams, nvgpu.NV_ERR_INVALID_ADDRESS)
++	}
++	// UVM can only populate VMAs already installed in the host mm. Resolve
++	// lazy mappings and software COW once per range, inheriting VMA permissions.
++	// Reject driver-owned mappings before changing any host mappings: replacing
++	// a managed UVM VMA discards the allocation, and even a failed replacement
++	// of an RDMA mapping can leave a gap in the host mm.
++	mm := ui.t.MemoryManager()
++	if err := mm.EnsureAddressSpaceMappings(ui.ctx, ar); err != nil {
++		if linuxerr.Equals(linuxerr.EPERM, err) || linuxerr.Equals(linuxerr.EACCES, err) || linuxerr.Equals(linuxerr.EFAULT, err) {
++			return 0, uvmFailWithStatus(ui, &ioctlParams, nvgpu.NV_ERR_INVALID_ADDRESS)
++		}
++		return 0, err
++	}
++	return uvmIoctlInApplicationMM(ui, as, &ioctlParams)
++}
++
++func uvmSetPreferredLocationV550(ui *uvmIoctlState) (uintptr, error) {
++	as, ok := ui.t.MemoryManager().AddressSpace().(platform.HostMMIO)
++	if ui.fd == nil || !ui.fd.applicationMMInitialized.Load() || !ok {
++		return uvmIoctlSimple[nvgpu.UVM_SET_PREFERRED_LOCATION_PARAMS_V550](ui)
++	}
++	var params nvgpu.UVM_SET_PREFERRED_LOCATION_PARAMS_V550
++	if _, err := params.CopyIn(ui.t, ui.ioctlParamsAddr); err != nil {
++		return 0, err
++	}
++	// NVIDIA requires the calling mm to match UVM's saved mm when applying
++	// preferred-location policy to ATS memory, including pinned allocations.
++	return uvmIoctlInApplicationMM(ui, as, &params)
++}
++
++func uvmUnsetPreferredLocation(ui *uvmIoctlState) (uintptr, error) {
++	as, ok := ui.t.MemoryManager().AddressSpace().(platform.HostMMIO)
++	if ui.fd == nil || !ui.fd.applicationMMInitialized.Load() || !ok {
++		return uvmIoctlSimple[nvgpu.UVM_UNSET_PREFERRED_LOCATION_PARAMS](ui)
++	}
++	var params nvgpu.UVM_UNSET_PREFERRED_LOCATION_PARAMS
++	if _, err := params.CopyIn(ui.t, ui.ioctlParamsAddr); err != nil {
++		return 0, err
++	}
++	// Removing ATS policy requires the same mm as setting it.
++	return uvmIoctlInApplicationMM(ui, as, &params)
++}
++
+ func uvmIoctlHasFrontendFD[Params any, PtrParams hasFrontendFDAndStatusPtr[Params]](ui *uvmIoctlState) (uintptr, error) {
+ 	var ioctlParamsValue Params
+ 	ioctlParams := PtrParams(&ioctlParamsValue)
+diff --git a/pkg/sentry/devices/nvproxy/uvm_mode.go b/pkg/sentry/devices/nvproxy/uvm_mode.go
+new file mode 100644
+index 0000000..323d34b
+--- /dev/null
++++ b/pkg/sentry/devices/nvproxy/uvm_mode.go
+@@ -0,0 +1,118 @@
++// Copyright 2026 The gVisor Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package nvproxy
++
++import (
++	"fmt"
++	"runtime"
++
++	"golang.org/x/sys/unix"
++	"gvisor.dev/gvisor/pkg/abi/nvgpu"
++	"gvisor.dev/gvisor/pkg/context"
++	"gvisor.dev/gvisor/pkg/devutil"
++	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
++	"gvisor.dev/gvisor/pkg/sentry/vfs"
++)
++
++// applicationMMUVMPossible reports whether a sandbox with the given
++// capabilities can select application-mm UVM on this architecture. Only
++// coherent ARM systems need it.
++func applicationMMUVMPossible(caps nvconf.DriverCaps) bool {
++	return runtime.GOARCH == "arm64" && caps&compUtil != 0
++}
++
++// UseApplicationMMUVM selects the UVM mode for the GPUs exposed to a container.
++// Call it during device setup, before any application UVM FDs are opened. The
++// driver queries use temporary host FDs, independent of application RM clients.
++// driverVersion is the NVIDIA driver ABI version configured for the sandbox.
++func UseApplicationMMUVM(ctx context.Context, devClient *devutil.GoferClient, minors []uint32, caps nvconf.DriverCaps, driverVersion nvconf.DriverVersion) (bool, error) {
++	if !applicationMMUVMPossible(caps) || len(minors) == 0 {
++		return false, nil
++	}
++	if devClient == nil {
++		return false, fmt.Errorf("nvproxy: device gofer is unavailable for UVM mode selection")
++	}
++	ctlFD, err := devClient.OpenAt(ctx, "nvidiactl", unix.O_RDONLY)
++	if err != nil {
++		return false, fmt.Errorf("nvproxy: open nvidiactl for UVM mode selection: %w", err)
++	}
++	// Closing the fresh control FD frees the temporary RM client and children.
++	defer unix.Close(ctlFD)
++	for _, minor := range minors {
++		fd, err := devClient.OpenAt(ctx, fmt.Sprintf("nvidia%d", minor), unix.O_RDONLY)
++		if err != nil {
++			return false, fmt.Errorf("nvproxy: open GPU %d for UVM mode selection: %w", minor, err)
++		}
++		// The driver requires these FDs to stay open during device allocation.
++		defer unix.Close(fd)
++	}
++	arches, err := nvconf.GPUArchitectures(ctlFD, minors)
++	if err != nil {
++		return false, fmt.Errorf("nvproxy: query GPU architectures for UVM mode selection: %w", err)
++	}
++	return applicationMMUVMForGPUs(arches, driverVersion)
++}
++
++func applicationMMUVMForGPUs(arches map[uint32]nvconf.GPUArchInfo, driverVersion nvconf.DriverVersion) (bool, error) {
++	for _, arch := range arches {
++		if !gpuRequiresApplicationMMUVM(arch) {
++			continue
++		}
++		// Only the V550 preferred-location handler translates application
++		// addresses. nvproxy cannot use application-mm UVM with older driver
++		// ABIs, and falling back to the legacy mode would disable the mm
++		// association required for ATS on these GPUs.
++		minDriverVersion := nvconf.NewDriverVersion(550, 40, 7)
++		if !driverVersion.Equals(minDriverVersion) && !driverVersion.IsGreaterThan(minDriverVersion) {
++			return false, fmt.Errorf("nvproxy: GPU requiring application-mm UVM needs NVIDIA driver %v or later, got %v", minDriverVersion, driverVersion)
++		}
++		return true, nil
++	}
++	return false, nil
++}
++
++func gpuRequiresApplicationMMUVM(arch nvconf.GPUArchInfo) bool {
++	// Known integrated CPU-GPU compute platforms, starting with GH/GB systems,
++	// use the application's host page tables. Otherwise initialization will not
++	// work due to the GPU requiring ATS.
++	switch arch.Architecture {
++	// Internal identifier: GH200
++	case nvgpu.NV2080_CTRL_MC_ARCH_INFO_ARCHITECTURE_GH100:
++		return arch.Implementation == nvgpu.NV2080_CTRL_MC_ARCH_INFO_IMPLEMENTATION_GH100_SOC
++
++	// Internal identifier: GB200, GB300
++	case nvgpu.NV2080_CTRL_MC_ARCH_INFO_ARCHITECTURE_GB100:
++		return arch.Implementation == nvgpu.NV2080_CTRL_MC_ARCH_INFO_IMPLEMENTATION_GB100 || arch.Implementation == nvgpu.NV2080_CTRL_MC_ARCH_INFO_IMPLEMENTATION_GB110
++
++	// Internal identifier: VR200
++	case nvgpu.NV2080_CTRL_MC_ARCH_INFO_ARCHITECTURE_GR100:
++		return arch.Implementation == nvgpu.NV2080_CTRL_MC_ARCH_INFO_IMPLEMENTATION_GR100
++
++	default:
++		return false
++	}
++}
++
++// SetContainerUVMMode records a mode selected during device setup. Each UVM FD
++// keeps the mode of its opening container even if passed to another container.
++func SetContainerUVMMode(vfsObj *vfs.VirtualFilesystem, containerName string, applicationMM bool) {
++	nvp := nvproxyFromVFS(vfsObj)
++	if nvp == nil {
++		panic("nvproxy: setting UVM mode before device registration")
++	}
++	nvp.fdsMu.Lock()
++	defer nvp.fdsMu.Unlock()
++	nvp.containerUVMModes[containerName] = applicationMM
++}
+diff --git a/pkg/sentry/devices/nvproxy/version.go b/pkg/sentry/devices/nvproxy/version.go
+index 6bf181c..4aa6e84 100644
+--- a/pkg/sentry/devices/nvproxy/version.go
++++ b/pkg/sentry/devices/nvproxy/version.go
+@@ -232,7 +232,7 @@ func Init() {
+ 					nvgpu.UVM_UNREGISTER_GPU:                 uvmHandler(uvmIoctlVidmem[nvgpu.UVM_UNREGISTER_GPU_PARAMS](vidmemUVMUnregisterGPU), compUtil),
+ 					nvgpu.UVM_PAGEABLE_MEM_ACCESS:            uvmHandler(uvmIoctlSimple[nvgpu.UVM_PAGEABLE_MEM_ACCESS_PARAMS], compUtil),
+ 					nvgpu.UVM_SET_PREFERRED_LOCATION:         uvmHandler(uvmIoctlSimple[nvgpu.UVM_SET_PREFERRED_LOCATION_PARAMS], compUtil),
+-					nvgpu.UVM_UNSET_PREFERRED_LOCATION:       uvmHandler(uvmIoctlSimple[nvgpu.UVM_UNSET_PREFERRED_LOCATION_PARAMS], compUtil),
++					nvgpu.UVM_UNSET_PREFERRED_LOCATION:       uvmHandler(uvmUnsetPreferredLocation, compUtil),
+ 					nvgpu.UVM_ENABLE_READ_DUPLICATION:        uvmHandler(uvmIoctlSimple[nvgpu.UVM_ENABLE_READ_DUPLICATION_PARAMS], compUtil),
+ 					nvgpu.UVM_DISABLE_READ_DUPLICATION:       uvmHandler(uvmIoctlSimple[nvgpu.UVM_DISABLE_READ_DUPLICATION_PARAMS], compUtil),
+ 					nvgpu.UVM_SET_ACCESSED_BY:                uvmHandler(uvmIoctlSimple[nvgpu.UVM_SET_ACCESSED_BY_PARAMS], compUtil),
+@@ -242,7 +242,8 @@ func Init() {
+ 					nvgpu.UVM_MAP_DYNAMIC_PARALLELISM_REGION: uvmHandler(uvmIoctlSimple[nvgpu.UVM_MAP_DYNAMIC_PARALLELISM_REGION_PARAMS], compUtil),
+ 					nvgpu.UVM_UNMAP_EXTERNAL:                 uvmHandler(uvmIoctlVidmem[nvgpu.UVM_UNMAP_EXTERNAL_PARAMS](vidmemUVMUnmapExternal), compUtil),
+ 					nvgpu.UVM_ALLOC_SEMAPHORE_POOL:           uvmHandler(uvmIoctlSimple[nvgpu.UVM_ALLOC_SEMAPHORE_POOL_PARAMS], compUtil),
+-					nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU:     uvmHandler(uvmIoctlSimple[nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS], nvconf.CapVideo),
++					nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU:     uvmHandler(uvmIoctlSimple[nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS], compUtil|nvconf.CapVideo),
++					nvgpu.UVM_POPULATE_PAGEABLE:              uvmHandler(uvmPopulatePageable, compUtil),
+ 					nvgpu.UVM_VALIDATE_VA_RANGE:              uvmHandler(uvmIoctlSimple[nvgpu.UVM_VALIDATE_VA_RANGE_PARAMS], compUtil),
+ 					nvgpu.UVM_CREATE_EXTERNAL_RANGE:          uvmHandler(uvmIoctlVidmem[nvgpu.UVM_CREATE_EXTERNAL_RANGE_PARAMS](vidmemUVMCreateExternalRange), compUtil),
+ 					nvgpu.UVM_MM_INITIALIZE:                  uvmHandler(uvmMMInitialize, compUtil),
+@@ -606,6 +607,7 @@ func Init() {
+ 							nvgpu.UVM_UNMAP_EXTERNAL:                 ioctlInfo("UVM_UNMAP_EXTERNAL", nvgpu.UVM_UNMAP_EXTERNAL_PARAMS{}),
+ 							nvgpu.UVM_ALLOC_SEMAPHORE_POOL:           ioctlInfo("UVM_ALLOC_SEMAPHORE_POOL", nvgpu.UVM_ALLOC_SEMAPHORE_POOL_PARAMS{}),
+ 							nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU:     ioctlInfo("UVM_PAGEABLE_MEM_ACCESS_ON_GPU", nvgpu.UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS{}),
++							nvgpu.UVM_POPULATE_PAGEABLE:              ioctlInfo("UVM_POPULATE_PAGEABLE", nvgpu.UVM_POPULATE_PAGEABLE_PARAMS{}),
+ 							nvgpu.UVM_VALIDATE_VA_RANGE:              ioctlInfo("UVM_VALIDATE_VA_RANGE", nvgpu.UVM_VALIDATE_VA_RANGE_PARAMS{}),
+ 							nvgpu.UVM_CREATE_EXTERNAL_RANGE:          ioctlInfo("UVM_CREATE_EXTERNAL_RANGE", nvgpu.UVM_CREATE_EXTERNAL_RANGE_PARAMS{}),
+ 							nvgpu.UVM_MM_INITIALIZE:                  ioctlInfo("UVM_MM_INITIALIZE", nvgpu.UVM_MM_INITIALIZE_PARAMS{}),
+@@ -991,7 +993,7 @@ func Init() {
+ 			abi.controlCmd[nvgpu.NV2080_CTRL_CMD_PERF_GET_VID_ENG_PERFMON_SAMPLE] = ctrlHandler(rmControlSimple, compUtil)
+ 			abi.controlCmd[nvgpu.NV0000_CTRL_CMD_SYSTEM_GET_P2P_CAPS] = ctrlHandler(ctrlClientSystemGetP2PCapsV550, compUtil)
+ 			abi.controlCmd[nvgpu.NV00FE_CTRL_CMD_SUBMIT_OPERATIONS] = ctrlHandler(rmControlSimple, compUtil)
+-			abi.uvmIoctl[nvgpu.UVM_SET_PREFERRED_LOCATION] = uvmHandler(uvmIoctlSimple[nvgpu.UVM_SET_PREFERRED_LOCATION_PARAMS_V550], compUtil)
++			abi.uvmIoctl[nvgpu.UVM_SET_PREFERRED_LOCATION] = uvmHandler(uvmSetPreferredLocationV550, compUtil)
+ 			abi.uvmIoctl[nvgpu.UVM_MIGRATE] = uvmHandler(uvmIoctlSimple[nvgpu.UVM_MIGRATE_PARAMS_V550], compUtil)
+ 			abi.allocationClass[nvgpu.NV_IMEX_SESSION] = allocHandler(rmAllocIMEXSession, nvconf.CapFabricIMEXManagement)
+ 			abi.allocationClass[nvgpu.NV_MEMORY_FABRIC_IMPORTED_REF] = allocHandler(rmAllocSimple[nvgpu.NV00FB_ALLOCATION_PARAMETERS], nvconf.CapFabricIMEXManagement)
+diff --git a/pkg/sentry/memmap/memmap.go b/pkg/sentry/memmap/memmap.go
+index f153955..2366101 100644
+--- a/pkg/sentry/memmap/memmap.go
++++ b/pkg/sentry/memmap/memmap.go
+@@ -399,8 +399,11 @@ type MMapOpts struct {
+ 	// If RequirePlatformEffect is false, PlatformEffect is best-effort;
+ 	// failure to create mappings in the platform.AddressSpace are silently
+ 	// ignored. If RequirePlatformEffect is true, failure to create mappings in
+-	// the platform.AddressSpace cause MMap() to fail. (If PlatformEffect is
+-	// PlatformEffectDefault, RequirePlatformEffect is ignored.)
++	// the platform.AddressSpace cause MMap() to fail. (During MMap, if
++	// PlatformEffect is PlatformEffectDefault, RequirePlatformEffect is
++	// ignored.) This requirement is retained by the MemoryManager to
++	// conservatively reject later population that could replace host-device
++	// mappings with driver-specific mmap semantics.
+ 	RequirePlatformEffect bool
+ 
+ 	// SentryOwnedContent indicates the sentry exclusively controls the
+diff --git a/pkg/sentry/mm/address_space.go b/pkg/sentry/mm/address_space.go
+index 046b21a..4eba041 100644
+--- a/pkg/sentry/mm/address_space.go
++++ b/pkg/sentry/mm/address_space.go
+@@ -67,6 +67,62 @@ func (mm *MemoryManager) UserModifiedGS(ctx context.Context) error {
+ // unnecessarily large ranges, resulting in unnecessarily long waits.
+ const asyncLoadMapUnit = 32 << 20
+ 
++// EnsureAddressSpaceMappings ensures that ar is mapped into the application's
++// AddressSpace, resolving copy-on-write for writable mappings. Each VMA in ar
++// must permit reading or writing. Read-only VMAs remain read-only.
++//
++// VMAs created with memmap.MMapOpts.RequirePlatformEffect are rejected. These
++// include host-device mappings whose host VMAs must not be replaced, even if
++// the replacement mmap fails.
++//
++// The entire range is checked before changing PMAs or AddressSpace mappings.
++// Errors obtaining backing memory or installing mappings may leave part of an
++// otherwise valid range populated. This method does not pin memory or eagerly
++// commit host pages.
++//
++// +checklocksexclude:mm.mappingMu
++// +checklocksexclude:mm.activeMu
++func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar hostarch.AddrRange) error {
++	if !ar.WellFormed() || ar.Length() == 0 || !ar.IsPageAligned() || !mm.applicationAddrRange().IsSupersetOf(ar) {
++		return linuxerr.EFAULT
++	}
++	mm.mappingMu.RLock()
++	defer mm.mappingMu.RUnlock()
++
++	vfirst, _, err := mm.getVMAsLocked(ctx, ar, hostarch.AccessType{}, false /* ignorePermissions */)
++	if err != nil {
++		return err
++	}
++	for vseg := vfirst; vseg.Ok() && vseg.Start() < ar.End; vseg = vseg.NextSegment() {
++		vma := vseg.ValuePtr()
++		if !vma.realPerms.Read && !vma.realPerms.Write {
++			return linuxerr.EACCES
++		}
++		if vma.requirePlatformEffect {
++			return linuxerr.EFAULT
++		}
++	}
++
++	mm.activeMu.Lock()
++	for vseg := vfirst; vseg.Ok() && vseg.Start() < ar.End; vseg = vseg.NextSegment() {
++		at := hostarch.Read
++		if vseg.ValuePtr().effectivePerms.Write {
++			at = hostarch.Write
++		}
++		if _, _, err := mm.getPMAsLocked(ctx, vseg, vseg.Range().Intersect(ar), at, false /* callerIndirectCommit */, false /* forPin */); err != nil {
++			mm.activeMu.Unlock()
++			return err
++		}
++	}
++	mm.activeMu.DowngradeLock()
++	defer mm.activeMu.RUnlock()
++
++	// Limit mapping to ar: remapping an adjacent device VMA can destroy state
++	// maintained by its driver. Mapping whole PMAs, rather than faulting one
++	// page at a time, also avoids per-page host mmap calls for resident memory.
++	return mm.mapASLocked(ctx, mm.pmas.LowerBoundSegment(ar.Start), ar, memmap.PlatformEffectPopulate)
++}
++
+ // mapASLocked maps addresses in ar into mm.as.
+ //
+ // Preconditions:
+diff --git a/pkg/sentry/mm/mm.go b/pkg/sentry/mm/mm.go
+index 69abef3..3b06240 100644
+--- a/pkg/sentry/mm/mm.go
++++ b/pkg/sentry/mm/mm.go
+@@ -326,6 +326,11 @@ type vma struct {
+ 	// being marked for COW
+ 	eagerForkCopy bool
+ 
++	// requirePlatformEffect is memmap.MMapOpts.RequirePlatformEffect. Such
++	// mappings may have host-device mmap semantics and must not be replaced
++	// just to populate an existing range in EnsureAddressSpaceMappings.
++	requirePlatformEffect bool
++
+ 	// sealed tells us whether the vma can be modified or not.
+ 	sealed bool
+ 
+@@ -361,24 +366,25 @@ type vma struct {
+ 
+ func (v *vma) copy() vma {
+ 	return vma{
+-		mappable:       v.mappable,
+-		off:            v.off,
+-		realPerms:      v.realPerms,
+-		effectivePerms: v.effectivePerms,
+-		maxPerms:       v.maxPerms,
+-		private:        v.private,
+-		growsDown:      v.growsDown,
+-		isStack:        v.isStack,
+-		dontfork:       v.dontfork,
+-		eagerForkCopy:  v.eagerForkCopy,
+-		sealed:         v.sealed,
+-		mlockMode:      v.mlockMode,
+-		numaPolicy:     v.numaPolicy,
+-		numaNodemask:   v.numaNodemask,
+-		id:             v.id,
+-		name:           v.name,
+-		nameMut:        v.nameMut,
+-		lastFault:      atomic.LoadUintptr(&v.lastFault),
++		mappable:              v.mappable,
++		off:                   v.off,
++		realPerms:             v.realPerms,
++		effectivePerms:        v.effectivePerms,
++		maxPerms:              v.maxPerms,
++		private:               v.private,
++		growsDown:             v.growsDown,
++		isStack:               v.isStack,
++		dontfork:              v.dontfork,
++		eagerForkCopy:         v.eagerForkCopy,
++		requirePlatformEffect: v.requirePlatformEffect,
++		sealed:                v.sealed,
++		mlockMode:             v.mlockMode,
++		numaPolicy:            v.numaPolicy,
++		numaNodemask:          v.numaNodemask,
++		id:                    v.id,
++		name:                  v.name,
++		nameMut:               v.nameMut,
++		lastFault:             atomic.LoadUintptr(&v.lastFault),
+ 	}
+ }
+ 
+diff --git a/pkg/sentry/mm/pma.go b/pkg/sentry/mm/pma.go
+index 55cbe05..0c6b25e 100644
+--- a/pkg/sentry/mm/pma.go
++++ b/pkg/sentry/mm/pma.go
+@@ -421,6 +421,14 @@ func (mm *MemoryManager) getPMAsInternalLocked(ctx context.Context, vseg vmaIter
+ 
+ 			case pseg.Ok() && pseg.Start() < vsegAR.End:
+ 				oldpma := pseg.ValuePtr()
++				if (at.Write || forPin) && oldpma.needCOW && !vseg.Range().IsSupersetOf(pseg.Range()) {
++					// COW masks writable permissions, so a PMA may span VMAs
++					// with different permissions. Resolving COW restores the
++					// current VMA's permissions and must not affect its neighbors.
++					pseg = mm.pmas.Isolate(pseg, vseg.Range())
++					pstart = pmaIterator{} // iterators invalidated
++					oldpma = pseg.ValuePtr()
++				}
+ 				if (at.Write || forPin) && mm.isPMACopyOnWriteLocked(vseg, pseg) {
+ 					// Break copy-on-write by copying.
+ 					if checkInvariants {
+diff --git a/pkg/sentry/mm/syscalls.go b/pkg/sentry/mm/syscalls.go
+index 3a1d7eb..e48daf8 100644
+--- a/pkg/sentry/mm/syscalls.go
++++ b/pkg/sentry/mm/syscalls.go
+@@ -495,21 +495,22 @@ func (mm *MemoryManager) MRemap(ctx context.Context, oldAddr hostarch.Addr, oldS
+ 		var ar hostarch.AddrRange
+ 		var err error
+ 		vseg, ar, droppedIDs, err = mm.createVMALocked(ctx, memmap.MMapOpts{
+-			Length:          newSize - oldSize,
+-			MappingIdentity: vma.id,
+-			Mappable:        vma.mappable,
+-			Offset:          newOffset,
+-			Addr:            oldEnd,
+-			Fixed:           true,
+-			Perms:           vma.realPerms,
+-			MaxPerms:        vma.maxPerms,
+-			Private:         vma.private,
+-			GrowsDown:       vma.growsDown,
+-			Stack:           vma.isStack,
+-			EagerForkCopy:   vma.eagerForkCopy,
+-			MLockMode:       vma.mlockMode,
+-			Name:            vma.name,
+-			NameMut:         vma.nameMut,
++			Length:                newSize - oldSize,
++			MappingIdentity:       vma.id,
++			Mappable:              vma.mappable,
++			Offset:                newOffset,
++			Addr:                  oldEnd,
++			Fixed:                 true,
++			Perms:                 vma.realPerms,
++			MaxPerms:              vma.maxPerms,
++			Private:               vma.private,
++			GrowsDown:             vma.growsDown,
++			Stack:                 vma.isStack,
++			EagerForkCopy:         vma.eagerForkCopy,
++			RequirePlatformEffect: vma.requirePlatformEffect,
++			MLockMode:             vma.mlockMode,
++			Name:                  vma.name,
++			NameMut:               vma.nameMut,
+ 		}, droppedIDs)
+ 		if err == nil {
+ 			if mlockMode == memmap.MLockEager {
+diff --git a/pkg/sentry/mm/vma.go b/pkg/sentry/mm/vma.go
+index 3c1b018..3a31708 100644
+--- a/pkg/sentry/mm/vma.go
++++ b/pkg/sentry/mm/vma.go
+@@ -121,21 +121,22 @@ func (mm *MemoryManager) createVMALocked(ctx context.Context, opts memmap.MMapOp
+ 
+ 	// Finally insert the vma.
+ 	v := vma{
+-		mappable:       opts.Mappable,
+-		off:            opts.Offset,
+-		realPerms:      opts.Perms,
+-		effectivePerms: opts.Perms.Effective(),
+-		maxPerms:       opts.MaxPerms,
+-		private:        opts.Private,
+-		growsDown:      opts.GrowsDown,
+-		isStack:        opts.Stack,
+-		eagerForkCopy:  opts.EagerForkCopy,
+-		sealed:         opts.Sealed,
+-		mlockMode:      opts.MLockMode,
+-		numaPolicy:     linux.MPOL_DEFAULT,
+-		id:             opts.MappingIdentity,
+-		name:           opts.Name,
+-		nameMut:        opts.NameMut,
++		mappable:              opts.Mappable,
++		off:                   opts.Offset,
++		realPerms:             opts.Perms,
++		effectivePerms:        opts.Perms.Effective(),
++		maxPerms:              opts.MaxPerms,
++		private:               opts.Private,
++		growsDown:             opts.GrowsDown,
++		isStack:               opts.Stack,
++		eagerForkCopy:         opts.EagerForkCopy,
++		requirePlatformEffect: opts.RequirePlatformEffect,
++		sealed:                opts.Sealed,
++		mlockMode:             opts.MLockMode,
++		numaPolicy:            linux.MPOL_DEFAULT,
++		id:                    opts.MappingIdentity,
++		name:                  opts.Name,
++		nameMut:               opts.NameMut,
+ 	}
+ 
+ 	vseg := mm.vmas.Insert(vgap, ar, v)
+@@ -552,6 +553,7 @@ func (vmaSetFunctions) Merge(ar1 hostarch.AddrRange, vma1 vma, ar2 hostarch.Addr
+ 		vma1.numaNodemask != vma2.numaNodemask ||
+ 		vma1.dontfork != vma2.dontfork ||
+ 		vma1.eagerForkCopy != vma2.eagerForkCopy ||
++		vma1.requirePlatformEffect != vma2.requirePlatformEffect ||
+ 		vma1.sealed != vma2.sealed ||
+ 		vma1.id != vma2.id ||
+ 		vma1.name != vma2.name ||
+diff --git a/pkg/sentry/platform/platform.go b/pkg/sentry/platform/platform.go
+index 65f1246..9d61577 100644
+--- a/pkg/sentry/platform/platform.go
++++ b/pkg/sentry/platform/platform.go
+@@ -434,6 +434,35 @@ type AddressSpaceOptions struct {
+ 	DisableSyscallPatching bool
+ }
+ 
++// HostMMIO is optionally implemented by AddressSpaces that can issue device
++// ioctls in the host mm containing application mappings.
++type HostMMIO interface {
++	// IoctlFlat copies buf to application-writable scratch, executes the
++	// ioctl, and copies it back. hostFD, request, and the scratch address must
++	// be protected from application modification. The caller must hold a
++	// reference to hostFD and authorize the request and all its arguments.
++	// buf must not contain translated host FDs or pointers into the Sentry;
++	// embedded addresses may only refer to application memory. buf must be
++	// large enough for the ioctl ABI, even when request does not encode its
++	// size. The ioctl must not create or return host file descriptors.
++	//
++	// buf and the result are untrusted, including Errno. They must not
++	// control privileged Sentry decisions. The separate error reports only
++	// platform failures. Implementations support at least 4088 bytes and may
++	// return E2BIG for larger arguments.
++	//
++	// An attempted ioctl may bind the device to this host mm, regardless of
++	// its reported result. The implementation must prevent reuse of that mm
++	// or its mappings after AddressSpace.Release, even if hostFD survives.
++	IoctlFlat(hostFD int32, request uint32, buf []byte) (HostIoctlResult, error)
++}
++
++// HostIoctlResult is an untrusted host ioctl result.
++type HostIoctlResult struct {
++	Return uintptr
++	Errno  unix.Errno
++}
++
+ // AddressSpaceIO supports IO through the memory mappings installed in an
+ // AddressSpace.
+ //
+@@ -610,6 +639,11 @@ func (s StaticSeccompInfo) HottestSyscalls() []uintptr {
+ 
+ // Options is a collection variables and flags for platform initialization.
+ type Options struct {
++	// HostMMIOIoctlRules admits ioctls executed through HostMMIO. Device
++	// proxies supply these rules; nil admits none. Process-based platforms
++	// with a global process pool may require the same rules for every New.
++	HostMMIOIoctlRules seccomp.SyscallRule
++
+ 	// DeviceFile is the device file to use (e.g. /dev/kvm for the KVM
+ 	// platform).
+ 	DeviceFile *fd.FD
+diff --git a/pkg/sentry/platform/systrap/BUILD b/pkg/sentry/platform/systrap/BUILD
+index a2df70b..bc68aae 100644
+--- a/pkg/sentry/platform/systrap/BUILD
++++ b/pkg/sentry/platform/systrap/BUILD
+@@ -136,7 +136,6 @@ go_test(
+         "//pkg/cpuid",
+         "//pkg/hostarch",
+         "//pkg/hostsyscall",
+-        "//pkg/pool",
+         "//pkg/safemem",
+         "//pkg/seccomp",
+         "//pkg/seccomp/precompiledseccomp",
+diff --git a/pkg/sentry/platform/systrap/shared_context_test.go b/pkg/sentry/platform/systrap/shared_context_test.go
+index c9a47e2..2a2275b 100644
+--- a/pkg/sentry/platform/systrap/shared_context_test.go
++++ b/pkg/sentry/platform/systrap/shared_context_test.go
+@@ -344,11 +344,11 @@ func TestCreateSysmsgThreadDeadClone(t *testing.T) {
+ 	}
+ 	go func() {
+ 		req := (<-s.requests).(requestThread)
+-		req.thread <- &thread{
++		req.thread <- threadCreationResult{thread: &thread{
+ 			tgid:          1 << 30,
+ 			tid:           1 << 30,
+ 			sysmsgStackID: id,
+-		}
++		}}
+ 	}()
+ 
+ 	if err := s.createSysmsgThread(); err == nil {
+@@ -370,10 +370,10 @@ func TestSyscallThreadKillMarksSubprocessDead(t *testing.T) {
+ 	if err := s.createSysmsgThread(); !errors.Is(err, errDeadSubprocess) {
+ 		t.Fatalf("createSysmsgThread got error %v, want %v", err, errDeadSubprocess)
+ 	}
+-	req := requestThread{thread: make(chan *thread, 1)}
++	req := requestThread{thread: make(chan threadCreationResult, 1)}
+ 	s.handlePtraceSyscallRequest(req)
+-	if got := <-req.thread; got != nil {
+-		t.Fatalf("handlePtraceSyscallRequest got %v, want nil when subprocess is dead", got)
++	if got := <-req.thread; got.thread != nil || !errors.Is(got.err, errDeadSubprocess) {
++		t.Fatalf("handlePtraceSyscallRequest got %+v, want no thread and errDeadSubprocess", got)
+ 	}
+ }
+ 
+diff --git a/pkg/sentry/platform/systrap/subprocess.go b/pkg/sentry/platform/systrap/subprocess.go
+index ef117e3..2703645 100644
+--- a/pkg/sentry/platform/systrap/subprocess.go
++++ b/pkg/sentry/platform/systrap/subprocess.go
+@@ -94,10 +94,17 @@ type thread struct {
+ 	logPrefix atomic.Pointer[string]
+ }
+ 
+-// requestThread is used to request a new sysmsg thread. A thread identifier will
+-// be sent into the thread channel.
++// requestThread is used to request a new sysmsg thread.
+ type requestThread struct {
+-	thread chan *thread
++	thread chan threadCreationResult
++}
++
++// threadCreationResult contains exactly one of thread and err. Only a
++// cloneRejectedError is safe to retry after binding a device to this address
++// space.
++type threadCreationResult struct {
++	thread *thread
++	err    error
+ }
+ 
+ // requestStub is used to request a new stub process.
+@@ -132,6 +139,8 @@ type subprocess struct {
+ 
+ 	// requests is used to signal creation of new threads.
+ 	requests chan any
++	// requestsDone is closed when the request goroutine exits.
++	requestsDone chan struct{}
+ 
+ 	// sysmsgInitRegs is used to reset sysemu regs.
+ 	sysmsgInitRegs arch.Registers
+@@ -152,6 +161,8 @@ type subprocess struct {
+ 	// threadContextRegion defines the ThreadContext memory region start
+ 	// within the sentry address space.
+ 	threadContextRegion uintptr
++	threadContextRange  memmap.FileRange
++	contextQueueRange   memmap.FileRange
+ 
+ 	// memoryFile is used to allocate a sysmsg stack which is shared between a
+ 	// stub process and the Sentry.
+@@ -187,6 +198,15 @@ type subprocess struct {
+ 
+ 	// dead indicates whether the subprocess is alive or not.
+ 	dead atomicbitops.Bool
++
++	// hostMMBound prevents recycling an mm that a host device may still
++	// reference through an open file after the application exits.
++	hostMMBound atomicbitops.Bool
++
++	// hostMMUnsafe prevents binding a device after failed sysmsg thread
++	// creation may have left aliases of recycled stack backing in this mm.
++	// Protected by syscallThreadMu.
++	hostMMUnsafe bool
+ }
+ 
+ var seccompNotifyIsSupported = false
+@@ -233,7 +253,7 @@ func (s *subprocess) initSyscallThread(ptraceThread *thread, seccompNotify bool)
+ func handlePtraceSyscallRequestError(req any, format string, values ...any) {
+ 	switch req := req.(type) {
+ 	case requestThread:
+-		req.thread <- nil
++		req.thread <- threadCreationResult{err: fmt.Errorf(format, values...)}
+ 	case requestStub:
+ 		req.done <- nil
+ 	}
+@@ -249,7 +269,7 @@ func (s *subprocess) handlePtraceSyscallRequest(req any) {
+ 	if s.dead.Load() {
+ 		switch req := req.(type) {
+ 		case requestThread:
+-			req.thread <- nil
++			req.thread <- threadCreationResult{err: errDeadSubprocess}
+ 		case requestStub:
+ 			req.done <- nil
+ 		}
+@@ -258,7 +278,7 @@ func (s *subprocess) handlePtraceSyscallRequest(req any) {
+ 	runtime.LockOSThread()
+ 	defer runtime.UnlockOSThread()
+ 	if err := s.syscallThread.attach(); err != nil {
+-		handlePtraceSyscallRequestError(req, err.Error())
++		handlePtraceSyscallRequestError(req, "%v", err)
+ 		return
+ 	}
+ 	defer s.syscallThread.detach()
+@@ -269,7 +289,7 @@ func (s *subprocess) handlePtraceSyscallRequest(req any) {
+ 	case requestThread:
+ 		t, err := ptraceThread.clone()
+ 		if err != nil {
+-			handlePtraceSyscallRequestError(req, "error initializing thread: %v", err)
++			r.thread <- threadCreationResult{err: err}
+ 			return
+ 		}
+ 
+@@ -334,7 +354,7 @@ func (s *subprocess) handlePtraceSyscallRequest(req any) {
+ 		t.detach()
+ 
+ 		// Return the thread.
+-		r.thread <- t
++		r.thread <- threadCreationResult{thread: t}
+ 	case requestStub:
+ 		t, err := ptraceThread.createStub()
+ 		if err != nil {
+@@ -376,6 +396,7 @@ func newSubprocess(create func() (*thread, error), memoryFile *pgalloc.MemoryFil
+ 	// Ready.
+ 	sp := &subprocess{
+ 		requests:          requests,
++		requestsDone:      make(chan struct{}),
+ 		faultedContexts:   make(map[*platformContext]struct{}),
+ 		sysmsgStackPool:   pool.Pool{Start: 0, Limit: uint64(maxChildThreads)},
+ 		threadContextPool: pool.Pool{Start: 0, Limit: maxGuestContexts},
+@@ -398,14 +419,13 @@ func newSubprocess(create func() (*thread, error), memoryFile *pgalloc.MemoryFil
+ 	}
+ 
+ 	go func() { // S/R-SAFE: Platform-related.
++		defer close(sp.requestsDone)
+ 
+ 		// Wait for requests to create threads.
+ 		for req := range requests {
+ 			sp.handlePtraceSyscallRequest(req)
+ 		}
+ 
+-		// Requests should never be closed.
+-		panic("unreachable")
+ 	}()
+ 
+ 	sp.unmap()
+@@ -460,6 +480,7 @@ func (s *subprocess) mapSharedRegions() {
+ 	}
+ 
+ 	s.contextQueue = contextQueue
++	s.contextQueueRange = contextQueueFR
+ 
+ 	// Map thread context region into the sentry.
+ 	threadContextFR, err := s.memoryFile.Allocate(uint64(stubContextRegionLen), opts)
+@@ -490,6 +511,7 @@ func (s *subprocess) mapSharedRegions() {
+ 	}
+ 
+ 	s.threadContextRegion = sentryThreadContextRegionAddr
++	s.threadContextRange = threadContextFR
+ }
+ 
+ func (s *subprocess) mapPrivateRegions() {
+@@ -521,11 +543,17 @@ func (s *subprocess) unmap() {
+ func (s *subprocess) Release() {
+ 	if s.alive() {
+ 		s.unmap()
++	} else if s.hostMMBound.Load() {
++		panic("cannot release an unexpectedly dead device-bound address space")
+ 	}
+ 	s.DecRef(s.release)
+ }
+ 
+ func (s *subprocess) release() {
++	if s.hostMMBound.Load() && s.alive() {
++		s.destroyHostMM()
++		return
++	}
+ 	if s.alive() {
+ 		globalPool.markAvailable(s)
+ 		return
+@@ -570,6 +598,11 @@ func (s *subprocess) kill() {
+ 	// complete before killing.
+ 	s.aliveMu.Lock()
+ 	defer s.aliveMu.Unlock()
++	if s.hostMMBound.Load() {
++		// A device may pin this mm after its tasks die. Losing the syscall
++		// thread would prevent removing aliases before their backing is reused.
++		panic("cannot recover from unexpected device-bound address space death")
++	}
+ 
+ 	if s.syscallThread != nil && s.syscallThread.thread != nil {
+ 		s.syscallThread.thread.kill()
+@@ -794,7 +827,7 @@ func (t *thread) syscall(regs *arch.Registers) (uintptr, error) {
+ 
+ 		sig, err := t.wait(stopped)
+ 		if err != nil {
+-			return 0, err
++			return 0, fmt.Errorf("ptrace wait failed: %w", err)
+ 		}
+ 		if sig == unix.SIGTRAP {
+ 			// Reached syscall-enter-stop.
+@@ -1100,6 +1133,9 @@ func (s *subprocess) Unmap(addr hostarch.Addr, length uint64) {
+ 		unix.SYS_MUNMAP,
+ 		arch.SyscallArgument{Value: uintptr(addr)},
+ 		arch.SyscallArgument{Value: uintptr(length)})
++	if err == errDeadSubprocess && s.hostMMBound.Load() {
++		panic("cannot unmap an unexpectedly dead device-bound address space")
++	}
+ 	if err != nil && err != errDeadSubprocess {
+ 		// We never expect this to happen.
+ 		panic(fmt.Sprintf("munmap(%x, %x)) failed: %v", addr, length, err))
+@@ -1139,19 +1175,39 @@ func (s *subprocess) createSysmsgThread() error {
+ 	return s.withAliveRLock(s.createSysmsgThreadLocked)
+ }
+ 
++// markSysmsgThreadCreationFailed must precede recycling any stack backing or
++// stack ID after a failed creation. A device can retain aliases in this mm,
++// so an already-bound mm cannot recover and an unbound mm must never bind later.
++func (s *subprocess) markSysmsgThreadCreationFailed() {
++	s.syscallThreadMu.Lock()
++	defer s.syscallThreadMu.Unlock()
++	if s.hostMMBound.Load() {
++		panic("cannot recover from failed thread creation in a device-bound address space")
++	}
++	s.hostMMUnsafe = true
++}
++
+ // +checklocksread:s.aliveMu
+ func (s *subprocess) createSysmsgThreadLocked() error {
+ 	// Create a new seccomp process.
+ 	var r requestThread
+-	r.thread = make(chan *thread)
++	r.thread = make(chan threadCreationResult)
+ 	s.requests <- r
+-	p := <-r.thread
+-	if p == nil {
+-		return fmt.Errorf("createSysmsgThread: failed to get clone")
++	result := <-r.thread
++	if (result.thread == nil) == (result.err == nil) {
++		panic("invalid sysmsg thread creation result")
++	}
++	if result.err != nil {
++		if _, rejected := result.err.(cloneRejectedError); !rejected {
++			s.markSysmsgThreadCreationFailed()
++		}
++		return fmt.Errorf("createSysmsgThread: failed to get clone: %w", result.err)
+ 	}
++	p := result.thread
+ 	success := false
+ 	defer func() {
+ 		if !success {
++			s.markSysmsgThreadCreationFailed()
+ 			s.sysmsgStackPool.Put(p.sysmsgStackID)
+ 		}
+ 	}()
+@@ -1185,6 +1241,7 @@ func (s *subprocess) createSysmsgThreadLocked() error {
+ 	}
+ 	defer func() {
+ 		if !success {
++			s.markSysmsgThreadCreationFailed()
+ 			s.memoryFile.DecRef(fr)
+ 		}
+ 	}()
+diff --git a/pkg/sentry/platform/systrap/subprocess_linux.go b/pkg/sentry/platform/systrap/subprocess_linux.go
+index 964d4d8..5d68cfa 100644
+--- a/pkg/sentry/platform/systrap/subprocess_linux.go
++++ b/pkg/sentry/platform/systrap/subprocess_linux.go
+@@ -34,6 +34,11 @@ const syscallEvent unix.Signal = 0x80
+ //
+ // Precondition: the runtime OS thread must be locked.
+ func createStub() (*thread, error) {
++	return createStubWithIoctls(nil)
++}
++
++// createStubWithIoctls creates the source process with proxy-authorized ioctls.
++func createStubWithIoctls(ioctlRules seccomp.SyscallRule) (*thread, error) {
+ 	// When creating the new child process, we specify SIGKILL as the
+ 	// signal to deliver when the child exits. We never expect a subprocess
+ 	// to exit; they are pooled and reused. This is done to ensure that if
+@@ -41,7 +46,7 @@ func createStub() (*thread, error) {
+ 	// transitively) will be killed as well. It's simply not possible to
+ 	// safely handle a single stub getting killed: the exact state of
+ 	// execution is unknown and not recoverable.
+-	t, err := attachedThread(unix.CLONE_FILES | uintptr(unix.SIGCHLD))
++	t, err := attachedThread(unix.CLONE_FILES|uintptr(unix.SIGCHLD), ioctlRules)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -58,9 +63,20 @@ func createStub() (*thread, error) {
+ // attachedThread returns a new attached thread.
+ //
+ // Precondition: the runtime OS thread must be locked.
+-func attachedThread(flags uintptr) (*thread, error) {
++func attachedThread(flags uintptr, ioctlRules seccomp.SyscallRule) (*thread, error) {
+ 	vars := stubfilter.StubProcessVars(uint64(stubStart), uint64(stubROMapEnd-stubStart))
+-	return forkStub(flags, renderStubFilter(stubfilter.StubProcessName, vars))
++	if ioctlRules == nil {
++		return forkStub(flags, renderStubFilter(stubfilter.StubProcessName, vars))
++	}
++	// The source is created before the Sentry installs its device filters.
++	// Its descendants must inherit the proxy's ioctl restrictions here.
++	program := stubfilter.StubProcess(vars)
++	program.RuleSets[0].Rules.Add(unix.SYS_IOCTL, ioctlRules)
++	instrs, _, err := program.Build()
++	if err != nil {
++		return nil, fmt.Errorf("compile host mm ioctl filters: %w", err)
++	}
++	return forkStub(flags, instrs)
+ }
+ 
+ // In the child, this function must not acquire any locks, because they might
+diff --git a/pkg/sentry/platform/systrap/subprocess_unsafe.go b/pkg/sentry/platform/systrap/subprocess_unsafe.go
+index aa91013..5cd7c91 100644
+--- a/pkg/sentry/platform/systrap/subprocess_unsafe.go
++++ b/pkg/sentry/platform/systrap/subprocess_unsafe.go
+@@ -23,6 +23,7 @@ package systrap
+ 
+ import (
+ 	"fmt"
++	"runtime"
+ 	"unsafe"
+ 
+ 	"golang.org/x/sys/unix"
+@@ -79,6 +80,104 @@ func mmapContextQueueForSentry(memoryFile *pgalloc.MemoryFile, opts pgalloc.Allo
+ 	return fr, (*contextQueue)(unsafe.Pointer(addr))
+ }
+ 
++// destroyHostMM destroys an address space that cannot be pooled because a
++// device may retain its mm. The final reference has been dropped, so no
++// context can use it.
++func (s *subprocess) destroyHostMM() {
++	close(s.requests)
++	<-s.requestsDone
++	runtime.LockOSThread()
++	defer runtime.UnlockOSThread()
++
++	// Stop every process sharing the mm before removing their data mappings.
++	// Keeping them traced also lets us wait for their deaths outside a PID
++	// namespace where the Sentry would otherwise not reap orphaned stubs.
++	threads := make([]*thread, 0, len(s.sysmsgThreads)+1)
++	for _, p := range s.sysmsgThreads {
++		threads = append(threads, p.thread)
++	}
++	threads = append(threads, s.syscallThread.thread)
++	for _, t := range threads {
++		if errno := hostsyscall.RawSyscallErrno(unix.SYS_PTRACE, unix.PTRACE_ATTACH, uintptr(t.tid), 0); errno != 0 {
++			panic(fmt.Sprintf("cannot attach device-bound address space thread %d: %v", t.tid, errno))
++		}
++		// A newly created sysmsg thread may still have its startup SIGSEGV
++		// pending before the attach's SIGSTOP. Any ptrace stop suffices here:
++		// these threads will never resume application code.
++		if _, err := t.wait(stopped); err != nil {
++			panic(fmt.Sprintf("cannot stop device-bound address space thread %d: %v", t.tid, err))
++		}
++		if err := t.init(); err != nil {
++			panic(fmt.Sprintf("cannot trace device-bound address space thread %d: %v", t.tid, err))
++		}
++	}
++	if err := s.syscallThread.unmaskAllSignalsAttached(); err != nil {
++		panic(fmt.Sprintf("cannot unmask device-bound syscall thread: %v", err))
++	}
++	// A device FD can pin the mm after all tasks exit. Remove its aliases of
++	// shared backing before returning those offsets to the memory allocator.
++	if _, err := s.syscallThread.thread.syscallIgnoreInterrupt(&s.syscallThread.thread.initRegs, unix.SYS_MUNMAP,
++		arch.SyscallArgument{Value: stubROMapEnd},
++		arch.SyscallArgument{Value: stubEnd - stubROMapEnd}); err != nil {
++		panic(fmt.Sprintf("cannot unmap device-bound address space data: %v", err))
++	}
++	s.dead.Store(true)
++	for _, t := range threads {
++		t.kill()
++	}
++	for _, t := range threads {
++		for {
++			var status unix.WaitStatus
++			_, err := unix.Wait4(int(t.tid), &status, unix.WALL, nil)
++			if err == unix.EINTR {
++				continue
++			}
++			if err != nil {
++				panic(fmt.Sprintf("cannot reap device-bound address space thread %d: %v", t.tid, err))
++			}
++			if status.Exited() || status.Signaled() {
++				break
++			}
++			// PTRACE_O_TRACEEXIT stops the process once before its final exit.
++			if err := unix.PtraceCont(int(t.tid), 0); err != nil {
++				panic(fmt.Sprintf("cannot finish device-bound address space thread %d exit: %v", t.tid, err))
++			}
++		}
++	}
++	// A traced sysmsg process can first report its exit to us as tracer, then
++	// become our waitable child when its original parent (the syscall thread)
++	// exits. Reap that second notification when running as the PID-namespace init.
++	for _, t := range threads {
++		var status unix.WaitStatus
++		if _, err := unix.Wait4(int(t.tid), &status, unix.WALL|unix.WNOHANG, nil); err != nil && err != unix.ECHILD {
++			panic(fmt.Sprintf("cannot reap orphaned device-bound thread %d: %v", t.tid, err))
++		}
++	}
++	if s.syscallThread.seccompNotify != nil {
++		if err := s.syscallThread.seccompNotify.Close(); err != nil {
++			panic(fmt.Sprintf("cannot close device-bound seccomp listener: %v", err))
++		}
++	}
++	for _, p := range s.sysmsgThreads {
++		p.unmapStackFromSentry()
++		s.memoryFile.DecRef(p.stackRange)
++	}
++	s.sysmsgThreads = nil
++	s.syscallThread.destroySentryMapping()
++	if errno := hostsyscall.RawSyscallErrno(unix.SYS_MUNMAP, uintptr(unsafe.Pointer(s.contextQueue)), uintptr(s.contextQueueRange.Length()), 0); errno != 0 {
++		panic(fmt.Sprintf("cannot unmap device-bound context queue: %v", errno))
++	}
++	s.contextQueue = nil
++	s.memoryFile.DecRef(s.contextQueueRange)
++	s.contextQueueRange = memmap.FileRange{}
++	if errno := hostsyscall.RawSyscallErrno(unix.SYS_MUNMAP, s.threadContextRegion, uintptr(s.threadContextRange.Length()), 0); errno != 0 {
++		panic(fmt.Sprintf("cannot unmap device-bound thread contexts: %v", errno))
++	}
++	s.threadContextRegion = 0
++	s.memoryFile.DecRef(s.threadContextRange)
++	s.threadContextRange = memmap.FileRange{}
++}
++
+ func saveFPState(ctx *sharedContext, ac *arch.Context64) {
+ 	fpState := ac.FloatingPointData().BytePointer()
+ 	dst := unsafe.Slice(fpState, archState.FpLen())
+diff --git a/pkg/sentry/platform/systrap/syscall_thread.go b/pkg/sentry/platform/systrap/syscall_thread.go
+index 6a09999..5363d6c 100644
+--- a/pkg/sentry/platform/systrap/syscall_thread.go
++++ b/pkg/sentry/platform/systrap/syscall_thread.go
+@@ -51,6 +51,8 @@ var syscallThreadMessageSize = uintptr(hostarch.PageSize * 2)
+ //   - If a system call never fails (e.g munmap).
+ //   - If a system call has to return only one know value or if it fails,
+ //     it doesn't not reveal any data (e.g. mmap).
++//   - If all results are untrusted values returned only to application code
++//     (e.g. a device ioctl's status).
+ type syscallThread struct {
+ 	// subproc is a link to the subprocess which is used to call native
+ 	// system calls and track when a sysmsg thread has to be recreated.
+@@ -128,16 +130,6 @@ func (t *syscallThread) init(seccompNotify bool) error {
+ }
+ 
+ func (t *syscallThread) destroy() {
+-	if t.sentryAddr != 0 {
+-		errno := hostsyscall.RawSyscallErrno(
+-			unix.SYS_MUNMAP,
+-			t.sentryAddr,
+-			syscallThreadMessageSize,
+-			0)
+-		if errno != 0 {
+-			panic(fmt.Sprintf("mumap failed: %v", errno))
+-		}
+-	}
+ 	if t.stubAddr != 0 {
+ 		_, err := t.thread.syscallIgnoreInterrupt(&t.thread.initRegs, unix.SYS_MUNMAP,
+ 			arch.SyscallArgument{Value: t.stubAddr},
+@@ -146,7 +138,20 @@ func (t *syscallThread) destroy() {
+ 			t.thread.Warningf("munmap failed: %v", err)
+ 		}
+ 	}
++	t.destroySentryMapping()
++}
++
++// destroySentryMapping releases the Sentry's syscall message after the stub's
++// mapping has been removed. It makes no syscalls in the stub process.
++func (t *syscallThread) destroySentryMapping() {
++	if t.sentryAddr != 0 {
++		if errno := hostsyscall.RawSyscallErrno(unix.SYS_MUNMAP, t.sentryAddr, syscallThreadMessageSize, 0); errno != 0 {
++			panic(fmt.Sprintf("munmap failed: %v", errno))
++		}
++		t.sentryAddr = 0
++	}
+ 	t.subproc.memoryFile.DecRef(t.stackRange)
++	t.stackRange = memmap.FileRange{}
+ 	t.subproc.sysmsgStackPool.Put(t.thread.sysmsgStackID)
+ }
+ 
+diff --git a/pkg/sentry/platform/systrap/syscall_thread_defs.go b/pkg/sentry/platform/systrap/syscall_thread_defs.go
+index 44eb650..67eeda9 100644
+--- a/pkg/sentry/platform/systrap/syscall_thread_defs.go
++++ b/pkg/sentry/platform/systrap/syscall_thread_defs.go
+@@ -14,6 +14,8 @@
+ 
+ package systrap
+ 
++import "gvisor.dev/gvisor/pkg/hostarch"
++
+ // syscallSentryMessage is a shared message that can be changed only from the
+ // Sentry and a stub process can only read it.
+ type syscallSentryMessage struct {
+@@ -30,4 +32,8 @@ type syscallSentryMessage struct {
+ // Attention: It can be compromised by user threads.
+ type syscallStubMessage struct {
+ 	ret uint64
++
++	// ioctlParams contains only application-controlled data. Translated host
++	// file descriptors and Sentry pointers must never be placed here.
++	ioctlParams [hostarch.MinPageSize - 8]byte
+ }
+diff --git a/pkg/sentry/platform/systrap/syscall_thread_unsafe.go b/pkg/sentry/platform/systrap/syscall_thread_unsafe.go
+index 4932126..1229213 100644
+--- a/pkg/sentry/platform/systrap/syscall_thread_unsafe.go
++++ b/pkg/sentry/platform/systrap/syscall_thread_unsafe.go
+@@ -22,8 +22,57 @@ import (
+ 	"golang.org/x/sys/unix"
+ 	"gvisor.dev/gvisor/pkg/abi/linux"
+ 	"gvisor.dev/gvisor/pkg/hostsyscall"
++	"gvisor.dev/gvisor/pkg/sentry/arch"
++	"gvisor.dev/gvisor/pkg/sentry/platform"
+ )
+ 
++// IoctlFlat implements platform.HostMMIO.
++func (s *subprocess) IoctlFlat(hostFD int32, request uint32, buf []byte) (platform.HostIoctlResult, error) {
++	if hostFD < 0 {
++		return platform.HostIoctlResult{}, unix.EBADF
++	}
++	if len(buf) > len(syscallStubMessage{}.ioctlParams) {
++		return platform.HostIoctlResult{}, unix.E2BIG
++	}
++	var result platform.HostIoctlResult
++	err := s.withAliveRLock(func() error {
++		s.syscallThreadMu.Lock()
++		defer s.syscallThreadMu.Unlock()
++		if s.hostMMUnsafe {
++			return unix.EIO
++		}
++		// Serialize against failed thread creation before the driver can
++		// retain this mm. It must never contain aliases of recycled backing
++		// or become another application's address space.
++		s.hostMMBound.Store(true)
++
++		t := s.syscallThread
++		copy(t.stubMessage.ioctlParams[:], buf)
++		paramsAddr := t.stubAddr + syscallStubMessageOffset + unsafe.Offsetof(syscallStubMessage{}.ioctlParams)
++		// CLONE_FILES shares hostFD with the stub. The syscall request page is
++		// read-only there, protecting the FD, command, and parameter address.
++		ret, err := t.syscall(unix.SYS_IOCTL,
++			arch.SyscallArgument{Value: uintptr(hostFD)},
++			arch.SyscallArgument{Value: uintptr(request)},
++			arch.SyscallArgument{Value: paramsAddr})
++		copy(buf, t.stubMessage.ioctlParams[:])
++		// The scratch page and syscall return are guest-writable. Keep the
++		// untrusted errno separate from transport and lifecycle failures.
++		result.Return = ret
++		if errno, ok := err.(unix.Errno); ok {
++			result.Errno = errno
++			return nil
++		}
++		return err
++	})
++	if err != nil {
++		// The guest-visible driver errno is in result. A transport or
++		// subprocess lifecycle failure has no corresponding driver errno.
++		return platform.HostIoctlResult{}, unix.EIO
++	}
++	return result, nil
++}
++
+ func (t *syscallThread) initRequestReplyAddresses(sentryStackAddr uintptr) {
+ 	// These are safe as these addresses are mmapped and never moved/gced.
+ 	sentryMessage := (*syscallSentryMessage)(unsafe.Pointer(sentryStackAddr))
+diff --git a/pkg/sentry/platform/systrap/systrap.go b/pkg/sentry/platform/systrap/systrap.go
+index 3e31921..a435214 100644
+--- a/pkg/sentry/platform/systrap/systrap.go
++++ b/pkg/sentry/platform/systrap/systrap.go
+@@ -55,6 +55,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"runtime"
++	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 
+@@ -80,6 +81,10 @@ var (
+ 	// We attempt to link the stub here, and adjust downward as needed.
+ 	stubStart uintptr = stubInitAddress
+ 
++	// hostMMIOIoctlKey identifies the immutable policy inherited by the
++	// process-global source and all pooled address spaces.
++	hostMMIOIoctlKey string
++
+ 	stubInitProcess uintptr
+ 
+ 	// Memory region to store thread specific stacks.
+@@ -293,6 +298,11 @@ func (*Systrap) MinUserAddress() hostarch.Addr {
+ 
+ // New returns a new seccomp-based implementation of the platform interface.
+ func New(opts platform.Options) (*Systrap, error) {
++	var ioctlKey strings.Builder
++	if opts.HostMMIOIoctlRules != nil {
++		opts.HostMMIOIoctlRules = opts.HostMMIOIoctlRules.Copy()
++		opts.HostMMIOIoctlRules.Repr(&ioctlKey)
++	}
+ 	mbCh := hostmm.Probe(false)
+ 	if !disableSyscallPatching {
+ 		disableSyscallPatching = opts.DisableSyscallPatching
+@@ -315,6 +325,7 @@ func New(opts platform.Options) (*Systrap, error) {
+ 
+ 	var stubErr error
+ 	stubInitialized.Do(func() {
++		hostMMIOIoctlKey = ioctlKey.String()
+ 		// Configure address space parameters for the current host's
+ 		// VA width. Must be called before any Context64 is created.
+ 		configureSystrapAddressSpace()
+@@ -334,7 +345,9 @@ func New(opts platform.Options) (*Systrap, error) {
+ 		// Create the source process for the global pool. This must be
+ 		// done before initializing any other processes.
+ 		usesSeccompNotify := false
+-		source, err := newSubprocess(createStub, mf, usesSeccompNotify, disableSyscallPatching)
++		source, err := newSubprocess(func() (*thread, error) {
++			return createStubWithIoctls(opts.HostMMIOIoctlRules)
++		}, mf, usesSeccompNotify, disableSyscallPatching)
+ 		if err != nil {
+ 			stubErr = fmt.Errorf("initialize systrap: %w", err)
+ 			return
+@@ -349,6 +362,9 @@ func New(opts platform.Options) (*Systrap, error) {
+ 
+ 		initSeccompNotify()
+ 	})
++	if stubErr == nil && hostMMIOIoctlKey != ioctlKey.String() {
++		stubErr = fmt.Errorf("systrap host mm ioctl policy differs from the process-global policy")
++	}
+ 	if stubErr != nil {
+ 		mf.Destroy()
+ 		return nil, stubErr
+diff --git a/pkg/sentry/platform/systrap/systrap_test.go b/pkg/sentry/platform/systrap/systrap_test.go
+index a5a99a9..7578667 100644
+--- a/pkg/sentry/platform/systrap/systrap_test.go
++++ b/pkg/sentry/platform/systrap/systrap_test.go
+@@ -17,6 +17,7 @@ package systrap
+ import (
+ 	"fmt"
+ 	"os"
++	"os/exec"
+ 	"sync/atomic"
+ 	"testing"
+ 
+@@ -25,6 +26,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/cpuid"
+ 	"gvisor.dev/gvisor/pkg/hostarch"
+ 	"gvisor.dev/gvisor/pkg/safemem"
++	"gvisor.dev/gvisor/pkg/seccomp"
+ 	"gvisor.dev/gvisor/pkg/sentry/arch"
+ 	"gvisor.dev/gvisor/pkg/sentry/memmap"
+ 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+@@ -39,7 +41,7 @@ const childEnv = "SYSTRAP_TEST_CHILD"
+ 
+ func TestMain(m *testing.M) {
+ 	switch mode := os.Getenv(childEnv); mode {
+-	case "":
++	case "", "hostmmio":
+ 		cpuid.Initialize()
+ 		os.Exit(m.Run())
+ 	case "stuck":
+@@ -182,3 +184,74 @@ func TestSpinningQueueLayout(t *testing.T) {
+ 		t.Errorf("spinning queue %#x not in [%#x, %#x)", stubSpinningThreadQueueAddr, queueStart, stubContextRegion)
+ 	}
+ }
++
++func TestHostMMIOOnDeadSubprocess(t *testing.T) {
++	var s subprocess
++	s.dead.Store(true)
++	result, err := s.IoctlFlat(0, 0, nil)
++	if err != unix.EIO || result.Errno != 0 {
++		t.Errorf("IoctlFlat on dead subprocess: got %+v, %v; want transport EIO", result, err)
++	}
++}
++
++func TestHostMMIO(t *testing.T) {
++	// A fresh process gives the source stub its own immutable ioctl policy.
++	if os.Getenv(childEnv) != "hostmmio" {
++		cmd := exec.Command(os.Args[0], "-test.run=^TestHostMMIO$")
++		cmd.Env = append(os.Environ(), childEnv+"=hostmmio")
++		if out, err := cmd.CombinedOutput(); err != nil {
++			t.Fatalf("HostMMIO child: %v\n%s", err, out)
++		}
++		return
++	}
++	p, err := New(platform.Options{
++		HostMMIOIoctlRules: seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(unix.TIOCINQ)},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := New(platform.Options{}); err == nil {
++		t.Fatal("accepted a different process-global ioctl policy")
++	}
++	as, err := p.NewAddressSpace(platform.AddressSpaceOptions{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := as.(*subprocess)
++	r, w, err := os.Pipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer r.Close()
++	defer w.Close()
++	if _, err := w.Write([]byte("abc")); err != nil {
++		t.Fatal(err)
++	}
++	var params [4]byte
++	result, err := s.IoctlFlat(int32(r.Fd()), unix.TIOCINQ, params[:])
++	if err != nil || result.Errno != 0 || hostarch.ByteOrder.Uint32(params[:]) != 3 {
++		t.Fatalf("TIOCINQ: got %+v, %v, %v; want 3 bytes", result, err, params)
++	}
++	null, err := os.Open(os.DevNull)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer null.Close()
++	if result, err := s.IoctlFlat(int32(null.Fd()), unix.TIOCINQ, params[:]); err != nil || result.Errno != unix.ENOTTY {
++		t.Fatalf("TIOCINQ(/dev/null): got %+v, %v; want untrusted ENOTTY", result, err)
++	}
++	tid := s.syscallThread.thread.tid
++	s.Release()
++	if !s.dead.Load() {
++		t.Fatal("device-bound address space was pooled instead of destroyed")
++	}
++	select {
++	case <-s.requestsDone:
++	default:
++		t.Error("request goroutine remains running after Release")
++	}
++	var status unix.WaitStatus
++	if _, err := unix.Wait4(int(tid), &status, unix.WALL|unix.WNOHANG, nil); err != unix.ECHILD {
++		t.Errorf("syscall thread was not reaped: %v", err)
++	}
++}
+diff --git a/pkg/sentry/platform/systrap/systrap_unsafe.go b/pkg/sentry/platform/systrap/systrap_unsafe.go
+index b8e4563..33a588e 100644
+--- a/pkg/sentry/platform/systrap/systrap_unsafe.go
++++ b/pkg/sentry/platform/systrap/systrap_unsafe.go
+@@ -77,6 +77,12 @@ func (t *thread) getSignalInfo(si *linux.SignalInfo) error {
+ 	return nil
+ }
+ 
++// cloneRejectedError means that no child was created. Transport failures while
++// executing or reading back clone are deliberately not classified this way.
++type cloneRejectedError struct{ unix.Errno }
++
++func (e cloneRejectedError) Unwrap() error { return e.Errno }
++
+ // clone creates a new sysmsg thread from this one.
+ //
+ // The returned thread will be stopped and available for any system thread to
+@@ -86,7 +92,7 @@ func (t *thread) getSignalInfo(si *linux.SignalInfo) error {
+ func (t *thread) clone() (*thread, error) {
+ 	r, ok := hostarch.Addr(stackPointer(&t.initRegs)).RoundUp()
+ 	if !ok {
+-		return nil, unix.EINVAL
++		return nil, cloneRejectedError{unix.EINVAL}
+ 	}
+ 	// Create a sysmsg thread.
+ 	//
+@@ -114,6 +120,11 @@ func (t *thread) clone() (*thread, error) {
+ 		// could be anything. We're going to stop immediately.
+ 		arch.SyscallArgument{Value: uintptr(unsafe.Pointer(&t.initRegs))})
+ 	if err != nil {
++		// syscall returns a bare errno only for a negative syscall result.
++		// ptrace and wait errors are wrapped and may follow a successful clone.
++		if errno, rejected := err.(unix.Errno); rejected {
++			return nil, cloneRejectedError{errno}
++		}
+ 		return nil, err
+ 	}
+ 
+diff --git a/runsc/boot/BUILD b/runsc/boot/BUILD
+index 168ba7d..32d0eb5 100644
+--- a/runsc/boot/BUILD
++++ b/runsc/boot/BUILD
+@@ -64,6 +64,7 @@ go_library(
+         "//pkg/rand",
+         "//pkg/rdma",
+         "//pkg/refs",
++        "//pkg/seccomp",
+         "//pkg/sentry/arch",
+         "//pkg/sentry/arch:registers_go_proto",
+         "//pkg/sentry/checkpoint",
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index 4e92a86..f00ab95 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -45,6 +45,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/rand"
+ 	"gvisor.dev/gvisor/pkg/rdma"
+ 	"gvisor.dev/gvisor/pkg/refs"
++	"gvisor.dev/gvisor/pkg/seccomp"
+ 	"gvisor.dev/gvisor/pkg/sentry/control"
+ 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy"
+ 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
+@@ -842,7 +843,7 @@ func New(args Args) (*Loader, error) {
+ 		}
+ 		unix.Close(args.CPUDMALatencyFD)
+ 	}
+-	p, err := createPlatform(args.Conf, args.NumCPU, args.Device, args.ID, args.StartupTimer, &l.pinRing, 0 /* tscOffset */)
++	p, err := createPlatform(args.Spec, args.Conf, args.NumCPU, args.Device, args.ID, args.StartupTimer, &l.pinRing, 0 /* tscOffset */)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("creating platform: %w", err)
+ 	}
+@@ -1249,15 +1250,25 @@ func (l *Loader) Destroy() {
+ 	refs.OnExit()
+ }
+ 
+-func createPlatform(conf *config.Config, numCPU int, deviceFile *fd.FD, sandboxID string, startupTimer *timing.Timer, pinRing *pinring.PinRing, tscOffset uint64) (platform.Platform, error) {
++func createPlatform(spec *specs.Spec, conf *config.Config, numCPU int, deviceFile *fd.FD, sandboxID string, startupTimer *timing.Timer, pinRing *pinring.PinRing, tscOffset uint64) (platform.Platform, error) {
+ 	platformName := conf.Platform
+ 	p, err := platform.Lookup(conf.Platform)
+ 	if err != nil {
+ 		panic(fmt.Sprintf("invalid platform %s: %s", conf.Platform, err))
+ 	}
+ 
++	var hostMMIOIoctlRules seccomp.SyscallRule
++	if specutils.NVProxyEnabled(spec, conf) {
++		caps, err := specutils.NVProxyDriverCapsAllowed(conf)
++		if err != nil {
++			return nil, fmt.Errorf("NVIDIA capabilities: %w", err)
++		}
++		hostMMIOIoctlRules = nvproxy.HostMMIOIoctlRules(caps)
++	}
++
+ 	log.Infof("Platform: %s", platformName)
+ 	plat, err := p.New(platform.Options{
++		HostMMIOIoctlRules:     hostMMIOIoctlRules,
+ 		DeviceFile:             deviceFile,
+ 		DisableSyscallPatching: platformName == "systrap" && conf.SystrapDisableSyscallPatching,
+ 		DisableFastPath:        platformName == "systrap" && conf.SystrapDisableFastPath,
+diff --git a/runsc/boot/nvproxy.go b/runsc/boot/nvproxy.go
+index 704e1fa..aebfcce 100644
+--- a/runsc/boot/nvproxy.go
++++ b/runsc/boot/nvproxy.go
+@@ -30,6 +30,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/devutil"
+ 	"gvisor.dev/gvisor/pkg/log"
+ 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy"
++	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
+ 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/dev"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+@@ -75,7 +76,7 @@ func (l *Loader) setNvproxyDeviceRemapMetadata(saveOpts *state.SaveOpts) error {
+ }
+ 
+ // +checklocks:l.mu
+-func (r *restorer) prepareNvproxyRestoreContextLocked(ctx context.Context, l *Loader) (context.Context, error) {
++func (r *restorer) prepareNvproxyRestoreContextLocked(ctx context.Context, l *Loader, driverVersion nvconf.DriverVersion) (context.Context, error) {
+ 	if idsJSON, ok := r.metadata[nvproxyDeviceRemapIDsKey]; ok {
+ 		var oldIDs []nvproxy.DeviceRemapID
+ 		if err := json.Unmarshal([]byte(idsJSON), &oldIDs); err != nil {
+@@ -98,7 +99,27 @@ func (r *restorer) prepareNvproxyRestoreContextLocked(ctx context.Context, l *Lo
+ 			}
+ 		}
+ 	}
+-	return ctx, nil
++	modes := make(map[string]bool)
++	for contName, spec := range l.containerSpecs {
++		if !specutils.NVProxyEnabled(spec, l.root.conf) {
++			continue
++		}
++		devClient := l.k.GetDevGoferClient(contName)
++		minors := make(map[uint32]*devutil.GoferClient)
++		if _, err := collectContainerNvidiaRegularDevices(ctx, spec, l.root.conf, devClient, minors); err != nil {
++			return ctx, err
++		}
++		caps, err := specutils.NVProxyDriverCapsAllowed(l.root.conf)
++		if err != nil {
++			return ctx, err
++		}
++		mode, err := nvproxy.UseApplicationMMUVM(ctx, devClient, slices.Sorted(maps.Keys(minors)), caps, driverVersion)
++		if err != nil {
++			return ctx, err
++		}
++		modes[contName] = mode
++	}
++	return context.WithValue(ctx, nvproxy.CtxContainerUVMModes, modes), nil
+ }
+ 
+ func getNvproxyDeviceRemapIDs(ctx context.Context, k *kernel.Kernel, specs map[string]*specs.Spec, conf *config.Config) ([]nvproxy.DeviceRemapID, error) {
+diff --git a/runsc/boot/restore.go b/runsc/boot/restore.go
+index 3c870a6..8a367a0 100644
+--- a/runsc/boot/restore.go
++++ b/runsc/boot/restore.go
+@@ -393,7 +393,7 @@ func (r *restorer) restore(l *Loader) error {
+ 	r.timer.Reached("specs validated")
+ 
+ 	tscOffset, willJumpBackwards := r.computeTSCOffset()
+-	p, err := createPlatform(l.root.conf, l.root.applicationCores, r.deviceFile, l.sandboxID, r.timer, &l.pinRing, tscOffset)
++	p, err := createPlatform(l.root.spec, l.root.conf, l.root.applicationCores, r.deviceFile, l.sandboxID, r.timer, &l.pinRing, tscOffset)
+ 	if err != nil {
+ 		return fmt.Errorf("creating platform: %v", err)
+ 	}
+@@ -549,7 +549,7 @@ func (r *restorer) restore(l *Loader) error {
+ 	}
+ 	cleanMnts.Release()
+ 
+-	ctx, err = r.prepareNvproxyRestoreContextLocked(ctx, l)
++	ctx, err = r.prepareNvproxyRestoreContextLocked(ctx, l, oldNvidiaDriverVersion)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/runsc/boot/vfs.go b/runsc/boot/vfs.go
+index 7233539..fa38453 100644
+--- a/runsc/boot/vfs.go
++++ b/runsc/boot/vfs.go
+@@ -1849,6 +1849,27 @@ func (c *containerMounter) configureRestore(restoreMnts *restoreMounts) error {
+ }
+ 
+ func createDeviceFiles(ctx context.Context, creds *auth.Credentials, info *containerInfo, vfsObj *vfs.VirtualFilesystem, root vfs.VirtualDentry) error {
++	var nvidiaMinors []uint32
++	if specutils.NVProxyEnabled(info.spec, info.conf) {
++		devClient := devutil.GoferClientFromContext(ctx)
++		minors := make(map[uint32]*devutil.GoferClient)
++		if _, err := collectContainerNvidiaRegularDevices(ctx, info.spec, info.conf, devClient, minors); err != nil {
++			return err
++		}
++		for minor := range minors {
++			nvidiaMinors = append(nvidiaMinors, minor)
++		}
++		slices.Sort(nvidiaMinors)
++		caps, err := specutils.NVProxyDriverCapsAllowed(info.conf)
++		if err != nil {
++			return err
++		}
++		applicationMM, err := nvproxy.UseApplicationMMUVM(ctx, devClient, nvidiaMinors, caps, kernel.KernelFromContext(ctx).NvidiaDriverVersion)
++		if err != nil {
++			return err
++		}
++		nvproxy.SetContainerUVMMode(vfsObj, info.containerName, applicationMM)
++	}
+ 	if info.spec.Linux != nil {
+ 		// Register vfio control device early if TPUv5 is enabled, so that
+ 		// subsequent TPU devices can find the tpuproxy object.
+@@ -1884,15 +1905,7 @@ func createDeviceFiles(ctx context.Context, creds *auth.Credentials, info *conta
+ 		}
+ 		// There is no nvidia-container-cli flag to enable fabric-imex-mgmt, so
+ 		// we never create a /dev/nvidia-caps/nvidia-cap# file for it here.
+-		devClient := devutil.GoferClientFromContext(ctx)
+-		if devClient == nil {
+-			return fmt.Errorf("dev gofer client not found in context")
+-		}
+-		minors, err := nvidiaRegularDeviceMinorsFromGofer(ctx, devClient)
+-		if err != nil {
+-			return err
+-		}
+-		for _, minor := range minors {
++		for _, minor := range nvidiaMinors {
+ 			nvidiaDevs = append(nvidiaDevs, specs.LinuxDevice{Path: fmt.Sprintf("/dev/nvidia%d", minor), Type: "c", Major: nvgpu.NV_MAJOR_DEVICE_NUMBER, Minor: int64(minor)})
+ 		}
+ 		for _, nvidiaDev := range nvidiaDevs {

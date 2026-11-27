@@ -195,7 +195,7 @@ index 49b0228..7457ecc 100644
  	timekeeper           *Timekeeper
 diff --git a/pkg/sentry/kernel/oom.go b/pkg/sentry/kernel/oom.go
 new file mode 100644
-index 0000000..cd3af74
+index 0000000..03d0f35
 --- /dev/null
 +++ b/pkg/sentry/kernel/oom.go
 @@ -0,0 +1,248 @@
@@ -325,7 +325,7 @@ index 0000000..cd3af74
 +		return
 +	}
 +	current, limit := o.limit.Usage()
-+	totalPages := limit / hostarch.PageSize
++	totalPages := limit / uint64(hostarch.PageSize)
 +	victim := o.selectVictim(totalPages)
 +	if victim == nil {
 +		// Nothing to kill: let allocations reach the host's limit, as
@@ -426,7 +426,7 @@ index 0000000..cd3af74
 +	for i := range cands {
 +		c := &cands[i]
 +		c.rss = c.mm.ResidentSetSize()
-+		c.points = int64(c.rss/hostarch.PageSize) + int64(c.adj)*int64(totalPages)/1000
++		c.points = int64(c.rss/uint64(hostarch.PageSize)) + int64(c.adj)*int64(totalPages)/1000
 +		c.mm.DecUsers(ctx)
 +		c.mm = nil
 +		if best == nil || c.points > best.points {
@@ -810,13 +810,14 @@ index f5c5d16..5bdeff1 100644
  		length:     length,
  		opts:       opts,
 diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
-index 1f0e5f3..f1371d4 100644
+index 078c231..4e92a86 100644
 --- a/runsc/boot/loader.go
 +++ b/runsc/boot/loader.go
-@@ -507,6 +507,10 @@ type Args struct {
- 	PassFDs []sentryapi.FDMapping
- 	// ExecFD is the host file descriptor used for program execution.
- 	ExecFD int
+@@ -514,6 +514,11 @@ type Args struct {
+ 	// ProcSelfFD is a directory FD to procfs' self/fd. Required with directfs,
+ 	// -1 otherwise. It must stay open for the lifetime of the sandbox.
+ 	ProcSelfFD int
++
 +	// MemoryCgroupFDs are FDs to memory.current, memory.stat and memory.max of
 +	// the host cgroup that limits the sandbox's memory, or empty.
 +	MemoryCgroupFDs []int
@@ -824,7 +825,7 @@ index 1f0e5f3..f1371d4 100644
  	// GoferFilestoreFDs are FDs to the regular files that will back the tmpfs or
  	// overlayfs mount for certain gofer mounts.
  	GoferFilestoreFDs []int
-@@ -846,6 +850,16 @@ func New(args Args) (*Loader, error) {
+@@ -860,6 +865,16 @@ func New(args Args) (*Loader, error) {
  		return nil, fmt.Errorf("creating memory file: %w", err)
  	}
  	l.k.SetMemoryFile(mf)
@@ -842,7 +843,7 @@ index 1f0e5f3..f1371d4 100644
  
  	// Create VDSO.
 diff --git a/runsc/cmd/sentry/sentrycmd/boot.go b/runsc/cmd/sentry/sentrycmd/boot.go
-index fed68ae..cad03ad 100644
+index a0b1511..9e2914f 100644
 --- a/runsc/cmd/sentry/sentrycmd/boot.go
 +++ b/runsc/cmd/sentry/sentrycmd/boot.go
 @@ -115,6 +115,10 @@ type Boot struct {
@@ -856,7 +857,7 @@ index fed68ae..cad03ad 100644
  	// goferMountConfs contains information about how the gofer mounts have been
  	// configured. The first entry is for rootfs and the following entries are
  	// for bind mounts in Spec.Mounts (in the same order).
-@@ -309,6 +313,7 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
+@@ -304,6 +308,7 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
  	f.Var(&b.stdioFDs, "stdio-fds", "list of FDs containing sandbox stdin, stdout, and stderr in that order")
  	f.Var(&b.passFDs, "pass-fd", "mapping of host to guest FDs. They must be in M:N format. M is the host and N the guest descriptor.")
  	f.IntVar(&b.execFD, "exec-fd", -1, "host file descriptor used for program execution.")
@@ -864,9 +865,9 @@ index fed68ae..cad03ad 100644
  	f.Var(&b.goferFilestoreFDs, "gofer-filestore-fds", "FDs to the regular files that will back the overlayfs or tmpfs mount if a gofer mount is to be overlaid.")
  	f.Var(&b.goferMountConfs, "gofer-mount-confs", "information about how the gofer mounts have been configured.")
  	f.IntVar(&b.userLogFD, "user-log-fd", 0, "file descriptor to write user logs to. 0 means no logging.")
-@@ -719,6 +724,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
- 		PassFDs:             b.passFDs.GetArray(),
+@@ -732,6 +737,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
  		ExecFD:              b.execFD,
+ 		ProcSelfFD:          procSelfFD,
  		GoferFilestoreFDs:   b.goferFilestoreFDs.GetArray(),
 +		MemoryCgroupFDs:     b.memoryCgroupFDs.GetArray(),
  		GoferMountConfs:     b.goferMountConfs.GetArray(),

@@ -30,17 +30,17 @@ Verified:
   reached the Internet while it was open, and the sandbox reached its Gateway.
 
 diff --git a/pkg/tcpip/nftables/nftables.go b/pkg/tcpip/nftables/nftables.go
-index ae2ac5b..d19d601 100644
+index cdb391a..4315b50 100644
 --- a/pkg/tcpip/nftables/nftables.go
 +++ b/pkg/tcpip/nftables/nftables.go
-@@ -75,6 +75,9 @@ func (nf *NFTables) checkHook(pkt *stack.PacketBuffer, route *stack.Route, af st
+@@ -75,6 +75,9 @@ func (nf *NFTables) checkHook(pkt *stack.PacketBuffer, route *stack.Route, outNI
  	if !IsNFTablesEnabled() {
  		return true
  	}
 +	// nftables tracks and NATs connections apart from iptables.
 +	pkt.SwapNFTablesState()
 +	defer pkt.SwapNFTablesState()
- 	v, err := nf.EvaluateHook(af, hook, pkt, route)
+ 	v, err := nf.EvaluateHook(af, hook, pkt, route, outNICID)
  
  	if err != nil {
 diff --git a/pkg/tcpip/stack/packet_buffer.go b/pkg/tcpip/stack/packet_buffer.go

@@ -271,10 +271,10 @@ index e5d98f5..4dd4ddc 100644
 +	return m.Buffer(), nil
 +}
 diff --git a/pkg/tcpip/nftables/nftables_test.go b/pkg/tcpip/nftables/nftables_test.go
-index 1c41207..2e57bcf 100644
+index 38262a3..9297472 100644
 --- a/pkg/tcpip/nftables/nftables_test.go
 +++ b/pkg/tcpip/nftables/nftables_test.go
-@@ -5858,7 +5858,7 @@ func TestCompatOperationDeepCopy(t *testing.T) {
+@@ -5860,7 +5860,7 @@ func TestCompatOperationDeepCopy(t *testing.T) {
  		{
  			name: "noop match",
  			op: &compatNoopMatch{
@@ -283,7 +283,7 @@ index 1c41207..2e57bcf 100644
  				revision: 0,
  				infoData: []byte{1, 2, 3, 4},
  			},
-@@ -5881,7 +5881,7 @@ func TestCompatOpCompatibility(t *testing.T) {
+@@ -5883,7 +5883,7 @@ func TestCompatOpCompatibility(t *testing.T) {
  	masq := &compatMASQTarget{}
  	snat := &compatNATTarget{info: natTargetInfo{natType: stack.SNAT}}
  	dnat := &compatNATTarget{info: natTargetInfo{natType: stack.DNAT}}
@@ -292,7 +292,7 @@ index 1c41207..2e57bcf 100644
  	const nonBaseChainType = BaseChainType(-1)
  
  	makeCtx := func(bcType BaseChainType, hook stack.NFHook) *opCompatCtx {
-@@ -6395,10 +6395,10 @@ func TestCompatNATTargetEvaluation(t *testing.T) {
+@@ -6397,10 +6397,10 @@ func TestCompatNATTargetEvaluation(t *testing.T) {
  	})
  }
  
@@ -305,11 +305,10 @@ index 1c41207..2e57bcf 100644
  		revision: 0,
  		infoData: []byte{1, 2, 3, 4},
  	}
-@@ -6411,3 +6411,173 @@ func TestCompatNoopMatchEvaluation(t *testing.T) {
- 		t.Errorf("evaluate verdict = %d, want %d", regs.verdict.Code, VC(linux.NFT_CONTINUE))
+@@ -6547,6 +6547,130 @@ func TestMetaOutputInterface(t *testing.T) {
  	}
  }
-+
+ 
 +// Tests evaluating the compat tcp and udp matches, which iptables-nft 1.8.7
 +// writes for --sport, --dport and --tcp-flags.
 +func TestCompatTCPUDPMatchEvaluation(t *testing.T) {
@@ -433,6 +432,14 @@ index 1c41207..2e57bcf 100644
 +		})
 +	}
 +}
++
+ // TestMasqueradeOutputInterface tests that masq and the MASQUERADE compat
+ // target take the source address from the hook's output interface, using the
+ // route only for the next hop, like
+@@ -6685,3 +6809,49 @@ func TestCompatAddrtypeLimitIfaceOut(t *testing.T) {
+ 		})
+ 	}
+ }
 +
 +// Tests parsing the compat tcp and udp matches' info.
 +func TestCompatTCPUDPMatchParse(t *testing.T) {
