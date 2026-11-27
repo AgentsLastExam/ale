@@ -6,7 +6,6 @@ import base64
 import json
 import re
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -27,11 +26,15 @@ from orbit.core.trajectory import (
 from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     NativeResult,
+    call_metrics,
+    epoch_time,
     invocations,
+    iso_time,
     mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -173,7 +176,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                 builder.add(
                     source="user",
                     message=recorded[native_turns].prompt,
-                    timestamp=_timestamp(event),
+                    timestamp=iso_time(event.get("timestamp")),
                 )
                 native_turns += 1
             continue
@@ -195,7 +198,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                 transcript_mcp,
                 used_mcp,
                 context,
-                timestamp=_timestamp(event),
+                timestamp=iso_time(event.get("timestamp")),
                 metrics=None if call is None or call in charged else call_usage.get(call),
                 response_id=responses.get(call) if call is not None else None,
             )
@@ -328,7 +331,7 @@ def _thread_trajectory(
             builder.add(
                 source="user",
                 message=str(payload.get("message") or ""),
-                timestamp=_timestamp(event),
+                timestamp=iso_time(event.get("timestamp")),
             )
         elif event.get("type") == "response_item":
             # Only stdout carries the real server name of a model's MCP call, and only the
@@ -344,7 +347,7 @@ def _thread_trajectory(
                     [],
                     set(),
                     context,
-                    timestamp=_timestamp(event),
+                    timestamp=iso_time(event.get("timestamp")),
                     metrics=None if call is None or call in charged else usage.get(call),
                     response_id=responses.get(call) if call is not None else None,
                 )
@@ -710,7 +713,7 @@ def _read_traces(
                         latest.get(thread, ""),
                         cells.get(cell, ""),
                         payload,
-                        _wall_time(event),
+                        epoch_time(event.get("wall_time_unix_ms"), 1000),
                     )
             elif kind == "inference_completed" and payload.get("response_id"):
                 # Of the response only its usage and its items' identities are read.
@@ -718,10 +721,13 @@ def _read_traces(
                 body = _trace_payload(context, bundle, payload.get("response_payload"), issues)
                 usage = body.get("token_usage")
                 items = body.get("output_items")
-                metrics = _metrics(usage) if isinstance(usage, dict) else None
-                # A response that reported no usage has ``null``; other values are unreadable.
-                if body and usage is not None and metrics is None:
-                    issues.append({"reason": "invalid_token_usage", "response_id": response_id})
+                # A response that reported no usage has ``null``.
+                metrics = None
+                if usage is not None:
+                    try:
+                        metrics = _metrics(usage)
+                    except ValueError:
+                        issues.append({"reason": "invalid_token_usage", "response_id": response_id})
                 if body and not isinstance(items, list):
                     issues.append({"reason": "invalid_trace_response", "response_id": response_id})
                 traced = _Response(
@@ -743,18 +749,6 @@ def _read_traces(
                 (*_script_call(context, bundle, call, issues), call.time)
             )
     return _Traces(found, responses)
-
-
-def _wall_time(event: dict[str, Any]) -> str | None:
-    """A trace event's wall-clock time, in the rollout's ISO 8601 form."""
-    value = event.get("wall_time_unix_ms")
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        return None
-    try:
-        moment = datetime.fromtimestamp(value / 1000, tz=UTC)
-    except (OverflowError, OSError, ValueError):
-        return None
-    return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _item_keys(payload: dict[str, Any]) -> list[str]:
@@ -1002,19 +996,21 @@ def _model_calls(
                 if open_call:
                     call, open_call = call + 1, False
                 continue
-            metrics = _metrics(last) if isinstance(last, dict) else None
-            if metrics is None:
+            try:
+                metrics = _metrics(last)
+            except ValueError:
                 issues.append(
                     {
                         "reason": "invalid_token_usage",
                         "session_id": thread_id,
-                        "timestamp": _timestamp(event),
+                        "timestamp": iso_time(event.get("timestamp")),
                     }
                 )
-            elif not (metrics.prompt_tokens or metrics.completion_tokens):
-                continue
-            elif call not in paired:
-                usage["rollout", call] = metrics
+            else:
+                if metrics is None:
+                    continue
+                if call not in paired:
+                    usage["rollout", call] = metrics
             total = seen
             call, open_call = call + 1, False
     return calls, usage, ids
@@ -1026,35 +1022,17 @@ def _model_output(payload: dict[str, Any]) -> bool:
     return kind in _CALL_TYPES or kind == "reasoning" or payload.get("role") == "assistant"
 
 
-def _metrics(usage: dict[str, Any]) -> AtifMetrics | None:
+def _metrics(usage: object) -> AtifMetrics | None:
     """A call's usage as the rollout's ``last_token_usage`` or the trace's ``token_usage``
     records it: its ``input_tokens`` already include the cached ones, and its
-    ``output_tokens`` the reasoning ones."""
-
-    def count(key: str) -> int | None:
-        value = usage.get(key)
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-    prompt, completion = count("input_tokens"), count("output_tokens")
-    if prompt is None or completion is None:
-        return None
-    return AtifMetrics(
-        prompt_tokens=prompt,
-        completion_tokens=completion,
-        cached_tokens=count("cached_input_tokens"),
+    ``output_tokens`` the reasoning ones. ``None`` for usage with no tokens; raises
+    ``ValueError`` for usage that cannot be read."""
+    counts = usage if isinstance(usage, dict) else {}
+    return call_metrics(
+        token_count(counts.get("input_tokens")),
+        token_count(counts.get("output_tokens")),
+        token_count(counts.get("cached_input_tokens"), optional=True),
     )
-
-
-def _timestamp(event: dict[str, Any]) -> str | None:
-    """When Codex recorded a rollout line, if it is an ISO 8601 time."""
-    value = event.get("timestamp")
-    if not isinstance(value, str):
-        return None
-    try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return value
 
 
 def _agent(context: TrajectoryParseContext) -> AtifAgent:

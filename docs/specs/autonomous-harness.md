@@ -276,6 +276,15 @@ trajectory lacks that conversation; the program's other files are not named. Par
 do not decide retention (see [Trace](trace.md)). Orbit converts once, after the final log
 copy, and then adds transport links, exact token enrichment, and retention.
 
+A step takes the time its native record was written; for model output that is when the
+output arrived, not when the request was sent. The first step a model call produced
+carries the call's usage, once, counted as the Gateway counts it: prompt tokens include
+cache reads and writes, completion tokens include reasoning, so steps sum to the calls.
+Every step of a call lists the provider's response ID in `extra.orbit.native_event_ids`
+when the native log records it, which is how Orbit links steps to their Gateway calls.
+Usage that cannot be read is a parse issue, usage that reports no tokens is none, and
+what a native log does not record stays absent; the Harness's README says what that is.
+
 A spawned child session becomes a subagent trajectory (see [Trace](trace.md)) only when
 the native evidence identifies the call that spawned it. Otherwise it stays raw evidence
 with an `unlinked_subagent` issue, because a guessed link would misstate who delegated

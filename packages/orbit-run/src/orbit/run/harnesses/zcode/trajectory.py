@@ -6,9 +6,7 @@ import base64
 import binascii
 import json
 import re
-import shutil
 import sqlite3
-import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -33,6 +31,7 @@ from orbit.run.harnesses.base import (
     NativeResult,
     invocations,
     json_lines,
+    mirrored_store,
     requested_session_id,
     stdout_events,
 )
@@ -157,20 +156,10 @@ class _Store:
 
 
 def _read_store(path: Path, issues: list[dict[str, Any]]) -> _Store | None:
-    """Read the mirrored store through a private copy, so the mirror is never touched.
-
-    The copy takes the write-ahead log along: SQLite folds in what a stopped process left
-    there.
-    """
+    """The mirrored store's sessions and their messages with their parts."""
     if not path.is_file():
         return None
-    with tempfile.TemporaryDirectory() as directory:
-        copy = Path(directory) / path.name
-        shutil.copyfile(path, copy)
-        wal = path.with_name(path.name + "-wal")
-        if wal.is_file():
-            shutil.copyfile(wal, copy.with_name(copy.name + "-wal"))
-        connection = sqlite3.connect(copy)
+    with mirrored_store(path) as connection:
         try:
             parents = dict(connection.execute("select id, parent_id from session"))
             ordered: dict[str, list[_Message]] = {}
@@ -190,8 +179,6 @@ def _read_store(path: Path, issues: list[dict[str, Any]]) -> _Store | None:
         except sqlite3.Error as error:
             issues.append({"reason": "native_store_unreadable", "detail": str(error)[:500]})
             return None
-        finally:
-            connection.close()
     return _Store(parents, ordered)
 
 

@@ -1628,8 +1628,8 @@ def test_codex_calls_a_script_made_take_their_trace_time_and_no_model_usage(
     # `exec-2` and `exec-3` come from a call whose usage the rollout never recorded.
     assert all(step.metrics is None for step in agent[2:])
     assert [step.timestamp for step in agent if step.llm_call_count == 0] == [
-        "2026-10-26T07:33:21.000Z",
-        "2026-10-26T07:33:22.000Z",
+        "2026-10-26T07:33:21.000000Z",
+        "2026-10-26T07:33:22.000000Z",
         None,
     ]
 
