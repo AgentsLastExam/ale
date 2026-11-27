@@ -12,6 +12,7 @@ from orbit.core.errors import AgentError, ConfigError, HarnessLimitError
 from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
 from orbit.core.taskspec import OperatingSystem, StreamableHttpMcpServer
 from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.core.trajectory import AtifMetrics
 from orbit.run.cli.tasks import PRESET_DIR, _harness
 from orbit.run.harnesses.muse_code import MuseCodeHarness
 from orbit.run.recording import BlobStore
@@ -293,6 +294,11 @@ def run(kind: str, **event: object) -> dict[str, object]:
     }
 
 
+def muse_usage(prompt: int, cached: int, output: int) -> dict[str, int]:
+    """A response's usage as Muse records it: its input includes the cached tokens."""
+    return {"input_tokens": prompt, "cached_tokens": cached, "output_tokens": output}
+
+
 def write_turns(logs: Path, requested: str | None, *turns: tuple[str, str]) -> None:
     """One recorded invocation per prompt, its stdout ending in the reply."""
     records: list[dict[str, object]] = []
@@ -397,18 +403,21 @@ def test_parser_follows_the_session_log(tmp_path: Path) -> None:
         [
             catalog,
             run("started", prompt="Use the tools."),
+            run("model_response_created", response_id="r1"),
             # Muse records a response's usage before its tool calls but after its text.
-            run("model_completed", usage={"input_tokens": 10}),
+            run("model_completed", usage=muse_usage(10, 0, 1)),
             run("assistant_tool_calls_committed", response_id="r1", tool_calls=calls),
             run("tool_result_batch_committed", results=results),
             run("tool_result_model_visible_content", call_id="call-3", content=[png]),
+            run("model_response_created", response_id="r2"),
             # A record may sit inside a retained frame, and the same record may recur.
             {"children": [{"record_json": json.dumps(framed)}]},
-            run("model_completed", usage={"input_tokens": 20}),
+            run("model_completed", usage=muse_usage(20, 0, 1)),
             second,
             second,
+            run("model_response_created", response_id="r3"),
             run("assistant_message_committed", response_id="r3", text="SECOND-DONE"),
-            run("model_completed", usage={"input_tokens": 30}),
+            run("model_completed", usage=muse_usage(30, 0, 1)),
         ],
     )
     parse = context(logs, tmp_path)
@@ -440,6 +449,197 @@ def test_parser_follows_the_session_log(tmp_path: Path) -> None:
     assert [step.metrics.prompt_tokens for step in agent] == [10, 20, 30]  # type: ignore[union-attr]
     assert trajectory.final_metrics is not None
     assert trajectory.final_metrics.total_prompt_tokens == 60
+
+
+def muse_at(second: int) -> str:
+    return f"2026-10-26T00:00:{second:02d}.000000Z"
+
+
+def timed(second: int, record: dict[str, object]) -> dict[str, object]:
+    """A record Muse wrote at ``second``, in microseconds since the epoch; 1792972800 is
+    2026-10-26T00:00:00Z."""
+    return {"id": f"record-{second}", "recorded_at": (1792972800 + second) * 10**6, **record}
+
+
+def test_steps_keep_their_times_and_each_response_its_usage_and_id(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    write_turns(logs, RUN_ID, ("Use the tools.", "again"))
+    write_jsonl(
+        logs / RUN_LOG,
+        [
+            timed(1, run("started", prompt="Use the tools.")),
+            timed(2, run("model_response_created", response_id="resp_1")),
+            timed(3, run("reasoning_summary_committed", response_id="resp_1", text="plan")),
+            timed(4, run("model_completed", usage=muse_usage(1000, 800, 30))),
+            # A completion no new response precedes belongs to no response.
+            timed(5, run("model_completed", usage=muse_usage(2000, 0, 1))),
+            timed(
+                6,
+                run(
+                    "assistant_tool_calls_committed",
+                    response_id="resp_1",
+                    tool_calls=[{"call_id": "call-1", "name": "bash", "args": "{}"}],
+                ),
+            ),
+            timed(7, run("model_response_created", response_id="resp_2")),
+            timed(8, run("model_completed", usage={**muse_usage(1, 0, 1), "output_tokens": "?"})),
+            timed(9, run("assistant_message_committed", response_id="resp_2", text="done")),
+            # A response that commits nothing keeps its usage off the next one's step.
+            timed(10, run("model_response_created", response_id="resp_3")),
+            timed(11, run("model_completed", usage=muse_usage(500, 0, 5))),
+            timed(12, run("model_response_created", response_id="resp_4")),
+            timed(13, run("assistant_message_committed", response_id="resp_4", text="again")),
+            # A response that reported no usage.
+            timed(14, run("model_completed")),
+        ],
+    )
+
+    trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path))
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", muse_at(1)),
+        ("agent", muse_at(3)),
+        ("agent", muse_at(9)),
+        ("agent", muse_at(13)),
+    ]
+    # Each response's usage on its step; input already includes the cached tokens.
+    assert [step.metrics for step in trajectory.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=1000, completion_tokens=30, cached_tokens=800),
+        None,
+        None,
+    ]
+    assert [step.extra for step in trajectory.steps] == [
+        None,
+        {"orbit": {"native_event_ids": ["resp_1"]}},
+        {"orbit": {"native_event_ids": ["resp_2"]}},
+        {"orbit": {"native_event_ids": ["resp_4"]}},
+    ]
+    assert trajectory.final_metrics is not None
+    assert trajectory.final_metrics.total_prompt_tokens == 3500
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "invalid_token_usage", "session_id": RUN_ID, "response_id": "resp_2"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("usage", "metrics"),
+    [
+        # A cache count Muse leaves out or gives as null: none.
+        (
+            {"input_tokens": 1000, "output_tokens": 30, "cached_tokens": None},
+            AtifMetrics(prompt_tokens=1000, completion_tokens=30, cached_tokens=0),
+        ),
+        # Usage that reports no tokens: none, and nothing to report.
+        (muse_usage(0, 0, 0), None),
+        # A count that is missing, or no usage record: reported.
+        ({"input_tokens": 1000, "cached_tokens": 0}, "invalid"),
+        ("no usage record", "invalid"),
+    ],
+)
+def test_a_response_s_usage_needs_its_input_and_output_counts(
+    tmp_path: Path, usage: object, metrics: object
+) -> None:
+    logs = tmp_path / "logs"
+    write_turns(logs, RUN_ID, ("Use the tools.", "done"))
+    write_jsonl(
+        logs / RUN_LOG,
+        [
+            run("started", prompt="Use the tools."),
+            run("model_response_created", response_id="resp_1"),
+            run("assistant_message_committed", response_id="resp_1", text="done"),
+            run("model_completed", usage=usage),
+        ],
+    )
+
+    trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path))
+
+    if metrics == "invalid":
+        assert trajectory.steps[1].metrics is None
+        assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+            {"reason": "invalid_token_usage", "session_id": RUN_ID, "response_id": "resp_1"}
+        ]
+    else:
+        assert trajectory.steps[1].metrics == metrics
+        assert trajectory.extra is None
+
+
+def test_provider_run_calls_take_their_own_time_and_their_response_s_usage(
+    tmp_path: Path,
+) -> None:
+    def search(second: int, call_id: str) -> dict[str, object]:
+        return timed(
+            second,
+            run(
+                "provider_tool_call_completed",
+                call_id=call_id,
+                name="web_search",
+                action={"query": "orbit"},
+                status="completed",
+            ),
+        )
+
+    logs = tmp_path / "logs"
+    write_turns(logs, RUN_ID, ("Search the web.", "found"))
+    write_jsonl(
+        logs / RUN_LOG,
+        [
+            timed(1, run("started", prompt="Search the web.")),
+            # A response that ran only a provider's tool.
+            timed(2, run("model_response_created", response_id="resp_1")),
+            search(3, "ws-1"),
+            timed(4, run("model_completed", usage=muse_usage(1000, 0, 30))),
+            # A response whose first record is a provider's tool call.
+            timed(5, run("model_response_created", response_id="resp_2")),
+            search(6, "ws-2"),
+            timed(7, run("assistant_message_committed", response_id="resp_2", text="found")),
+            timed(8, run("model_completed", usage=muse_usage(1100, 1000, 5))),
+        ],
+    )
+
+    trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path))
+
+    assert [
+        (step.timestamp, [call.tool_call_id for call in step.tool_calls or ()], step.extra)
+        for step in trajectory.steps
+    ] == [
+        (muse_at(1), [], None),
+        (muse_at(3), ["ws-1"], {"orbit": {"native_event_ids": ["resp_1"]}}),
+        (muse_at(6), ["ws-2"], {"orbit": {"native_event_ids": ["resp_2"]}}),
+    ]
+    assert [step.metrics for step in trajectory.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=1000, completion_tokens=30, cached_tokens=0),
+        AtifMetrics(prompt_tokens=1100, completion_tokens=5, cached_tokens=1000),
+    ]
+
+
+def test_a_provider_s_call_after_a_result_s_media_joins_its_response(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    write_turns(logs, RUN_ID, ("Look.", "done"))
+    png = {"media_type": "image/png", "base64_data": base64.b64encode(b"png").decode()}
+    write_jsonl(
+        logs / RUN_LOG,
+        [
+            run("started", prompt="Look."),
+            run("model_response_created", response_id="resp_1"),
+            run(
+                "assistant_tool_calls_committed",
+                response_id="resp_1",
+                tool_calls=[{"call_id": "call-1", "name": "read_file", "args": "{}"}],
+            ),
+            run("tool_result_batch_committed", results=[{"tool_call_id": "call-1", "text": "a"}]),
+            run("tool_result_model_visible_content", call_id="call-1", content=[png]),
+            run("provider_tool_call_completed", call_id="ws-1", name="web_search", action={}),
+        ],
+    )
+
+    trajectory = MuseCodeHarness().parse_trajectory(context(logs, tmp_path))
+
+    assert [call.tool_call_id for call in trajectory.steps[1].tool_calls or ()] == [
+        "call-1",
+        "ws-1",
+    ]
 
 
 def test_provider_run_calls_join_the_response_that_made_them(tmp_path: Path) -> None:

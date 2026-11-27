@@ -6,7 +6,6 @@ import base64
 import binascii
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -26,12 +25,15 @@ from orbit.core.trajectory import (
 )
 from orbit.run.harnesses.base import (
     NativeResult,
+    call_metrics,
+    epoch_time,
     invocations,
     json_lines,
     mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -39,6 +41,8 @@ SESSIONS = ".local/share/muse/sessions"
 SESSION_LOG = "session.jsonl"
 _IMAGE_TYPES = frozenset(("image/png", "image/jpeg", "image/gif", "image/webp"))
 _TERMINALS = ("run.terminal.completed", "run.terminal.failed")
+#: A call the provider ran inside a response, its result, and when Muse recorded it.
+_Provided = tuple[AtifToolCall, AtifObservationResult, str | None]
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -142,6 +146,8 @@ class _Step:
     reasoning: list[str] = field(default_factory=list)
     calls: list[AtifToolCall] = field(default_factory=list)
     results: dict[str, AtifObservationResult] = field(default_factory=dict)
+    #: The provider's ID of the model response the step is.
+    response_id: str | None = None
     metrics: AtifMetrics | None = None
 
 
@@ -171,17 +177,21 @@ class _Conversation:
         owner: dict[str, _Step] = {}
         tool_tasks: dict[str, str] = {}
         failures: dict[str, str] = {}
-        awaiting: _Step | None = None
-        usage: AtifMetrics | None = None
-        # The response in progress, and the provider-run calls it made before its first commit.
+        # Each response's usage, by response ID.
+        usage: dict[str, AtifMetrics | None] = {}
+        # The response in progress, its step once it commits, and the provider-run calls it
+        # made before its first commit, with when Muse recorded each.
+        created: str | None = None
         current: _Step | None = None
-        provided: list[tuple[AtifToolCall, AtifObservationResult]] = []
+        provided: list[_Provided] = []
         for record in records:
             payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
             event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
             kind = event.get("kind")
             if record.get("payload_type") != "runtime.session":
                 continue
+            # Muse records microseconds since the epoch.
+            recorded = epoch_time(record.get("recorded_at"), 1_000_000)
             if payload.get("kind") == "task":
                 key = event.get("idempotency_key")
                 if (
@@ -197,7 +207,7 @@ class _Conversation:
                 continue
             if kind == "started":
                 if prompt := event.get("prompt"):
-                    steps.append(_Step("user", str(prompt), _timestamp(record)))
+                    steps.append(_Step("user", str(prompt), recorded))
             elif kind in {
                 "reasoning_summary_committed",
                 "reasoning_committed",
@@ -207,14 +217,15 @@ class _Conversation:
                 response = str(event.get("response_id") or event.get("message_id") or "")
                 step = responses.get(response)
                 if step is None:
-                    step = responses[response] = _Step("agent", timestamp=_timestamp(record))
+                    # A step takes the time of its response's first record.
+                    step = responses[response] = _Step(
+                        "agent",
+                        timestamp=provided[0][2] if provided else recorded,
+                        response_id=_string(event, "response_id"),
+                    )
                     steps.append(step)
-                    if usage is not None:
-                        step.metrics, usage = usage, None
-                    else:
-                        awaiting = step
                 current = step
-                for call, result in provided:
+                for call, result, _ in provided:
                     step.calls.append(call)
                     step.results[call.tool_call_id] = result
                 provided.clear()
@@ -231,26 +242,41 @@ class _Conversation:
             elif kind == "model_response_created":
                 # Calls of a response that committed nothing else stand on their own.
                 if provided:
-                    steps.append(_provided_step(provided))
+                    steps.append(_provided_step(provided, created))
                     provided = []
-                current = None
+                created, current = _string(event, "response_id"), None
             elif kind == "provider_tool_call_completed":
                 # A tool the provider ran inside the response, such as hosted web search.
                 call, result = _provided(event)
                 if current is None:
-                    provided.append((call, result))
+                    provided.append((call, result, recorded))
                 else:
                     current.calls.append(call)
                     current.results[call.tool_call_id] = result
-            elif kind == "model_completed":
-                # Muse commits a response's tool calls after its usage, so usage belongs
-                # to the response in progress, or else to the next one.
-                metrics = _metrics(event.get("usage"), totals)
-                if awaiting is not None and awaiting.metrics is None:
-                    awaiting.metrics = metrics
-                else:
-                    usage = metrics
-                awaiting = None
+            elif kind == "model_completed" and event.get("usage") is not None:
+                # The response in progress completed with this usage; Muse may commit its
+                # tool calls after it. Its input tokens include the cache reads and writes, as
+                # the Responses API counts them, and its output tokens the reasoning.
+                counts = event["usage"] if isinstance(event["usage"], dict) else {}
+                try:
+                    prompt = token_count(counts.get("input_tokens"))
+                    completion = token_count(counts.get("output_tokens"))
+                    cached = token_count(counts.get("cached_tokens"), optional=True)
+                except ValueError:
+                    self.issues.append(
+                        {
+                            "reason": "invalid_token_usage",
+                            "session_id": builder.session_id,
+                            "response_id": created,
+                        }
+                    )
+                    continue
+                if totals is not None:
+                    totals["input"] += prompt
+                    totals["output"] += completion
+                    totals["cached"] += cached
+                if created:
+                    usage.setdefault(created, call_metrics(prompt, completion, cached))
             elif kind == "tool_result_batch_committed":
                 for result in event.get("results") or ():
                     if not isinstance(result, dict):
@@ -267,32 +293,35 @@ class _Conversation:
                 call_id = str(event.get("call_id") or "")
                 holder = owner.get(call_id)
                 if holder is not None and call_id in holder.results:
-                    current = holder.results[call_id]
+                    shown = holder.results[call_id]
                     parts = (
-                        [AtifContentPart(type="text", text=current.content)]
-                        if isinstance(current.content, str)
-                        else list(current.content or ())
+                        [AtifContentPart(type="text", text=shown.content)]
+                        if isinstance(shown.content, str)
+                        else list(shown.content or ())
                     )
                     parts.extend(self._media(item) for item in event.get("content") or ())
-                    holder.results[call_id] = current.model_copy(update={"content": parts})
+                    holder.results[call_id] = shown.model_copy(update={"content": parts})
             elif kind == "inbox_item_drained":
                 # What Muse delivers to the model between turns, such as a subagent's result.
                 body = (event.get("delivery_snapshot") or {}).get("body")
                 if isinstance(body, str) and body:
-                    steps.append(_Step("system", body, _timestamp(record)))
+                    steps.append(_Step("system", body, recorded))
             elif kind == "terminal" and event.get("terminal") not in (None, "completed"):
                 reason = event.get("reason") or f"Muse run {event.get('terminal')}"
-                steps.append(_Step("system", str(reason), _timestamp(record)))
+                steps.append(_Step("system", str(reason), recorded))
         if provided:
-            steps.append(_provided_step(provided))
+            steps.append(_provided_step(provided, created))
+        for step in steps:
+            if step.response_id:
+                step.metrics = usage.pop(step.response_id, None)
         for call_id, reason in failures.items():
             holder = owner.get(call_id)
             if holder is None:
                 continue
-            current = holder.results.get(call_id) or AtifObservationResult(
+            failed = holder.results.get(call_id) or AtifObservationResult(
                 source_call_id=call_id, content=reason
             )
-            holder.results[call_id] = current.model_copy(
+            holder.results[call_id] = failed.model_copy(
                 update={"extra": {"orbit": {"is_error": True}}}
             )
         for step in steps:
@@ -424,6 +453,7 @@ def _emit(builder: TrajectoryBuilder, step: _Step) -> None:
         tool_calls=step.calls or None,
         observation=AtifObservation(results=results) if results else None,
         metrics=step.metrics,
+        extra={"orbit": {"native_event_ids": [step.response_id]}} if step.response_id else None,
     )
 
 
@@ -490,11 +520,15 @@ def _provided(event: dict[str, Any]) -> tuple[AtifToolCall, AtifObservationResul
     )
 
 
-def _provided_step(provided: list[tuple[AtifToolCall, AtifObservationResult]]) -> _Step:
+def _provided_step(provided: list[_Provided], response_id: str | None) -> _Step:
+    """The step of a response that committed only calls the provider ran: it takes the
+    time of the first."""
     return _Step(
         "agent",
-        calls=[call for call, _ in provided],
-        results={call.tool_call_id: result for call, result in provided},
+        timestamp=provided[0][2],
+        calls=[call for call, _, _ in provided],
+        results={call.tool_call_id: result for call, result, _ in provided},
+        response_id=response_id,
     )
 
 
@@ -528,35 +562,10 @@ def _prompt(record: dict[str, Any]) -> bool:
     return event.get("kind") == "started" and bool(event.get("prompt"))
 
 
-def _metrics(usage: Any, totals: dict[str, int] | None) -> AtifMetrics | None:
-    if not isinstance(usage, dict):
-        return None
-    counts = {
-        key: value if isinstance(value, int) and not isinstance(value, bool) else 0
-        for key, value in (
-            (key, usage.get(key)) for key in ("input_tokens", "output_tokens", "cached_tokens")
-        )
-    }
-    if totals is not None:
-        totals["input"] += counts["input_tokens"]
-        totals["output"] += counts["output_tokens"]
-        totals["cached"] += counts["cached_tokens"]
-    return AtifMetrics(
-        prompt_tokens=counts["input_tokens"],
-        completion_tokens=counts["output_tokens"],
-        cached_tokens=counts["cached_tokens"],
-    )
-
-
-def _timestamp(record: dict[str, Any]) -> str | None:
-    # Session logs record microseconds since the epoch.
-    value = record.get("recorded_at")
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        return None
-    try:
-        return datetime.fromtimestamp(value / 1_000_000, tz=UTC).isoformat()
-    except (OverflowError, OSError, ValueError):
-        return None
+def _string(event: dict[str, Any], key: str) -> str | None:
+    """A field that holds a non-empty string, such as an ID."""
+    value = event.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _terminal(events: list[dict[str, Any]]) -> dict[str, Any] | None:
