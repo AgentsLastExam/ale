@@ -551,7 +551,7 @@ def assistant(*content: dict[str, object], **fields: object) -> dict[str, object
         "id": "msg_a",
         "model": {"id": "scripted-model", "providerID": "orbit"},
         "content": list(content),
-        "time": {"created": 1795241923550},
+        "time": {"created": 1795241923550, "streamed": 1795241924550, "completed": 1795241924600},
         **fields,
     }
 
@@ -629,7 +629,7 @@ def test_an_export_converts_in_native_order(tmp_path: Path) -> None:
         ("agent", "Done."),
     ]
     step = trajectory.steps[1]
-    assert step.timestamp == "2026-11-21T06:18:43.550000+00:00"
+    assert step.timestamp == "2026-11-21T06:18:44.550000Z"
     assert step.model_name == "scripted-model" and step.reasoning_content == "plan"
     assert step.metrics is not None
     # OpenCode counts cached input and reasoning apart from input and output.
@@ -1028,3 +1028,70 @@ def test_servers_opencode_would_misname_or_rewrite_are_refused(
         OpenCodeHarness().validate_resources(
             EffectiveAgentResources(mcp_servers=servers, digest="sha256:" + "d" * 64)
         )
+
+
+def test_each_model_call_takes_the_time_its_response_streamed_and_its_usage(
+    tmp_path: Path,
+) -> None:
+    record(tmp_path, "Go.")
+    usage = {"input": 3, "output": 5, "reasoning": 2, "cache": {"read": 40, "write": 50}}
+    export(
+        tmp_path,
+        "20261121T000000000000Z",
+        {
+            "info": {"id": SESSION_ID},
+            "messages": [
+                user("Go."),
+                assistant(
+                    {"type": "text", "text": "Streamed."},
+                    tokens=usage,
+                    time={"created": 1_000, "streamed": 2_000, "completed": 3_000},
+                ),
+                # No tokens is no usage; a call cut off before it streamed ends with its failure.
+                assistant(
+                    {"type": "text", "text": "Cut off."},
+                    error={"type": "unknown", "message": "stream failed"},
+                    time={"created": 4_000, "completed": 5_000},
+                ),
+                # Cache and reasoning counts are optional; a negative time is none.
+                assistant(
+                    {"type": "text", "text": "No cache."},
+                    tokens={"input": 4, "output": 1},
+                    time={"created": 6_000, "streamed": -1},
+                ),
+                assistant(
+                    {"type": "text", "text": "Empty."},
+                    tokens={"input": 0, "output": 0},
+                    time={"created": 7_000},
+                ),
+                assistant(
+                    {"type": "text", "text": "Unreadable."},
+                    id="msg_bad",
+                    tokens={"input": 1},
+                    time={"created": 8_000},
+                ),
+            ],
+        },
+    )
+    trajectory = OpenCodeHarness().parse_trajectory(context(tmp_path))
+
+    steps = trajectory.steps
+    assert [(step.source, step.message, step.timestamp) for step in steps[1:]] == [
+        ("agent", "Streamed.", "1970-01-01T00:00:02.000000Z"),
+        ("agent", "Cut off.", "1970-01-01T00:00:05.000000Z"),
+        ("system", "stream failed; unknown", "1970-01-01T00:00:05.000000Z"),
+        ("agent", "No cache.", None),
+        ("agent", "Empty.", None),
+        ("agent", "Unreadable.", None),
+    ]
+    assert [
+        (step.metrics.prompt_tokens, step.metrics.cached_tokens, step.metrics.completion_tokens)
+        if step.metrics
+        else None
+        for step in steps[1:]
+    ] == [(93, 40, 7), None, None, (4, 0, 1), None, None]
+    # The session records no response ID, so no step names one.
+    assert all(step.extra is None for step in steps)
+    assert trajectory.extra == {
+        "orbit": {"parse_issues": [{"reason": "invalid_token_usage", "message_id": "msg_bad"}]}
+    }

@@ -46,15 +46,25 @@ and every session it spawned at any depth, to
 `.opencode-orbit/exports/<root session id>/<time>/<session id>.json`; it reads the time and
 each export's child sessions with the framework's Python. The parser reads the newest
 export, uses an invocation's JSON events only for a turn the export lacks, and adds an
-invocation's error to a turn whose session records no failure. A
-`subagent` call's metadata names the child session, whose export names its parent; the child becomes a
+invocation's error to a turn whose session records no failure. A `subagent` call's
+metadata names the child session, whose export names its parent; the child becomes a
 subagent trajectory embedded in its spawner's, any other session in the export gets an
 `unlinked_subagent` issue, and another root's exports are named in `parse_issues`. A
 synthetic message, such as the notice of a finished subagent, is a system step.
 
-OpenCode titles a new session with a model request of its own. When an invocation ends
-before that request completes, the Gateway records it as a failed call and the next
-invocation makes it again.
+Each assistant message is one model call. Its step takes the time the response finished
+streaming, `time.streamed`, since `time.created` is when OpenCode sent the request, before
+the model output anything; a call cut off before then, and its failure, take the time it
+ended. Its `tokens` are the step's metrics. OpenCode counts the cache and the reasoning
+apart, so `prompt_tokens` adds the cache reads and writes to `input` and
+`completion_tokens` adds `reasoning` to `output`; tokens that cannot be read are reported
+as `invalid_token_usage`. The export records no response ID, so steps are not linked to
+Gateway calls. A turn rebuilt from JSON events keeps each call's tokens but has no step
+times, since the events record no time a response finished streaming.
+
+OpenCode titles a new session with a model request of its own, which produces no step.
+When an invocation ends before that request completes, the Gateway records it as a failed
+call and the next invocation makes it again.
 
 MCP servers are written with `codemode: false`, so their tools are on the model's tool
 list as `<server>_<tool>`, with each name's characters outside `[A-Za-z0-9_-]` as `_`; the
