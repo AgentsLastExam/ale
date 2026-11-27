@@ -370,6 +370,57 @@ def test_a_job_removes_only_the_stores_of_jobs_that_ended(tmp_path, monkeypatch)
     assert worker.stale_stores(tmp_path) == [tmp_path / f"{worker.STORE_PREFIX}ended"]
 
 
+@pytest.mark.parametrize(
+    ("proxies", "flags"),
+    [
+        ({}, []),
+        ({"https_proxy": "http://proxy.site:3128", "NO_PROXY": "localhost,10.0.0.0/8"}, []),
+        ({"https_proxy": "proxy.site:3128", "HTTP_PROXY": "http://me:secret@proxy.site:3128"},
+         ["--http-proxy=false"]),
+        ({"ftp_proxy": "me@proxy.site:21"}, ["--http-proxy=false"]),
+    ],
+)  # fmt: skip
+def test_builds_get_the_nodes_proxy_only_without_credentials(monkeypatch, capsys, proxies, flags):
+    for name in worker.PROXIES:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    for name, value in proxies.items():
+        monkeypatch.setenv(name, value)
+    assert worker.build_proxy() == flags
+    notice = capsys.readouterr().err
+    assert ("credentials" in notice) == bool(flags) and "secret" not in notice
+
+
+def test_both_builds_of_a_preparation_keep_a_proxy_with_credentials_out(tmp_path, monkeypatch):
+    job = tmp_path / "job"
+    job.mkdir()
+    monkeypatch.chdir(job)
+    framework = {"body": [], "tail": [], "python": "/python", "context": "/context"}
+    (job / "recipe.json").write_text(json.dumps({"key": "k", "framework": framework}))
+    monkeypatch.setenv("SLURM_JOB_ID", "5")
+    monkeypatch.setenv("https_proxy", "http://me:secret@proxy.site:3128")
+    monkeypatch.setattr(worker, "store", lambda recipe: (str(tmp_path), ["podman"], tmp_path))
+    monkeypatch.setattr(worker, "hold_namespace", lambda *_: None)
+    monkeypatch.setattr(worker, "clean", lambda *_: None)
+    monkeypatch.setattr(worker, "output", lambda *_: "")
+    builds = []
+
+    def run(argv, **_):
+        if argv[1] == "build":
+            builds.append(argv)
+            Path(argv[argv.index("--iidfile") + 1]).write_text("sha256:" + "0" * 64)
+        return subprocess.CompletedProcess(argv, 0)
+
+    def save(argv, **_):
+        raise RuntimeError("saved")
+
+    monkeypatch.setattr(worker.subprocess, "run", run)
+    monkeypatch.setattr(worker.subprocess, "Popen", save)
+    with pytest.raises(RuntimeError, match="saved"):
+        worker.prepare()
+    assert [argv[2] for argv in builds] == ["--http-proxy=false", "--http-proxy=false"]
+
+
 def test_a_volume_candidate_is_a_directory_with_no_link_on_its_way(tmp_path):
     (tmp_path / "home/user/work").mkdir(parents=True)
     (tmp_path / "data").mkdir()

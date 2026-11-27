@@ -963,7 +963,9 @@ named image is pinned by the digest its registry gives it now, read over HTTP, a
 there; a Task's own build context, copied below the cache without `setup/`, is built there
 with Podman, whose Buildah 1.33 refuses what only BuildKit reads, such as a heredoc in
 `RUN`. A private registry's credentials are those `~/.docker/config.json` saves, which both
-the pin and Podman read, so for one the compute nodes share the account's home. The job adds
+the pin and Podman read, so for one the compute nodes share the account's home. A build's
+`RUN` steps, which run the Task's own programs, get the node's proxy only while no proxy
+variable holds credentials; Podman's own pulls use it either way. The job adds
 the framework layer for the account the Task's image declares, or `user` for an image a
 caller names by reference alone, as the conformance suite does. The layer of a Task one of
 whose Sandboxes spans several nodes copies the nodes' OpenSSH from its GHCR image, and so

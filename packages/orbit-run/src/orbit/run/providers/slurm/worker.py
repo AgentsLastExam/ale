@@ -44,6 +44,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit
 
 SANDBOXES = Path("sandboxes")
 #: Below the job's directory: each node's store and runtime, by the node's Slurm name.
@@ -83,6 +84,9 @@ COPY = (
 )
 #: How tar keeps an overlay layer's whiteouts and opaque directories, and its owners.
 TAR = ["tar", "--xattrs", "--xattrs-include=user.*", "--numeric-owner"]
+#: The proxies Podman gives a build's ``RUN`` steps from its own environment, in either case
+#: (``config.ProxyEnv`` of containers/common, less ``no_proxy``, which names no proxy).
+PROXIES = ("http_proxy", "https_proxy", "ftp_proxy")
 
 
 def output(*argv: str) -> str:
@@ -1001,6 +1005,25 @@ def clean(command: list[str], directory: str) -> None:
         raise
 
 
+def build_proxy() -> list[str]:
+    """What keeps the node's proxies out of a build's ``RUN`` steps, which run the Task's
+    and its image's own programs, where one of them holds credentials: Podman would hand
+    them over, and with them the site's password. Podman's own pulls still use them."""
+    for name in PROXIES:
+        for variable in (name, name.upper()):
+            value = os.environ.get(variable, "")
+            if urlsplit(value if "://" in value else "//" + value).username is not None:
+                print(
+                    f"{variable} holds credentials, so image builds get no proxy; registry "
+                    "pulls still use it, and a build that needs the network needs a proxy "
+                    "without credentials",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return ["--http-proxy=false"]
+    return []
+
+
 def prepare() -> None:
     """Pull a Task's image, or build it from its context, add the framework layer the recipe
     describes, and save the result below the cache under the recipe's key; record what was
@@ -1010,6 +1033,7 @@ def prepare() -> None:
     directory, command, node_local_dir = store(recipe)
     archive = Path.cwd().parent / IMAGES / f"{recipe['key']}.tar.gz"
     part = archive.with_name(f"{archive.name}.{os.environ['SLURM_JOB_ID']}.part")
+    proxy = build_proxy()
     step = "pull"
     try:
         hold_namespace(command, node_local_dir)
@@ -1027,8 +1051,8 @@ def prepare() -> None:
             # The context was copied without what the image must not hold; its own
             # .dockerignore still applies.
             subprocess.run(
-                [*command, "build", "-q", "--iidfile", "built", "--file", "context/Dockerfile",
-                 "context"],
+                [*command, "build", *proxy, "-q", "--iidfile", "built",
+                 "--file", "context/Dockerfile", "context"],
                 check=True,
                 stdout=subprocess.DEVNULL,
             )  # fmt: skip
@@ -1041,7 +1065,7 @@ def prepare() -> None:
         lines = [f"FROM {tag}", *framework["body"], *([f"USER {user}"] if user else [])]
         Path("Framework.Dockerfile").write_text("\n".join([*lines, *framework["tail"]]) + "\n")
         subprocess.run(
-            [*command, "build", "-q", "--iidfile", "framed",
+            [*command, "build", *proxy, "-q", "--iidfile", "framed",
              "--build-context", "python=" + framework["python"],
              "--file", "Framework.Dockerfile", framework["context"]],
             check=True,
