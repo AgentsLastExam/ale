@@ -95,10 +95,14 @@ BANNER = "Starting gVisor"
 #: through nvproxy on each of its GPUs, which ``runsc flags`` lists. A sandbox's annotation
 #: sets it for that sandbox alone.
 GPU_MEMORY_FLAG = "nvproxy-gpu-memory-limit"
-#: Every runsc process is charged to the container's memory, so an application's process,
-#: run in a stub, must be the one the OOM killer takes rather than the Sentry, which holds
-#: the whole sandbox; under rootless Docker the default ties them.
-FLAGS = ("--oom-score-adj", "500")
+#: ``--oom-score-adj``: every runsc process is charged to the container's memory, so an
+#: application's process, run in a stub, must be the one the OOM killer takes rather than the
+#: Sentry, which holds the whole sandbox; under rootless Docker the default ties them.
+#: ``--ipc=shareable``: Docker mounts ``/dev/shm`` as a tmpfs on the Host, which runsc reaches
+#: through its gofer, rather than keeping a private namespace's in the Sentry, through which
+#: a DataLoader passes about half as much (``docker/AGENTS.md``); semaphores in it work with
+#: patch 0015.
+FLAGS = ("--oom-score-adj", "500", "--ipc=shareable")
 #: Where the Sentry counts, in ``oom_kill``, the processes it ended to keep the sandbox
 #: below its cgroup's limit on the Host (patch 0009): the root of the cgroup v1 memory
 #: hierarchy a Docker container sees, which the Host's cgroup never learns of.

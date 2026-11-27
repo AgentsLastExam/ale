@@ -2438,8 +2438,10 @@ async def test_a_sandbox_is_granted_only_the_features_it_asked_for(
     assert run[run.index("--memory-swap") + 1] == memory
     # Half the Task's memory, not the Sentry's added to it, as a Linux VM of it has.
     assert run[run.index("--shm-size") + 1] == "256m"
-    # An application, not gVisor's Sentry, is what the OOM killer takes.
+    # An application, not gVisor's Sentry, is what the OOM killer takes, and gVisor's
+    # /dev/shm is a tmpfs on the Host, not the Sentry's.
     assert ("--oom-score-adj" in run) is (runtime == "gvisor")
+    assert ("--ipc=shareable" in run) is (runtime == "gvisor")
     created = _created(calls)
     host_ip = "172.18.0.1"
     if runtime == "runc":
