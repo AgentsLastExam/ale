@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
+import struct
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -15,6 +17,7 @@ from orbit.core.errors import AgentError, AgentUnsupportedError, ConfigError
 from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
 from orbit.core.taskspec import OperatingSystem, StreamableHttpMcpServer
 from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.core.trajectory import AtifMetrics
 from orbit.run import guestd
 from orbit.run.cli.tasks import PRESET_DIR, _harness
 from orbit.run.framework import MACOS_PYTHON
@@ -701,14 +704,160 @@ def test_a_step_output_its_record_lacks_is_kept_on_the_result(tmp_path: Path) ->
 
 
 def test_files_beside_a_converted_conversation_are_not_named(tmp_path: Path) -> None:
-    """agy's copies, task logs and database are not sessions, whatever they hold."""
+    """agy's copies and task logs are not sessions, whatever they hold."""
     context = _session(tmp_path)
     generated = _generated(context.logs_dir, ROOT)
     _write(generated / "logs/transcript.jsonl", _jsonl([{**RECORDS[5], "content": "Not this."}]))
     _write(generated / "tasks/task-1.log", "Timer fired.")
-    _write(context.logs_dir / f".gemini/antigravity-cli/conversations/{ROOT}.db", "steps")
 
     assert AntigravityCliHarness().parse_trajectory(context).extra is None
+
+
+def _proto(*fields: tuple[int, int | float | bytes]) -> bytes:
+    """A protobuf message: an int field as a varint, a float as 32 bits, bytes as such."""
+
+    def varint(value: int) -> bytes:
+        out = b""
+        while value >= 0x80:
+            out += bytes([value & 0x7F | 0x80])
+            value >>= 7
+        return out + bytes([value])
+
+    data = b""
+    for number, value in fields:
+        if isinstance(value, bytes):
+            data += varint(number << 3 | 2) + varint(len(value)) + value
+        elif isinstance(value, float):
+            data += varint(number << 3 | 5) + struct.pack("<f", value)
+        else:
+            data += varint(number << 3) + varint(value)
+    return data
+
+
+def _stored(nanos: int, response_id: str | None = None) -> bytes:
+    """A step's ``CortexStepMetadata`` as agy stores it, created at 2026-11-27T21:15:18 plus
+    ``nanos``, with the model call's response ID. Its source and cost, which the parser
+    skips, stand for the fields of other wire types around those it reads."""
+    created = _proto((1, 1_795_814_118), (2, nanos))
+    usage = _proto((7, response_id.encode())) if response_id else None
+    return _proto((1, created), (3, 2), (10, 0.5), *([(9, usage)] if usage else []))
+
+
+def _database(logs: Path, conversation: str, steps: dict[int, bytes | None]) -> None:
+    path = logs / f".gemini/antigravity-cli/conversations/{conversation}.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("create table steps (idx integer primary key, metadata blob)")
+        connection.executemany("insert into steps values (?, ?)", steps.items())
+    connection.close()
+
+
+def test_steps_take_their_database_times_and_each_call_its_usage_and_response(
+    tmp_path: Path,
+) -> None:
+    second = "2026-11-27T21:15:18Z"
+    context = _logs(
+        tmp_path,
+        [("Go.", _turn("Again."))],
+        {
+            ROOT: [
+                {**_user(0, "Go."), "created_at": second},
+                _planner(
+                    1,
+                    "Running.",
+                    ("run_command", {"CommandLine": "ls"}),
+                    created_at=second,
+                    input_tokens=6,
+                    cache_read_tokens=4,
+                    output_tokens=3,
+                ),
+                _result(2, "task.json"),
+                # A null cache count: none.
+                _planner(
+                    3,
+                    "Done.",
+                    created_at=second,
+                    input_tokens=2,
+                    cache_read_tokens=None,
+                    output_tokens=1,
+                ),
+                # Beyond the database, with a count that cannot be read or is missing.
+                _planner(4, "Again.", created_at=second, input_tokens=2, output_tokens="many"),
+                _planner(5, "Once more.", created_at=second, input_tokens=2),
+                # Usage that reports no tokens: none.
+                _planner(6, "Idle.", created_at=second, input_tokens=0, output_tokens=0),
+            ]
+        },
+    )
+    _database(
+        context.logs_dir,
+        ROOT,
+        {
+            0: _stored(100_000_000),
+            # Nanoseconds below a microsecond are dropped.
+            1: _stored(200_000_999, "resp-1"),
+            2: None,
+            # Its call recorded no response ID.
+            3: _stored(300_000_000),
+        },
+    )
+    trajectory = AntigravityCliHarness().parse_trajectory(context)
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", "2026-11-27T21:15:18.100000Z"),
+        ("agent", "2026-11-27T21:15:18.200000Z"),
+        ("agent", "2026-11-27T21:15:18.300000Z"),
+        *[("agent", second)] * 3,
+    ]
+    assert [step.metrics for step in trajectory.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=10, completion_tokens=3, cached_tokens=4),
+        AtifMetrics(prompt_tokens=2, completion_tokens=1, cached_tokens=0),
+        *[None] * 3,
+    ]
+    assert [step.extra for step in trajectory.steps] == [
+        None,
+        {"orbit": {"native_event_ids": ["resp-1"]}},
+        *[None] * 4,
+    ]
+    transcript = f"{BRAIN}/{ROOT}/.system_generated/logs/transcript_full.jsonl"
+    assert trajectory.extra == {
+        "orbit": {
+            "parse_issues": [
+                {"source": transcript, "reason": "invalid_token_usage", "step_index": index}
+                for index in (4, 5)
+            ]
+        }
+    }
+
+
+def test_an_unreadable_database_or_step_metadata_is_reported(tmp_path: Path) -> None:
+    context = _spawning(tmp_path)
+    database = ".gemini/antigravity-cli/conversations"
+    _write(context.logs_dir / f"{database}/{ROOT}.db", "not a database")
+    # A length that runs past the end of the data.
+    _database(context.logs_dir, CHILD, {1: b"\x0a\x05\x08"})
+
+    trajectory = AntigravityCliHarness().parse_trajectory(context)
+
+    assert all(step.timestamp is None and step.extra is None for step in trajectory.steps)
+    issues = trajectory.extra["orbit"]["parse_issues"]  # type: ignore[index]
+    assert [(issue["source"], issue["reason"]) for issue in issues] == [
+        (f"{database}/{ROOT}.db", "native_store_unreadable"),
+        (f"{database}/{CHILD}.db", "invalid_step_metadata"),
+    ]
+    assert issues[1]["step_index"] == 1
+
+
+def test_a_subagent_s_steps_take_its_own_database_times_and_responses(tmp_path: Path) -> None:
+    context = _spawning(tmp_path)
+    _database(context.logs_dir, CHILD, {1: _stored(5_000, "resp-child")})
+
+    (child,) = AntigravityCliHarness().parse_trajectory(context).subagent_trajectories or ()
+
+    (hi,) = [step for step in child.steps if step.message == "hi"]
+    assert hi.timestamp == "2026-11-27T21:15:18.000005Z"
+    assert hi.extra == {"orbit": {"native_event_ids": ["resp-child"]}}
 
 
 def test_parser_keeps_retries_and_the_stdout_failure(tmp_path: Path) -> None:
