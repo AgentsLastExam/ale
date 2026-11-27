@@ -194,7 +194,10 @@ def npm_tree(package: str, version: str, platform: Platform) -> Tree:
 
     def fill(into: Path) -> None:
         node = node_distribution(HOST_NODE, host_platform())
-        with tempfile.TemporaryDirectory(dir=into) as prefix:
+        with tempfile.TemporaryDirectory(dir=into) as made:
+            # npm names a lockfile's packages from the real directory, so a prefix reached
+            # through a symbolic link, as a cache on another disk is, names none of them.
+            prefix = os.path.realpath(made)
             argv = [
                 str(node / "bin" / "node"),
                 str(node / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"),
@@ -535,9 +538,11 @@ def _tree(lock: dict, package: str, platform: Platform) -> dict:
                 "into": path,
             }
         )
-    main = lock["packages"].get(f"node_modules/{package}", {})
-    declared = main.get("bin") or {}
-    return {"archives": archives, "bin": declared}
+    main = lock.get("packages", {}).get(f"node_modules/{package}")
+    if main is None:
+        # Kept in the Host cache, an empty tree would refuse every later install.
+        raise AgentError(f"npm's lockfile for {package} does not name it")
+    return {"archives": archives, "bin": main.get("bin") or {}}
 
 
 def _supports(entry: dict, platform: Platform) -> bool:

@@ -11,6 +11,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -323,6 +324,62 @@ def test_npm_resolves_a_javascript_tree_for_the_sandbox_without_fetching_or_runn
     _install.npm_tree("tool", "1.0.0", Platform(OperatingSystem.MACOS, "aarch64"))
     assert {"--os=darwin", "--cpu=arm64"} <= set(calls[-1])
     assert not any(flag.startswith("--libc") for flag in calls[-1])
+
+
+def _lock_naming(prefix: str, entries: dict[str, dict]) -> dict:
+    """A lockfile as npm writes it under ``prefix``: each package named from the real
+    directory, which a path through a symbolic link is not."""
+    real = os.path.realpath(prefix)
+    return {
+        "packages": {
+            "": {},
+            **{
+                os.path.relpath(os.path.join(real, path), prefix): entry
+                for path, entry in entries.items()
+            },
+        }
+    }
+
+
+def test_npm_resolves_a_tree_in_a_cache_reached_through_a_symbolic_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "disk").mkdir()
+    (tmp_path / "linked").symlink_to(tmp_path / "disk")
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "linked" / "cache"))
+    monkeypatch.setattr(_install, "node_distribution", lambda version, platform: tmp_path)
+    digest = "sha512-" + base64.b64encode(hashlib.sha512(b"tool").digest()).decode()
+    entry = {"bin": {"tool": "./cli.js"}, "resolved": "https://registry.test/tool.tgz"}
+
+    def npm(argv, **kwargs):  # type: ignore[no-untyped-def]
+        prefix = argv[argv.index("--prefix") + 1]
+        lock = _lock_naming(prefix, {"node_modules/tool": {**entry, "integrity": digest}})
+        Path(prefix, "package-lock.json").write_text(json.dumps(lock))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(_install.subprocess, "run", npm)
+    tree = _install.npm_tree("tool", "1.0.0", LINUX)
+    assert tree.bin == {"tool": "./cli.js"}
+    assert [archive.into for archive in tree.archives] == ["node_modules/tool"]
+
+
+def test_a_lockfile_without_the_package_fails_and_is_not_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_install, "node_distribution", lambda version, platform: tmp_path)
+    calls = []
+
+    def npm(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(argv)
+        prefix = Path(argv[argv.index("--prefix") + 1])
+        (prefix / "package-lock.json").write_text(json.dumps({"packages": {"": {}}}))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(_install.subprocess, "run", npm)
+    for _ in range(2):
+        with pytest.raises(AgentError, match="lockfile for tool does not name it"):
+            _install.npm_tree("tool", "1.0.0", LINUX)
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize(
