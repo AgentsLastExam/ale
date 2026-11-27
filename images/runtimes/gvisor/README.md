@@ -220,10 +220,11 @@ Docker's default swap allowance, before patch 0009:
 
 Rootless Docker's default ties the stubs with the Sentry, and when the OOM killer takes the
 Sentry the sandbox ends, so a gVisor container needs `--oom-score-adj` above the inherited
-value; Orbit passes 500. `runsc` cannot hold the Sentry lower instead: an unprivileged
-process cannot go below its `oom_score_adj_min`, the value its user's systemd manager was
-started with (`OOMScoreAdjust` of `user@.service`: 100 in systemd 259, unset and so 0 in
-systemd 249).
+value; Orbit's Docker Provider passes 500, and its cluster Provider none
+([Cluster](../../../packages/orbit-run/src/orbit/run/providers/cluster/AGENTS.md)). `runsc`
+cannot hold the Sentry lower instead: an unprivileged process cannot go below its
+`oom_score_adj_min`, the value its user's systemd manager was started with (`OOMScoreAdjust`
+of `user@.service`: 100 in systemd 259, unset and so 0 in systemd 249).
 
 ## GPU memory limit
 

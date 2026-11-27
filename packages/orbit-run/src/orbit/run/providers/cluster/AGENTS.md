@@ -155,7 +155,19 @@ In a 2048 MiB Sandbox, 1024 MiB were written before a write failed with `ENOSPC`
 `/dev/shm` full, one process allocating held 568 MiB and was killed alone, and the Sandbox
 answered after it; 400 processes of 16 MiB ended the whole Sandbox as `MemoryExhaustedError`
 (the Sentry counted 63 to 67 kills, then the step exited 137) with `/dev/shm` full or empty,
-under either flag.
+under `--shm-size` and `--tmpfs` alike.
+
+Decided: a Sandbox's processes keep the `oom_score_adj` they inherit, 0, rather than the 500
+Docker gives its gVisor containers (`gvisor.FLAGS`). With 500, every process's stub ranked
+above the Sentry, which stays at 0, for the Host's OOM killer, and killing a stub frees
+nothing, as the memory is the Sentry's. Measured on OpenRSI with the 400 processes of 16 MiB
+above and the Sandbox left alone for 20 s after its loss: with 500, its Sentry stopped
+answering in 12 of 21 runs, its threads all asleep and its log silent, while the Host's OOM
+killer went on taking stubs at the step's limit, so Podman's removal waited without end and
+the job held its node; with 0, the Host's OOM killer took the Sentry, the largest process,
+and the Sandbox ended as `MemoryExhaustedError` and was removed, in 10 of 10. One process
+past the memory still dies alone, to the Sentry's own OOM killer. Docker's gVisor Sandboxes
+left alone the same way all lived (6 of 6, rootful Docker), so Docker keeps 500.
 
 Podman uses NVIDIA CDI devices by UUID. Setting NVIDIA_VISIBLE_DEVICES to void disables
 the duplicate NVIDIA hook. Register the injected libraries inside the sandbox. For nested
