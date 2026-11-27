@@ -1097,7 +1097,11 @@ async def test_a_shared_sandbox_records_its_reservation_and_is_watched_while_a_r
     async def written(container: str) -> int:
         return 0
 
+    async def layers(container: str) -> int:
+        return 3
+
     monkeypatch.setattr("orbit.run.providers.docker.provider.storage.written", written)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._layers", layers)
     await snapshotted.snapshot(roles=("solver",), reason="kept")
     await destroyed.destroy()
     assert provider._watchdog._watched == {}

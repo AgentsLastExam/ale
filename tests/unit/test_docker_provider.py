@@ -61,9 +61,11 @@ from orbit.run.providers.docker import (
 from orbit.run.providers.docker.provider import (
     GATEWAY_CHAIN,
     HOST_ALIAS,
+    MAX_LAYER_DEPTH,
     RUNTIMES,
     DockerProvider,
     DockerSandbox,
+    _config_changes,
     _GvisorConfinement,
     _KataConfinement,
     _Networks,
@@ -260,11 +262,15 @@ def _scripted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
 WRITTEN = 3 << 20
 
 
-def _measured_at_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+def _measured_at_commit(monkeypatch: pytest.MonkeyPatch, *, layers: int = 3) -> None:
     async def written(container: str) -> int:
         return WRITTEN
 
+    async def stacked(container: str) -> int:
+        return layers
+
     monkeypatch.setattr("orbit.run.providers.docker.provider.storage.written", written)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._layers", stacked)
 
 
 def _created(calls: list[tuple[str, ...]]) -> list[tuple[str, IPv4Network, str, bool]]:
@@ -2660,37 +2666,73 @@ async def test_a_kata_sandbox_that_stopped_ends_its_sessions(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("status", "refused"),
-    [
-        ('[["Backing Filesystem","extfs"]]', True),
-        ('[["driver-type","io.containerd.snapshotter.v1"]]', False),
-    ],
-)
-async def test_a_sandbox_that_would_save_past_the_layer_stores_limit_is_refused_up_front(
-    monkeypatch: pytest.MonkeyPatch, status: str, refused: bool
+async def test_a_commit_that_would_pass_the_layer_stores_limit_is_flattened(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each commit stacks one more layer: Docker's layer store chains 125 at most, under any
-    graph driver, so a Sandbox whose image and planned saves exceed that never starts; the
-    containerd store's snapshotter stacks far more."""
-    layers = "120\n"
+    """Each commit stacks one more layer, and Docker's layer store chains 125 at most: a
+    snapshot whose commit, with the writable layer of a Sandbox booted from it, would pass
+    that is flattened to one layer with the same labels, so a chain never ends there."""
+    calls = _scripted(monkeypatch)
+    _measured_at_commit(monkeypatch, layers=MAX_LAYER_DEPTH - 1)
+    flattened: list[tuple[str, str, list[str]]] = []
 
-    async def docker(*argv: str, **_: object) -> tuple[int, str, str]:
-        if argv[:3] == ("info", "--format", "{{json .DriverStatus}}"):
-            return 0, f"{status}\n", ""
-        if argv[:2] == ("image", "inspect"):
-            return 0, layers, ""
-        raise AssertionError(argv)
+    async def flatten(container: str, tag: str, changes: list[str]) -> None:
+        flattened.append((container, tag, list(changes)))
 
-    monkeypatch.setattr("orbit.run.providers.docker.provider._docker", docker)
-    provider = DockerProvider()
-    if refused:
-        with pytest.raises(ProviderCapabilityError, match="more than the 125"):
-            await provider._refuse_deep_stacks("image@sha256:abc", 6)
-    else:
-        await provider._refuse_deep_stacks("image@sha256:abc", 6)
-    await provider._refuse_deep_stacks("image@sha256:abc", 5)
-    layers = "<no value>\n"
-    if refused:
-        with pytest.raises(ProviderStartError, match="could not count the layers"):
-            await provider._refuse_deep_stacks("image@sha256:abc", 1)
+    monkeypatch.setattr("orbit.run.providers.docker.provider._flatten", flatten)
+    retained = await _sandbox().snapshot(roles=("solver",), reason="kept")
+    assert calls == [("stop", "--time", "30", "orbit-e1-abcdef")]
+    assert flattened == [
+        (
+            "orbit-e1-abcdef",
+            "orbit-snapshot:e1-abcdef",
+            [
+                "LABEL orbit.retention=snapshot",
+                'LABEL orbit.gpus=""',
+                'LABEL orbit.gpu_memory_mb=""',
+                f"LABEL orbit.prepared={DIGEST}",
+                f"LABEL orbit.written={WRITTEN}",
+            ],
+        )
+    ]
+    assert retained.handle == "docker:snapshot:e1-abcdef"
+
+
+def test_a_flattened_image_keeps_the_configuration_a_commit_would() -> None:
+    """Its environment, command, account, directory, ports, volumes, labels, stop signal and
+    health check, with no variable in a value expanding."""
+    changes = _config_changes(
+        {
+            "Env": ["PATH=/usr/bin:/bin", 'QUOTED=a "b" $HOME \\c', "EMPTY="],
+            "Entrypoint": ["/bin/sh", "-c"],
+            "Cmd": ["sleep infinity"],
+            "User": "root",
+            "WorkingDir": "/home/user",
+            "ExposedPorts": {"6901/tcp": {}, "5901/tcp": {}},
+            "Volumes": {"/data": {}},
+            "Labels": {"orbit.role": "solver", "odd key": "v=1"},
+            "StopSignal": "SIGRTMIN+3",
+            "Healthcheck": {
+                "Test": ["CMD-SHELL", "true"],
+                "Interval": 5_000_000_000,
+                "Retries": 3,
+            },
+        }
+    )
+    assert changes == [
+        'ENV PATH="/usr/bin:/bin"',
+        'ENV QUOTED="a \\"b\\" \\$HOME \\\\c"',
+        'ENV EMPTY=""',
+        'ENTRYPOINT ["/bin/sh", "-c"]',
+        'CMD ["sleep infinity"]',
+        "USER root",
+        "WORKDIR /home/user",
+        "EXPOSE 5901/tcp",
+        "EXPOSE 6901/tcp",
+        'VOLUME ["/data"]',
+        'LABEL "odd key"="v=1"',
+        'LABEL "orbit.role"="solver"',
+        "STOPSIGNAL SIGRTMIN+3",
+        "HEALTHCHECK --interval=5000ms --retries=3 CMD true",
+    ]
+    assert _config_changes({"Healthcheck": {"Test": ["NONE"]}}) == ["HEALTHCHECK NONE"]
