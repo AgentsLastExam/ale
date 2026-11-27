@@ -23,12 +23,15 @@ from orbit.core.trajectory import (
 )
 from orbit.run.harnesses.base import (
     NativeResult,
+    epoch_time,
     invocations,
+    iso_time,
     json_lines,
     mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -58,7 +61,8 @@ def read_result(stdout: str) -> NativeResult:
     if completion is not None:
         final = completion.get("finalText")
         return NativeResult(session_id, final if isinstance(final, str) and final else None)
-    return NativeResult(session_id, None, _stream_error(events))
+    error = _stream_error(events)
+    return NativeResult(session_id, None, _error_text(error) if error else None)
 
 
 def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
@@ -98,26 +102,28 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if index < len(turns):
             reported = _native_steps(builder, turns[index], item.prompt, context)
             if not reported and (error := _stream_error(stream)):
-                builder.add(source="system", message=error)
+                _add_error(builder, error)
         else:
             # The session lacks this invocation; its own stream-json is the record.
-            builder.add(source="user", message=item.prompt)
-            _stream_steps(builder, stream, context)
+            _stream_steps(builder, stream, item.prompt, context)
     if not recorded:
         builder.add(source="user", message=context.instruction)
     if not any(step.source == "agent" for step in builder.steps) and context.final_message:
         builder.add(source="agent", message=context.final_message)
-    usage = [
-        event["usage"]
-        for stream in streams
-        for event in stream
-        if event.get("type") == "completion" and isinstance(event.get("usage"), dict)
-    ]
+    usage: list[tuple[int, int, int]] = []
+    for index, stream in enumerate(streams, 1):
+        for event in stream:
+            if event.get("type") != "completion" or event.get("usage") is None:
+                continue
+            try:
+                usage.append(_invocation_usage(event["usage"]))
+            except ValueError:
+                issues.append({"reason": "invalid_token_usage", "invocation": index})
     final_metrics = (
         AtifFinalMetrics(
-            total_prompt_tokens=sum(_count(item, "input_tokens") for item in usage),
-            total_completion_tokens=sum(_count(item, "output_tokens") for item in usage),
-            total_cached_tokens=sum(_count(item, "cache_read_input_tokens") for item in usage),
+            total_prompt_tokens=sum(prompt for prompt, _, _ in usage),
+            total_completion_tokens=sum(completion for _, completion, _ in usage),
+            total_cached_tokens=sum(cached for _, _, cached in usage),
             total_steps=len(builder.steps),
         )
         if usage
@@ -197,7 +203,7 @@ def _native_steps(
             continue
         message = event["message"]
         role = message.get("role")
-        timestamp = event.get("timestamp") if isinstance(event.get("timestamp"), str) else None
+        timestamp = iso_time(event.get("timestamp"))
         extra = {"orbit": {"native_event_ids": [str(event.get("id"))]}} if event.get("id") else None
         if role == "user" and message.get("visibility") == "user_only":
             # A notice Droid shows its user, such as an unreachable provider.
@@ -275,8 +281,24 @@ def _text(message: dict[str, Any]) -> str:
 
 
 def _stream_steps(
-    builder: TrajectoryBuilder, stream: list[dict[str, Any]], context: TrajectoryParseContext
+    builder: TrajectoryBuilder,
+    stream: list[dict[str, Any]],
+    prompt: str,
+    context: TrajectoryParseContext,
 ) -> None:
+    """Add one invocation from its stream-json, prompted by ``prompt``; each step takes the
+    time of the event it starts with, which stream-json gives in Unix milliseconds."""
+    prompted = next(
+        (
+            event
+            for event in stream
+            if event.get("type") == "message" and event.get("role") == "user"
+        ),
+        {},
+    )
+    builder.add(
+        source="user", message=prompt, timestamp=epoch_time(prompted.get("timestamp"), 1000)
+    )
     results = {
         str(event.get("id") or ""): AtifObservationResult(
             source_call_id=str(event.get("id") or ""),
@@ -291,6 +313,7 @@ def _stream_steps(
     }
     pending: list[AtifToolCall] = []
     pending_message: object = None
+    pending_time: str | None = None
 
     def flush() -> None:
         nonlocal pending
@@ -301,6 +324,7 @@ def _stream_steps(
             builder.add(
                 source="agent",
                 message="",
+                timestamp=pending_time,
                 tool_calls=pending,
                 observation=AtifObservation(results=observed) if observed else None,
             )
@@ -311,7 +335,10 @@ def _stream_steps(
         if kind == "tool_call":
             if event.get("messageId") != pending_message:
                 flush()
-                pending_message = event.get("messageId")
+                pending_message, pending_time = (
+                    event.get("messageId"),
+                    epoch_time(event.get("timestamp"), 1000),
+                )
             name = str(event.get("toolName") or event.get("toolId") or "")
             pending.append(
                 AtifToolCall(
@@ -323,22 +350,34 @@ def _stream_steps(
             )
         elif kind == "message" and event.get("role") == "assistant":
             flush()
-            builder.add(source="agent", message=str(event.get("text") or ""))
+            builder.add(
+                source="agent",
+                message=str(event.get("text") or ""),
+                timestamp=epoch_time(event.get("timestamp"), 1000),
+            )
     flush()
     if error := _stream_error(stream):
-        builder.add(source="system", message=error)
+        _add_error(builder, error)
 
 
-def _stream_error(events: list[dict[str, Any]]) -> str | None:
-    """The invocation's failure, unless it completed despite recovered errors."""
+def _add_error(builder: TrajectoryBuilder, error: dict[str, Any]) -> None:
+    builder.add(
+        source="system",
+        message=_error_text(error),
+        timestamp=epoch_time(error.get("timestamp"), 1000),
+    )
+
+
+def _stream_error(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The event reporting the invocation's failure, unless it completed despite recovered
+    errors."""
     if any(event.get("type") == "completion" for event in events):
         return None
-    errors = [
-        str(event.get("message") or "native error")
-        for event in events
-        if event.get("type") == "error"
-    ]
-    return errors[-1] if errors else None
+    return next((event for event in reversed(events) if event.get("type") == "error"), None)
+
+
+def _error_text(error: dict[str, Any]) -> str:
+    return str(error.get("message") or "native error")
 
 
 # --- shared ---
@@ -393,9 +432,19 @@ def _mcp_extra(name: str) -> dict[str, Any] | None:
     return {"orbit": {"mcp": {"server": server, "tool": tool}}}
 
 
-def _count(usage: dict[str, Any], key: str) -> int:
-    value = usage.get(key)
-    return value if isinstance(value, int) else 0
+def _invocation_usage(usage: object) -> tuple[int, int, int]:
+    """Stream-json's usage of a whole invocation as prompt, completion and cache-read
+    tokens: ``input_tokens`` leave out the cache reads and writes, ``output_tokens``
+    include the thinking."""
+    if not isinstance(usage, dict):
+        raise ValueError(f"not a usage: {usage!r}")
+    read = token_count(usage.get("cache_read_input_tokens"), optional=True)
+    prompt = (
+        token_count(usage.get("input_tokens"))
+        + token_count(usage.get("cache_creation_input_tokens"), optional=True)
+        + read
+    )
+    return prompt, token_count(usage.get("output_tokens")), read
 
 
 def _extra(
