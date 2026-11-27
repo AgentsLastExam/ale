@@ -534,6 +534,11 @@ fails as on a full disk, and a process past what is left is killed alone.
 | `qemu`, Windows; `orchard` | none: Windows and macOS have no `/dev/shm` |
 | `fleet` | as on its Node's leaf |
 
+A POSIX semaphore one process creates in it and another opens by name, as Python's
+multiprocessing does in its spawn context, wakes either from the other on every Provider,
+which the conformance suite checks; through gVisor's gofer, it does only with Orbit's patch
+0015 ([gVisor](../../../../../../images/runtimes/gvisor/README.md)).
+
 No Sandbox swaps to the Host. Every Docker leaf starts a Sandbox with `--memory-swap` equal
 to `--memory`, under every runtime. Docker's default, twice `--memory`, let one process of a
 512 MiB runc Sandbox hold 1008 MiB on a Host with 8 GiB of swap, and 504 MiB in another run

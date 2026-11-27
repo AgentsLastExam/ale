@@ -315,7 +315,9 @@ Sandbox lost to either ends its Episode
 `memory_mb`, so that a Task gets the same memory on every Host; a guest system that pages to
 its own disk, as Windows and macOS do, keeps its paging. A Linux Sandbox's `/dev/shm` holds
 half its `memory_mb`, as on a Linux machine of that memory, so that processes that share
-memory through it, such as PyTorch's DataLoader workers, get the same room on every Provider
+memory through it, such as PyTorch's DataLoader workers, get the same room on every
+Provider, and a semaphore one process creates there and another opens by name is one
+semaphore, as Python's multiprocessing needs
 ([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#memory)).
 
 ### GPUs

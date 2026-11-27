@@ -110,6 +110,29 @@ else:
     print("wrote", written)
 """
 
+#: Python's multiprocessing in its spawn context, as vLLM and SGLang start their processes:
+#: the child opens by name the semaphores the parent created, and each wakes the other once.
+#: Prints whether the parent was woken and the child's exit code, 0 once the child was woken
+#: too.
+_SEMAPHORES = """
+import multiprocessing, sys, time
+
+def child(ready, go):
+    ready.release()
+    sys.exit(0 if go.acquire(timeout=30) else 1)
+
+if __name__ == "__main__":
+    context = multiprocessing.get_context("spawn")
+    ready, go = context.Semaphore(0), context.Semaphore(0)
+    process = context.Process(target=child, args=(ready, go))
+    process.start()
+    woken = ready.acquire(timeout=30)
+    time.sleep(1)
+    go.release()
+    process.join(60)
+    print(woken, process.exitcode)
+"""
+
 #: Reports, per ``kind=address`` argument, whether the sandbox reached it: ``http`` gets an
 #: answer, ``tls`` completes a handshake (verified against the address), ``tcp`` connects.
 _REACH = """
@@ -909,6 +932,20 @@ class ProviderConformance:
             )
             assert not allocated.ok and not allocated.timed_out
             assert (await sandbox.exec(["true"])).ok
+
+    @pytest.mark.asyncio
+    async def test_processes_share_semaphores_by_name(self) -> None:
+        """A semaphore one of the agent's processes creates and another opens by name, as
+        Python's multiprocessing does in its spawn context for its locks, events and queues,
+        is one semaphore: a release in either ends a wait in the other."""
+        async with await self.provider.create(await self.request()) as sandbox:
+            script = str(PurePosixPath(sandbox.agent_home) / "semaphores.py")
+            await sandbox.write_file(script, _SEMAPHORES.encode(), identity=Identity.AGENT)
+            result = await sandbox.exec(
+                ["python3", script], identity=Identity.AGENT, timeout_sec=120
+            )
+            assert result.ok, result.stderr
+            assert result.stdout.split() == ["True", "0"], result.stdout
 
     @pytest.mark.asyncio
     async def test_destroy_is_idempotent(self) -> None:

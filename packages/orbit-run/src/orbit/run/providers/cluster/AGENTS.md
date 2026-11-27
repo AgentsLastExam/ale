@@ -131,18 +131,25 @@ its worker starts, or, once it runs, by a control command on each node.
 
 A Sandbox's `/dev/shm` is Podman's `--shm-size` of half its Task's memory
 ([`memory.shm_mb`](../memory.py)). Podman makes it a tmpfs on the node and binds it into the
-container, so runsc reaches it through its gofer (`9p`), where it mounts Docker's as a tmpfs
-of the Sentry; its pages are charged to the step's cgroup all the same. A `--tmpfs` at
-`/dev/shm`, which replaces Podman's with a tmpfs of the Sentry as under Docker, was slower.
-Measured on OpenRSI (Podman 4.9.3, Orbit's runsc 0.1.4, November 2026), with PyTorch's
-DataLoader of 8 workers and batches of 64 images of 3×224×224 float32 on one H100, in a
-Sandbox of 16 CPUs and 16 GiB, three passes each, in both orders:
+container, so runsc reaches it through its gofer (`9p`), as it does Docker's under
+`docker:gvisor`; its pages are charged to the step's cgroup all the same. A POSIX semaphore
+there works between processes only with Orbit's gVisor patch 0015: without it, a process
+that opened one by name, as Python's multiprocessing does in its spawn context, never woke
+the process that created it, nor was woken by it, and in a Task that serves a model with
+SGLang-Omni the server never became ready. A `--tmpfs` at `/dev/shm`, which replaces
+Podman's with a tmpfs of the Sentry and needs no patch, passes less than half as many
+samples. Measured on OpenRSI (Podman 4.9.3, Orbit's runsc 0.1.0 with and without patch 0015,
+gVisor release-20261116.0, November 2026), with PyTorch's DataLoader of 8 workers passing
+batches of 64 images of 3×224×224 float32 to the main process, which copies each to one
+H100, in a Sandbox of 16 CPUs with 8 GiB of `/dev/shm`, three passes of forked workers and
+one of spawned ones each, in both orders:
 
-| `/dev/shm` | Samples per second |
-|---|---|
-| 64 MiB | none: a bus error in a worker at the first batch |
-| `--shm-size`, 8 GiB over `9p` | 1795, 2170, 2155; 1720, 2152, 2152 |
-| `--tmpfs`, 8 GiB in the Sentry | 1231, 1507, 1494; 1232, 1497, 1497 |
+| `/dev/shm` | Samples per second, forked | Spawned |
+|---|---|---|
+| 64 MiB | none: a bus error in a worker at the first batch | none |
+| `--shm-size` over `9p`, patch 0015 | 4680, 4709, 5260; 4622, 4930, 4739 | 3793; 4103 |
+| `--shm-size` over `9p`, without it | 4608, 4685, 4809; 4677, 4946, 4781 | 4079; 4174 |
+| `--tmpfs` in the Sentry | 2158, 2117, 2203; 2218, 2082, 1924 | 1944; 1998 |
 
 In a 2048 MiB Sandbox, 1024 MiB were written before a write failed with `ENOSPC`; with
 `/dev/shm` full, one process allocating held 568 MiB and was killed alone, and the Sandbox
