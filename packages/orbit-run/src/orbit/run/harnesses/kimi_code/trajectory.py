@@ -7,7 +7,6 @@ import binascii
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -28,12 +27,15 @@ from orbit.core.trajectory import (
 from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     NativeResult,
+    call_metrics,
+    epoch_time,
     invocations,
     json_lines,
     mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -150,6 +152,8 @@ class _Step:
     calls: list[AtifToolCall] = field(default_factory=list)
     results: dict[str, AtifObservationResult] = field(default_factory=dict)
     metrics: AtifMetrics | None = None
+    #: The provider's response ID for the model call.
+    response_id: str | None = None
 
 
 @dataclass
@@ -170,7 +174,12 @@ class _Conversation:
         root: bool,
         totals: dict[str, int] | None = None,
     ) -> list[AtifTrajectory]:
-        """Add one agent's conversation to ``builder``; return the subagents it spawned."""
+        """Add one agent's conversation to ``builder``; return the subagents it spawned.
+
+        Each native step is one model call. Kimi records the response's parts and calls
+        once it has streamed, and the call's usage and response ID when the step ends,
+        after the calls' results; the step takes the time of its first part or call.
+        """
         embedded, refs = self._children(builder.trajectory_id, agent_id, events)
         steps: list[_Step] = []
         owner: dict[str, _Step] = {}
@@ -188,22 +197,24 @@ class _Conversation:
                     _Step(
                         source,
                         message=self._content(agent_id, event.get("input")),
-                        timestamp=_timestamp(event),
+                        timestamp=epoch_time(event.get("time"), 1000),
                     )
                 )
             elif kind == "context.append_loop_event":
                 loop = event.get("event") or {}
                 loop_kind = loop.get("type")
                 if loop_kind == "step.begin":
-                    current = _Step("agent", timestamp=_timestamp(event))
+                    current = _Step("agent")
                     steps.append(current)
                 elif loop_kind == "content.part" and current is not None:
+                    current.timestamp = current.timestamp or epoch_time(event.get("time"), 1000)
                     part = loop.get("part") or {}
                     if part.get("type") == "text":
                         current.text.append(str(part.get("text") or ""))
                     elif part.get("type") == "think":
                         current.reasoning.append(str(part.get("think") or ""))
                 elif loop_kind == "tool.call" and current is not None:
+                    current.timestamp = current.timestamp or epoch_time(event.get("time"), 1000)
                     call_id = str(loop.get("toolCallId") or "")
                     name = str(loop.get("name") or "")
                     current.calls.append(
@@ -231,7 +242,25 @@ class _Conversation:
                         extra={"orbit": {"is_error": True}} if result.get("isError") else None,
                     )
                 elif loop_kind == "step.end" and current is not None:
-                    current.metrics = _metrics(loop.get("usage"), totals)
+                    # A step that failed or was interrupted records no usage or response ID.
+                    if loop.get("usage") is not None:
+                        try:
+                            current.metrics = _metrics(loop["usage"])
+                        except ValueError:
+                            self.issues.append(
+                                {
+                                    "reason": "invalid_token_usage",
+                                    "agent_id": agent_id,
+                                    "step": loop.get("uuid"),
+                                }
+                            )
+                    if totals is not None and current.metrics is not None:
+                        totals["input"] += current.metrics.prompt_tokens or 0
+                        totals["output"] += current.metrics.completion_tokens or 0
+                        totals["cached"] += current.metrics.cached_tokens or 0
+                    response_id = loop.get("messageId")
+                    if isinstance(response_id, str) and response_id:
+                        current.response_id = response_id
                     current = None
             elif kind == "turn.ended" and event.get("reason") != "completed":
                 current = None
@@ -240,7 +269,7 @@ class _Conversation:
                     _Step(
                         "system",
                         message=error or f"turn ended: {event.get('reason') or 'unknown'}",
-                        timestamp=_timestamp(event),
+                        timestamp=epoch_time(event.get("time"), 1000),
                     )
                 )
             elif kind == "context.apply_compaction":
@@ -254,7 +283,7 @@ class _Conversation:
                             if isinstance(summary, str) and summary
                             else "Context compacted."
                         ),
-                        timestamp=_timestamp(event),
+                        timestamp=epoch_time(event.get("time"), 1000),
                     )
                 )
         for step in steps:
@@ -388,6 +417,7 @@ def _emit(builder: TrajectoryBuilder, step: _Step) -> None:
         tool_calls=step.calls or None,
         observation=AtifObservation(results=results) if results else None,
         metrics=step.metrics,
+        extra={"orbit": {"native_event_ids": [step.response_id]}} if step.response_id else None,
     )
 
 
@@ -404,43 +434,24 @@ def _is_user_prompt(event: dict[str, Any], agent_id: str) -> bool:
     )
 
 
-def _metrics(usage: Any, totals: dict[str, int] | None) -> AtifMetrics | None:
+def _metrics(usage: Any) -> AtifMetrics | None:
+    """A step's ``usage``; raises ``ValueError`` when it cannot be read.
+
+    ``inputOther`` leaves out the cache reads and writes, which the prompt adds back, and
+    ``output`` already includes reasoning.
+    """
     if not isinstance(usage, dict):
-        return None
-    counts = {
-        key: value if isinstance(value, int) else 0
-        for key, value in (
-            (key, usage.get(key))
-            for key in ("inputOther", "inputCacheRead", "inputCacheCreation", "output")
-        )
-    }
-    # Input includes prompt-cache reads and writes, as the Gateway accounts it.
-    prompt = counts["inputOther"] + counts["inputCacheRead"] + counts["inputCacheCreation"]
-    if totals is not None:
-        totals["input"] += prompt
-        totals["output"] += counts["output"]
-        totals["cached"] += counts["inputCacheRead"]
-    return AtifMetrics(
-        prompt_tokens=prompt,
-        completion_tokens=counts["output"],
-        cached_tokens=counts["inputCacheRead"],
-    )
+        raise ValueError(f"not a usage object: {usage!r}")
+    cached = token_count(usage.get("inputCacheRead"), optional=True)
+    written = token_count(usage.get("inputCacheCreation"), optional=True)
+    prompt = token_count(usage.get("inputOther")) + cached + written
+    return call_metrics(prompt, token_count(usage.get("output")), cached)
 
 
 def _append_text(content: str | list[AtifContentPart], text: str) -> str | list[AtifContentPart]:
     if isinstance(content, str):
         return f"{content}\n{text}" if content else text
     return [*content, AtifContentPart(type="text", text=text)]
-
-
-def _timestamp(event: dict[str, Any]) -> str | None:
-    value = event.get("time")
-    if not isinstance(value, int | float) or isinstance(value, bool) or value < 0:
-        return None
-    try:
-        return datetime.fromtimestamp(value / 1000, tz=UTC).isoformat()
-    except (OverflowError, OSError, ValueError):
-        return None
 
 
 def _arguments(value: Any) -> dict[str, Any]:

@@ -18,8 +18,9 @@ Each Gateway dialect selects Kimi's own provider for it: `kimi` for Chat Complet
 default, `anthropic` for Messages and `openai_responses` for Responses. The `kimi` provider
 sends a tool's image, such as a `cua-desktop` screenshot, in the tool message, which
 OpenAI's Chat Completions API refuses: it takes images in user messages only. The preset's
-Gateway provider is `moonshot`, Moonshot's own API. Kimi requires every model to declare `max_context_size`; non-default
-`thinking_effort` values require the `thinking` or `always_thinking` capability.
+Gateway provider is `moonshot`, Moonshot's own API. Kimi requires every model to declare
+`max_context_size`; non-default `thinking_effort` values require the `thinking` or
+`always_thinking` capability.
 
 Print mode accepts the prompt only as an argument. The script reads the recorded
 `prompt.md` into that one argument, keeping its trailing newlines, and on Windows turns
@@ -36,6 +37,17 @@ trajectory when the caller's wire holds a `subagent.spawned` record naming the c
 tool call, that call has a result, and the subagent's own `agents/<id>/wire.jsonl` is
 present. Images larger than 4 KiB are read from `agents/<id>/blobs`. Any other wire is
 left unconverted and named in `parse_issues`.
+
+Each native step is one model call. Kimi writes the response's `content.part` records once
+it has streamed and a `tool.call` as each call starts, and the step takes the time of the
+first; `step.begin` is written before the request. The `step.end` record carries the
+call's `usage`, as the step's metrics, and `messageId`, the provider's response ID, which
+the step lists in `extra.orbit.native_event_ids`. The root session's steps link to their
+Gateway calls; a subagent's steps keep the ID, unlinked. `prompt_tokens` adds the cache
+reads and writes to `inputOther`, which leaves them out, and `completion_tokens` is
+`output`, which includes reasoning. A step that failed or was interrupted records no usage
+or response ID, and usage that cannot be read is reported as `invalid_token_usage`.
+Stdout records no times, usage or response IDs, so a turn rebuilt from it has none.
 
 The Grep tool needs ripgrep. The bases do not provide it and Kimi downloads it on first
 use, which fails once egress is sealed; the agent can still search through Bash.
