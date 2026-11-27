@@ -12,7 +12,13 @@ import pytest
 from orbit.core.config import LoggingPolicy
 from orbit.core.harness import AgentRun, AutonomousHarness, HarnessSession, TrajectoryParseContext
 from orbit.core.trajectory import AtifAgent, AtifStep, AtifTrajectory
-from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
+from orbit.run.harnesses.base import (
+    INVOCATIONS_PATH,
+    STDERR_PATH,
+    STDOUT_PATH,
+    invocations,
+    redact_invocation_streams,
+)
 from orbit.run.harnesses.claude_code import ClaudeCodeHarness
 from orbit.run.harnesses.codex_cli import CodexCliHarness
 from orbit.run.harnesses.grok_build import GrokBuildHarness
@@ -24,7 +30,7 @@ from orbit.run.protocol.episode_protocol import (
     _AgentTime,
     _Solver,
 )
-from orbit.run.recording import EpisodeRecording
+from orbit.run.recording import EpisodeRecording, Redactor, redact_files
 
 pytestmark = pytest.mark.unit
 
@@ -240,3 +246,50 @@ async def test_retained_reverification_captures_evidence_without_a_harness(tmp_p
     protocol = ReverificationProtocol(SimpleNamespace(), tmp_path, sandbox_identity=None)
     await protocol._capture_solver_evidence(ctx, SimpleNamespace())
     assert ctx.solver_evidence_captured
+
+
+def test_a_credential_one_run_printed_moves_no_other_run_s_output(tmp_path: Path) -> None:
+    """Each launch or resume keeps its own part of the streams once a credential it printed
+    is redacted, however much shorter the stand-in is."""
+    secret = "tok-" + "0123456789abcdef" * 4
+    logs = tmp_path / "logs"
+    (logs / STDOUT_PATH).parent.mkdir(parents=True)
+    outputs = [f"first saw {secret}\n", "second ok\n", f"third saw {secret} twice: {secret}\n"]
+    errors = [f"warning {secret}\n", "", "done\n"]
+    records, stdout, stderr = [], "", ""
+    for index, (output, error) in enumerate(zip(outputs, errors, strict=True)):
+        records.append(
+            {
+                "prompt": f"prompt {index}",
+                "session_id": "session",
+                "stdout_offset": len(stdout.encode()),
+                "stderr_offset": len(stderr.encode()),
+            }
+        )
+        stdout, stderr = stdout + output, stderr + error
+    (logs / STDOUT_PATH).write_text(stdout)
+    (logs / STDERR_PATH).write_text(stderr)
+    (logs / INVOCATIONS_PATH).write_text(
+        "".join(json.dumps(record) + "\n" for record in records) + '{"prompt": "cut'
+    )
+
+    redactor = Redactor((secret,), patterns=False)
+    redact_invocation_streams(logs, redactor)
+    redact_files(logs, redactor)
+
+    context = SimpleNamespace(logs_dir=logs, instruction="instruction")
+    assert [run.stdout for run in invocations(context)] == [  # type: ignore[arg-type]
+        "first saw [REDACTED]\n",
+        "second ok\n",
+        "third saw [REDACTED] twice: [REDACTED]\n",
+    ]
+    held = [json.loads(line) for line in (logs / INVOCATIONS_PATH).read_text().splitlines()[:3]]
+    stderr = (logs / STDERR_PATH).read_text()
+    assert [stderr[record["stderr_offset"] :] for record in held] == [
+        "warning [REDACTED]\ndone\n",
+        "done\n",
+        "done\n",
+    ]
+    # What was not a record stays as it was.
+    assert (logs / INVOCATIONS_PATH).read_text().endswith('{"prompt": "cut')
+    assert not any(secret in path.read_text() for path in logs.rglob("*") if path.is_file())

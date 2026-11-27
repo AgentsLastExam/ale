@@ -14,6 +14,7 @@ import shlex
 from abc import abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import accumulate
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, ClassVar, final
 
@@ -42,6 +43,7 @@ from orbit.core.taskspec import OperatingSystem, SseMcpServer
 from orbit.run.harnesses import _install
 from orbit.run.harnesses._agent import agent_home, agent_path, bash_command
 from orbit.run.harnesses._diagnostics import failure_detail
+from orbit.run.recording import Redactor
 from orbit.run.subscription import classify_subscription_error
 
 LOG_ROOT = ".orbit-harness"
@@ -557,6 +559,54 @@ def invocations(context: TrajectoryParseContext) -> list[Invocation]:
         )
         for record, start, end in zip(records, starts, ends, strict=True)
     ]
+
+
+def redact_invocation_streams(logs_dir: Path, redactor: Redactor) -> None:
+    """Redact the stdout and stderr every launch and resume appended to, each one's part on
+    its own, and move the offsets its record holds to where that part now starts.
+
+    A credential is longer than what stands in for it, so redacting a whole stream would
+    move every later part, and ``invocations`` would give each run some of another's output.
+    """
+    path = logs_dir / INVOCATIONS_PATH
+    if not path.is_file():
+        return
+    lines = path.read_bytes().splitlines(keepends=True)
+    records: dict[int, dict[str, Any]] = {}
+    for index, line in enumerate(lines):
+        try:
+            value = json.loads(line) if line.endswith(b"\n") else None
+        except ValueError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("prompt"), str):
+            records[index] = value
+    for stream, key in ((STDOUT_PATH, "stdout_offset"), (STDERR_PATH, "stderr_offset")):
+        file = logs_dir / stream
+        marked = [record for record in records.values() if isinstance(record.get(key), int)]
+        if not file.is_file() or not marked:
+            continue
+        data = file.read_bytes()
+        starts: list[int] = []
+        for record in marked:
+            starts.append(min(max(record[key], starts[-1] if starts else 0), len(data)))
+        parts = [
+            redactor(data[start:end].decode("utf-8", "surrogateescape")).encode(
+                "utf-8", "surrogateescape"
+            )
+            for start, end in zip([0, *starts], [*starts, len(data)], strict=True)
+        ]
+        moved = accumulate(len(part) for part in parts[:-1])
+        for record, start in zip(marked, moved, strict=True):
+            record[key] = start
+        file.write_bytes(b"".join(parts))
+    path.write_bytes(
+        b"".join(
+            json.dumps(records[index], ensure_ascii=False).encode("utf-8") + b"\n"
+            if index in records
+            else line
+            for index, line in enumerate(lines)
+        )
+    )
 
 
 def requested_session_id(context: TrajectoryParseContext, recorded: list[Invocation]) -> str | None:

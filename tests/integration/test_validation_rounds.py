@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -245,6 +247,51 @@ async def test_an_agent_improves_over_rounds_tests_scores_without_validation_in_
 
 
 @pytest.mark.asyncio
+class _PrintingCli(ScriptedCliHarness):
+    """The scripted CLI, each of whose turns first prints the Task's credential."""
+
+    async def prepare_command(  # type: ignore[no-untyped-def]
+        self, prompt_path, sandbox, session, *, native_session_id
+    ):
+        command = await super().prepare_command(
+            prompt_path, sandbox, session, native_session_id=native_session_id
+        )
+        return replace(command, script='echo "token: $SERVICE_TOKEN"\n' + command.script)
+
+
+@pytest.mark.asyncio
+async def test_a_credential_each_turn_prints_leaves_every_turn_its_own_output_in_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The credential is redacted from the CLI's stream, far shorter, and each turn still
+    reads back its own output: its result is in the trajectory as the turn's answer."""
+    secret = f"tok-{uuid.uuid4().hex}{uuid.uuid4().hex}"
+    env_file = tmp_path / "checkout.env"
+    env_file.write_text(f"SERVICE_TOKEN={secret}\n")
+    monkeypatch.setenv("ORBIT_ENV_FILE", str(env_file))
+    root = _task(tmp_path / "printed", "shared", rounds=1)
+    edit_task_config(root, {"environment": {"env": {"SERVICE_TOKEN": "${SERVICE_TOKEN}"}}})
+    task = load_tasks(root)[0]
+    resolve_task_variables([task], oracle=False, protected={})
+    result = await run_episode(
+        task,
+        EpisodeProtocol(_PrintingCli(), validation_rounds=1),
+        provider_registry(DockerProvider()),
+        run_dir=tmp_path / "runs",
+    )
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    trajectory = AtifTrajectory.model_validate_json(
+        (result.run_dir / "trajectory.json").read_text()
+    )
+    answers = [step.message for step in trajectory.steps if step.source == "agent"]
+    assert answers == ["turn 1", "turn 2"]
+    assert not any(
+        secret.encode() in path.read_bytes()
+        for path in result.run_dir.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+
 @pytest.mark.parametrize("validation", [True, False])
 async def test_the_agent_reads_the_stage_that_validates_where_the_task_shows_it_in_docker(
     tmp_path: Path, validation: bool
