@@ -6,8 +6,9 @@ image layer:
 
 - guestd, the guest service every sandbox operation goes through, under root-only
   ``/opt/orbit`` so the agent cannot read the protocol driving its sandbox;
-- the framework's own Python at a pinned version under ``/opt/orbit/python``, which guestd
-  runs on whatever Python the image has, and verification falls back to;
+- the framework's own Python at a pinned version in ``/opt/orbit-python``, which guestd
+  runs on whatever Python the image has, verification falls back to, and every account
+  may run, so the agent's desktop tool and Harness helpers need no Python of the image's;
 - Cua Driver at a pinned version, which guestd starts inside the desktop session when the
   image has one;
 - a check that the Task's agent account exists in the image;
@@ -80,7 +81,7 @@ from orbit.run.images import (
     valid_qcow2,
 )
 from orbit.run.process import run
-from orbit.run.sources import cache_root
+from orbit.run.sources import cache_root, cached
 
 __all__ = [
     "CUA_DRIVER_VERSION",
@@ -158,8 +159,7 @@ _CUA_DRIVER = {
 _CUA_DRIVER_BINARY = {"linux": "cua-driver", "windows": "cua-driver.exe"}
 #: Run inside the VM builder to install the Windows framework into a disk.
 _WINDOWS_INSTALLER = Path(__file__).with_name("framework_windows.py")
-#: Where the macOS framework puts its Python, readable by every account so the agent's
-#: desktop tool and Harness helpers can run it, and writable by root alone.
+#: Where the macOS framework puts its Python, which every account may run.
 MACOS_PYTHON = guestd.PYTHON["macos"]
 MACOS_DRIVER_APP = "/Applications/CuaDriver.app"
 MACOS_DRIVER = f"{MACOS_DRIVER_APP}/Contents/MacOS/cua-driver"
@@ -215,15 +215,16 @@ if ! id -u "$user" >/dev/null 2>&1; then
         "image or name an existing account with [agent].user in task.toml" >&2
     exit 1
 fi
-rm -rf /opt/orbit/python
-cp -RP "$python" /opt/orbit/python
-if ! /opt/orbit/python/bin/python3 -c "" >/dev/null 2>&1; then
+rm -rf /opt/orbit-python /opt/orbit/python
+cp -RP "$python" /opt/orbit-python
+if ! /opt/orbit-python/bin/python3 -c "" >/dev/null 2>&1; then
     echo "Orbit: the framework's Python does not run in this image; Orbit needs an x86-64" \
         "image with glibc" >&2
     exit 1
 fi
-chown -R 0:0 /opt/orbit
+chown -R 0:0 /opt/orbit /opt/orbit-python
 chmod -R go-rwx /opt/orbit
+chmod -R go-w,a+rX /opt/orbit-python
 chown 0:0 /usr/local/bin/cua-driver
 chmod 0755 /usr/local/bin/cua-driver
 for unit in orbit-guestd orbit-volumes; do
@@ -589,7 +590,7 @@ def container_framework(
         # Outside root's /opt/orbit, as the agent runs its ssh too.
         *([f"COPY --from={MULTINODE_SSH_IMAGE} /openssh/ {SSH}/"] if multinode else []),
         # Mounted, not copied: a copy would land in the layer once more when setup takes it
-        # into /opt/orbit/python.
+        # into /opt/orbit-python.
         "RUN --mount=type=bind,from=python,target=/tmp/python "
         + json.dumps(["/bin/sh", "/opt/orbit/setup.sh", user, identity, "/tmp/python"]),
     ]
@@ -697,13 +698,8 @@ def _fetched(
     what: str,
 ) -> Path:
     """``root``, holding a release asset unpacked once after checking its pinned SHA-256."""
-    if root.is_dir():
-        return root
-    root.parent.mkdir(parents=True, exist_ok=True)
-    with (root.parent / "download.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if root.is_dir():
-            return root
+
+    def fill(into: Path) -> None:
         try:
             with urllib.request.urlopen(url, timeout=300) as response:
                 payload = response.read()
@@ -711,14 +707,9 @@ def _fetched(
             raise ProviderStartError(f"could not download {what}: {exc}") from exc
         if hashlib.sha256(payload).hexdigest() != sha256:
             raise ProviderStartError(f"downloaded {what} does not match its pinned checksum")
-        partial = Path(tempfile.mkdtemp(prefix=f".{root.name}-", dir=root.parent))
-        try:
-            unpack(payload, partial)
-        except BaseException:
-            shutil.rmtree(partial, ignore_errors=True)
-            raise
-        partial.rename(root)
-    return root
+        unpack(payload, into)
+
+    return cached(root, fill)
 
 
 def macos_driver_archive() -> bytes:

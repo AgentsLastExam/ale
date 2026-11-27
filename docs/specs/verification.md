@@ -125,6 +125,11 @@ reasoning_effort = "high"
 
 Agent Judge uses the configured exact CLI version, an invocation-specific native home,
 and the framework's elevated identity (root on Linux and macOS, Administrator on Windows).
+The engine installs that CLI into the verifier as the Harness of its name is installed
+([Autonomous Harness](autonomous-harness.md#shipped-integrations)), into a framework-owned
+directory of its own, so the solver's copy, configuration and memory never reach it, and a
+verifier with no npm or Node.js has it too. A verifier whose network is not open gets the
+files from the Host.
 Tasks may call either Judge repeatedly, interleave ordinary checks, or inspect files
 after a Judge runs. Agent Judge can modify the live workspace; already collected solver
 artifacts and trajectory are not overwritten by those modifications.

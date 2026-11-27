@@ -11,7 +11,7 @@ createhomedir -c -u "$user" > /dev/null
 printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$user" > "/etc/sudoers.d/$user"
 chmod 0440 "/etc/sudoers.d/$user"
 defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$user"
-/opt/orbit/python/bin/python3 -I - "$password" <<'PY'
+/opt/orbit-python/bin/python3 -I - "$password" <<'PY'
 import sys
 
 key = bytes([0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F])

@@ -45,41 +45,61 @@ Orbit integrates these official upstream agent programs:
 | `openclaw-cli` | `openclaw@2026.7.1` | OpenAI Responses | `provider`, `thinking`, `timeout_seconds`, `tool_profile`, `tools_allow`, `tools_deny`, `model_params`, `input` |
 
 Each integration installs its program's official distribution; Orbit does not install a fork
-or carry agent-program patches. That is the npm package when upstream publishes one.
-Otherwise it is the official release executable, pinned per OS and architecture by URL and
-SHA-256 in the adapter's `release_assets`; when upstream ships it inside a tar or zip
-archive, only that one member is taken, pinned by its own SHA-256 too. The Sandbox's own
-Python, on macOS the framework's, downloads it as the agent and installs it only if every
-digest matches, so an unverifiable build never runs. Its integrity is the digest of that
-whole table. A program upstream distributes only through its own installer is installed by
-its adapter from one pinned artifact: a source installer at one commit, reported as
-`git:<repository>@<commit>`, or an installer package it verifies and unpacks, reported as
-the `sha256:` of the files it runs. Bases provide runtimes, not agent CLI packages; they pin
-Node.js 24.15.0, which a macOS image, having no Orbit base, provides itself. Each run
-installs and configures the selected CLI before applying the Task network policy.
+or carry agent-program patches. The Host resolves which files make up the program and the
+digest their publisher states or Orbit pins; the Sandbox accepts each file only by that
+digest and unpacks it as the agent with the framework's Python, so an unverifiable build
+never runs and no image needs npm, Node.js or Python for a Harness. A Sandbox far from the
+Host, such as a cloud one, downloads the files itself, which spares the Host the upload; any
+other gets them from the Host, which downloads each once into its cache, and needs no network
+to install.
+
+- A program on npm comes from the registry, each package accepted by the registry's
+  integrity value, and is reported as `npm:<package>@<version>`. A native program, whose
+  npm package only delivers its build, is the package holding the build for the Sandbox's
+  platform, so a version is pinned without digests of Orbit's own. A JavaScript program is
+  its dependency tree as npm resolves it on the Host for the Sandbox's platform; no
+  package's install script runs, and an optional dependency that has one is left out, as a
+  failed build is.
+- A program not on npm is its official release executable, pinned per OS and architecture
+  by URL and SHA-256 in the adapter's `release_assets`; when upstream ships it inside a tar
+  or zip archive, only that one member is taken, pinned by its own SHA-256 too. Its
+  integrity is the digest of that whole table.
+- A program upstream distributes only through its own installer is installed by its adapter
+  from one pinned artifact: an installer package, of which only the pinned files it runs are
+  kept, reported as their `sha256:`, or a source installer at one commit, reported as
+  `git:<repository>@<commit>`, which runs in the Sandbox and needs what it names.
+
+A JavaScript program, from npm or an installer package, runs on the Node.js version its
+adapter declares, nodejs.org's build pinned by SHA-256, and its integrity adds
+` node@<version>`. That Node.js is the program's alone: it sits in a private directory, only
+the program's launcher names it, and the agent's `PATH` never includes it, so the agent's
+own commands find the Task's Node.js, or none, as the image made it. Whatever else a Harness
+needs from the image, such as Git, its README names.
+
+Each run installs and configures the selected CLI before applying the Task network policy.
 
 Every other adapter gives its pin, Gateway dialects and public settings in its own README,
 listed in the [Harness index](../../packages/orbit-run/src/orbit/run/harnesses/README.md).
 
 `agent.version` selects an exact version, and omitting it uses the adapter's pinned
 default. A release-binary adapter accepts only its pinned version, because only that
-version's digests are known. An already matching installation may be reused.
+version's digests are known. An already matching installation is reused.
 
 Harnesses declare `supported_os` and check it before Sandbox creation; the CLI also
 checks it before image preparation. The default is Linux only. An npm CLI adapter
 supports Linux, Windows and macOS. A release-binary adapter supports exactly the systems
 its table covers, and its README names any system upstream ships no build for. Unsupported
-systems raise `AgentUnsupportedError` before installation; an architecture with no
-pinned asset raises it during installation.
+systems raise `AgentUnsupportedError` before installation; an architecture with no build
+raises it during installation.
 
 On Windows, the base also supplies Git for Windows at `C:/Program Files/Git` and
 puts its `bin` and `usr/bin` directories on `PATH`. Harnesses use Git Bash to launch
-the native Windows CLI packages; WSL is not required. npm installs and release
-binaries stay under the agent's `.local` directory, and the inherited Windows tool
-search path is preserved.
-The built-in `cua-desktop` uses the OS's system Python, and on macOS, which has none recent
-enough, the framework's, as do the adapters' own helper scripts. A Task's own Skills and
-MCP commands must themselves work on the Task's system.
+the native Windows CLI packages; WSL is not required. Programs, their Node.js and their
+launchers stay under the agent's `.local` directory, and the inherited Windows tool search
+path is preserved.
+The built-in `cua-desktop` and the adapters' own helper scripts run on the framework's
+Python, which every account may run. A Task's own Skills and MCP commands must themselves
+work on the Task's system.
 
 Every CLI adapter supports local Skills, canonical stdio and Streamable HTTP MCP
 servers, and native resume at its pinned version, except for a limit its
@@ -175,16 +195,15 @@ sent. A CLI that takes a prompt only as an argument is the exception: it receive
 file's exact bytes as one argument, expanded from the file and never re-quoted, so the
 OS's argument limits bound the prompt and a longer one fails at launch instead of being
 truncated. A CLI that reads a headless prompt from stdin only inside a structured message
-gets the file's exact text wrapped into that message by the Sandbox's Python (on macOS
-the framework's) first. Every
+gets the file's exact text wrapped into that message by the framework's Python first. Every
 invocation, launch or resume, appends to `.orbit-harness/stdout.log` and
 `.orbit-harness/stderr.log` and records its prompt, requested session ID, and stream offsets
 in `.orbit-harness/invocations.jsonl`. Result interpretation sees only the current
 invocation's output, so it cannot reuse the success or session ID of an earlier turn.
 
 The CLI starts from a non-login shell, POSIX `sh` on Linux and macOS and Git Bash on
-Windows, with the Sandbox's own `PATH` behind the agent's npm prefix. Profile scripts are
-not sourced, so the measured program's environment is the image's declared one.
+Windows, with the Sandbox's own `PATH` behind the agent's `~/.local/bin`. Profile scripts
+are not sourced, so the measured program's environment is the image's declared one.
 
 A failed launch retains the process exit code and a bounded, credential-redacted diagnostic
 from native error events and stderr. Stderr warnings must not displace the native failure

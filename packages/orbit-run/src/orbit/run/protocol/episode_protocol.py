@@ -131,7 +131,12 @@ from orbit.run.recording import (
     execution_logging,
     redact_files,
 )
-from orbit.run.verification import installed_orbit_verify, verifier_judge_config
+from orbit.run.verification import (
+    install_agent_judge,
+    installed_orbit_verify,
+    judge_kinds,
+    verifier_judge_config,
+)
 from orbit_verify import MAX_FEEDBACK_BYTES, JudgeInvocation, read_result
 
 __all__ = [
@@ -275,10 +280,10 @@ mkdir -m 0700 -- "$verifier"
 """
 
 #: Gives ``[verifier].user`` its stage and the verifier directory, and lets it through the
-#: framework's root on Linux, below which everything else stays the framework's alone.
+#: framework's root, below which everything else stays the framework's alone.
 _VERIFIER_USER_GRANT = """set -eu
 user="$1" framework="$2" stage="$3" verifier="$4"
-if [ "$(uname)" = Linux ]; then chmod -- o+x "$framework"; fi
+chmod -- o+x "$framework"
 chown -R -- "$user" "$stage" "$verifier"
 """
 
@@ -1937,7 +1942,7 @@ class EpisodeProtocol:
                 server = server.model_copy(
                     update={
                         "command": (
-                            "python.exe"
+                            guestd.AGENT_PYTHON["windows"]
                             if ctx.spec.os is OperatingSystem.WINDOWS and item.name == "cua-desktop"
                             else server.command.replace("{mcp}", target)
                         ),
@@ -2146,7 +2151,18 @@ class EpisodeProtocol:
         await sandbox.write_file(
             str(layout.path(stage, "instruction.md")), ctx.spec.instruction.encode("utf-8")
         )
-        await self._stage_verification_config(ctx, sandbox, stage)
+        placed = ctx.spec.validation_spec if phase is Phase.VALIDATE else ctx.spec.verify
+        # The verifier's own network, applied before its Judge's program is placed, which a
+        # Sandbox that downloads files fetches under it: in a shared solver it replaces the
+        # agent's, and its Judges reach the Gateway under any policy.
+        await self._apply_network(ctx, sandbox, placed.network, phase)
+        await self._stage_verification_config(
+            ctx,
+            sandbox,
+            stage,
+            stage_dir,
+            fetch=sandbox.fetches_files and placed.network.mode is NetworkMode.OPEN,
+        )
 
         python, destination = await self._site_packages(ctx, sandbox)
         framework_source, framework_version, framework_hash = installed_orbit_verify()
@@ -2185,9 +2201,6 @@ class EpisodeProtocol:
             content_hash=framework_hash,
         )
         invocations: tuple[JudgeInvocation, ...] = ()
-        # The verifier's own network, applied just before its code runs: in a shared solver
-        # it replaces the agent's, and its Judges reach the Gateway under any policy.
-        await self._apply_network(ctx, sandbox, placed.network, phase)
         if ctx.open_judge_sessions is not None:
             ctx.open_judge_sessions(True)
         try:
@@ -2205,8 +2218,9 @@ class EpisodeProtocol:
                 ctx.open_judge_sessions(False)
             if ctx.open_egress_session is not None:
                 ctx.open_egress_session(NetworkPolicy())
-            if placed.user is not None and ctx.spec.os is OperatingSystem.LINUX:
-                # A solver kept for continuation gets its framework root back closed.
+            if placed.user is not None:
+                # A solver kept for continuation gets its framework root back closed; Windows
+                # refuses [verifier].user.
                 await sandbox.exec(["chmod", "--", "o-x", str(layout.root)])
             # Keep Judge evidence even if the task exits, raises or times out.
             invocations = await self._collect_judge_logs(ctx, sandbox, stage, records)
@@ -2229,16 +2243,39 @@ class EpisodeProtocol:
         return float(result["reward"]), feedback
 
     async def _stage_verification_config(
-        self, ctx: EpisodeContext, sandbox: Sandbox, stage: Stage = Stage.TESTS
+        self,
+        ctx: EpisodeContext,
+        sandbox: Sandbox,
+        stage: Stage,
+        stage_dir: Path,
+        *,
+        fetch: bool,
     ) -> None:
         """Point the verifier's Judges at this episode's Gateway sessions.
 
         The verifier gets the Gateway's address and a session token per Judge; the Judge's
-        own key stays on the Host, where the Gateway adds it to each forwarded call.
+        own key stays on the Host, where the Gateway adds it to each forwarded call. A stage
+        that calls the Agent Judge, which has a session, also gets its program, which the
+        verifier downloads itself with ``fetch``.
         """
         payload, command_env = verifier_judge_config(
             ctx.verification_config, ctx.judge_tokens, sandbox.gateway_url
         )
+        agent = payload.get("agent")
+        if agent and "agent" in ctx.judge_tokens and "agent" in judge_kinds([stage_dir]):
+            try:
+                agent["executable"] = await install_agent_judge(
+                    sandbox,
+                    agent["adapter"],
+                    agent["version"],
+                    _layout(ctx.spec.os).path("judge").as_posix(),
+                    fetch=fetch,
+                )
+            except (AgentError, AgentUnsupportedError) as error:
+                raise VerificationInfrastructureError(
+                    f"could not install the Agent Judge's {agent['adapter']} "
+                    f"{agent['version']}: {error}"
+                ) from error
         await sandbox.write_file(
             str(_layout(ctx.spec.os).path(stage, "config.json")),
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),

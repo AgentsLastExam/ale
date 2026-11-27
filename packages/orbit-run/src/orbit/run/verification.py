@@ -15,12 +15,16 @@ from orbit.core.config import VerificationConfig
 from orbit.core.episode import EventSink
 from orbit.core.errors import ConfigError, TaskDefinitionError
 from orbit.core.ids import content_hash
+from orbit.core.sandbox import Identity, Sandbox
 from orbit.run.gateway.server import REQUEST_PATHS, Gateway
 from orbit.run.gateway.session import GatewaySession, Upstream
+from orbit.run.harnesses.claude_code import ClaudeCodeHarness
+from orbit.run.harnesses.codex_cli import CodexCliHarness
 from orbit.run.secrets import provider_endpoint
 from orbit_verify import ConfigurationError, endpoint_identity, judge_route, probe_judge
 
 __all__ = [
+    "install_agent_judge",
     "installed_orbit_verify",
     "judge_endpoints",
     "judge_kinds",
@@ -31,6 +35,8 @@ __all__ = [
 ]
 
 _JUDGE_KINDS = ("llm", "agent")
+#: The Agent Judge's programs: the official CLIs the Harnesses of their names run.
+_JUDGE_PROGRAMS = {"codex-cli": CodexCliHarness, "claude-code": ClaudeCodeHarness}
 
 _IGNORED = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
@@ -232,3 +238,20 @@ def verifier_judge_config(
         section["api_key_env"] = _TOKEN_ENV[kind]
         env[_TOKEN_ENV[kind]] = token
     return payload, env
+
+
+async def install_agent_judge(
+    sandbox: Sandbox, adapter: str, version: str, directory: str, *, fetch: bool
+) -> str:
+    """The Agent Judge's program below ``directory`` of a verifier, placed by the framework
+    as its Harness places it for an agent; the path of its executable.
+
+    With ``fetch`` the verifier downloads it; otherwise the Host uploads it, so a verifier
+    with no network, npm or Node.js still has it. It is the framework's own copy, apart from
+    the agent's, so nothing the agent did to its program reaches the Judge.
+    """
+    harness = _JUDGE_PROGRAMS[adapter](cli_version=version)
+    (executable,) = await harness.place(
+        sandbox, directory, identity=Identity.FRAMEWORK, fetch=fetch
+    )
+    return executable

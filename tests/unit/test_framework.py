@@ -583,7 +583,7 @@ def test_the_macos_payload_carries_the_shared_python_tree_and_the_whole_driver(
     # The macOS Python is the release every other system pins, built for Apple Silicon.
     asset, _ = framework._PYTHON["macos"]
     assert asset.startswith(f"cpython-3.12.15+{framework.PYTHON_RELEASE}-aarch64-apple-darwin")
-    assert framework.MACOS_PYTHON == "/opt/orbit/python/bin/python3" == guestd.PYTHON["macos"]
+    assert framework.MACOS_PYTHON == "/opt/orbit-python/bin/python3" == guestd.PYTHON["macos"]
 
 
 @pytest.mark.asyncio

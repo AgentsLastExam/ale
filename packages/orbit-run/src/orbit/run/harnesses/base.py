@@ -7,6 +7,7 @@ its output begins. Parsers read the same layout back from the Host mirror.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shlex
@@ -38,9 +39,9 @@ from orbit.core.harness import (
 )
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import OperatingSystem, SseMcpServer
+from orbit.run.harnesses import _install
+from orbit.run.harnesses._agent import agent_home, agent_path, bash_command
 from orbit.run.harnesses._diagnostics import failure_detail
-from orbit.run.harnesses._npm import agent_path, bash_command, ensure_npm_cli
-from orbit.run.harnesses._release import ReleaseAssets, ensure_release_binary, release_identity
 from orbit.run.subscription import classify_subscription_error
 
 LOG_ROOT = ".orbit-harness"
@@ -113,7 +114,8 @@ class CliHarness(AutonomousHarness):
 
     The program comes from its official npm package, or, when ``release_assets`` is set,
     from its official release binary for the Sandbox's OS and architecture, accepted only
-    when its SHA-256 matches the pinned one.
+    when its SHA-256 matches the pinned one. Either way the Sandbox accepts its files only
+    by their digests (``_install``).
 
     The prompt reaches the CLI as a file, through stdin or a native prompt-file option,
     so its bytes never pass through argv, an environment variable or shell quoting. The
@@ -125,9 +127,18 @@ class CliHarness(AutonomousHarness):
     """The official program: its npm package, or the upstream source of its releases."""
     binary: ClassVar[str]
     default_version: ClassVar[str]
-    release_assets: ClassVar[ReleaseAssets] = {}
-    """Pinned release executables of ``default_version`` by OS and architecture; empty
-    installs from npm. Such an adapter supports exactly the systems this table covers."""
+    release_assets: ClassVar[_install.ReleaseAssets] = {}
+    """Pinned release executables of ``default_version`` by OS and architecture; empty when
+    the program comes from npm or the adapter installs it itself. Such an adapter supports
+    exactly the systems this table covers."""
+    platform_packages: ClassVar[_install.PlatformPackages] = {}
+    """For a native program npm delivers: by npm platform (``linux-x64``, ``darwin-arm64``,
+    ``win32-x64``, and ``linux-x64-baseline`` or ``win32-x64-baseline`` for an x86-64 CPU
+    without AVX2), the ``package``'s optional dependency holding it and the executable's
+    path inside that."""
+    node: ClassVar[str | None] = None
+    """The Node.js version a JavaScript program runs on; set exactly when the program is
+    one."""
     mcp_sse: ClassVar[bool] = True
     """Whether the adapter configures an SSE MCP server, natively or as its URL as Harbor's
     adapter for the CLI does; one that cannot is refused before any Sandbox exists."""
@@ -164,8 +175,9 @@ class CliHarness(AutonomousHarness):
 
     def integrity(self) -> str:
         if self.release_assets:
-            return release_identity(self.release_assets)
-        return f"npm:{self.package}@{self.version()}"
+            return _install.release_identity(self.release_assets)
+        program = f"npm:{self.package}@{self.version()}"
+        return f"{program} node@{self.node}" if self.node else program
 
     def validate_resources(self, resources: EffectiveAgentResources) -> None:
         """Every CLI here supports Skills, stdio and Streamable HTTP MCP servers and HTTP
@@ -185,13 +197,95 @@ class CliHarness(AutonomousHarness):
                     )
 
     async def install(self, sandbox: Sandbox) -> str:
+        """The program as the agent: a release executable in its ``~/.local/bin``, or any
+        other behind a launcher there, which one already in place may be."""
+        home = await agent_home(sandbox)
         if self.release_assets:
-            return await ensure_release_binary(
-                sandbox, binary=self.binary, version=self.version(), assets=self.release_assets
+            return await _install.install_release(
+                sandbox,
+                home,
+                binary=self.binary,
+                version=self.version(),
+                assets=self.release_assets,
+                platform=await _install.sandbox_platform(sandbox, home),
             )
-        return await ensure_npm_cli(
-            sandbox, package=self.package, binary=self.binary, version=self.version()
+        launcher = f"{agent_path(home)}/.local/bin/{self.binary}"
+        if (
+            found := await _install.installed(sandbox, home, [launcher], self.version())
+        ) is not None:
+            return found
+        argv = await self.place(
+            sandbox,
+            f"{agent_path(home)}/{_install.PROGRAMS}",
+            identity=Identity.AGENT,
+            fetch=sandbox.fetches_files,
         )
+        await _install.write_launcher(sandbox, launcher, argv)
+        return await _install.verified(
+            sandbox, home, [launcher], self.version(), binary=self.binary
+        )
+
+    async def place(
+        self, sandbox: Sandbox, directory: str, *, identity: Identity, fetch: bool
+    ) -> list[str]:
+        """Put a program from npm below ``directory`` as ``identity``, unless it is there
+        already; the command that runs it. With ``fetch`` the Sandbox downloads its archives.
+
+        Also how the Agent Judge gets its program into a verifier.
+        """
+        home = await agent_home(sandbox)
+        platform = await _install.sandbox_platform(sandbox, home)
+        program = f"{self.binary}/{self.version()}"
+        if self.node is None:
+            name, executable = self._platform_package(platform)
+            runs = f"{program}/{executable.removesuffix('.br')}"
+            argv = [f"{directory}/{runs}"]
+            if await _install.installed(sandbox, home, argv, self.version(), identity=identity):
+                return argv
+            archives = await asyncio.to_thread(
+                _install.native_package, self.package, self.version(), name, executable
+            )
+            await _install.unpack(
+                sandbox,
+                [archive.moved(_below(program, archive.into)) for archive in archives],
+                directory,
+                identity=identity,
+                fetch=fetch,
+                executables=[runs],
+            )
+            return argv
+        tree = await asyncio.to_thread(_install.npm_tree, self.package, self.version(), platform)
+        entry = tree.bin.get(self.binary) if isinstance(tree.bin, dict) else tree.bin
+        if not isinstance(entry, str):
+            raise AgentError(f"{self.package} declares no {self.binary} program")
+        argv = [
+            _install.node_path(directory, self.node, platform),
+            f"{directory}/{program}/node_modules/{self.package}/{entry.removeprefix('./')}",
+        ]
+        if await _install.installed(sandbox, home, argv, self.version(), identity=identity):
+            return argv
+        node = _install.node_runtime(self.node, platform)
+        await _install.unpack(
+            sandbox,
+            [
+                node.moved(f"node/{self.node}"),
+                *(archive.moved(_below(program, archive.into)) for archive in tree.archives),
+            ],
+            directory,
+            identity=identity,
+            fetch=fetch,
+            executables=[f"node/{self.node}/{node.members[0][1]}"],
+        )
+        return argv
+
+    def _platform_package(self, platform: _install.Platform) -> tuple[str, str]:
+        baseline = self.platform_packages.get(f"{platform.npm}-baseline")
+        found = (
+            baseline if baseline and not platform.avx2 else self.platform_packages.get(platform.npm)
+        )
+        if found is None:
+            raise AgentUnsupportedError(f"{self.package} has no build for {platform.npm}")
+        return found
 
     @abstractmethod
     def is_session_file(self, path: PurePosixPath, session_id: str) -> bool:
@@ -388,6 +482,10 @@ class CliHarness(AutonomousHarness):
             final_message=native.final_message,
             continuation=NativeContinuation(harness=self.name, native_session_id=native.session_id),
         )
+
+
+def _below(directory: str, path: str) -> str:
+    return f"{directory}/{path}" if path else directory
 
 
 async def install_skills(

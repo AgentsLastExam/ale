@@ -268,7 +268,7 @@ def test_guestd_starts_without_the_runners_proxy_variables() -> None:
     # In the root directory, on the framework's Python isolated from the image's variables.
     assert words[:5] == ["cd", "/", "&&", "exec", "env"]
     assert words[-4:] == [
-        "/opt/orbit/python/bin/python3",
+        "/opt/orbit-python/bin/python3",
         "-I",
         "/opt/orbit/guestd/main.py",
         "--stdio",
@@ -692,7 +692,7 @@ async def test_the_tunnel_runs_isolated_in_the_root_directory() -> None:
     tunnel = GatewayTunnel(LocalRelay(), listeners=[(7412, 0)], targets=[("127.0.0.1", 1)])  # type: ignore[arg-type]
     assert shlex.split(tunnel._command)[:7] == [
         "cd", "/", "&&", "exec",
-        "/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/tunnel.py",
+        "/opt/orbit-python/bin/python3", "-I", "/opt/orbit/guestd/tunnel.py",
     ]  # fmt: skip
 
 

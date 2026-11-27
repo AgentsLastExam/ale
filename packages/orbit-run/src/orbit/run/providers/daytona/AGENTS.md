@@ -139,3 +139,33 @@ them, is not refused.
 **Decision.** The daemon gives root nothing root lacks in the sandbox, so refusing a root
 agent kept nothing from it. What such an agent can change is what elevation always allows,
 recorded as `sandbox.sudo`.
+
+## Agent programs download in the sandbox
+
+**Problem.** Uploading an agent's program from the Host sends its whole build over the
+Host's connection, once per sandbox: 137 MB for Codex, 93 MB for Claude Code and 173 MB
+for ZCode, so a Run of many episodes at once is bounded by the Host's upstream bandwidth.
+
+**Context.** Measured in a 2-vCPU sandbox of a Debian image without Node.js or Python
+(November 2026, CPU runner, the Host's cache warm), each time from the start of the install
+to a program that answers `--version`:
+
+| Program | Downloaded in the sandbox | Uploaded from the Host |
+|---|---|---|
+| Codex 0.146.0 | 5.0–5.3 s | 9.5–9.6 s |
+| Claude Code 2.1.227 | 4.0 s | 6.9–7.0 s |
+| Pi 1.4.0 (121 npm packages, 24 MB, and Node.js) | 12.6–13.8 s | 9.4–10.4 s |
+| ZCode 0.17.0 (the 3.16.3 `.deb`) | 18.8–28.3 s | 22.6 s |
+
+Node.js's 57 MB archive downloads in 0.2 s there. Pi's 121 packages take 5.3 s from
+`registry.npmjs.org` with 16 threads or with 64, so the registry's response time, not the
+number of connections, bounds them.
+
+**Solution.** `DaytonaSandbox.fetches_files` is true: the sandbox downloads each file
+itself, checks it by its digest and unpacks it, with the CA bundle the Host uploads beside
+the manifest. A verifier whose network is not open gets its Agent Judge uploaded, as every
+other Provider's sandbox does, and Grok's build, which the Host decompresses, is uploaded.
+
+**Decision.** Downloading in the sandbox, though a program of many small npm packages
+installs a few seconds slower: its cost is the registry's and stays per sandbox, while an
+upload's grows with every episode the Host runs at once.

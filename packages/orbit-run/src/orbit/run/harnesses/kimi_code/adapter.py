@@ -14,7 +14,7 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, is_windows, npm_env
+from orbit.run.harnesses._agent import agent_env, agent_path, is_windows
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     PROMPT_ARGUMENT_WINDOWS_ENV,
@@ -55,6 +55,7 @@ class KimiCodeHarness(CliHarness):
     package = "@moonshot-ai/kimi-code"
     binary = "kimi"
     default_version = DEFAULT_CLI_VERSION
+    node = "24.15.0"
     settings_type = KimiCodeSettings
     settings: KimiCodeSettings
     logs = (LOG_ROOT, trajectory.SESSIONS)
@@ -178,7 +179,7 @@ class KimiCodeHarness(CliHarness):
         read_prompt, prompt = prompt_argument(prompt_path)
         script = f"unset {' '.join(_OVERRIDES)}; {read_prompt}{shlex.join(argv)} --prompt={prompt}"
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "KIMI_CODE_HOME": str(kimi_home),
             "KIMI_CODE_NO_AUTO_UPDATE": "1",
             "NO_COLOR": "1",

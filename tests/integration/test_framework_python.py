@@ -75,7 +75,7 @@ async def test_an_image_without_python_gets_the_frameworks(tmp_path: Path) -> No
         # Verification has no Python of the image's to use, so it gets the framework's.
         ctx = SimpleNamespace(spec=SimpleNamespace(os=OperatingSystem.LINUX))
         python, site = await EpisodeProtocol(NopHarness())._site_packages(ctx, sandbox)  # type: ignore[arg-type]
-        assert python == guestd.PYTHON["linux"] and site.startswith("/opt/orbit/python/")
+        assert python == guestd.PYTHON["linux"] and site.startswith("/opt/orbit-python/")
 
 
 @pytest.mark.asyncio

@@ -902,7 +902,7 @@ def _netstack_state(call: tuple[str, ...]) -> dict[str, Any]:
     """The state a privileged exec of the iptables writer sets, checked to be one it
     takes."""
     assert call[:5] == ("exec", "--privileged", "-u", "0", "orbit-e1")
-    assert call[5:8] == ("/opt/orbit/python/bin/python3", "-I", "-c")
+    assert call[5:8] == ("/opt/orbit-python/bin/python3", "-I", "-c")
     assert call[8] == Path(iptables.__file__).read_text()
     iptables.plan(call[9])
     return json.loads(call[9])
@@ -1459,7 +1459,7 @@ async def test_guestd_is_reached_isolated_in_the_root_directory_through_a_sessio
     assert transport._argv == [
         "docker", "exec", "-i", "--user", "0", "--env", "ORBIT_AGENT_USER=user",
         "--workdir", "/", "orbit-e1",
-        "/opt/orbit/python/bin/python3", "-I", "/opt/orbit/guestd/main.py", "--stdio",
+        "/opt/orbit-python/bin/python3", "-I", "/opt/orbit/guestd/main.py", "--stdio",
     ]  # fmt: skip
 
 
@@ -2274,7 +2274,7 @@ async def test_a_gvisor_sandbox_shows_it_runs_on_gvisor_and_writes_where_docker_
     written: dict[str, bytes] = {}
 
     async def guest_exec(argv: list[str], **_: object) -> tuple[int, str, str, bool]:
-        assert argv[:3] == ["/opt/orbit/python/bin/python3", "-I", "-c"]
+        assert argv[:3] == ["/opt/orbit-python/bin/python3", "-I", "-c"]
         return 0, log, "", False
 
     async def write_file(path: str, data: bytes, **_: object) -> None:

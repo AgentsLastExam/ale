@@ -2,18 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import io
 import json
-import os
 import re
 import shlex
 import shutil
-import subprocess
-import sys
-import tarfile
-import zipfile
 from pathlib import Path
-from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -42,14 +35,8 @@ from orbit.core.taskspec import (
 )
 from orbit.core.trajectory import AtifTrajectory
 from orbit.run.cli.tasks import PRESET_DIR, _harness
-from orbit.run.harnesses import _release
-from orbit.run.harnesses._npm import reported_version
-from orbit.run.harnesses._release import (
-    ReleaseAsset,
-    ReleaseAssets,
-    ensure_release_binary,
-    release_identity,
-)
+from orbit.run.harnesses._agent import reported_version
+from orbit.run.harnesses._install import ReleaseAsset, ReleaseAssets, release_identity
 from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
 from orbit.run.harnesses.base import (
     CONTINUE_PROMPT,
@@ -69,7 +56,6 @@ from orbit.run.harnesses.hermes import HermesHarness
 from orbit.run.harnesses.kimi_code import KimiCodeHarness
 from orbit.run.harnesses.muse_code import MuseCodeHarness
 from orbit.run.harnesses.openclaw_cli import OpenClawCliHarness
-from orbit.run.harnesses.openclaw_cli.adapter import _supported_node
 from orbit.run.harnesses.opencode import OpenCodeHarness
 from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
 from orbit.run.harnesses.pi_cli import PiCliHarness
@@ -189,10 +175,10 @@ async def test_windows_harness_uses_git_bash_native_paths_and_retains_failure(
     assert shell[1] == "-c"
     assert 'export PATH="/usr/bin:$PATH"' in shell[2]
     assert "'C:/Users/Agent User/" in shell[2]
-    assert env["PATH"] == f"C:/Users/Agent User/.local;{inherited_path}"
+    assert env["PATH"] == f"C:/Users/Agent User/.local/bin;{inherited_path}"
     assert env["HOME"] == "C:/Users/Agent User"
     if isinstance(harness, GrokBuildHarness):
-        assert "/bin/grok.exe'" in shell[2]
+        assert "/.local/bin/grok'" in shell[2]
 
 
 @pytest.mark.parametrize("exit_code", [0, 17])
@@ -719,6 +705,8 @@ async def test_openclaw_runs_without_its_respawning_launcher() -> None:
     )
 
     assert prepared.env["OPENCLAW_NO_RESPAWN"] == "1"
+    # Its tools inherit the PATH as the agent has it, without its Node.js ahead of it.
+    assert prepared.env["OPENCLAW_PATH_BOOTSTRAPPED"] == "1"
 
 
 def native_path(tmp_path: Path, relative: str) -> Path:
@@ -2022,20 +2010,6 @@ def test_openclaw_reports_other_transcripts_but_not_what_it_keeps_beside_them(
 
 
 @pytest.mark.parametrize(
-    ("version", "supported"),
-    [
-        ("v22.22.2", False),
-        ("v22.22.3", True),
-        ("v23.0.0", False),
-        ("v24.15.0", True),
-        ("v25.9.0", True),
-    ],
-)
-def test_openclaw_node_runtime_gate(version: str, supported: bool) -> None:
-    assert _supported_node(version) is supported
-
-
-@pytest.mark.parametrize(
     ("workdir", "expected"), [(None, "/home/agent"), ("/srv/project", "/srv/project")]
 )
 async def test_the_agent_starts_where_the_task_says(workdir, expected) -> None:
@@ -2256,102 +2230,6 @@ def test_release_assets_must_be_https_and_hex_and_only_the_pinned_version_runs()
         ReleasedHarness(cli_version="0.0.1")
 
 
-class ReleaseSandbox:
-    """Answers the installer's commands; records what it ran."""
-
-    def __init__(self, machine: str, *, reports: str = "fixture 2.0.0", banner: str = "") -> None:
-        self.request = SimpleNamespace(os=OperatingSystem.LINUX)
-        self.machine = machine
-        self.reports = reports
-        self.banner = banner
-        self.commands: list[list[str]] = []
-        self.files: dict[str, bytes] = {}
-
-    async def write_file(self, path, data, **kwargs):  # type: ignore[no-untyped-def]
-        self.files[str(path)] = data
-
-    async def exec(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-        argv = [str(part) for part in argv]
-        self.commands.append(argv)
-        if argv[-1] == 'printf %s "$HOME"':
-            return ExecResult(exit_code=0, stdout="/home/user")
-        if argv[-1] == "uname -m":
-            return ExecResult(exit_code=0, stdout=f"{self.machine}\n")
-        if argv[-1] == "--version":
-            return ExecResult(exit_code=0, stdout=self.reports, stderr=self.banner)
-        return ExecResult(exit_code=0)
-
-
-@pytest.mark.parametrize(("machine", "url"), [("x86_64", "x86_64"), ("arm64", "aarch64")])
-async def test_release_install_picks_the_asset_for_the_sandbox_platform(
-    machine: str, url: str
-) -> None:
-    sandbox = ReleaseSandbox(machine)
-    assets = ReleasedHarness.release_assets
-    version = await ensure_release_binary(
-        sandbox,  # type: ignore[arg-type]
-        binary="fixture",
-        version="2.0.0",
-        assets=assets,
-    )
-    assert version == "2.0.0"
-    installer = "/home/user/.local/share/orbit/install-release.py"
-    (install,) = [command for command in sandbox.commands if command[:2] == ["python3", installer]]
-    # The script runs from a file: a Windows desktop agent's command line may not exceed
-    # 1,024 characters.
-    assert sandbox.files[installer] == _release._INSTALL.encode()
-    assert len(subprocess.list2cmdline(install)) < 1024
-    assert install[2:] == [
-        f"https://example.test/fixture-linux-{url}",
-        assets[(OperatingSystem.LINUX, url)].sha256,
-        "/home/user/.local/bin/fixture",
-        "",
-        "",
-    ]
-
-
-async def test_a_release_binary_goes_where_its_program_looks_for_it() -> None:
-    sandbox = ReleaseSandbox("x86_64")
-    await ensure_release_binary(
-        sandbox,  # type: ignore[arg-type]
-        binary="fixture",
-        version="2.0.0",
-        assets=ReleasedHarness.release_assets,
-        directory="/home/user/.cache/program/bin",
-    )
-    (install,) = [command for command in sandbox.commands if command[0] == "python3"]
-    assert install[4] == "/home/user/.cache/program/bin/fixture"
-    assert ["/home/user/.cache/program/bin/fixture", "--version"] in sandbox.commands
-
-
-async def test_release_install_fails_closed_on_an_unknown_platform_or_wrong_version() -> None:
-    with pytest.raises(AgentUnsupportedError, match="no official release for linux/riscv64"):
-        await ensure_release_binary(
-            ReleaseSandbox("riscv64"),  # type: ignore[arg-type]
-            binary="fixture",
-            version="2.0.0",
-            assets=ReleasedHarness.release_assets,
-        )
-    # The program's own version is read before a library banner on stderr, as OpenHands
-    # CLI prints "OpenHands SDK v1.21.0" there.
-    assert (
-        await ensure_release_binary(
-            ReleaseSandbox("x86_64", banner="Fixture SDK v9.9.9\n"),  # type: ignore[arg-type]
-            binary="fixture",
-            version="2.0.0",
-            assets=ReleasedHarness.release_assets,
-        )
-        == "2.0.0"
-    )
-    with pytest.raises(AgentError, match=r"does not name 2\.0\.0: 'fixture 1\.9\.0'"):
-        await ensure_release_binary(
-            ReleaseSandbox("x86_64", reports="fixture 1.9.0"),  # type: ignore[arg-type]
-            binary="fixture",
-            version="2.0.0",
-            assets=ReleasedHarness.release_assets,
-        )
-
-
 @pytest.mark.parametrize(
     ("output", "version", "named"),
     [
@@ -2367,86 +2245,6 @@ def test_the_version_output_must_name_the_pinned_version_as_a_token(
     output: str, version: str, named: bool
 ) -> None:
     assert (reported_version(output, version) == version) is named
-
-
-def _install(
-    source: str, digest: str, target: Path, member: str = "", member_digest: str = ""
-) -> subprocess.CompletedProcess[str]:
-    """The in-Sandbox installer, run here by this interpreter."""
-    return subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _release._INSTALL,
-            source,
-            digest,
-            str(target),
-            member,
-            member_digest,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def test_release_installer_verifies_reuses_and_replaces_links(tmp_path: Path) -> None:
-    source = tmp_path / "download"
-    source.write_bytes(INSTALLED_BYTES)
-    target = tmp_path / "home/.local/bin/fixture"
-
-    refused = _install(source.as_uri(), "a" * 64, target)
-    assert refused.returncode != 0 and "not the pinned" in refused.stderr
-    assert not target.exists() and list(target.parent.iterdir()) == []
-
-    assert _install(source.as_uri(), INSTALLED_SHA256, target).returncode == 0
-    assert target.read_bytes() == INSTALLED_BYTES and os.access(target, os.X_OK)
-    # A matching file is reused without fetching anything.
-    assert _install("file:///nonexistent", INSTALLED_SHA256, target).returncode == 0
-
-    protected = tmp_path / "protected"
-    protected.write_bytes(b"system")
-    target.unlink()
-    target.symlink_to(protected)
-    assert _install(source.as_uri(), INSTALLED_SHA256, target).returncode == 0
-    assert not target.is_symlink() and target.read_bytes() == INSTALLED_BYTES
-    assert protected.read_bytes() == b"system"
-
-
-@pytest.mark.parametrize("kind", ["tar", "zip"])
-def test_release_installer_takes_only_the_pinned_member_of_an_archive(
-    tmp_path: Path, kind: str
-) -> None:
-    archive = tmp_path / f"release.{kind}"
-    if kind == "tar":
-        with tarfile.open(archive, "w:gz") as bundle:
-            for name, data in (("cli", INSTALLED_BYTES), ("../escape", b"outside")):
-                info = tarfile.TarInfo(name)
-                info.size = len(data)
-                bundle.addfile(info, io.BytesIO(data))
-    else:
-        with zipfile.ZipFile(archive, "w") as bundle:
-            bundle.writestr("cli", INSTALLED_BYTES)
-            bundle.writestr("../escape", b"outside")
-    archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    target = tmp_path / "home/.local/bin/fixture"
-
-    wrong = _install(archive.as_uri(), archive_digest, target, "cli", "a" * 64)
-    assert wrong.returncode != 0 and "cli in" in wrong.stderr and not target.exists()
-    missing = _install(archive.as_uri(), archive_digest, target, "absent", INSTALLED_SHA256)
-    assert missing.returncode != 0 and not target.exists()
-
-    assert (
-        _install(archive.as_uri(), archive_digest, target, "cli", INSTALLED_SHA256).returncode == 0
-    )
-    assert target.read_bytes() == INSTALLED_BYTES and os.access(target, os.X_OK)
-    assert sorted(path.name for path in target.parent.iterdir()) == ["fixture"]
-    assert not (tmp_path / "home/.local/escape").exists() and not (tmp_path / "escape").exists()
-    # The installed member is what a later install compares, not the archive.
-    assert (
-        _install("file:///nonexistent", archive_digest, target, "cli", INSTALLED_SHA256).returncode
-        == 0
-    )
 
 
 def test_an_archive_member_is_pinned_with_its_own_digest() -> None:

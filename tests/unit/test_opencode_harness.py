@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -21,7 +22,9 @@ from orbit.core.harness import (
 )
 from orbit.core.sandbox import ExecResult
 from orbit.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
+from orbit.run import guestd
 from orbit.run.cli.tasks import PRESET_DIR, _harness
+from orbit.run.harnesses import _install
 from orbit.run.harnesses.base import INVOCATIONS_PATH, STDERR_PATH, STDOUT_PATH
 from orbit.run.harnesses.opencode import OpenCodeHarness
 from orbit.run.recording import BlobStore
@@ -204,7 +207,7 @@ async def test_command_reads_stdin_into_one_exact_session(native_session_id: str
         native_session_id=native_session_id,
     )
     sh, invoke, python, prompt, requested, *argv = shlex.split(command.script)
-    assert (sh, invoke, python) == ("sh", f"{STATE}/invoke.sh", "python3")
+    assert (sh, invoke, python) == ("sh", f"{STATE}/invoke.sh", guestd.PYTHON["linux"])
     assert prompt == "/home/agent/.orbit-harness/prompt.md"
     assert requested == command.session_id
     assert argv[:2] == ["opencode", "run"]
@@ -246,7 +249,7 @@ async def test_a_windows_invocation_fits_a_desktop_agent_s_command_line() -> Non
         for argv in reversed(sandbox.commands)
         if argv[0] == "C:/Program Files/Git/bin/bash.exe"
     )
-    assert "/.opencode-orbit/invoke.sh' python " in shell[2]
+    assert "/.opencode-orbit/invoke.sh' C:/ProgramData/Orbit/python/python.exe " in shell[2]
     assert len(subprocess.list2cmdline(shell)) < 1024
 
 
@@ -307,8 +310,10 @@ async def test_every_invocation_exports_its_session_and_each_one_it_spawned(
     )
     _stage(sandbox)
     env = {**command.env, "PATH": f"{fake}:{os.environ['PATH']}", "FAKE_STATUS": str(status)}
+    # Run here, on this interpreter in place of the framework's.
+    script = command.script.replace(guestd.PYTHON["linux"], sys.executable)
     result = subprocess.run(
-        ["sh", "-c", command.script], env=env, capture_output=True, text=True, check=False
+        ["sh", "-c", script], env=env, capture_output=True, text=True, check=False
     )
 
     assert result.returncode == status, result.stderr
@@ -341,7 +346,8 @@ async def test_no_export_is_kept_without_the_session_itself(tmp_path: Path) -> N
     (home / "prompt.md").write_text("go")
     _stage(sandbox)
     env = {**command.env, "PATH": f"{fake}:{os.environ['PATH']}"}
-    subprocess.run(["sh", "-c", command.script], env=env, check=True, capture_output=True)
+    script = command.script.replace(guestd.PYTHON["linux"], sys.executable)
+    subprocess.run(["sh", "-c", script], env=env, check=True, capture_output=True)
     assert list((home / ".opencode-orbit/exports" / str(command.session_id)).iterdir()) == []
 
 
@@ -406,11 +412,15 @@ def test_a_retried_model_call_does_not_fail_the_invocation() -> None:
     assert (retried.final_message, retried.error) == ("Recovered.", None)
 
 
-INSTALLER = "/home/user/.local/share/orbit/install-release.py"
+#: The ``rg`` of the pinned Linux x86-64 ripgrep release.
+RG_SHA256 = "ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2"
 
 
 class InstallSandbox(FakeSandbox):
-    """Answers installation: OpenCode is installed, and names its paths."""
+    """Answers installation: OpenCode is installed and names its paths; ripgrep runs once
+    it has been uploaded."""
+
+    fetches_files = False
 
     def __init__(self, paths: str) -> None:
         super().__init__()
@@ -431,24 +441,37 @@ class InstallSandbox(FakeSandbox):
             return ExecResult(exit_code=0, stdout=self.paths)
         if command.endswith("uname -m"):
             return ExecResult(exit_code=0, stdout="x86_64\n")
-        if argv[-1] == "--version":
+        if command.endswith("/rg --version") and self.uploads:
             return ExecResult(exit_code=0, stdout="ripgrep 15.1.0\n")
         return ExecResult(exit_code=0)
 
 
-async def test_ripgrep_goes_where_opencode_looks_before_downloading_it() -> None:
+async def test_ripgrep_goes_where_opencode_looks_before_downloading_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"x")
+    monkeypatch.setenv("ORBIT_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(_install, "_downloaded", lambda archive_: archive)
     sandbox = InstallSandbox(
         "data   /home/user/.local/share/opencode\nbin    /x/cache/opencode/bin\n"
     )
     assert await OpenCodeHarness().install(sandbox) == "2.3.2"  # type: ignore[arg-type]
-    (install,) = [command for command in sandbox.commands if command[1:2] == [INSTALLER]]
-    assert install[2:6] == [
-        "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/"
-        "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz",
-        "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599",
-        "/x/cache/opencode/bin/rg",
-        "ripgrep-15.1.0-x86_64-unknown-linux-musl/rg",
-    ]
+    (upload,) = sandbox.uploads
+    assert upload[1] == "/x/cache/opencode/bin/.orbit-unpack"
+    manifest = json.loads(sandbox.files["/x/cache/opencode/bin/.orbit-unpack/manifest.json"])
+    assert manifest == {
+        "archives": [
+            {
+                "digest": "sha256:1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599",
+                "unpack": "members",
+                "into": "",
+                "members": [["ripgrep-15.1.0-x86_64-unknown-linux-musl/rg", "rg", RG_SHA256]],
+                "name": "",
+            }
+        ],
+        "executables": ["rg"],
+    }
     for paths in ("data   /somewhere\n", "bin\n"):
         with pytest.raises(AgentError, match="no bin directory"):
             await OpenCodeHarness().install(InstallSandbox(paths))  # type: ignore[arg-type]

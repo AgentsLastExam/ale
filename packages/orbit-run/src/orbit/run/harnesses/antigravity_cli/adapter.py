@@ -12,8 +12,8 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import OperatingSystem, StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, agent_python, is_windows, npm_env
-from orbit.run.harnesses._release import ReleaseAsset
+from orbit.run.harnesses._agent import agent_env, agent_path, agent_python, is_windows
+from orbit.run.harnesses._install import ReleaseAsset
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -204,7 +204,7 @@ class AntigravityCliHarness(CliHarness):
             f"{shlex.join(argv)} < {shlex.quote(request_path)}"
         )
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "HOME": str(home),
             "GEMINI_API_KEY": session.token,
             "GOOGLE_GEMINI_BASE_URL": session.gateway_url,

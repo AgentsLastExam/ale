@@ -20,8 +20,8 @@ from orbit.core.taskspec import (
     StreamableHttpMcpServer,
     ToolProvision,
 )
+from orbit.run import guestd
 from orbit.run.agent_resources import resolve_agent_resources
-from orbit.run.framework import MACOS_PYTHON
 
 pytestmark = pytest.mark.unit
 
@@ -356,11 +356,7 @@ def test_builtin_cua_desktop_is_opt_in_and_deduplicates(operating_system: Operat
     assert resources.mcp_servers[0].source_layers == ("run", "cli")
     server = resources.mcp_servers[0].server
     assert isinstance(server, StdioMcpServer)
-    assert server.command == (
-        {OperatingSystem.WINDOWS: "python.exe", OperatingSystem.MACOS: MACOS_PYTHON}.get(
-            operating_system, "python3"
-        )
-    )
+    assert server.command == guestd.AGENT_PYTHON[operating_system.value]
 
     with pytest.raises(AgentResourceError, match="unknown built-in"):
         resolve_agent_resources(

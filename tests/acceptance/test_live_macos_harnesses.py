@@ -3,8 +3,8 @@
 Run on a Mac whose local Orchard ``scripts/setup_macos.py`` keeps running. Set
 ORBIT_RUN_LIVE_ACCEPTANCE=1, ORBIT_LIVE_MACOS_CONFIG to a private run TOML, and
 ORBIT_ORCHARD_TEST_IMAGE / ORBIT_ORCHARD_TEST_USER to an image that logs that account in
-automatically, such as ``tests.support.MACOS_BASE`` and ``admin``; the Task adds the
-Node.js the CLI integration tests' image has. The TOML supplies the API-key Gateway
+automatically, such as ``tests.support.MACOS_BASE`` and ``admin``; the Task builds on it
+as the CLI integration tests' image does. The TOML supplies the API-key Gateway
 configuration; credentials stay in the environment. Select one Harness with pytest -k and
 use its Gateway dialect: Responses for the CLIs, Anthropic for computer-use. Each test
 creates and destroys its own VM.

@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Protocol, Self
+from typing import ClassVar, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -493,6 +493,11 @@ class Sandbox(ABC):
     ``agent_user`` and ``agent_home`` are the account :attr:`Identity.AGENT` maps to, as
     the guest reported it once the sandbox was ready, not as the request assumed it.
     """
+
+    fetches_files: ClassVar[bool] = False
+    """Whether files the framework installs from the web, such as an agent's program, are
+    downloaded by the sandbox itself rather than uploaded from the Host: true for one far
+    from the Host, such as a cloud sandbox, where a download in it is the faster way."""
 
     def __init__(
         self,

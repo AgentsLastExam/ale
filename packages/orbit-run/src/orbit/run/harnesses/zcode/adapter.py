@@ -10,20 +10,26 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from orbit.core.errors import AgentError, ConfigError
+from orbit.core.errors import ConfigError
 from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import (
+from orbit.run.harnesses._agent import (
+    agent_env,
     agent_home,
     agent_path,
     agent_python,
-    bash_command,
     is_windows,
-    npm_env,
-    reported_version,
-    version_mismatch,
+)
+from orbit.run.harnesses._install import (
+    PROGRAMS,
+    Archive,
+    installed,
+    node_path,
+    node_runtime,
+    sandbox_platform,
+    unpack,
 )
 from orbit.run.harnesses.base import (
     LOG_ROOT,
@@ -65,7 +71,13 @@ FILES = {
         "361b778f89496a37540d23a9d309efe6cb8fc97d557119cefbffc67df2f93998",
     ),
 }
-INSTALL_DIR = ".local/lib/zcode"
+#: The installer as one archive, of which only those files are unpacked, each checked.
+INSTALLER = Archive(
+    f"sha512:{INSTALLER_SHA512}",
+    "members",
+    url=INSTALLER_URL,
+    members=tuple((member, name, digest) for member, (name, digest) in FILES.items()),
+)
 #: ZCode's API type for each Gateway dialect, and the URL suffix its client expects.
 _APIS = {
     "openai-chat-completions": ("openai-chat-completions", "/v1"),
@@ -81,87 +93,16 @@ _OVERRIDES = (
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 )
 
-# Run by the agent's Python (``agent_python``, on macOS the framework's) on every system.
-# Matching files are reused; otherwise the installer is downloaded, accepted only by its
-# pinned sha512, and only the pinned members of its data archive are written, each
-# accepted only by its own sha256.
-_INSTALL = r"""
-import hashlib, json, os, sys, tarfile, tempfile, urllib.request
-
-spec = json.loads(sys.argv[1])
-target = spec["target"]
-wanted = {member: (name, digest) for member, (name, digest) in spec["files"].items()}
-
-def digest(path):
-    value = hashlib.sha256()
-    with open(path, "rb") as stream:
-        while block := stream.read(1 << 20):
-            value.update(block)
-    return value.hexdigest()
-
-def present(name, expected):
-    path = os.path.join(target, name)
-    return not os.path.islink(path) and os.path.isfile(path) and digest(path) == expected
-
-if all(present(name, expected) for name, expected in wanted.values()):
-    sys.exit(0)
-os.makedirs(target, exist_ok=True)
-handle, installer = tempfile.mkstemp(dir=target, prefix=".installer-")
-try:
-    checksum = hashlib.sha512()
-    response = urllib.request.urlopen(spec["url"], timeout=600)
-    with os.fdopen(handle, "wb") as out, response:
-        while block := response.read(1 << 20):
-            checksum.update(block)
-            out.write(block)
-    if checksum.hexdigest() != spec["sha512"]:
-        sys.exit(f"{spec['url']} has sha512 {checksum.hexdigest()}, not the pinned one")
-
-    class Member:
-        # One ar member of the Debian package, read in place.
-        def __init__(self, stream, size):
-            self.stream, self.left = stream, size
-        def read(self, size=-1):
-            size = self.left if size is None or size < 0 else min(size, self.left)
-            data = self.stream.read(size)
-            self.left -= len(data)
-            return data
-
-    found = {}
-    with open(installer, "rb") as stream:
-        if stream.read(8) != b"!<arch>\n":
-            sys.exit("the installer is not a Debian package")
-        while header := stream.read(60):
-            name, size = header[:16].decode().strip().rstrip("/"), int(header[48:58])
-            start = stream.tell()
-            if name.startswith("data.tar"):
-                with tarfile.open(fileobj=Member(stream, size), mode="r|*") as archive:
-                    for entry in archive:
-                        if entry.name in wanted and entry.isreg():
-                            found[entry.name] = archive.extractfile(entry).read()
-            stream.seek(start + size + size % 2)
-    for member, (name, expected) in wanted.items():
-        data = found.get(member)
-        if data is None or hashlib.sha256(data).hexdigest() != expected:
-            sys.exit(f"the installer's {member} is missing or not the pinned build")
-        handle, staged = tempfile.mkstemp(dir=target, prefix=".file-")
-        with os.fdopen(handle, "wb") as out:
-            out.write(data)
-        os.replace(staged, os.path.join(target, name))
-finally:
-    if os.path.exists(installer):
-        os.unlink(installer)
-"""
-
 
 class ZCodeHarness(CliHarness):
-    """Runs the ZCode CLI headless under the Sandbox's Node, from ZCode's desktop release."""
+    """Runs the ZCode CLI headless on Orbit's Node.js, from ZCode's desktop release."""
 
     name = "zcode"
     package = f"cdn-zcode.z.ai/zcode/electron/releases/{RELEASE}"
     binary = "zcode"
     mcp_sse = False  # no SSE transport is documented for ZCode's configuration
     default_version = DEFAULT_CLI_VERSION
+    node = "24.15.0"
     settings_type = ZCodeSettings
     settings: ZCodeSettings
     logs = (LOG_ROOT, trajectory.DB_DIR, trajectory.ARTIFACTS, trajectory.AGENTS)
@@ -185,38 +126,28 @@ class ZCodeHarness(CliHarness):
     def integrity(self) -> str:
         """``sha256:`` of the files Orbit runs, named with their own digests."""
         lines = sorted(f"{name} {digest}" for name, digest in FILES.values())
-        return "sha256:" + hashlib.sha256("\n".join(lines).encode()).hexdigest()
+        files = "sha256:" + hashlib.sha256("\n".join(lines).encode()).hexdigest()
+        return f"{files} node@{self.node}"
 
-    async def install(self, sandbox: Sandbox) -> str:
+    async def place(
+        self, sandbox: Sandbox, directory: str, *, identity: Identity, fetch: bool
+    ) -> list[str]:
         home = await agent_home(sandbox)
-        target = agent_path(home) / INSTALL_DIR
-        spec = {
-            "url": INSTALLER_URL,
-            "sha512": INSTALLER_SHA512,
-            "target": str(target),
-            "files": {member: list(entry) for member, entry in FILES.items()},
-        }
-        result = await sandbox.exec(
-            [agent_python(sandbox.request.os), "-c", _INSTALL, json.dumps(spec)],
-            timeout_sec=1200,
-            identity=Identity.AGENT,
+        platform = await sandbox_platform(sandbox, home)
+        program = f"{self.binary}/{self.version()}"
+        argv = [node_path(directory, self.node, platform), f"{directory}/{program}/zcode.cjs"]
+        if await installed(sandbox, home, argv, self.version(), identity=identity):
+            return argv
+        node = node_runtime(self.node, platform)
+        await unpack(
+            sandbox,
+            [node.moved(f"node/{self.node}"), INSTALLER.moved(program)],
+            directory,
+            identity=identity,
+            fetch=fetch,
+            executables=[f"node/{self.node}/{node.members[0][1]}"],
         )
-        if not result.ok:
-            detail = (result.stderr or result.stdout)[-800:]
-            raise AgentError(f"could not install zcode {self.version()}: {detail}")
-        probe = await sandbox.exec(
-            bash_command(
-                home, f"node {shlex.quote(str(target / 'zcode.cjs'))} --version", login=False
-            ),
-            env=await npm_env(sandbox, home),
-            timeout_sec=60,
-            identity=Identity.AGENT,
-        )
-        output = probe.stdout + "\n" + probe.stderr
-        installed = reported_version(output, self.version()) if probe.ok else None
-        if installed is None:
-            raise AgentError(version_mismatch("zcode", self.version(), output))
-        return installed
+        return argv
 
     async def install_resources(
         self,
@@ -319,8 +250,7 @@ class ZCodeHarness(CliHarness):
     ) -> CliCommand:
         home = agent_path(session.home)
         argv = [
-            "node",
-            str(home / INSTALL_DIR / "zcode.cjs"),
+            str(home / ".local/bin/zcode"),
             "--mode",
             "yolo",
             "--output-format",
@@ -340,8 +270,10 @@ class ZCodeHarness(CliHarness):
         read_prompt, prompt = prompt_argument(prompt_path)
         script = f"unset {' '.join(_OVERRIDES)}; {read_prompt}{shlex.join(argv)} --prompt={prompt}"
         env = {
-            **await npm_env(sandbox, session.home),
-            "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": str(home / INSTALL_DIR / "zcode-builtin.json"),
+            **await agent_env(sandbox, session.home),
+            "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": str(
+                home / PROGRAMS / self.binary / self.version() / "zcode-builtin.json"
+            ),
             "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": str(home / trajectory.PRIVATE / "provider.json"),
             "ZCODE_MODEL_TELEMETRY_ENABLED": "false",
             "NO_COLOR": "1",

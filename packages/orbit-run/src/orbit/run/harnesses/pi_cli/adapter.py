@@ -15,7 +15,7 @@ from orbit.core.harness import EffectiveAgentResources, HarnessSession, Trajecto
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses._agent import agent_env, agent_path
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -50,6 +50,7 @@ class PiCliHarness(CliHarness):
     package = "@earendil-works/pi-coding-agent"
     binary = "pi"
     default_version = DEFAULT_CLI_VERSION
+    node = "24.15.0"
     settings_type = PiCliSettings
     settings: PiCliSettings
     logs = (LOG_ROOT, trajectory.SESSIONS)
@@ -171,7 +172,7 @@ class PiCliHarness(CliHarness):
         if self.settings.disabled_tools:
             argv.extend(["--exclude-tools", ",".join(self.settings.disabled_tools)])
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "PI_CODING_AGENT_DIR": str(home / AGENT_DIR),
             # No startup network use: version checks, catalog refreshes and telemetry.
             "PI_OFFLINE": "1",

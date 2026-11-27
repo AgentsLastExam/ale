@@ -15,9 +15,10 @@ from orbit.core.errors import AgentError, AgentUnsupportedError, ConfigError
 from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
 from orbit.core.taskspec import OperatingSystem, StreamableHttpMcpServer
 from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.run import guestd
 from orbit.run.cli.tasks import PRESET_DIR, _harness
 from orbit.run.framework import MACOS_PYTHON
-from orbit.run.harnesses._release import release_identity
+from orbit.run.harnesses._install import release_identity
 from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
 from orbit.run.harnesses.antigravity_cli import adapter as agy
 from orbit.run.recording import BlobStore
@@ -108,8 +109,8 @@ async def test_configuration_is_episode_local_and_selects_api_key_mode(tmp_path:
 @pytest.mark.parametrize(
     ("system", "home", "python"),
     [
-        (OperatingSystem.LINUX, "/home/agent", "python3"),
-        (OperatingSystem.WINDOWS, "C:/Users/Agent User", "python"),
+        (OperatingSystem.LINUX, "/home/agent", guestd.PYTHON["linux"]),
+        (OperatingSystem.WINDOWS, "C:/Users/Agent User", guestd.AGENT_PYTHON["windows"]),
         (OperatingSystem.MACOS, "/Users/admin", MACOS_PYTHON),
     ],
 )
@@ -244,7 +245,7 @@ async def test_default_effort_leaves_the_native_choice() -> None:
     assert "--effort" not in command.script
 
 
-async def test_windows_command_runs_the_exe_with_the_os_python() -> None:
+async def test_windows_command_runs_the_exe_with_the_framework_python() -> None:
     sandbox = FakeSandbox(stdout=r"C:\Windows\System32")
     command = await AntigravityCliHarness().prepare_command(
         "C:/Users/agent/.orbit-harness/prompt.md",
@@ -252,7 +253,7 @@ async def test_windows_command_runs_the_exe_with_the_os_python() -> None:
         session(model=MODEL, home="C:/Users/agent", os=OperatingSystem.WINDOWS),
         native_session_id=None,
     )
-    assert "; python -Ic " in command.script
+    assert f"; {guestd.AGENT_PYTHON['windows']} -Ic " in command.script
     assert "C:/Users/agent/.local/bin/agy.exe --dangerously-skip-permissions" in command.script
     assert command.env["HOME"] == "C:/Users/agent"
 

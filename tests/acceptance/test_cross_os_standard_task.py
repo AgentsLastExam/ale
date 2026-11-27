@@ -16,7 +16,7 @@ from orbit.core.verdict import Status
 from orbit.run.episode import run_episode
 from orbit.run.gateway.server import Gateway
 from orbit.run.gateway.session import Limits
-from orbit.run.harnesses._npm import agent_home
+from orbit.run.harnesses._agent import agent_home
 from orbit.run.harnesses.builtin import OracleHarness
 from orbit.run.harnesses.computer_use import ComputerUseHarness
 from orbit.run.protocol.episode_protocol import EpisodeProtocol

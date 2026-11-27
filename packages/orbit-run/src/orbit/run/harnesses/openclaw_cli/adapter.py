@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import json
-import re
 import shlex
 import uuid
 from pathlib import PurePosixPath
 from typing import Any
 
-from orbit.core.errors import AgentError
 from orbit.core.harness import EffectiveAgentResources, HarnessSession, TrajectoryParseContext
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import StdioMcpServer
 from orbit.core.trajectory import AtifTrajectory
-from orbit.run.harnesses._npm import agent_path, npm_env
+from orbit.run.harnesses._agent import agent_env, agent_path
 from orbit.run.harnesses.base import (
     LOG_ROOT,
     CliCommand,
@@ -38,17 +36,10 @@ class OpenClawCliHarness(CliHarness):
     package = "openclaw"
     binary = "openclaw"
     default_version = DEFAULT_CLI_VERSION
+    node = "24.15.0"
     settings_type = OpenClawCliSettings
     settings: OpenClawCliSettings
     logs = (LOG_ROOT, trajectory.SESSIONS)
-
-    async def install(self, sandbox: Sandbox) -> str:
-        node = await sandbox.exec(["node", "--version"], timeout_sec=30, identity=Identity.AGENT)
-        if not node.ok or not _supported_node(node.stdout):
-            raise AgentError(
-                "OpenClaw 2026.7.1 requires Node >=22.22.3; rebuild the Orbit base image"
-            )
-        return await super().install(sandbox)
 
     async def install_resources(
         self,
@@ -192,7 +183,7 @@ class OpenClawCliHarness(CliHarness):
         elif isinstance(self.settings.timeout_seconds, int):
             argv.extend(["--timeout", str(self.settings.timeout_seconds)])
         env = {
-            **await npm_env(sandbox, session.home),
+            **await agent_env(sandbox, session.home),
             "OPENCLAW_HOME": str(state),
             "OPENCLAW_STATE_DIR": str(state),
             "OPENCLAW_CONFIG_PATH": str(state / "openclaw.json"),
@@ -203,6 +194,9 @@ class OpenClawCliHarness(CliHarness):
             # Node process and report any signal death of the CLI, such as an OOM kill,
             # as a bare exit 1.
             "OPENCLAW_NO_RESPAWN": "1",
+            # Its PATH bootstrap would put the directory of the Node.js it runs on, and
+            # /usr/bin and /bin, ahead of the PATH its tools inherit.
+            "OPENCLAW_PATH_BOOTSTRAPPED": "1",
         }
         return CliCommand(shlex.join(argv), env, requested)
 
@@ -214,15 +208,3 @@ class OpenClawCliHarness(CliHarness):
 
     def parse_trajectory(self, context: TrajectoryParseContext) -> AtifTrajectory:
         return trajectory.parse_trajectory(context)
-
-
-def _supported_node(output: str) -> bool:
-    match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", output)
-    if not match:
-        return False
-    version = tuple(int(part) for part in match.groups())
-    return (
-        version >= (25, 9, 0)
-        or (24, 15, 0) <= version < (25, 0, 0)
-        or (22, 22, 3) <= version < (23, 0, 0)
-    )

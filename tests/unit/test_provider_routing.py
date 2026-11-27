@@ -652,7 +652,7 @@ async def test_the_probe_runs_as_root_on_the_frameworks_python_for_each_feature(
     wanted = {ContainerFeature.PERF, ContainerFeature.MOUNT, ContainerFeature.NESTED_CONTAINERS}
     missing = await missing_features(sandbox, wanted)  # type: ignore[arg-type]
     assert missing == {ContainerFeature.MOUNT: "mount_namespace EPERM"}
-    assert sandbox.argv[:3] == ("/opt/orbit/python/bin/python3", "-I", "-c")
+    assert sandbox.argv[:3] == ("/opt/orbit-python/bin/python3", "-I", "-c")
     # Starting a container is no syscall: conformance checks nested containers.
     assert sandbox.argv[4:] == ("mount", "perf")
     assert await missing_features(sandbox, [ContainerFeature.NESTED_CONTAINERS]) == {}  # type: ignore[arg-type]

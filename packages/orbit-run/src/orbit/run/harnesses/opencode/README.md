@@ -1,8 +1,9 @@
 # OpenCode
 
 Pinned to the npm package `@opencode/cli@2.3.2`, OpenCode 2; the older `opencode-ai`
-package carries only OpenCode 1. Its postinstall links the platform build from the
-matching `@opencode/cli-<platform>` package. Each invocation is
+package carries only OpenCode 1. Orbit installs the platform build from the matching
+`@opencode/cli-<platform>` package, the `-baseline` one on an x86-64 Linux or Windows CPU
+without AVX2, as OpenCode's postinstall chooses. Each invocation is
 `opencode run --standalone --format json --auto` with the prompt on stdin. `--standalone`
 gives the invocation a server of its own on the loopback, which ends with it; without it
 the CLI would start, or join, a background service that outlives the invocation. `--auto`
@@ -42,10 +43,11 @@ runs through `.opencode-orbit/invoke.sh`, which Orbit writes, since a Windows de
 agent's command line may not exceed 1,024 characters. OpenCode keeps sessions in SQLite
 only, so after every invocation the script has `opencode session export` write the session,
 and every session it spawned at any depth, to
-`.opencode-orbit/exports/<root session id>/<time>/<session id>.json`. The parser reads the
-newest export, uses an invocation's JSON events only for a turn the export lacks, and adds
-an invocation's error to a turn whose session records no failure. A `subagent` call's
-metadata names the child session, whose export names its parent; the child becomes a
+`.opencode-orbit/exports/<root session id>/<time>/<session id>.json`; it reads the time and
+each export's child sessions with the framework's Python. The parser reads the newest
+export, uses an invocation's JSON events only for a turn the export lacks, and adds an
+invocation's error to a turn whose session records no failure. A
+`subagent` call's metadata names the child session, whose export names its parent; the child becomes a
 subagent trajectory embedded in its spawner's, any other session in the export gets an
 `unlinked_subagent` issue, and another root's exports are named in `parse_issues`. A
 synthetic message, such as the notice of a finished subagent, is a system step.

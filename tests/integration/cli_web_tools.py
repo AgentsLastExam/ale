@@ -39,7 +39,7 @@ from orbit.core.trace import read_jsonl
 from orbit.run.gateway import anthropic, gemini, openai_chat_completions, openai_responses
 from orbit.run.gateway.server import REQUEST_PATHS, Gateway
 from orbit.run.gateway.session import GatewaySession, Upstream
-from orbit.run.harnesses._npm import agent_python
+from orbit.run.harnesses._agent import agent_python
 from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
 from orbit.run.harnesses.base import CliHarness
 from orbit.run.harnesses.claude_code import ClaudeCodeHarness

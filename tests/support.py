@@ -48,7 +48,7 @@ from orbit.core.taskspec import (
 )
 from orbit.core.trace import ExecutionLog
 from orbit.core.trajectory import AtifAgent, AtifTrajectory, TrajectoryBuilder
-from orbit.run import orbit_image
+from orbit.run import guestd, orbit_image
 from orbit.run.harnesses.base import CliHarness
 from orbit.run.providers import ProviderRegistry, machine_arch
 from orbit.run.scaffold import scaffold_task
@@ -310,18 +310,10 @@ MACOS_BASE = (
     "ghcr.io/cirruslabs/macos-tahoe-base@sha256:"
     "4aaa751fa7538902d73c767f27a066fc87e83f183069da4e4b5022863abd4c77"
 )
-#: ``environment/build.sh`` of a macOS image with the runtimes the Orbit bases provide CLIs:
-#: the Node.js they pin, and the base's own Git and Python.
+#: ``environment/build.sh`` of a macOS image with what the Orbit bases provide CLIs: the
+#: base's own Git and Python. Harnesses bring their own Node.js.
 MACOS_RUNTIME_BUILD = """\
 set -euo pipefail
-node=node-v24.15.0-darwin-arm64
-curl -fsSL --retry 3 -o "/tmp/$node.tar.gz" "https://nodejs.org/dist/v24.15.0/$node.tar.gz"
-echo "372331b969779ab5d15b949884fc6eaf88d5afe87bde8ba881d6400b9100ffc4  /tmp/$node.tar.gz" |
-    shasum -a 256 -c -
-tar -xzf "/tmp/$node.tar.gz" -C /usr/local --strip-components 1 \\
-    "$node/bin" "$node/include" "$node/lib" "$node/share"
-rm "/tmp/$node.tar.gz"
-/usr/local/bin/node --version
 git --version
 python3 --version
 """
@@ -534,13 +526,13 @@ class MemorySandbox(Sandbox):
                    output_sink=None):  # type: ignore[no-untyped-def]  # fmt: skip
         if argv[0] == "sleep":
             await asyncio.sleep(float(argv[1]))
-        if argv[:2] == ["python3", "-c"] and argv[3:4] == ["inspect"]:
+        if argv[:2] == [guestd.PYTHON["linux"], "-c"] and argv[3:4] == ["inspect"]:
             # The artifact copier: the declared file, when the Sandbox holds it.
             found = argv[4] in self.files
             entries = [{"source": argv[4], "kind": "file", "mode": 0o644}] if found else []
             report = {"entries": entries, "skipped": [], "truncated": False}
             return ExecResult(exit_code=0, stdout=json.dumps(report))
-        if argv[:2] == ["python3", "-c"] and argv[3:4] == ["read"]:
+        if argv[:2] == [guestd.PYTHON["linux"], "-c"] and argv[3:4] == ["read"]:
             await output_sink("stdout", self.files[argv[4]])
             return ExecResult(exit_code=0)
         if argv[:3] == ["rm", "-rf", "--"]:

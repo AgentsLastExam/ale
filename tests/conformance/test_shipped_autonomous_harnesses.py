@@ -16,7 +16,7 @@ from orbit.core.harness import HarnessSession, ResumeSupport, TrajectoryParseCon
 from orbit.core.sandbox import ExecResult
 from orbit.core.taskspec import OperatingSystem
 from orbit.core.testkit import AutonomousHarnessConformance
-from orbit.run.harnesses._release import release_identity
+from orbit.run.harnesses._install import NODE, release_identity
 from orbit.run.harnesses.base import LOG_ROOT, PROMPT_PATH, STDOUT_PATH, CliHarness, NativeResult
 from orbit.run.recording import BlobStore
 
@@ -98,13 +98,20 @@ def test_definition_is_strict_pinned_and_declares_its_evidence(harness: CliHarne
         assert set(harness.supported_os) == {system for system, _ in harness.release_assets}
     else:
         # The npm package, or what an adapter installs from upstream's own installer: its
-        # source at one commit, or the digest of the files it unpacks and runs.
-        assert harness.integrity() == f"npm:{harness.package}@{harness.version()}" or (
+        # source at one commit, or the digest of the files it unpacks and runs; and the
+        # Node.js a JavaScript program runs on.
+        node = f" node@{harness.node}" if harness.node else ""
+        assert harness.integrity() == f"npm:{harness.package}@{harness.version()}{node}" or (
             re.fullmatch(
-                r"git:[\w.-]+/[\w.-]+@[0-9a-f]{40}|sha256:[0-9a-f]{64}", harness.integrity()
+                rf"(git:[\w.-]+/[\w.-]+@[0-9a-f]{{40}}|sha256:[0-9a-f]{{64}}){re.escape(node)}",
+                harness.integrity(),
             )
         )
         assert set(harness.supported_os) == set(OperatingSystem)
+        assert harness.node is None or harness.node in NODE
+        if harness.integrity().startswith("npm:") and harness.node is None:
+            # A native program from npm has a build for every system it supports.
+            assert {"linux-x64", "darwin-arm64", "win32-x64"} <= set(harness.platform_packages)
     assert harness.resume_support is ResumeSupport.NATIVE
     assert harness.logs[0] == LOG_ROOT and len(harness.logs) > 1
 
