@@ -18,6 +18,7 @@ from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, Traje
 from orbit.core.sandbox import ExecResult
 from orbit.core.taskspec import OperatingSystem, StreamableHttpMcpServer
 from orbit.core.testkit import AutonomousHarnessConformance
+from orbit.core.trajectory import AtifMetrics
 from orbit.run import guestd
 from orbit.run.cli.tasks import PRESET_DIR, _harness
 from orbit.run.harnesses import _install
@@ -458,9 +459,18 @@ def child_messages() -> list[Message]:
         user("run child"),
         assistant(
             tool("call-3", "Bash", {"command": "echo hi"}, "hi"),
-            {"type": "step-finish", "tokens": {"input": 7}},
+            {"type": "step-finish", "tokens": {"input": 7, "output": 1}},
         ),
     ]
+
+
+#: The columns of ZCode's store the parser reads.
+STORE_TABLES = (
+    "create table session (id text, parent_id text);"
+    "create table message (id text, session_id text, sequence integer, data text);"
+    "create table part (id text, message_id text, sequence integer, data text);"
+    "create table model_usage (assistant_message_id text, completed_at integer);"
+)
 
 
 def add_messages(store: sqlite3.Connection, session_id: str, *messages: Message) -> None:
@@ -500,11 +510,7 @@ def zcode_logs(tmp_path: Path) -> Path:
     image = {"mime": "image/png", "url": f"zcode-artifact://{SESSION_ID}/image-1"}
     store = sqlite3.connect(logs / DB)
     with store:
-        store.executescript(
-            "create table session (id text, parent_id text);"
-            "create table message (id text, session_id text, sequence integer, data text);"
-            "create table part (id text, message_id text, sequence integer, data text);"
-        )
+        store.executescript(STORE_TABLES)
         store.executemany(
             "insert into session values (?, ?)", [(SESSION_ID, None), (CHILD_ID, SESSION_ID)]
         )
@@ -517,7 +523,10 @@ def zcode_logs(tmp_path: Path) -> Path:
             assistant(
                 tool("call-2", "Read", {"file_path": "a.png"}, "1x1 pixels", attachments=[image])
             ),
-            assistant(text_part("PARENT-DONE"), {"type": "step-finish", "tokens": {"input": 5}}),
+            assistant(
+                text_part("PARENT-DONE"),
+                {"type": "step-finish", "tokens": {"input": 5, "output": 1}},
+            ),
             user(PROMPTS[1]),
             assistant(text_part("SECOND-DONE")),
         )
@@ -668,3 +677,81 @@ def test_without_the_store_each_turn_comes_from_its_prompt_and_stdout(tmp_path: 
     assert {"reason": "native_session_unavailable", "session_id": SESSION_ID} in orbit[
         "parse_issues"
     ]
+
+
+def test_steps_take_the_time_their_call_finished_and_its_own_usage(tmp_path: Path) -> None:
+    """A step takes the time its model call finished, as ``model_usage`` records it; ZCode's
+    ``input`` already counts the cache reads and writes. It records no response ID."""
+    logs = tmp_path / "logs"
+    write_run(logs, stdout("ONE"), stdout("TWO"))
+    (logs / DB).parent.mkdir(parents=True)
+    epoch = 1792972800000  # 2026-10-26T00:00:00Z
+
+    def prompt(second: int, text: str) -> Message:
+        data, parts = user(text)
+        return {**data, "time": {"created": epoch + 1000 * second}}, parts
+
+    def answer(text: str, tokens: object) -> Message:
+        return assistant(text_part(text), {"type": "step-finish", "tokens": tokens})
+
+    store = sqlite3.connect(logs / DB)
+    with store:
+        store.executescript(STORE_TABLES)
+        store.execute("insert into session values (?, ?)", (SESSION_ID, None))
+        add_messages(
+            store,
+            SESSION_ID,
+            prompt(0, PROMPTS[0]),
+            # ``output`` already counts the reasoning.
+            answer(
+                "ONE",
+                {
+                    "input": 1300,
+                    "output": 40,
+                    "reasoning": 5,
+                    "cache": {"read": 1000, "write": 298},
+                },
+            ),
+            prompt(3, PROMPTS[1]),
+            # A cache count the usage gives as null is zero.
+            answer("TWO", {"input": 9, "output": 3, "cache": {"read": None}}),
+            answer("THREE", {"input": "9", "output": 3}),
+            # Usage that reports no tokens is none, as is a step-finish without usage.
+            answer("FOUR", {"input": 0, "output": 0}),
+            assistant(text_part("FIVE"), {"type": "step-finish"}),
+        )
+        store.executemany(
+            "insert into model_usage values (?, ?)",
+            [
+                # A retried call finished with its last attempt.
+                (f"{SESSION_ID}-1", epoch + 1500),
+                (f"{SESSION_ID}-1", epoch + 2000),
+                (f"{SESSION_ID}-3", epoch + 4000),
+            ],
+        )
+    store.close()
+
+    trajectory = ZCodeHarness().parse_trajectory(context(logs, tmp_path))
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", "2026-10-26T00:00:00.000000Z"),
+        ("agent", "2026-10-26T00:00:02.000000Z"),
+        ("user", "2026-10-26T00:00:03.000000Z"),
+        ("agent", "2026-10-26T00:00:04.000000Z"),
+        ("agent", None),
+        ("agent", None),
+        ("agent", None),
+    ]
+    assert [step.metrics for step in trajectory.steps if step.source == "agent"] == [
+        AtifMetrics(prompt_tokens=1300, completion_tokens=40, cached_tokens=1000),
+        AtifMetrics(prompt_tokens=9, completion_tokens=3, cached_tokens=0),
+        None,
+        None,
+        None,
+    ]
+    assert all(step.extra is None for step in trajectory.steps)
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "invalid_token_usage", "session_id": SESSION_ID, "message_id": f"{SESSION_ID}-4"}
+    ]
+    assert trajectory.final_metrics is not None
+    assert trajectory.final_metrics.total_prompt_tokens == 1309

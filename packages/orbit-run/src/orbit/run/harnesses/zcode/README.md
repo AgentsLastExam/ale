@@ -43,13 +43,22 @@ policy.
 ZCode chooses the session ID and reports it in its final `result`; a resume passes it to
 `--resume`. The conversation is in ZCode's SQLite store, `.zcode/cli/db/db.sqlite`, whose
 schema the release does not promise to keep; the parser reads the pinned version's
-`session`, `message` and `part` tables from a private copy that takes the write-ahead log
-along. Each assistant message is one model step with its tool calls, their outcomes and
-usage. Context ZCode injects as model-only user messages is not a turn. Images are data
-URLs in `.zcode/cli/artifacts/<session id>/`. A failed turn has no record in the store; its
-`turn.failed` event on stdout is added at the end of the turn. Resume checks the store for
-the exact top-level session, because a session's own files exist only for attachments or
-subagents; the check runs on the framework's Python.
+`session`, `message`, `part` and `model_usage` tables from a private copy that takes the
+write-ahead log along. Context ZCode injects as model-only user messages is not a turn.
+Images are data URLs in `.zcode/cli/artifacts/<session id>/`. A failed turn has no record in
+the store; its `turn.failed` event on stdout is added at the end of the turn. A turn the
+store lacks is rebuilt from its prompt and stdout's `result`, with no times or usage.
+Resume checks the store for the exact top-level session, because a session's own files
+exist only for attachments or subagents; the check runs on the framework's Python.
+
+Each assistant message is one model call's step with its tool calls, their outcomes and
+usage. It takes the time the call finished, which `model_usage` records in Unix
+milliseconds, the last attempt's when it was retried: the message's `time.created` is when
+the request was sent, and its `time.completed` comes after its tool calls ran. The usage is
+its `step-finish` part's `tokens`, which keep the AI SDK's totals: `input` already counts
+the cache reads and writes and `output` the reasoning, as the Gateway does. Usage that
+cannot be read is reported as `invalid_token_usage`. The store records no response ID, so
+no step is linked to a Gateway call.
 
 A subagent's `.zcode/cli/agents/<session id>/<agent id>/metadata.json` names the parent
 session, the spawning call and the child session, whose row names the same parent. It
