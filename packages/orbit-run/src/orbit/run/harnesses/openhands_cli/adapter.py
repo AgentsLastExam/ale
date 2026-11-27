@@ -174,7 +174,9 @@ class OpenHandsCliHarness(CliHarness):
             "OPENHANDS_SUPPRESS_BANNER": "1",
             "NO_COLOR": "1",
         }
-        return CliCommand(f"{shlex.join(argv)} < /dev/null", env, requested)
+        # Its events record local time without a zone: keep the offset that gives it one.
+        offset = shlex.quote(str(home / trajectory.UTC_OFFSET))
+        return CliCommand(f"date +%z > {offset}; {shlex.join(argv)} < /dev/null", env, requested)
 
     def read_result(self, stdout: str) -> NativeResult:
         return trajectory.read_result(stdout)
