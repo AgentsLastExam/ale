@@ -58,7 +58,13 @@ async def test_every_step_is_witnessed_by_the_framework(
         ]
     )
 
-    result = await run_policy(task_root, tmp_path / "runs", harness)
+    result = await run_policy(
+        task_root,
+        tmp_path / "runs",
+        harness,
+        instruction_prefix="First.",
+        instruction_suffix="Last.",
+    )
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     trajectory = AtifTrajectory.model_validate_json(
@@ -87,9 +93,13 @@ async def test_every_step_is_witnessed_by_the_framework(
     assert screenshot.content[0].source is not None
     assert (result.run_dir / screenshot.content[0].source.path).is_file()
 
-    # The harness saw the instruction exactly once, on the first step.
-    assert harness.observations[0].instruction is not None
+    # The harness saw the instruction exactly once, on the first step, between the Run's
+    # prefix and suffix, as the trajectory records it.
+    instruction = load_tasks(task_root)[0].spec.instruction
+    given = f"First.\n\n{instruction}" + ("\n" if instruction.endswith("\n") else "\n\n") + "Last."
+    assert harness.observations[0].instruction == given
     assert all(o.instruction is None for o in harness.observations[1:])
+    assert trajectory.steps[0].source == "user" and trajectory.steps[0].message == given
 
 
 @pytest.mark.asyncio

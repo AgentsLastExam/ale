@@ -219,6 +219,10 @@ class AgentProvenance(BaseModel):
     resources: tuple[AgentResourceProvenance, ...] = ()
     resources_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     authentication: AuthenticationProvenance = AuthenticationProvenance()
+    instruction_prefix: str = Field(default="", exclude_if=lambda value: not value)
+    """The Run's text above the Task's instruction in the agent's first prompt."""
+    instruction_suffix: str = Field(default="", exclude_if=lambda value: not value)
+    """The Run's text below it, above what the framework states."""
     env: tuple[AgentVariableProvenance, ...] = Field(default=(), exclude_if=lambda value: not value)
     """The Run's ``[agent.env]``, given to every command of the agent's turns."""
 

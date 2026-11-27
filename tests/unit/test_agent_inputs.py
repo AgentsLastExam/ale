@@ -1,4 +1,4 @@
-"""What a Run gives its agent: variables of its own."""
+"""What a Run gives its agent: text around the Task's instruction, and variables of its own."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from orbit.core.errors import ConfigError
 from orbit.core.harness import AgentRun, HarnessSession
 from orbit.core.lock import AgentVariableProvenance, RunLock
 from orbit.core.sandbox import ExecResult, PreparedTaskImage
+from orbit.core.trajectory import AtifTrajectory
 from orbit.core.verdict import Status
 from orbit.run.episode import run_episode
 from orbit.run.harnesses.builtin import NopHarness, OracleHarness
@@ -89,35 +90,107 @@ async def _run(
     )
 
 
-# --- the variables ---
+# --- the instruction ---
 
 
-def test_agent_env_is_part_of_the_run_configuration(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_the_prefix_and_suffix_wrap_the_instruction_in_the_first_prompt_alone(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    plain, wrapped = TurnsHarness(), TurnsHarness()
+    task = _task(tmp_path / "plain", rounds=1)
+    result = await _run(tmp_path / "plain", task, plain)
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    result = await _run(
+        tmp_path / "wrapped",
+        _task(tmp_path / "wrapped", rounds=1),
+        wrapped,
+        instruction_prefix=PREFIX,
+        instruction_suffix=SUFFIX,
+    )
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+
+    instruction = task.spec.instruction
+    first, framework = plain.prompts[0].split("\n\n---\n\n")
+    assert first == instruction and instruction.endswith("\n")
+    # Prefix, the instruction verbatim, suffix, each a blank line apart, and below them what
+    # the framework states, as without them.
+    assert wrapped.prompts[0] == (
+        PREFIX + "\n" + instruction + "\n" + SUFFIX + "\n\n---\n\n" + framework
+    )
+    # Every later prompt is the framework's alone.
+    assert wrapped.prompts[1:] == plain.prompts[1:]
+    assert not any("ablation" in prompt or "Biases" in prompt for prompt in wrapped.prompts[1:])
+    # The trajectory records the first prompt as it was sent.
+    trajectory = AtifTrajectory.model_validate_json(
+        (result.run_dir / "trajectory.json").read_text()
+    )
+    users = [step.message for step in trajectory.steps if step.source == "user"]
+    assert users == wrapped.prompts
+
+
+def test_the_oracle_receives_the_instruction_alone() -> None:
+    protocol = EpisodeProtocol(
+        OracleHarness(), instruction_prefix=PREFIX, instruction_suffix=SUFFIX
+    )
+    assert protocol._given("Do the task.\n") == "Do the task.\n"
+    protocol = EpisodeProtocol(NopHarness(), instruction_prefix=PREFIX)
+    assert protocol._given("Do the task.\n") == PREFIX + "\nDo the task.\n"
+    # One blank line apart however each part ends, and the instruction as written.
+    protocol = EpisodeProtocol(NopHarness(), instruction_prefix="First", instruction_suffix="Last")
+    assert protocol._given("Do the task.") == "First\n\nDo the task.\n\nLast"
+    assert protocol._given("Do the task.\n\n\n") == "First\n\nDo the task.\n\n\nLast"
+
+
+def test_the_prefix_suffix_and_env_are_part_of_the_run_configuration(tmp_path: Path) -> None:
     path = tmp_path / "run.toml"
-    path.write_text('[agent.env]\nWANDB_API_KEY = "${WANDB_API_KEY}"\nWANDB_MODE = "online"\n')
+    path.write_text(
+        '[agent]\ninstruction_prefix = """\nFirst.\n"""\ninstruction_suffix = "Last."\n'
+        '[agent.env]\nWANDB_API_KEY = "${WANDB_API_KEY}"\nWANDB_MODE = "online"\n'
+    )
     config = load_run_config(run_path=path)
+    assert (config.agent.instruction_prefix, config.agent.instruction_suffix) == (
+        "First.\n",
+        "Last.",
+    )
     assert config.agent.env == {"WANDB_API_KEY": "${WANDB_API_KEY}", "WANDB_MODE": "online"}
     hashes = {
         RunConfig().config_hash,
         config.config_hash,
+        load_run_config(run_path=path, overrides=["agent.instruction_suffix=Other."]).config_hash,
         load_run_config(run_path=path, overrides=["agent.env.WANDB_MODE=offline"]).config_hash,
     }
-    assert len(hashes) == 3
+    assert len(hashes) == 4
 
 
 def test_the_lock_records_what_the_run_gave_its_agent_never_a_value() -> None:
-    settings = RunConfig.model_validate({"agent": {"env": {"WANDB_API_KEY": "${WANDB_API_KEY}"}}})
+    settings = RunConfig.model_validate(
+        {
+            "agent": {
+                "instruction_prefix": "First.",
+                "instruction_suffix": "Last.",
+                "env": {"WANDB_API_KEY": "${WANDB_API_KEY}"},
+            }
+        }
+    )
     sources = (AgentVariableProvenance(name="WANDB_API_KEY", source="env_file"),)
     given = agent_provenance(NopHarness(), "model", settings, agent_env=sources)
-    assert given.env == sources
+    assert (given.instruction_prefix, given.instruction_suffix, given.env) == (
+        "First.",
+        "Last.",
+        sources,
+    )
     lock = make_lock().model_copy(update={"agent": given})
     recorded = json.loads(RunLock.model_validate_json(lock.model_dump_json()).model_dump_json())
     assert recorded["agent"]["env"] == [{"name": "WANDB_API_KEY", "source": "env_file"}]
-    # An oracle receives none, and a lock without them names none.
+    # An oracle receives neither, and a lock without them names neither.
     oracle = agent_provenance(OracleHarness(), "", settings)
-    assert oracle.env == ()
+    assert (oracle.instruction_prefix, oracle.instruction_suffix, oracle.env) == ("", "", ())
     dumped = json.loads(make_lock().model_copy(update={"agent": oracle}).model_dump_json())
-    assert "env" not in dumped["agent"]
+    assert {"instruction_prefix", "instruction_suffix", "env"}.isdisjoint(dumped["agent"])
+
+
+# --- the variables ---
 
 
 @pytest.mark.parametrize(
@@ -363,10 +436,10 @@ async def test_orbit_run_gives_the_env_to_an_agent_and_none_to_the_oracle(
 ) -> None:
     task_cli = import_module("orbit.run.cli.tasks")
     env_file(f"WANDB_API_KEY={SECRET}\n" if agent == "nop" else "")
-    seen: list[tuple[Any, Any]] = []
+    seen: list[tuple[Any, Any, Any]] = []
 
     async def execute(task: Any, protocol: Any, _providers: Any, **kwargs: Any) -> Any:
-        seen.append((task.variables, kwargs["provenance"].agent))
+        seen.append((task.variables, protocol, kwargs["provenance"].agent))
         return write_result(kwargs["run_dir"] / kwargs["episode_id"], Status.COMPLETED, 1)
 
     monkeypatch.setattr(task_cli, "_prepare_images", _prepared)
@@ -376,21 +449,25 @@ async def test_orbit_run_gives_the_env_to_an_agent_and_none_to_the_oracle(
         {
             "agent": {
                 "name": agent,
+                "instruction_prefix": "First.",
+                "instruction_suffix": "Last.",
                 "env": {"WANDB_API_KEY": "${WANDB_API_KEY}"},
             }
         }
     )
     task = scaffold_task(tmp_path / "task")
     assert await task_cli._run_one(str(task), settings, tmp_path / "runs", "run") == 0
-    ((variables, provenance),) = seen
+    ((variables, protocol, provenance),) = seen
     if agent == "nop":
         assert variables.agent == {"WANDB_API_KEY": SECRET}
         assert SECRET in variables.secrets
         assert provenance.env == (AgentVariableProvenance(name="WANDB_API_KEY", source="env_file"),)
+        assert (provenance.instruction_prefix, provenance.instruction_suffix) == ("First.", "Last.")
     else:
         # Not even resolved: the oracle needs none of the .env's agent keys.
         assert variables.agent == {}
-        assert provenance.env == ()
+        assert (provenance.env, provenance.instruction_prefix) == ((), "")
+    assert (protocol.instruction_prefix, protocol.instruction_suffix) == ("First.", "Last.")
 
 
 @pytest.mark.asyncio

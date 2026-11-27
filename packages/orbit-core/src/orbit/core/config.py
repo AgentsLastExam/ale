@@ -159,6 +159,20 @@ class AgentConfig(BaseModel):
     )
     skills: tuple[SkillSource, ...] = ()
     mcp_servers: tuple[McpSource, ...] = ()
+    instruction_prefix: str = Field(
+        default="",
+        description=(
+            "Text above the Task's instruction in the agent's first prompt. The framework "
+            "composes that prompt, so it reaches every Harness alike"
+        ),
+    )
+    instruction_suffix: str = Field(
+        default="",
+        description=(
+            "Text below the Task's instruction in the agent's first prompt, above what the "
+            "framework states there"
+        ),
+    )
     env: TaskEnv = Field(
         default_factory=dict,
         description=(

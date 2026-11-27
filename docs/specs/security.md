@@ -413,7 +413,8 @@ solver and a separate or snapshot verifier the Provider selected and the leaf th
 the Sandbox with its container runtime, requested and effective resources, GPU allocation and
 sandbox observations, agent version and integrity, harness family, one optional Task-asset
 repository/path/commit/dirty observation, the name and value source of each Task variable
-and of each variable the Run gives the agent, the agent's and each verifier's network policies, verification topology and image/resources,
+and of each variable the Run gives the agent, the text the Run puts around the instruction,
+the agent's and each verifier's network policies, verification topology and image/resources,
 the verifier of validation rounds' among them where it has its own,
 sandbox lifecycle outcomes, config hash, seed, and the engine's own commit.
 Leaves of one kind isolate a Task differently and give it different kernel features, so a

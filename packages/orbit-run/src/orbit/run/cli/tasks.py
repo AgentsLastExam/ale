@@ -382,6 +382,8 @@ async def _run_one(
                     timeouts=settings.timeouts,
                     resume=resume,
                     validation_rounds=inputs.validation_rounds,
+                    instruction_prefix=settings.agent.instruction_prefix,
+                    instruction_suffix=settings.agent.instruction_suffix,
                 ),
                 providers,
                 run_dir=run_dir,

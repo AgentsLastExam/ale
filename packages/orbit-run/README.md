@@ -39,6 +39,9 @@ run TOML when `--config` is absent. An explicit `--config` replaces that default
 `--set` overrides values from the selected file. Use `--set section.key=value` for any
 setting without a dedicated flag. `sandbox.providers` lists the Providers that start a Run's
 Sandboxes ([Choose Providers](../../docs/guides/development.md#choose-providers)).
+`agent.instruction_prefix` and `agent.instruction_suffix` put the Run's text around every
+Task's instruction in the agent's first prompt
+([Episode protocol](../../docs/specs/episode-protocol.md#agent-or-oracle)), and
 `[agent.env]` sets variables for every Task's agent
 ([Variables](../../docs/specs/task-authoring.md#variables)). Model
 provider API keys belong in the checkout's gitignored `.env` under the `ORBIT_` names in
