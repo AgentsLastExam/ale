@@ -2,14 +2,17 @@
 
 Every stage of one Task prints which variables it received. The Task's credential comes from
 the checkout's ``.env``; it must reach setup, the oracle and the verifier, and no file the
-episode leaves on the Host may hold it.
+episode leaves on the Host may hold it. A Run's ``[agent.env]`` reaches every turn of the
+agent, and no verifier, under the same rules.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +30,14 @@ from orbit.run.providers import ProviderRegistry
 from orbit.run.providers.qemu import QemuProvider
 from orbit.run.secrets import resolve_task_variables
 from orbit.run.tasksets.manifest import ManifestTask, load_task_folder
-from tests.support import CONTAINER_BASE, VM_BASE, VM_RESOURCES, provider_registry, write_task
+from tests.support import (
+    CONTAINER_BASE,
+    VM_BASE,
+    VM_RESOURCES,
+    ScriptedCliHarness,
+    provider_registry,
+    write_task,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_docker]
 
@@ -240,4 +250,111 @@ async def test_a_failure_message_does_not_carry_the_secret(
     assert result.verdict.status is Status.TASK_ERROR
     assert result.verdict.failure is not None
     assert "cannot reach the service with [REDACTED]" in result.verdict.failure.message
+    assert _holding(result.run_dir, secret) == []
+
+
+AGENT_NAMES = ("REGION", "WANDB_API_KEY", "WANDB_MODE", "SHARED")
+
+
+def _observe(stage: str) -> str:
+    """A command that prints which of ``AGENT_NAMES`` it received, as ``stage``."""
+    return "python3 -c " + shlex.quote(
+        "import json, os\n"
+        f"seen = {{name: os.environ.get(name) for name in {AGENT_NAMES!r}}}\n"
+        f"print('ORBIT-ENV ' + json.dumps({{'stage': {stage!r}, 'env': seen}}))\n"
+    )
+
+
+class _ObservingCli(ScriptedCliHarness):
+    """The scripted CLI, each of whose turns first prints which variables it received, as
+    its answer in the trajectory."""
+
+    async def prepare_command(  # type: ignore[no-untyped-def]
+        self, prompt_path, sandbox, session, *, native_session_id
+    ):
+        command = await super().prepare_command(
+            prompt_path, sandbox, session, native_session_id=native_session_id
+        )
+        return replace(command, script=_observe("agent") + "\n" + command.script)
+
+    def parse_trajectory(self, context):  # type: ignore[no-untyped-def]
+        from orbit.core.trajectory import AtifAgent, TrajectoryBuilder
+        from orbit.run.harnesses.base import invocations
+
+        builder = TrajectoryBuilder(
+            trajectory_id=context.trajectory_id,
+            session_id=context.session_id,
+            agent=AtifAgent(name=self.name, version=context.agent_version),
+        )
+        runs = invocations(context)
+        for invocation in runs:
+            builder.add(source="user", message=invocation.prompt)
+        # Each turn's line from the whole log: its turns' offsets count the bytes before the
+        # log was redacted.
+        for line in "".join(invocation.stdout for invocation in runs).splitlines():
+            if line.startswith("ORBIT-ENV "):
+                builder.add(source="agent", message=line)
+        return builder.build()
+
+
+@pytest.mark.asyncio
+async def test_agent_env_reaches_each_turn_and_no_verifier_unrecorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = f"wandb-{uuid.uuid4().hex}"
+    env_file = tmp_path / "checkout.env"
+    env_file.write_text(f"WANDB_API_KEY={secret}\n")
+    monkeypatch.setenv("ORBIT_ENV_FILE", str(env_file))
+    root = tmp_path / "task"
+    write_task(
+        root,
+        name="agentslastexam/agent-env",
+        config={
+            "environment": {"env": {"REGION": "eu"}},
+            "agent": {"validation_rounds": 1, "timeout_sec": 600},
+            "verifier": {"env": {"SHARED": "verifier"}},
+        },
+        dockerfile=f"FROM {CONTAINER_BASE}\n",
+        test=None,
+    )
+    for stage in ("tests", "validation"):
+        (root / stage).mkdir(exist_ok=True)
+        (root / stage / "test.sh").write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            f"{_observe(stage)}\n"
+            '"$ORBIT_VERIFY_PYTHON" -c "from orbit_verify import write; write({\'reward\': 1.0})"\n'
+        )
+    task = load_task_folder(root)
+    agent = {"WANDB_API_KEY": "${WANDB_API_KEY}", "WANDB_MODE": "offline"}
+    resolve_task_variables([task], oracle=False, protected={}, agent=agent)
+    result = await run_episode(
+        task,
+        EpisodeProtocol(_ObservingCli(), validation_rounds=1),
+        ProviderRegistry(RunConfig()),
+        run_dir=tmp_path / "runs",
+    )
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+
+    # What each turn printed is in the trajectory, the verifiers' in the execution trace.
+    trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
+    lines = [step["message"] for step in trajectory["steps"] if step["source"] == "agent"]
+    for record in read_jsonl(result.run_dir / "trace.execution.jsonl").records:
+        if record.get("kind") == "command_finished" and record.get("component") == "task-stage":
+            lines.extend((record["stdout"].get("inline") or "").splitlines())
+    seen = [
+        (event["stage"], {key: value for key, value in event["env"].items() if value is not None})
+        for event in (
+            json.loads(line.removeprefix("ORBIT-ENV "))
+            for line in lines
+            if line.startswith("ORBIT-ENV ")
+        )
+    ]
+    agent_env = {"REGION": "eu", "WANDB_API_KEY": "[REDACTED]", "WANDB_MODE": "offline"}
+    verifier_env = {"REGION": "eu", "SHARED": "verifier"}
+    assert seen == [
+        ("agent", agent_env),
+        ("agent", agent_env),
+        ("validation", verifier_env),
+        ("tests", verifier_env),
+    ]
     assert _holding(result.run_dir, secret) == []

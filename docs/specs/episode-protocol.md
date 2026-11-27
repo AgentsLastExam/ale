@@ -90,7 +90,14 @@ framework-owned `TaskEnv`. The evaluated solver and
 the oracle, which runs a calibration case, both run as the image's agent account. Windows
 autonomous CLI Harnesses use the base's Git Bash.
 
-Below the instruction, the first prompt of an autonomous Harness states the agent's time
+The agent's first prompt is the Task's instruction, verbatim, between the Run's
+`[agent].instruction_prefix` and `instruction_suffix` where it sets them, each a blank line
+apart from it; a Policy Harness receives the same text as its first observation's
+instruction. The framework composes this text, so every Harness receives it alike, unlike a
+Harness setting that adds to its program's system prompt. Later prompts, the oracle and the
+verifier's `instruction.md` never carry the prefix or suffix.
+
+Below that text, the first prompt of an autonomous Harness states the agent's time
 limit in minutes and that the work is scored as it is when it runs out, where its time is
 limited, and the machine the agent has, as its Sandbox was given it rather than as the Task
 asked: its CPUs, memory, disk limit and GPUs, since tools in a container, such as `nproc`

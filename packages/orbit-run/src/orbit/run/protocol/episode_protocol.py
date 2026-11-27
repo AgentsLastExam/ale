@@ -591,6 +591,8 @@ class EpisodeProtocol:
         resume: Resume | None = None,
         validation_rounds: int | Literal["unlimited"] = 0,
         check_validation: bool = False,
+        instruction_prefix: str = "",
+        instruction_suffix: str = "",
     ) -> None:
         self.harness = harness
         self.max_steps = max_steps
@@ -605,6 +607,10 @@ class EpisodeProtocol:
         self.check_validation = check_validation
         """Validate once on the final state, before ``tests/`` scores it, with no turn after
         it, as calibration checks the stage that validates."""
+        self.instruction_prefix = instruction_prefix
+        """The Run's text above the Task's instruction in the first prompt alone."""
+        self.instruction_suffix = instruction_suffix
+        """The Run's text below it, above what the framework states there."""
 
     @property
     def validations(self) -> int:
@@ -1271,7 +1277,7 @@ class EpisodeProtocol:
         left = _left(sandbox, kept)
         timeout = _bound(budget.remaining if left is None else min(left, budget.remaining))
 
-        variables = ctx.variables.values
+        variables = ctx.variables
 
         async def launch() -> None:
             recorded = _RecordedSandbox(
@@ -1279,7 +1285,10 @@ class EpisodeProtocol:
                 sandbox,
                 component="harness-launch",
                 actor="task" if oracle is not None else "framework",
-                env=variables.oracle() if oracle is not None else variables.environment,
+                # The Run's [agent.env] is the evaluated agent's alone, never the oracle's.
+                env=variables.values.oracle()
+                if oracle is not None
+                else {**variables.values.environment, **variables.agent},
             )
             started = budget.running = time.monotonic()
             # Only a prompt the agent was given is looked for in its session.
@@ -1553,14 +1562,25 @@ class EpisodeProtocol:
         )
 
     def _instruction(self, ctx: EpisodeContext) -> str:
-        """The first prompt: the instruction, verbatim, and below it the agent's time, where it
-        is limited, and the machine the solver was given, as provisioning recorded it."""
+        """The first prompt: the instruction as the Run gives it, and below it the agent's time,
+        where it is limited, and the machine the solver was given, as provisioning recorded it."""
         spec = ctx.spec
         total = self.timeouts.agent_time(spec)
         below = [] if total is None else [TIME_NOTE.format(minutes=_minutes(total))]
         if ctx.resource_allocation is not None:
             below.append(_machine(ctx.resource_allocation))
-        return spec.instruction + ("\n\n---\n\n" + "".join(below) if below else "")
+        return self._given(spec.instruction) + ("\n\n---\n\n" + "".join(below) if below else "")
+
+    def _given(self, instruction: str) -> str:
+        """The Task's instruction, verbatim, between the Run's prefix and suffix, each a blank
+        line apart from it; the oracle receives the instruction alone."""
+        if isinstance(self.harness, OracleHarness):
+            return instruction
+        if self.instruction_prefix:
+            instruction = _apart(self.instruction_prefix, instruction)
+        if self.instruction_suffix:
+            instruction = _apart(instruction, self.instruction_suffix)
+        return instruction
 
     async def _validation_rounds(
         self,
@@ -1980,10 +2000,11 @@ class EpisodeProtocol:
                 model_name=ctx.session.model or None,
             ),
         )
-        builder.add(source="user", message=ctx.spec.instruction)
+        instruction = self._given(ctx.spec.instruction)
+        builder.add(source="user", message=instruction)
         async with SandboxEnv(
             sandbox,
-            instruction=ctx.spec.instruction,
+            instruction=instruction,
             trajectory=builder,
             blobs=ctx.blobs,
             max_steps=self.max_steps,
@@ -3337,6 +3358,12 @@ def _machine(allocation: ResourceAllocation) -> str:
     return text + "\n"
 
 
+def _apart(above: str, below: str) -> str:
+    """``above``, as written, then ``below`` after a blank line."""
+    ending = len(above) - len(above.rstrip("\n"))
+    return above + "\n" * max(0, 2 - ending) + below
+
+
 def _round_prompt(
     record: ValidationRound,
     rounds: int | None,
@@ -3635,7 +3662,7 @@ class _RecordedSandbox:
         self._component = component
         self._actor = actor
         self._env = env or {}
-        """The Task's variables, beneath each command's own."""
+        """The Task's variables, and for the agent the Run's, beneath each command's own."""
 
     def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
         return getattr(self._sandbox, name)

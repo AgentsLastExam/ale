@@ -11,8 +11,9 @@ Host-side behind the Gateway. Checkout-local subscription credentials are resolv
 separately and also remain Host-side.
 
 The same file supplies the variables Tasks declare (``[environment].env`` and the other
-Harbor ``env`` tables), and only the file does: a variable merely exported in the
-operator's shell, such as their own ``GITHUB_TOKEN``, never reaches a Sandbox unasked.
+Harbor ``env`` tables) and those a Run gives its agent (``[agent.env]``), and only the file
+does: a variable merely exported in the operator's shell, such as their own
+``GITHUB_TOKEN``, never reaches a Sandbox unasked.
 """
 
 from __future__ import annotations
@@ -20,11 +21,12 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
 from orbit.core.errors import ConfigError
-from orbit.core.lock import TaskVariableProvenance
+from orbit.core.lock import AgentVariableProvenance, TaskVariableProvenance
 from orbit.core.task import ResolvedVariables, Task
 from orbit.core.taskspec import (
     TaskVariables,
@@ -119,75 +121,123 @@ def host_credentials(names: Iterable[str] = ()) -> dict[str, str]:
 
 
 def resolve_task_variables(
-    tasks: Iterable[Task], *, oracle: bool, protected: Mapping[str, str]
-) -> None:
-    """Resolve every Task's variables from the checkout's environment file, or fail.
+    tasks: Iterable[Task],
+    *,
+    oracle: bool,
+    protected: Mapping[str, str],
+    agent: Mapping[str, str] | None = None,
+) -> tuple[AgentVariableProvenance, ...]:
+    """Resolve every Task's variables, and the Run's ``agent`` env, from the checkout's
+    environment file, or fail.
 
     Runs before any image is built, Sandbox started or model called, and names every
     missing variable of every Task at once. ``[solution].env`` is resolved only for the
     oracle. A value equal to one of the ``protected`` Host credentials fails too: model
-    and Judge keys reach a model through the Gateway only, never through a Task.
+    and Judge keys reach a model through the Gateway only, never through a variable.
+    ``agent``, the Run's ``[agent.env]``, is resolved once for every Task's agent, and a name
+    one of the Task's own ``env`` tables also sets fails, naming both, so neither silently
+    wins. Return where each of ``agent``'s values came from.
     """
     file = find_env_file()
     values = read_env_file(file) if file is not None else {}
     held = {value: name for name, value in protected.items()}
     problems: list[str] = []
+    agent = agent or {}
+    run = _Resolver(values, held)
+    agent_values, agent_sources = run.table("[agent.env]", agent)
+    if run.missing:
+        problems.append(f"the Run: {', '.join(run.missing)} not set")
+    problems.extend(f"the Run: {item}" for item in run.leaked)
     for task in tasks:
-        task.variables, missing, leaked = _resolve(task.spec.variables, values, held, oracle)
-        if missing:
-            problems.append(f"{task.spec.name}: {', '.join(missing)} not set")
-        problems.extend(f"{task.spec.name}: {item}" for item in leaked)
+        resolver = _Resolver(values, held)
+        resolved = _resolve(task.spec.variables, resolver, oracle)
+        if resolver.missing:
+            problems.append(f"{task.spec.name}: {', '.join(resolver.missing)} not set")
+        problems.extend(f"{task.spec.name}: {item}" for item in resolver.leaked)
+        problems.extend(
+            f"{task.spec.name}: [agent.env] {name} is also set by [{table}].env"
+            for table, env in task.spec.variables.tables
+            for name in env
+            if name in agent
+        )
+        task.variables = replace(
+            resolved,
+            agent=agent_values,
+            secrets=tuple(sorted({*resolved.secrets, *run.secrets})),
+        )
     if problems:
         source = str(file) if file is not None else "the checkout's .env (none found)"
         raise ConfigError(
-            f"Task variables cannot be resolved from {source}:\n  " + "\n  ".join(problems)
+            f"Variables cannot be resolved from {source}:\n  " + "\n  ".join(problems)
         )
+    return tuple(AgentVariableProvenance(name=name, source=kind) for name, kind in agent_sources)
 
 
-def _resolve(
-    declared: TaskVariables, values: Mapping[str, str], held: Mapping[str, str], oracle: bool
-) -> tuple[ResolvedVariables, list[str], list[str]]:
-    tables: dict[str, dict[str, str]] = {}
-    provenance: list[TaskVariableProvenance] = []
-    secrets: set[str] = set()
-    missing: list[str] = []
-    leaked: list[str] = []
+_Source = Literal["literal", "env_file", "default"]
+
+
+class _Resolver:
+    """Looks references up in the ``.env``, noting what is missing, what holds a Host
+    credential and which values are secrets."""
+
+    def __init__(self, values: Mapping[str, str], held: Mapping[str, str]) -> None:
+        self.values = values
+        self.held = held
+        self.secrets: set[str] = set()
+        self.missing: list[str] = []
+        self.leaked: list[str] = []
 
     def lookup(
-        reference: VariableReference, where: str, *, credential: bool
+        self, reference: VariableReference, where: str, *, credential: bool
     ) -> tuple[str, Literal["env_file", "default"]] | None:
         # Empty counts as unset, as a shell's ``${NAME:-default}`` treats it: an empty line
         # copied from an example file is not a credential.
-        if found := values.get(reference.name, ""):
+        if found := self.values.get(reference.name, ""):
             if (credential or is_credential_name(reference.name)) and not (
                 _COMMON_VALUE.fullmatch(found)
             ):
-                secrets.add(found)
+                self.secrets.add(found)
             return found, "env_file"
         if reference.default is not None:
             return reference.default, "default"
-        missing.append(f"{reference.name} ({where})")
+        self.missing.append(f"{reference.name} ({where})")
         return None
 
-    for table, env in declared.tables:
-        if table == "solution" and not oracle:
-            continue
-        resolved = tables.setdefault(table, {})
+    def table(
+        self, where: str, env: Mapping[str, str]
+    ) -> tuple[dict[str, str], list[tuple[str, _Source]]]:
+        """``env``'s values, and where each came from, of those that resolved."""
+        resolved: dict[str, str] = {}
+        sources: list[tuple[str, _Source]] = []
         for key, value in env.items():
             reference = VariableReference.parse(value)
-            source: Literal["literal", "env_file", "default"] = "literal"
+            source: _Source = "literal"
             if reference is not None:
-                found = lookup(reference, f"[{table}].env", credential=is_credential_name(key))
+                found = self.lookup(reference, where, credential=is_credential_name(key))
                 if found is None:
                     continue
                 value, source = found
-            if value in held:
-                leaked.append(
-                    f"[{table}].env {key} holds the Host credential {held[value]}, which "
+            if value in self.held:
+                self.leaked.append(
+                    f"{where} {key} holds the Host credential {self.held[value]}, which "
                     "reaches a model through the Gateway only"
                 )
             resolved[key] = value
-            provenance.append(TaskVariableProvenance(table=table, name=key, source=source))  # type: ignore[arg-type]
+            sources.append((key, source))
+        return resolved, sources
+
+
+def _resolve(declared: TaskVariables, resolver: _Resolver, oracle: bool) -> ResolvedVariables:
+    tables: dict[str, dict[str, str]] = {}
+    provenance: list[TaskVariableProvenance] = []
+    for table, env in declared.tables:
+        if table == "solution" and not oracle:
+            continue
+        tables[table], sources = resolver.table(f"[{table}].env", env)
+        provenance.extend(
+            TaskVariableProvenance(table=table, name=key, source=source)  # type: ignore[arg-type]
+            for key, source in sources
+        )
 
     # An oracle has no MCP client, so it needs none of these.
     mcp_headers: dict[str, dict[str, str]] = {}
@@ -199,15 +249,15 @@ def _resolve(
             hits = {
                 reference: hit
                 for reference in references
-                if (hit := lookup(reference, where, credential=credential)) is not None
+                if (hit := resolver.lookup(reference, where, credential=credential)) is not None
             }
             if len(hits) < len(references):
                 continue
-            leaked.extend(
-                f"{where} holds the Host credential {held[text]}, which reaches a model "
+            resolver.leaked.extend(
+                f"{where} holds the Host credential {resolver.held[text]}, which reaches a model "
                 "through the Gateway only"
                 for text, _ in hits.values()
-                if text in held
+                if text in resolver.held
             )
             mcp_headers.setdefault(server, {})[header] = VariableReference.substitute(
                 value, {reference: text for reference, (text, _) in hits.items()}
@@ -230,12 +280,8 @@ def _resolve(
         solution=tables.get("solution", {}),
         mcp_headers=mcp_headers,
     )
-    return (
-        ResolvedVariables(
-            values=variables, secrets=tuple(sorted(secrets)), provenance=tuple(provenance)
-        ),
-        missing,
-        leaked,
+    return ResolvedVariables(
+        values=variables, secrets=tuple(sorted(resolver.secrets)), provenance=tuple(provenance)
     )
 
 

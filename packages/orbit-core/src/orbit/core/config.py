@@ -28,7 +28,7 @@ from orbit.core.capability import GpuModel
 from orbit.core.errors import ConfigError
 from orbit.core.ids import content_hash
 from orbit.core.sandbox import DesktopResolution
-from orbit.core.taskspec import McpSource, SkillSource, TaskSpec
+from orbit.core.taskspec import McpSource, SkillSource, TaskEnv, TaskSpec, env_problem
 
 __all__ = [
     "GPU_MEMORY_MARGIN_MB",
@@ -159,6 +159,38 @@ class AgentConfig(BaseModel):
     )
     skills: tuple[SkillSource, ...] = ()
     mcp_servers: tuple[McpSource, ...] = ()
+    instruction_prefix: str = Field(
+        default="",
+        description=(
+            "Text above the Task's instruction in the agent's first prompt. The framework "
+            "composes that prompt, so it reaches every Harness alike"
+        ),
+    )
+    instruction_suffix: str = Field(
+        default="",
+        description=(
+            "Text below the Task's instruction in the agent's first prompt, above what the "
+            "framework states there"
+        ),
+    )
+    env: TaskEnv = Field(
+        default_factory=dict,
+        description=(
+            "Variables every command of the agent's turns receives, under a Task's env rules; "
+            "setup, the verifier and the oracle never do"
+        ),
+    )
+
+    # --- validation ---
+
+    @field_validator("env")
+    @classmethod
+    def _as_lint_reads_a_task_env(cls, env: dict[str, str]) -> dict[str, str]:
+        # No ``orbit lint`` reads a run configuration, so its rules hold as it loads.
+        for key, value in env.items():
+            if problem := env_problem(key, value):
+                raise ValueError(f"[agent.env] {problem}")
+        return env
 
 
 #: The model vendor whose API the Gateway or a Judge calls. Not a sandbox Provider.

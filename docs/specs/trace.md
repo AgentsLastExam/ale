@@ -41,10 +41,11 @@ against that schema before atomic replacement:
 }
 ```
 
-Step IDs start at 1 and are contiguous. The complete instruction is the first
-agent-visible user content, followed by what the framework states below it, the agent's
-time limit and [machine](episode-protocol.md#agent-or-oracle), as it was sent. Each round's
-prompt is a user message of the same
+Step IDs start at 1 and are contiguous. The complete instruction, between the Run's prefix
+and suffix where it sets them, is the first agent-visible user content, followed by what the
+framework states below it, the agent's time limit and
+[machine](episode-protocol.md#agent-or-oracle), as it was sent. Each round's prompt is a
+user message of the same
 native session, so one trajectory covers every turn. Native tool-use/result events are
 grouped into one agent step; every observation `source_call_id` resolves to a tool call in
 that step. An empty result is valid, while a missing result remains absent. A call that a
@@ -161,9 +162,10 @@ validation round records, with its index, its turn's end and the solver's save i
 `provision` phase.
 
 Command output at or below 16 KiB stays inline. Larger output becomes a text BlobRef.
-Credentials, bearer tokens, provider keys, configured secrets and the Task's credential
-variables are redacted before text reaches disk; mirrored native logs, copied while the agent
-runs, are redacted when the agent stops, before conversion. Timeouts kill the process group,
+Credentials, bearer tokens, provider keys, configured secrets and the credential variables
+of the Task and of the Run's `[agent.env]` are redacted before text reaches disk; mirrored
+native logs, copied while the agent runs, are redacted when the agent stops, before
+conversion. Timeouts kill the process group,
 drain both pipes, preserve received output with `complete=false`, and record a terminal
 command outcome. A host restart
 recovers deterministic `.partial` files as incomplete blobs. A torn JSONL suffix is

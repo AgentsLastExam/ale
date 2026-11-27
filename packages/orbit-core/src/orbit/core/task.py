@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -44,11 +45,15 @@ class TaskSourceContext:
 
 @dataclass(frozen=True)
 class ResolvedVariables:
-    """A Task's variables with their values, resolved on the Host before anything runs."""
+    """A Task's variables, and the Run's for its agent, with their values, resolved on the Host
+    before anything runs."""
 
     values: TaskVariables = field(default_factory=TaskVariables)
+    agent: Mapping[str, str] = field(default_factory=dict)
+    """The Run's ``[agent.env]``: what each command of the agent's turns receives besides
+    ``[environment].env``, and no other command."""
     secrets: tuple[str, ...] = ()
-    """Values every record leaves out: the credentials among them."""
+    """Values every record leaves out: the credentials among them and among ``agent``."""
     provenance: tuple[TaskVariableProvenance, ...] = ()
 
 

@@ -48,10 +48,10 @@ this file. `AGENTS.md` is a symlink to this file so every coding agent sees one 
 - Changing a contract updates its spec in the same change.
 - Every reportable result carries a complete `RunLock`.
 - API-key and shipped subscription credentials, Judge keys included, remain on the Host
-  Gateway; a sandbox holds episode tokens and only the variables its Task declares.
-  `tests/`, `validation/`, `solution/` and `calibration/` never appear during the evaluated
-  agent phase, except a read-only copy of the stage that validates where a Task sets
-  `[verifier.validation].visibility`.
+  Gateway; a sandbox holds episode tokens and only the variables its Task or its Run
+  declares. `tests/`, `validation/`, `solution/` and `calibration/` never appear during the
+  evaluated agent phase, except a read-only copy of the stage that validates where a Task
+  sets `[verifier.validation].visibility`.
 
 ## Local guides
 
