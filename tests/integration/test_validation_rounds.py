@@ -136,7 +136,10 @@ def _check(result: Any, rounds: int = 2, *, shown: bool = False) -> None:
     # each round's result, which reads the same whichever stage validated.
     assert verification["lines"] == [
         INSTRUCTION.strip(),
-        *(f"Your work was scored: reward {score:.2f}." for score in scores),
+        *(
+            f"Validation round {index} of {rounds}: reward {score:.2f}."
+            for index, score in enumerate(scores, start=1)
+        ),
     ]
     # No process the agent started outlived the turn it started in, and no turn saw
     # validation/, tests/ or what they wrote.
@@ -190,6 +193,38 @@ async def test_an_agent_improves_over_validation_rounds_in_docker(
         check=True,
     ).stdout.split()
     assert containers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["shared", "snapshot"])
+async def test_an_agent_improves_over_rounds_whose_snapshots_docker_flattens(
+    tmp_path: Path, mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A snapshot whose commit would pass the layers Docker's layer store chains is flattened
+    to one, with the container's configuration: here every save is, and each turn and the
+    snapshot verifier boot from one and go on from what the agent left."""
+    from orbit.run.providers.docker import provider as docker_provider
+
+    flatten = docker_provider._flatten
+    layers: list[int] = []
+
+    async def counted(container: str, tag: str, changes: list[str]) -> None:
+        await flatten(container, tag, changes)
+        inspected = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{len .RootFS.Layers}}", tag],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        layers.append(int(inspected.stdout))
+
+    monkeypatch.setattr(docker_provider, "MAX_LAYER_DEPTH", 0)
+    monkeypatch.setattr(docker_provider, "_flatten", counted)
+    root = _task(tmp_path / f"rounds-flat-{mode}", mode)
+    result = await _episode(tmp_path, root, DockerProvider())
+    _check(result)
+    # Each round's save, and the final one a snapshot verifier boots from.
+    assert layers == [1] * (2 + (mode == "snapshot"))
 
 
 @pytest.mark.asyncio

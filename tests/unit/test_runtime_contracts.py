@@ -349,6 +349,11 @@ class TestConfigLayering:
         for invalid in (0, -1, float("inf"), "never"):
             with pytest.raises(ValueError):
                 RunConfig(timeouts={"agent": invalid})
+        # The agent's time may be unlimited too, from the command line as from a file.
+        unlimited = load_run_config(overrides=["timeouts.agent=unlimited"])
+        assert unlimited.timeouts.agent == "unlimited"
+        assert make_lock(timeouts=unlimited.timeouts).timeouts.agent == "unlimited"
+        assert unlimited.config_hash != RunConfig().config_hash
 
     def test_the_desktop_resolution_is_one_validated_run_setting(self) -> None:
         assert RunConfig().desktop_resolution == DesktopResolution(width=1024, height=768)

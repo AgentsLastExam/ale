@@ -353,6 +353,8 @@ class FirecrackerSandbox(Sandbox):
         self.container = container
         self.storage = storage
         self.layers = layers
+        # A save stacks its disk on these layers, and a microVM boots at most eight.
+        self.saves_left = MAX_LAYERS - len(layers)
         self.host_ip = host_ip
         self.snapshot_dir = snapshot_dir
         self.runner_image = runner_image

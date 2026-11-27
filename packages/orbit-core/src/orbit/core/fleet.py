@@ -578,6 +578,9 @@ class SandboxDescription(BaseModel):
     """Seconds the Node's Provider took to create it."""
     volumes: tuple[str, ...] = ()
     """Which of its volume candidates it mounted as volumes of their own."""
+    saves_left: int | None = Field(default=None, ge=0)
+    """How many snapshots in a row it can still save, where its Node's Provider caps that
+    (:attr:`~orbit.core.sandbox.Sandbox.saves_left`)."""
 
 
 class LeaseRenewal(BaseModel):

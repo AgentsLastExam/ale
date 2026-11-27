@@ -36,17 +36,17 @@ reaches its deadline [moves](#moves), `save, boot`, and goes on.
 Every phase is timed and attributed independently. Agent and verify default to the Task's
 `[agent].timeout_sec` and `[verifier].timeout_sec`. Setup has a fixed framework bound of
 1800 s, a guard against a hung setup rather than a scored budget. Run policy may override
-`timeouts.agent` with positive seconds and `timeouts.verify` with positive seconds or
-`"unlimited"`, and `validation_rounds` with a non-negative count. These overrides are
-recorded in RunLock and the configuration hash without changing the Task identity. The Agent
-deadline is each turn's: it starts at Harness launch (or policy rollout), after
-installation, resource staging, and network policy, and a [validation
-round](#validation-rounds)'s next turn has all of it again. Evidence capture, verification,
-and cleanup do not consume it. An Agent timeout ends its turn and is not retried; at the
-last turn it terminates execution and destroys the Sandbox even if retention was requested,
-after verification. Teardown is cancellation-shielded on every exit path, and SIGTERM
-cancels a command as Ctrl-C does, so a supervisor or timeout that stops `orbit` still lets
-it destroy every Sandbox it created.
+`timeouts.agent` and `timeouts.verify` with positive seconds or `"unlimited"`, and
+`validation_rounds` with a non-negative count or `"unlimited"`; an agent whose time is
+unlimited runs each turn until its program ends. A Run that leaves the agent's time, its
+rounds and every Gateway limit unlimited is refused, as nothing would end its agent. These
+overrides are recorded in RunLock and the configuration hash without changing the Task
+identity. The Agent deadline starts at Harness launch (or policy rollout), after
+installation, resource staging, and network policy. Evidence capture, verification, and
+cleanup do not consume it. An Agent timeout terminates execution, is not retried, and
+destroys its Sandbox even if retention was requested, after verification. Teardown is
+cancellation-shielded on every exit path, and SIGTERM cancels a command as Ctrl-C does, so a
+supervisor or timeout that stops `orbit` still lets it destroy every Sandbox it created.
 
 ### Provision
 
@@ -90,14 +90,15 @@ framework-owned `TaskEnv`. The evaluated solver and
 the oracle, which runs a calibration case, both run as the image's agent account. Windows
 autonomous CLI Harnesses use the base's Git Bash.
 
-Below the instruction, the first prompt of an autonomous Harness states the turn's time
-limit in minutes and that the work is scored as it is when it runs out, and the machine the
-agent has, as its Sandbox was given it rather than as the Task asked: its CPUs, memory, disk
-limit and GPUs, since tools in a container, such as `nproc` and `nvidia-smi`, may report the
-Host's. It says nothing of how, where or when the work is verified: the agent could game
-what it is told, so what the agent needs to know of it is the instruction's. For a Sandbox
-of several [nodes](task-authoring.md#nodes) it states each node's, names the nodes, and says
-that `ssh` reaches them and that `/shared` is one directory they all see.
+Below the instruction, the first prompt of an autonomous Harness states the agent's time
+limit in minutes and that the work is scored as it is when it runs out, where its time is
+limited, and the machine the agent has, as its Sandbox was given it rather than as the Task
+asked: its CPUs, memory, disk limit and GPUs, since tools in a container, such as `nproc`
+and `nvidia-smi`, may report the Host's. It says nothing of how, where or when the work is
+verified: the agent could game what it is told, so what the agent needs to know of it is the
+instruction's. For a Sandbox of several [nodes](task-authoring.md#nodes) it states each
+node's, names the nodes, and says that `ssh` reaches them and that `/shared` is one
+directory they all see.
 
 Only the directory of the calibration case the oracle runs is uploaded, the reference
 solution's under `orbit run --agent oracle`, and only for an oracle episode; none is present
@@ -254,16 +255,17 @@ A Task's `[agent].validation_rounds`, or the Run's `validation_rounds`, is `N`, 
 results of [`validation/`](task-authoring.md#validation), or of `tests/` for a Task without
 it, the agent receives. With `N = 0` the episode is the one above. With `N > 0` the agent
 works in up to `N + 1` turns, and a round follows each turn but the last: its result is the
-agent's next prompt, and `tests/` scores the final state once, as above. Only the evaluated
-agent receives rounds; the oracle never does. A turn ends when the Harness's program
-finishes normally, exiting zero with no limit, timeout or failure, so the agent submits by
-ending its turn and needs no command in the Sandbox to do it, and any Harness that resumes
-its session can take part. A turn also ends, and its round follows, where it reaches its
-time limit or a Gateway limit: both are each turn's own, so that rounds are orthogonal to
-them, and the round records which of them ended it. A turn that anything else ends is the
-last, and its state is verified as any stopped agent's is, but for one its Sandbox's
-deadline cuts, which [moves](#moves) and goes on. Each round, whatever the verification
-mode:
+agent's next prompt, and `tests/` scores the final state once, as above. With `"unlimited"`,
+which only a Run sets, a round follows every turn that ends normally while the agent's time
+and Gateway limits last and its solver's Provider can still save it: one that caps how many
+snapshots it stacks in a row ends the rounds there, and the turn after the last round it can
+save for is the last. Only the evaluated agent receives rounds; the oracle never does. A
+turn ends when the Harness's program finishes normally, exiting zero with no limit, timeout
+or failure, so the agent submits by ending its turn and needs no command in the Sandbox to
+do it, and any Harness that resumes its session can take part. A turn that anything else
+ends, or that leaves none of the agent's time, is the last, and its state is verified as any
+stopped agent's is, but for one its Sandbox's deadline cuts, which [moves](#moves) and goes
+on. Each round, whatever the verification mode:
 
 1. copies the agent's logs, as the final copy does, converts its trajectory of the turns
    so far into the round's directory, and, under separate verification, captures the
@@ -289,32 +291,34 @@ mode:
 
 The rounds are the same in every mode so that nothing a verifier does reaches the state the
 agent continues from: each turn after the first starts from the snapshot, which no verifier
-changed. Each turn has the whole of the agent's time, `[agent].timeout_sec` or the Run's
-`timeouts.agent`, and of the Gateway's limits, which count only that turn's calls, so each
-means for a turn what it means for the one turn of an episode without rounds; saves,
-validation, boots and staging spend none of them. The turns share one Gateway session;
-between turns and after the last the agent's session is closed
-([Security](security.md#5-answers-are-absent-not-hidden)). The next turn's solver is sealed
-as soon as it boots, and a boot that finds no room, as when another Run took its GPUs while
-the round's verifier ran, is tried again every 10 s for up to 30 minutes, a framework bound
-outside the agent's time. A round whose verifier produces no score, by failing, timing out
-or losing its Sandbox, but for a loss a [move](#moves) runs again, is recorded with its
-failure and given to the agent as unscored, and the episode goes on; a save or boot that
-fails ends the episode without a score, as a failed save for a snapshot verifier does.
+changed. The agent's time, `[agent].timeout_sec` or the Run's `timeouts.agent`, covers all
+its turns, and each turn gets what is left; saves, validation, boots and staging spend none
+of it, so a Task's time limit means the same with and without rounds. Gateway limits count
+across the turns, which share one session; between turns and after the last the agent's
+session is closed ([Security](security.md#5-answers-are-absent-not-hidden)). The next turn's
+solver is sealed as soon as it boots, and a boot that finds no room, as when another Run
+took its GPUs while the round's verifier ran, is tried again every 10 s for up to 30
+minutes, a framework bound outside the agent's time. A round whose verifier produces no
+score, by failing, timing out or losing its Sandbox, but for a loss a [move](#moves) runs
+again, is recorded with its failure and given
+to the agent as unscored, and the episode goes on; a save or boot that fails ends the
+episode without a score, as a failed save for a snapshot verifier does.
 
-The prompts are framework-owned and minimal. The first states the turn's time limit below
-the instruction, as for every episode. Each round's prompt gives its reward, or that it has
-none and why, the [feedback](verification.md#feedback) of the stage that validated verbatim,
-if it wrote any, and the next turn's time limit. Neither says what ending a turn does, how
-many rounds there are, or what scores the final state: what rounds are for is the
-instruction's to say.
+The prompts are framework-owned and minimal. The first states the agent's time limit below
+the instruction, as for every episode. Each round's prompt gives which round it was, of how
+many where they are counted, and its reward, or that it has none and why, the
+[feedback](verification.md#feedback) of the stage that validated verbatim, if it wrote any,
+the rounds left, where they are counted, as a Provider that caps its saves counts unlimited
+ones, and, where the agent's time is limited, the time left. Neither says what ending a turn
+does or what scores the final state: what rounds are for is the instruction's to say.
 
 Rounds need what each step does: a Harness with native resume, since every turn after the
 first resumes the session, and a leaf that saves as many snapshots in a row as the solver
-plans ([Provider selection](sandbox-image.md#provider-selection)) and, for a shared or
-snapshot verifier, serves the round's verifier too. A Run giving rounds to a Harness without
-native resume is refused before provisioning, and one that no leaf serves before anything is
-prepared; either can set `validation_rounds = 0`.
+plans, the next one where rounds are unlimited ([Provider
+selection](sandbox-image.md#provider-selection)) and, for a shared or snapshot verifier,
+serves the round's verifier too. A Run giving rounds to a Harness without native resume is
+refused before provisioning, and one that no leaf serves before anything is prepared; either
+can set `validation_rounds = 0`.
 
 ### Moves
 
@@ -335,7 +339,7 @@ solver moves, so that an episode can be longer than any one Sandbox lasts.
 3. The Harness resumes the session the cut run left with a framework prompt, neutral as the
    rounds' are: the work was interrupted and moved to another machine, the files are as the
    agent left them, every process and any command in progress was stopped, and the time
-   left.
+   left, where the agent's time is limited.
 
 The run's time until the cut is the agent's; the save, any wait for the next solver's room,
 such as in a scheduler's queue, and its boot are not. A move ends no turn, so no round

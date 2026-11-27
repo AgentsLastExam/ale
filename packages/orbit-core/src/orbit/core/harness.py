@@ -309,9 +309,10 @@ class AutonomousHarness(Harness):
         sandbox: Sandbox,
         session: HarnessSession,
         *,
-        timeout_sec: float,
+        timeout_sec: float | None,
     ) -> AgentRun:
-        """Run the agent to completion."""
+        """Run the agent to completion, within ``timeout_sec``, or without a limit where it is
+        ``None``."""
 
     async def resume(
         self,
@@ -320,9 +321,9 @@ class AutonomousHarness(Harness):
         sandbox: Sandbox,
         session: HarnessSession,
         *,
-        timeout_sec: float,
+        timeout_sec: float | None,
     ) -> AgentRun:
-        """Continue an exact native session.
+        """Continue an exact native session, as :meth:`launch` runs one.
 
         An instruction becomes the session's next user message. ``None`` asks the agent to
         carry on from where it stopped, without new task input.

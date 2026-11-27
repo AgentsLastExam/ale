@@ -31,7 +31,7 @@ from orbit.run.providers.slurm.job import Job, JobReady
 from orbit.run.providers.slurm.job import seconds as job_seconds
 from orbit.run.providers.slurm.provider import (
     JOB_OVERHEAD_MB,
-    MAX_SAVES,
+    MAX_LAYERS,
     SlurmProvider,
     _capacity,
     _Chain,
@@ -136,13 +136,13 @@ async def test_a_solver_and_its_snapshot_verifier_share_one_partition(solver, ve
 
 
 @pytest.mark.asyncio
-async def test_snapshots_are_saved_as_deep_as_measured_container_engine_or_not():
+async def test_any_number_of_snapshots_is_saved_in_a_row_container_engine_or_not():
+    """A snapshot whose image or volume would stack more than was measured is flattened."""
     slurm = provider()
-    for feature in ("raw_sockets", "nested_containers"):
-        saved = needs(Resources(container_features=(feature,)), saves=MAX_SAVES)
+    for feature in (None, "raw_sockets", "nested_containers"):
+        resources = Resources(container_features=(feature,) if feature else ())
+        saved = needs(resources, saves=10 * MAX_LAYERS)
         assert not await slurm.unserved(saved, user="user", role=SandboxRole.SOLVER)
-    deeper = needs(Resources(), saves=MAX_SAVES + 1)
-    assert await slurm.unserved(deeper, user="user", role=SandboxRole.SOLVER)
 
 
 def test_an_allocation_is_sized_for_every_verifier_it_may_hold_in_turn():
@@ -975,15 +975,17 @@ def test_a_save_stops_the_container_again_where_podman_lost_a_session_s_end(monk
 
     monkeypatch.setattr(worker.subprocess, "run", run)
     monkeypatch.setattr(worker, "output", lambda *argv: "sha256:abc")
+    monkeypatch.setattr(worker, "layers_of", lambda command, image: 1)
     own = tmp_path / "1" / "nodes" / "0"
     own.mkdir(parents=True)
     codes[:] = [125, 0]
-    assert worker.save(["podman"], str(tmp_path), "sandbox-1", own, [], lambda: 0) == set()
+    saved = worker.save(["podman"], str(tmp_path), "sandbox-1", own, [], lambda: 0, max_layers=200)
+    assert saved == set()
     assert ran == ["stop", "stop"]
     assert json.loads((own / "saved").read_text())["image"] == "abc"
     codes[:] = [125, 125]
     with pytest.raises(subprocess.CalledProcessError):
-        worker.save(["podman"], str(tmp_path), "sandbox-1", own, [], lambda: 0)
+        worker.save(["podman"], str(tmp_path), "sandbox-1", own, [], lambda: 0, max_layers=200)
 
 
 def test_a_router_derives_its_wireguard_public_key_as_x25519_does():

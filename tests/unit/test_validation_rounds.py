@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from tests.support import (
-    TURNS_SESSION,
     MemoryProvider,
     MemorySandbox,
     RoundsProvider,
@@ -24,7 +23,7 @@ from tests.support import (
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
 from orbit.core.capability import GpuHold
-from orbit.core.config import RunConfig, SandboxRetentionConfig
+from orbit.core.config import RunConfig, RunTimeouts, SandboxRetentionConfig
 from orbit.core.errors import (
     AgentError,
     AgentUnsupportedError,
@@ -73,11 +72,16 @@ from orbit.run.tasksets.manifest import ManifestTask, load_tasks
 
 pytestmark = pytest.mark.unit
 
-#: What each turn's prompt says last, of the Task's ten minutes.
-_TIME = (
-    "Your time limit for this turn is 10 minutes. If it runs out, your work is scored as it is "
-    "then."
-)
+#: What the first prompt says below the instruction, of the Task's ten minutes, and what each
+#: round's prompt says last of what is left of them, when no time passes.
+_TIME = "Your time limit is 10 minutes. If it runs out, your work is scored as it is then."
+_TIME_LEFT = "Time left: 10 minutes. If it runs out, your work is scored as it is then."
+
+
+def _left(rounds: str) -> str:
+    """The last line of a round's prompt with ``rounds`` left and no time passed."""
+    return f"Validation rounds left: {rounds}. {_TIME_LEFT}"
+
 
 IMAGE = PreparedTaskImage(
     kind="container",
@@ -186,12 +190,12 @@ async def test_n_rounds_give_n_validations_and_n_plus_one_turns_then_tests_once(
 
 
 @pytest.mark.asyncio
-async def test_the_prompts_state_each_turns_time_alone_and_show_validation_never_tests(
+async def test_the_prompts_state_the_time_alone_and_show_validation_never_tests(
     tmp_path: Path, verifiers: Verifiers
 ) -> None:
-    """Below the instruction only the turn's time; each round's prompt is its reward, the
-    feedback and the next turn's time. How the work is verified, how often, and what scores
-    the final state are the instruction's to say."""
+    """Below the instruction only the agent's time; each round's prompt is which round of
+    how many it was, its reward, the feedback, and the rounds and time left. How the work is
+    verified and what scores the final state are the instruction's to say."""
     harness = TurnsHarness()
     task = _task(tmp_path, rounds=2)
     result = await _run(tmp_path, RoundsProvider(), task, harness)
@@ -201,20 +205,21 @@ async def test_the_prompts_state_each_turns_time_alone_and_show_validation_never
     # The instruction stays verbatim above what the framework states.
     assert first.startswith(task.spec.instruction + "\n\n---\n\n" + _TIME + "\n")
     for prompt in harness.prompts:
-        for unsaid in ("validation set", "test set", "round", "survive", "process", "left"):
+        for unsaid in ("validation set", "test set", "survive", "process", "turn"):
             assert unsaid not in prompt.removeprefix(task.spec.instruction).lower()
+    assert "round" not in first.removeprefix(task.spec.instruction).lower()
     assert second.splitlines() == [
-        "Your work was scored: reward 0.33.",
+        "Validation round 1 of 2: reward 0.33.",
         "",
         "Feedback:",
         "<feedback>",
         "1 lines; write more",
         "</feedback>",
         "",
-        _TIME,
+        _left("1"),
     ]
-    assert third.splitlines()[0] == "Your work was scored: reward 0.67."
-    assert third.splitlines()[-1] == _TIME
+    assert third.splitlines()[0] == "Validation round 2 of 2: reward 0.67."
+    assert third.splitlines()[-1] == _left("none")
     # What tests/ says never reaches the agent.
     assert not any("hidden test detail" in prompt for prompt in harness.prompts)
 
@@ -332,11 +337,10 @@ async def test_the_first_prompt_states_the_machine_its_solver_was_given(
 
 
 @pytest.mark.asyncio
-async def test_each_turn_has_the_whole_of_the_agents_time(
+async def test_each_turn_has_what_is_left_of_the_agents_time(
     tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A turn's time is its own, as the one turn of an episode without rounds has it; saves,
-    validation and boots spend none of it."""
+    """Saves, validation and boots spend none of it."""
     clock = [1000.0]
 
     class Timed(TurnsHarness):
@@ -354,19 +358,157 @@ async def test_each_turn_has_the_whole_of_the_agents_time(
     harness = Timed()
     result = await _run(tmp_path, RoundsProvider(), _task(tmp_path, rounds=2), harness)
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert harness.timeouts == [600, 600, 600]
-    # The record still counts all the agent's time.
-    progress = json.loads((result.run_dir / "progress.json").read_text())
-    assert (progress["agent_sec"], progress["agent_used_sec"]) == (600, 180)
+    assert harness.timeouts == [600, 540, 480]
+    # Each round's prompt says what is left.
+    assert [prompt.splitlines()[-1].partition(" minutes")[0] for prompt in harness.prompts[1:]] == [
+        "Validation rounds left: 1. Time left: 9",
+        "Validation rounds left: none. Time left: 8",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_failed_is_the_last(tmp_path: Path, verifiers: Verifiers) -> None:
-    provider = RoundsProvider()
-    harness = TurnsHarness(stops={2: AgentError("the agent failed")})
+async def test_an_agent_whose_time_is_unlimited_runs_without_a_limit_and_is_told_none(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    harness = TurnsHarness()
+    task = _task(tmp_path, rounds=1)
+    lock = make_lock()
+    result = await run_episode(
+        task,
+        EpisodeProtocol(harness, validation_rounds=1, timeouts=RunTimeouts(agent="unlimited")),
+        provider_registry(RoundsProvider()),
+        run_dir=tmp_path / "runs",
+        provenance=ProvenanceInputs(
+            source=lock.task.source,
+            agent=lock.agent,
+            gateway=lock.gateway,
+            config_hash=lock.config_hash,
+            framework=lock.framework,
+            validation_rounds=1,
+        ),
+    )
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert harness.timeouts == [None, None]
+    first, second = harness.prompts
+    assert "time limit" not in first.lower() and "time left" not in second.lower()
+    assert second.splitlines() == [
+        "Validation round 1 of 1: reward 0.33.",
+        "",
+        "Feedback:",
+        "<feedback>",
+        "1 lines; write more",
+        "</feedback>",
+        "",
+        "Validation rounds left: none.",
+    ]
+    # Its progress names no limit.
+    assert "agent_sec" not in json.loads((result.run_dir / "progress.json").read_text())
+
+
+class _Chaining(RoundsProvider):
+    """Saves ``cap`` snapshots in a row: each solver booted from the one before can save one
+    fewer, as Firecracker's microVMs stack their layers."""
+
+    def __init__(self, cap: int) -> None:
+        super().__init__()
+        self.cap = cap
+        self.solvers = 0
+
+    async def create(self, request: SandboxRequest) -> MemorySandbox:
+        sandbox = await super().create(request)
+        if request.role is not SandboxRole.VERIFIER:
+            sandbox.saves_left = self.cap - self.solvers
+            self.solvers += 1
+        return sandbox
+
+
+async def _unlimited(tmp_path: Path, provider: RoundsProvider, harness: TurnsHarness) -> Any:
+    task = _task(tmp_path, rounds=0)
+    lock = make_lock()
+    return await run_episode(
+        task,
+        EpisodeProtocol(harness, validation_rounds="unlimited"),
+        provider_registry(provider),
+        run_dir=tmp_path / "runs",
+        provenance=ProvenanceInputs(
+            source=lock.task.source,
+            agent=lock.agent,
+            gateway=lock.gateway,
+            config_hash=lock.config_hash,
+            framework=lock.framework,
+            validation_rounds="unlimited",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_unlimited_rounds_end_where_the_solvers_provider_saves_no_more(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    """Rounds go on while the agent has time and Gateway limits left and its solver's
+    Provider can take the next save: one that caps its chain ends them there, and the turn
+    after the last round it can save for is the last, verified as any final state is."""
+    harness = TurnsHarness()
+    result = await _unlimited(tmp_path, _Chaining(3), harness)
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert [item.index for item in result.record.validation_rounds] == [1, 2, 3]
+    assert len(harness.prompts) == 4
+    assert [prompt.splitlines()[0] for prompt in harness.prompts[1:]] == [
+        "Validation round 1: reward 0.33.",
+        "Validation round 2: reward 0.67.",
+        "Validation round 3: reward 1.00.",
+    ]
+    assert [prompt.splitlines()[-1].partition(" Time")[0] for prompt in harness.prompts[1:]] == [
+        "Validation rounds left: 2.",
+        "Validation rounds left: 1.",
+        "Validation rounds left: none.",
+    ]
+    assert result.lock is not None and result.lock.validation_rounds == "unlimited"
+
+
+@pytest.mark.asyncio
+async def test_unlimited_rounds_go_on_until_the_agents_time_runs_out(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    """Where the Provider saves any number, nothing counts the rounds: the agent learns of
+    none left, and the turn that runs out of time is the last."""
+    harness = TurnsHarness(stops={4: PhaseTimeoutError("agent", 600)})
+    result = await _unlimited(tmp_path, RoundsProvider(), harness)
+    assert result.verdict.status is Status.TIMEOUT, result.verdict.failure
+    assert [item.index for item in result.record.validation_rounds] == [1, 2, 3]
+    assert harness.prompts[1].splitlines()[0] == "Validation round 1: reward 0.33."
+    assert all("rounds left" not in prompt for prompt in harness.prompts)
+    assert all(prompt.splitlines()[-1] == _TIME_LEFT for prompt in harness.prompts[1:])
+
+
+def test_a_run_whose_agent_nothing_limits_is_refused() -> None:
+    """Unlimited time, rounds and Gateway limits could run for ever: one of them holds."""
+    with pytest.raises(ValueError, match="could run for ever"):
+        RunConfig(validation_rounds="unlimited", timeouts={"agent": "unlimited"})  # type: ignore[arg-type]
+    for limited in (
+        {"timeouts": {"agent": 3600}},
+        {"validation_rounds": 5},
+        {"gateway": {"limits": {"max_total_tokens": 10**8}}},
+    ):
+        config = {"validation_rounds": "unlimited", "timeouts": {"agent": "unlimited"}}
+        RunConfig.model_validate(config | limited)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop", "status"),
+    [
+        (PhaseTimeoutError("agent", 600), Status.TIMEOUT),
+        (AgentError("the agent failed"), Status.AGENT_ERROR),
+    ],
+)
+async def test_a_turn_that_did_not_end_normally_is_the_last(
+    tmp_path: Path, verifiers: Verifiers, stop: Exception, status: Status
+) -> None:
+    provider, harness = RoundsProvider(), TurnsHarness(stops={2: stop})
     result = await _run(tmp_path, provider, _task(tmp_path, rounds=3), harness)
     # Two turns and one round; its state is still scored, as any stopped agent's is.
-    assert result.verdict.status is Status.AGENT_ERROR
+    assert result.verdict.status is status
     assert len(harness.prompts) == 2
     assert [item.index for item in result.record.validation_rounds] == [1]
     assert result.record.rewards == {"reward": 0.67}
@@ -493,9 +635,9 @@ async def test_a_round_without_a_score_is_reported_as_such_and_the_loop_goes_on(
     assert first.failure is not None and first.failure.phase == "validate"
     assert (second.status, second.reward) == (Status.COMPLETED, 0.67)
     assert harness.prompts[1].splitlines() == [
-        "Your work could not be scored (task_error).",
+        "Validation round 1 of 2: no score (task_error).",
         "",
-        _TIME,
+        _left("1"),
     ]
     assert len(harness.prompts) == 3
     # The failed round leaves the episode's own failure phase alone.
@@ -512,7 +654,7 @@ async def test_a_validation_verifier_that_cannot_start_is_an_unscored_round(
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     (round_,) = result.record.validation_rounds
     assert round_.status is Status.ENV_ERROR
-    assert "could not be scored (env_error)" in harness.prompts[1]
+    assert "no score (env_error)" in harness.prompts[1]
     assert provider.snapshots == {}
 
 
@@ -768,13 +910,13 @@ async def test_without_validation_tests_validates_each_round_as_a_copy_of_it_wou
     # The prompts read as they do where validation/ validates.
     assert first.removeprefix(task.spec.instruction).startswith("\n\n---\n\n" + _TIME + "\n")
     assert second.splitlines()[:5] == [
-        "Your work was scored: reward 0.33.",
+        "Validation round 1 of 2: reward 0.33.",
         "",
         "Feedback:",
         "<feedback>",
         "hidden test detail",
     ]
-    assert third.splitlines()[0] == "Your work was scored: reward 0.67."
+    assert third.splitlines()[0] == "Validation round 2 of 2: reward 0.67."
 
     # The RunLock says the agent's rounds were the test set's.
     assert result.lock is not None
@@ -1453,9 +1595,10 @@ async def test_a_later_turn_that_cannot_start_in_what_the_agent_left_is_its_stop
 
 
 @pytest.mark.asyncio
-async def test_a_gateway_limit_ends_its_turn_only(tmp_path: Path, verifiers: Verifiers) -> None:
-    """The first turn exited normally after the Gateway refused one of its calls: it ended at
-    that limit, its round records so, and the next turn has the limits afresh."""
+async def test_a_turn_that_ended_after_a_gateway_limit_is_the_last(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    """It exited normally, but the Gateway had refused one of its calls: a budget stop."""
     from orbit.run.gateway.session import LimitReached, SessionRegistry
 
     registry = SessionRegistry()
@@ -1463,9 +1606,8 @@ async def test_a_gateway_limit_ends_its_turn_only(tmp_path: Path, verifiers: Ver
     class Limited(TurnsHarness):
         async def _turn(self, prompt: str, sandbox: Any, session: Any, timeout: float) -> Any:
             opened = registry.resolve(session.token)
-            assert opened is not None and opened.refusal is None
-            if not self.prompts:
-                opened.refusal = LimitReached("max_model_calls", 1, 2)
+            assert opened is not None
+            opened.refusal = LimitReached("max_model_calls", 1, 2)
             return await super()._turn(prompt, sandbox, session, timeout)
 
     harness = Limited()
@@ -1476,50 +1618,9 @@ async def test_a_gateway_limit_ends_its_turn_only(tmp_path: Path, verifiers: Ver
         harness,
         episode={"session_registry": registry},
     )
-    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert len(harness.prompts) == 3
-    first, second = result.record.validation_rounds
-    assert first.turn_ended_by is not None
-    assert first.turn_ended_by.error_type == "BudgetExceededError"
-    assert "max_model_calls" in first.turn_ended_by.message
-    assert second.turn_ended_by is None
-
-
-@pytest.mark.asyncio
-async def test_a_turn_whose_program_a_gateway_limit_stopped_goes_on_in_its_session(
-    tmp_path: Path, verifiers: Verifiers
-) -> None:
-    """A turn whose program failed after a refusal ended at that limit; the last such turn is
-    the episode's budget stop."""
-    from orbit.run.gateway.session import LimitReached, SessionRegistry
-
-    registry = SessionRegistry()
-
-    class Refused(TurnsHarness):
-        async def _turn(self, prompt: str, sandbox: Any, session: Any, timeout: float) -> Any:
-            run = await super()._turn(prompt, sandbox, session, timeout)
-            if len(self.prompts) == 2:
-                return run
-            opened = registry.resolve(session.token)
-            assert opened is not None
-            opened.refusal = LimitReached("max_total_tokens", 10, 12)
-            stopped = AgentError("claude-code exited 1: refused")
-            stopped.native_session_id = TURNS_SESSION.native_session_id
-            raise stopped
-
-    harness = Refused()
-    result = await _run(
-        tmp_path,
-        RoundsProvider(),
-        _task(tmp_path, rounds=2),
-        harness,
-        episode={"session_registry": registry},
-    )
     assert result.verdict.status is Status.BUDGET_EXCEEDED, result.verdict.failure
-    assert len(harness.prompts) == 3
-    ended = [item.turn_ended_by for item in result.record.validation_rounds]
-    # The second turn ended normally; the third, the last, is the episode's stop.
-    assert [item and item.error_type for item in ended] == ["BudgetExceededError", None]
+    assert len(harness.prompts) == 1
+    assert result.record.validation_rounds == ()
 
 
 @pytest.mark.asyncio
@@ -1855,31 +1956,22 @@ async def test_a_turn_that_reports_no_native_session_is_the_last(
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_runs_out_of_time_ends_and_its_round_follows(
-    tmp_path: Path, verifiers: Verifiers
+async def test_a_turn_that_leaves_no_time_is_the_last(
+    tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Its state is validated as it is, the next turn resumes the session the cut run left
-    with the whole of its time, and a last turn that runs out is the episode's timeout."""
-    cut = PhaseTimeoutError("agent", 600, native_session_id=TURNS_SESSION.native_session_id)
-    provider, harness = RoundsProvider(), TurnsHarness(stops={1: cut, 3: cut})
-    result = await _run(tmp_path, provider, _task(tmp_path, rounds=2), harness)
-    assert result.verdict.status is Status.TIMEOUT, result.verdict.failure
-    assert len(harness.prompts) == 3 and harness.timeouts == [600, 600, 600]
-    first, second = result.record.validation_rounds
-    assert first.turn_ended_by is not None
-    assert first.turn_ended_by.error_type == "PhaseTimeoutError"
-    assert (first.status, first.reward) == (Status.COMPLETED, 0.33)
-    assert second.turn_ended_by is None
-    assert result.record.rewards == {"reward": 1.0}
+    clock = [0.0]
 
+    class Slow(TurnsHarness):
+        async def _turn(self, *args: Any) -> AgentRun:
+            clock[0] += 600
+            return await super()._turn(*args)
 
-@pytest.mark.asyncio
-async def test_a_turn_that_runs_out_of_time_with_no_session_to_resume_is_the_last(
-    tmp_path: Path, verifiers: Verifiers
-) -> None:
-    harness = TurnsHarness(stops={1: PhaseTimeoutError("agent", 600)})
+    monkeypatch.setattr(
+        "orbit.run.protocol.episode_protocol.time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    harness = Slow()
     result = await _run(tmp_path, RoundsProvider(), _task(tmp_path, rounds=2), harness)
-    assert result.verdict.status is Status.TIMEOUT, result.verdict.failure
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
     assert len(harness.prompts) == 1 and result.record.validation_rounds == ()
 
 

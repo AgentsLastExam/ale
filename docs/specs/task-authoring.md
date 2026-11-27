@@ -169,8 +169,8 @@ expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or
 per OS. It must be a directory when the agent starts; stages keep their fixed directories.
 `[agent].validation_rounds`, an integer from 0, is how many results of
 [`validation/`](#validation), or of `tests/` for a Task without it, the agent receives. Run
-policy may replace it with `validation_rounds`, a non-negative integer, recorded as the
-timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
+policy may replace it with `validation_rounds`, a non-negative integer or `"unlimited"`,
+recorded as the timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
 
 When the instruction requires deliverable files, every instructed destination must equal or be
 contained by a declared `artifacts` path, or matched by a declared glob. Commands and examples in `instruction.md` must write to
@@ -711,11 +711,10 @@ With `[agent].validation_rounds = N`, the agent works in up to `N + 1` turns: it
 ends, `validation/`, or else `tests/`, scores the state it left, the agent receives that
 result as its next turn begins, and so on until `tests/` scores the state its last turn
 left, once. A turn ends when the agent's program finishes normally, so the agent submits its
-work by ending its turn; there is nothing else to call. A turn also ends, and its round
-follows, at `[agent].timeout_sec` or a Gateway limit, which are each turn's own; a turn that
-a failure ends is the last. The framework tells the agent only each turn's time limit, so
-the instruction says what ending a turn does, as often as rounds remain. Between turns the
-agent's Sandbox is saved and a new one booted from what it saved, without setup: files on
+work by ending its turn; there is nothing else to call. A turn that a timeout, a limit or a
+failure ends is the last. `[agent].timeout_sec` covers all turns together. The framework
+tells the agent only its time, so the instruction says what ending a turn does. Between turns
+the agent's Sandbox is saved and a new one booted from what it saved, without setup: files on
 its disk survive the end of a turn; files in memory, such as a tmpfs, and its desktop
 session do not, nor does any process, the agent's or a service setup started. A round
 therefore never sees a process the agent or setup left running. How the rounds run is in the

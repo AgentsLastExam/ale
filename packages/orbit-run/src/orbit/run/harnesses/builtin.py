@@ -56,7 +56,7 @@ class NopHarness(AutonomousHarness):
         sandbox: Sandbox,
         session: HarnessSession,
         *,
-        timeout_sec: float,
+        timeout_sec: float | None,
     ) -> AgentRun:
         return AgentRun(exit_code=0, final_message="nop harness took no action")
 
@@ -115,7 +115,7 @@ class OracleHarness(AutonomousHarness):
         sandbox: Sandbox,
         session: HarnessSession,
         *,
-        timeout_sec: float,
+        timeout_sec: float | None,
     ) -> AgentRun:
         root = solution_dir(session.home, session.os)
         entry = root / case_entry(session.os)

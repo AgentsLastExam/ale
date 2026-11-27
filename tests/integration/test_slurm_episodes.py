@@ -3,6 +3,7 @@ Orbit's cache with its compute nodes; no Docker is needed there."""
 
 from __future__ import annotations
 
+import json
 import shlex
 from pathlib import Path, PurePosixPath
 
@@ -15,6 +16,7 @@ from orbit.run.gateway.server import Gateway
 from orbit.run.harnesses.base import CliCommand
 from orbit.run.protocol.episode_protocol import EpisodeProtocol
 from orbit.run.providers.slurm import SlurmProvider
+from orbit.run.providers.slurm import provider as slurm_provider
 from orbit.run.providers.slurm.job import Job
 from orbit.run.secrets import resolve_task_variables
 from orbit.run.tasksets.manifest import load_tasks
@@ -179,3 +181,34 @@ async def test_a_save_outlasts_a_guest_session_whose_srun_was_killed() -> None:
             assert await booted.read_file(kept) == b"kept"
     finally:
         await provider.destroy_retained(retained.handle)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_slurm_flattens_keeps_the_agents_work_and_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit or a volume's stack that would pass the layers measured is flattened to one:
+    here every save is, and each turn and the snapshot verifier go on from what the agent
+    left on its disk and in its volume."""
+    monkeypatch.setattr(slurm_provider, "MAX_LAYERS", 1)
+    saved: list[dict[str, object]] = []
+    save = Job.save
+
+    async def recorded(job: Job, index: str, *, nodes: int, timeout: int = 1800):  # type: ignore[no-untyped-def]
+        done = await save(job, index, nodes=nodes, timeout=timeout)
+        for rank in range(nodes):
+            record = job.directory / "sandboxes" / index / "nodes" / str(rank) / "saved"
+            saved.append(json.loads(record.read_text()))
+        return done
+
+    monkeypatch.setattr(Job, "save", recorded)
+    provider = SlurmProvider(slurm_config())
+    result = await volume_episode(tmp_path, "snapshot", None, provider)
+    check_volume(result, "snapshot", None)
+    # Each round's save and the final one, each one layer; a volume viewed a stack below the
+    # first is a merged layer of its own.
+    assert [record["layers"] for record in saved] == [1, 1, 1]
+    stacks = [stack for record in saved[1:] for stack in record["stacks"].values()]  # type: ignore[union-attr]
+    assert stacks and all(
+        len(stack["layers"]) == 1 and stack["layers"][0].endswith(".f") for stack in stacks
+    )

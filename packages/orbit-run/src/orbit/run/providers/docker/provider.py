@@ -34,6 +34,7 @@ import csv
 import io
 import json
 import logging
+import os
 import random
 import re
 import shutil
@@ -1566,7 +1567,9 @@ class DockerSandbox(Sandbox):
 
         The commit keeps no volume: the image's label records each volume's stack of layers,
         which the snapshot keeps (volumes.py). The image keeps the container's labels and
-        command; a snapshot holds no GPU and reserves no memory.
+        command; a snapshot holds no GPU and reserves no memory. A commit that would stack
+        more layers than :data:`MAX_LAYER_DEPTH` allows is flattened to one, so that an
+        episode saves any number of snapshots in a row.
         """
         roots = await self._volume_roots()
         # The relay ends with this container; the image keeps the account's own settings.
@@ -1582,27 +1585,28 @@ class DockerSandbox(Sandbox):
             raise ProviderStartError(f"{self.container} is gone; its disk cannot be saved")
         if self._meter is not None:
             layer += await self._meter.written()
-        stacks: list[str] = []
+        changes = [
+            f"LABEL {RETENTION_LABEL}=snapshot",
+            f'LABEL {GPU_LABEL}=""',
+            f'LABEL {GPU_MEMORY_LABEL}=""',
+            f"LABEL {PREPARED_LABEL}={self.request.prepared_image.prepared_identity}",
+            f"LABEL {WRITTEN_LABEL}={self.written + layer}",
+        ]
         if self.mounts:
             label, self._kept = await volumes.freeze(
                 self.sandbox_id, self.mounts, roots, NETFILTER_IMAGE
             )
-            stacks = ["--change", f"LABEL {volumes.LAYERS_LABEL}={label}"]
+            changes.append(f"LABEL {volumes.LAYERS_LABEL}={label}")
+        tag = f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}"
         self._committing = True
-        code, _, stderr = await _docker(
-            "commit",
-            "--change", f"LABEL {RETENTION_LABEL}=snapshot",
-            "--change", f'LABEL {GPU_LABEL}=""',
-            "--change", f'LABEL {GPU_MEMORY_LABEL}=""',
-            "--change", f"LABEL {PREPARED_LABEL}={self.request.prepared_image.prepared_identity}",
-            "--change", f"LABEL {WRITTEN_LABEL}={self.written + layer}",
-            *stacks,
-            self.container,
-            f"{SNAPSHOT_REPOSITORY}:{self.sandbox_id}",
-            timeout=1800,
-        )  # fmt: skip
-        if code != 0:
-            raise ProviderStartError(f"could not commit {self.container}: {stderr.strip()}")
+        # With the writable layer of a Sandbox booted from it, a commit stacks two more.
+        if await _layers(self.container) + 2 > MAX_LAYER_DEPTH:
+            await _flatten(self.container, tag, changes)
+        else:
+            flags = [part for change in changes for part in ("--change", change)]
+            code, _, stderr = await _docker("commit", *flags, self.container, tag, timeout=1800)
+            if code != 0:
+                raise ProviderStartError(f"could not commit {self.container}: {stderr.strip()}")
         self._committing = False
         handle = f"{SNAPSHOT_PREFIX}{self.sandbox_id}"
         return RetainedSandbox(
@@ -1616,8 +1620,137 @@ class DockerSandbox(Sandbox):
 
 
 #: The most layers Docker's layer store chains under any graph driver (moby's
-#: ``maxLayerDepth``): each commit adds one, so a chain of snapshots is capped there.
+#: ``maxLayerDepth``): each commit adds one, and a snapshot that would pass it is flattened.
 MAX_LAYER_DEPTH = 125
+#: Upper bound on flattening a snapshot, which writes its whole filesystem again.
+FLATTEN_TIMEOUT_SEC = 3600
+
+
+async def _layers(container: str) -> int:
+    """How many layers the image ``container`` runs stacks."""
+    code, image, stderr = await _docker("inspect", "--format", "{{.Image}}", container, timeout=60)
+    if code == 0:
+        code, raw, stderr = await _docker(
+            "image", "inspect", "--format", "{{len .RootFS.Layers}}", image.strip(), timeout=60
+        )
+        if code == 0 and raw.strip().isdigit():
+            return int(raw.strip())
+    raise ProviderStartError(f"could not count the layers under {container}: {stderr.strip()}")
+
+
+async def _flatten(container: str, tag: str, changes: Sequence[str]) -> None:
+    """Commit the stopped ``container`` as ``tag`` in a single layer: its filesystem, as a
+    commit would keep it, exported and imported whole, with the container's configuration
+    and ``changes`` after it, so that a snapshot chain starts again from one layer."""
+    code, raw, stderr = await _docker("inspect", "--format", "{{json .Config}}", container)
+    if code != 0:
+        raise ProviderStartError(f"could not read {container}'s configuration: {stderr.strip()}")
+    flags = [
+        part
+        for change in (*_config_changes(json.loads(raw)), *changes)
+        for part in ("--change", change)
+    ]
+    read, write = os.pipe()
+    processes: list[asyncio.subprocess.Process] = []
+    try:
+        try:
+            processes.append(
+                await asyncio.create_subprocess_exec(
+                    "docker",
+                    "export",
+                    container,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=write,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            )
+            processes.append(
+                await asyncio.create_subprocess_exec(
+                    "docker",
+                    "import",
+                    *flags,
+                    "-",
+                    tag,
+                    stdin=read,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            )
+        finally:
+            os.close(read)
+            os.close(write)
+        async with asyncio.timeout(FLATTEN_TIMEOUT_SEC):
+            errors = [error for _, error in await asyncio.gather(
+                *(process.communicate() for process in processes)
+            )]  # fmt: skip
+    except BaseException:
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+        await asyncio.gather(*(process.wait() for process in processes), return_exceptions=True)
+        raise
+    failed = [
+        error.decode("utf-8", "replace").strip()
+        for process, error in zip(processes, errors, strict=True)
+        if process.returncode
+    ]
+    if failed:
+        raise ProviderStartError(f"could not flatten {container}: {'; '.join(failed)}")
+
+
+def _config_changes(config: Mapping[str, Any]) -> list[str]:
+    """``docker import`` changes that give an image ``config``, a container's, as a commit
+    of it keeps it: its environment, command, account, directory, ports, volumes, labels,
+    stop signal and health check."""
+    changes = [
+        f"ENV {key}={_dockerfile_string(value)}"
+        for key, _, value in (item.partition("=") for item in config.get("Env") or ())
+    ]
+    for key, instruction in (("Entrypoint", "ENTRYPOINT"), ("Cmd", "CMD")):
+        if config.get(key) is not None:
+            changes.append(f"{instruction} {json.dumps(config[key])}")
+    if config.get("User"):
+        changes.append(f"USER {config['User']}")
+    if config.get("WorkingDir"):
+        changes.append(f"WORKDIR {config['WorkingDir'].replace('$', chr(92) + '$')}")
+    changes += [f"EXPOSE {port}" for port in sorted(config.get("ExposedPorts") or {})]
+    if config.get("Volumes"):
+        changes.append(f"VOLUME {json.dumps(sorted(config['Volumes']))}")
+    changes += [
+        f"LABEL {_dockerfile_string(key)}={_dockerfile_string(value)}"
+        for key, value in sorted((config.get("Labels") or {}).items())
+    ]
+    if config.get("StopSignal"):
+        changes.append(f"STOPSIGNAL {config['StopSignal']}")
+    if health := config.get("Healthcheck"):
+        changes.append(_healthcheck(health))
+    return changes
+
+
+def _dockerfile_string(value: str) -> str:
+    """``value`` as a Dockerfile string, which no variable in it expands."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+    return f'"{escaped}"'
+
+
+def _healthcheck(health: Mapping[str, Any]) -> str:
+    test = list(health.get("Test") or ())
+    if not test or test[0] == "NONE":
+        return "HEALTHCHECK NONE"
+    options = [
+        f"--{option}={health[key] // 1_000_000}ms"
+        for option, key in (
+            ("interval", "Interval"),
+            ("timeout", "Timeout"),
+            ("start-period", "StartPeriod"),
+            ("start-interval", "StartInterval"),
+        )
+        if health.get(key)
+    ]
+    if health.get("Retries"):
+        options.append(f"--retries={health['Retries']}")
+    command = json.dumps(test[1:]) if test[0] == "CMD" else test[1]
+    return " ".join(("HEALTHCHECK", *options, "CMD", command))
 
 
 class DockerProvider(Provider):
@@ -1831,28 +1964,6 @@ class DockerProvider(Provider):
                 f"{' '.join(runtime.arguments.get(ran, ()))}? {stderr.strip()}"
             )
 
-    async def _refuse_deep_stacks(self, image: str, saves: int) -> None:
-        """Refuse, before its container starts, a Sandbox whose image and the snapshots its
-        episode saves in a row would stack more layers than Docker's layer store chains, under
-        any graph driver. The containerd image store's snapshotter, which replaces that
-        store, stacks far more than a Run saves."""
-        code, status, _ = await _docker("info", "--format", "{{json .DriverStatus}}", timeout=30)
-        if code != 0 or "io.containerd.snapshotter" in status:
-            return
-        code, raw, stderr = await _docker(
-            "image", "inspect", "--format", "{{len .RootFS.Layers}}", image, timeout=30
-        )
-        if code != 0 or not raw.strip().isdigit():
-            raise ProviderStartError(
-                f"could not count the layers of {image}: {stderr.strip() or raw.strip()!r}"
-            )
-        layers = int(raw.strip())
-        if layers + saves > MAX_LAYER_DEPTH:
-            raise ProviderCapabilityError(
-                f"{image} stacks {layers} layers, and saving it {saves} more times would stack "
-                f"more than the {MAX_LAYER_DEPTH} Docker's layer store chains"
-            )
-
     async def create(self, request: SandboxRequest) -> Sandbox:
         await self.accepts(request)
         runtime = RUNTIMES[self.runtime]
@@ -1874,8 +1985,6 @@ class DockerProvider(Provider):
                     "See docs/specs/sandbox-image.md"
                 )
             resolved_image = await self._framed(resolved_image, request)
-        if request.saves:
-            await self._refuse_deep_stacks(resolved_image.observed_ref, request.saves)
 
         sandbox_id = f"{request.episode_id}-{uuid.uuid4().hex[:6]}"
         container = f"orbit-{sandbox_id}"

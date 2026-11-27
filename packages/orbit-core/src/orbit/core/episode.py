@@ -184,10 +184,7 @@ class EpisodeContext:
     result: ResultSink | None = None
     current_phase: Phase | None = None
     limit_refusal: Callable[[], LimitTermination | None] | None = None
-    """Reports the Gateway limit that refused one of the current turn's model calls, if any."""
-    begin_agent_turn: Callable[[], None] | None = None
-    """Starts a turn of the agent, which has the whole of the Gateway's limits: they count each
-    turn's calls, as they count the one turn of an episode without validation rounds."""
+    """Reports the Gateway limit that refused one of this episode's model calls, if any."""
     model_provider_failure: Callable[[], str | None] | None = None
     """Describes how the model provider is failing the agent's calls, as the Gateway saw: from
     a call it failed until it answers one; ``None`` while it answers them."""

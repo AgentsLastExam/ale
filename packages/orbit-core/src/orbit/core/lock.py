@@ -13,7 +13,7 @@ Two fields deserve emphasis because they are where other frameworks leak:
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -348,9 +348,9 @@ class RunLock(BaseModel):
     ``validation/Dockerfile`` gave them their own and the episode validated: its placement,
     network, and the image and resources of its first round's Sandbox of its own."""
     timeouts: RunTimeouts = RunTimeouts()
-    validation_rounds: int = Field(default=0, ge=0)
-    """How many validation rounds the agent was to receive: the Task's, or the Run's override;
-    0 for the oracle, which never receives one."""
+    validation_rounds: Annotated[int, Field(ge=0)] | Literal["unlimited"] = 0
+    """How many validation rounds the agent was to receive: the Task's, or the Run's override,
+    which may be ``"unlimited"``; 0 for the oracle, which never receives one."""
     validation_stage: Literal["validation", "tests"] = Field(
         default="validation", exclude_if=lambda value: value == "validation"
     )

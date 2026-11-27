@@ -1032,6 +1032,7 @@ class FleetSandbox(Sandbox):
         self.node = node
         self._gateway = description.gateway_url
         self.volumes = description.volumes
+        self.saves_left = description.saves_left
         self._url = f"{node.address}/v1/sandboxes/{description.sandbox_id}"
         #: The context each command ran in, by the number the Node's notices name it by.
         self._contexts: list[contextvars.Context] = []

@@ -863,6 +863,7 @@ class NodeAgent:
             gateway_url=sandbox.gateway_url,
             create_sec=held.create_sec,
             volumes=sandbox.volumes,
+            saves_left=sandbox.saves_left,
         )
         entry.handle, entry.description = sandbox.handle, description
         self._write(held)

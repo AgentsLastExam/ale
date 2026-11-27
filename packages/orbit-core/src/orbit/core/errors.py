@@ -177,9 +177,6 @@ class ModelProviderError(EnvironmentError_):
 class AgentError(OrbitError):
     """The agent failed in a way that is attributable to the agent."""
 
-    #: The native session the failed run left, where its Harness read one.
-    native_session_id: str | None = None
-
 
 class AgentRefusalError(AgentError):
     """The agent declined the task (safety refusal, policy stop)."""
@@ -270,15 +267,11 @@ class BudgetExceededError(OrbitError):
         limit: str,
         value: float,
         observed_value: float | None = None,
-        *,
-        native_session_id: str | None = None,
     ) -> None:
         super().__init__(f"budget limit {limit!r} reached ({value:g})")
         self.limit = limit
         self.value = value
         self.observed_value = observed_value
-        #: The native session the run the limit stopped left, which it can resume.
-        self.native_session_id = native_session_id
 
 
 class HarnessLimitError(BudgetExceededError):

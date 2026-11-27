@@ -59,8 +59,8 @@ leaves its profiles name:
 | `docker:runc` | Linux containers, on the machine's architecture | the Host's NVIDIA GPUs that `sandbox.docker.gpus` allows, by the models and memory nvidia-smi reports, shared by `gpu_memory_mb` and watched ([GPU memory](#gpu-memory)); none without a working nvidia-smi | yes | `raw_sockets` | — |
 | `docker:kata` | Linux containers, on the machine's architecture | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `docker:gvisor` | Linux containers, on the machine's architecture | as `docker:runc`'s, shared under a limit | yes | `user_namespaces`, `fuse` and `mount`, with `raw_sockets` in one profile and `nested_containers` in another | — |
-| `slurm` | Linux x86-64 containers on configured partitions, a Sandbox on up to a partition's `max_nodes` nodes ([Slurm nodes](#slurm-nodes)) | whole GPUs of the configured partition model, on each node | 200 in a row | as the two gVisor profiles above | a solver that, with the verifier booted from its snapshot, needs more than a partition supplies |
-| `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | yes | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
+| `slurm` | Linux x86-64 containers on configured partitions, a Sandbox on up to a partition's `max_nodes` nodes ([Slurm nodes](#slurm-nodes)) | whole GPUs of the configured partition model, on each node | yes | as the two gVisor profiles above | a solver that, with the verifier booted from its snapshot, needs more than a partition supplies |
+| `firecracker` | Linux containers on x86-64, up to 32 CPUs | none | eight in a row | `perf`, `bpf`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | — |
 | `qemu` | Linux and Windows VMs on x86-64 | those of its VFIO pool, whole, when it is given one; no Run or Node setting gives it one | yes | none: a VM takes none | — |
 | `orchard` | macOS VMs on arm64 | none | yes | none: a VM takes none | storage that is not whole GiB; an agent account that is root, or `admin` for an agent without `[agent].sudo` |
 | `daytona` (scheduler) | Linux containers on x86-64 | Daytona's, whole | no | `nested_containers`, `fuse`, `io_uring`, `raw_sockets`, `user_namespaces`, `mount` | memory or storage that is not whole GiB; `gpu_types` naming no Daytona GPU type |
@@ -172,9 +172,9 @@ How each counts what a snapshot holds against the `storage_mb` of a Sandbox boot
 
 | Provider | What the snapshot holds, and how it counts |
 |---|---|
-| Docker | A commit labels the image `orbit.written` with the bytes written over the Task's image, the container's `SizeRw` measured once it has stopped plus what the snapshot it booted from held. A container booted from it carries that label, and the [storage watch](#docker-writable-storage) adds it to every measurement. Each commit stacks one more layer: Docker's layer store chains 125 at most under any graph driver, so a Sandbox whose image's layers and planned saves would exceed that is refused before it starts; the containerd image store's snapshotter, which replaces that store, stacks far more |
+| Docker | A commit labels the image `orbit.written` with the bytes written over the Task's image, the container's `SizeRw` measured once it has stopped plus what the snapshot it booted from held. A container booted from it carries that label, and the [storage watch](#docker-writable-storage) adds it to every measurement. Each commit stacks one more layer, and Docker's layer store chains 125 at most under any graph driver: a commit that a Sandbox booted from it would stack past that is flattened instead, the stopped container exported and imported as one layer with its configuration (environment, command, account, directory, ports, volumes, labels, stop signal and health check), so a chain saves any number in a row |
 | QEMU | The overlay is the larger of the snapshot's virtual size and `storage_mb` plus its overhead, and the guest's root filesystem already holds what the solver wrote |
-| Firecracker | `snapshot.json` records `written_mb`, the writable disk's use as the guest's `df /` showed it before shutdown plus what the snapshot it booted from held; a microVM booted from it gets a writable disk of `storage_mb` less that, plus the overhead, and one whose `storage_mb` that already fills is refused before it boots, as the Task's error. Each save stacks one more layer, of eight at most, so the profile saves eight in a row (`max_saves`), and a Sandbox whose snapshot's layers and [planned saves](../../../../../../docs/specs/sandbox-image.md#provider-selection) together would exceed eight is refused before it boots |
+| Firecracker | `snapshot.json` records `written_mb`, the writable disk's use as the guest's `df /` showed it before shutdown plus what the snapshot it booted from held; a microVM booted from it gets a writable disk of `storage_mb` less that, plus the overhead, and one whose `storage_mb` that already fills is refused before it boots, as the Task's error. Each save stacks one more layer, of eight at most, so the profile saves eight in a row (`max_saves`), and a Sandbox whose snapshot's layers and [planned saves](../../../../../../docs/specs/sandbox-image.md#provider-selection) together would exceed eight is refused before it boots. Each microVM says how many more it can save (`saves_left`), where unlimited validation rounds end |
 | Orchard | The clone is the snapshot's disk, at least `storage_mb`, with the solver's files on it |
 | Slurm | Each node's step measures, once the container has stopped, what the node holds over the image, its writable layer and its volumes' layers, plus what the snapshot it booted from held there, and the snapshot records it, written out too; a Sandbox booted from it counts that on each node, and on node 0 its `/shared` copy whole, a verifier booted from it the snapshot's own `/shared` |
 
@@ -325,18 +325,20 @@ engine path of a Sandbox that asks for `nested_containers`; a view, an overlay t
 mounts in the allocation's rootless Podman namespace with `userxattr`, of a snapshot's stack
 under an empty layer of its own, which gVisor's gofer serves as any directory; or a copy
 (`cp -a --reflink=auto`) of an engine's storage. Every layer has a short link below the
-store, by which an overlay's options name the 200 layers of [`MAX_SAVES`](#slurm) in one
-page. A snapshot records each path's stack, and a step unmounts its views before the Host
-hears of its snapshot, as a mounted upper layer is no other overlay's lower. A snapshot
-written out for an allocation of its own carries each of its layers beside its image as an
-uncompressed tar that keeps owners, whiteouts and the overlay's extended attributes, which
-that allocation unpacks before it starts anything. The allocation is sized for the separate
-verifier too where a partition holds both, and loads that verifier's image, prepared for the
-cluster as the solver's is, when it starts; destroying a snapshot removes its layers that no
-other snapshot and no running view stacks. Measured on OpenRSI (Linux 6.8, Podman, gVisor
-0.1.4): a Podman volume filled from the image, a view of a stack of two layers, a deletion
-through it kept as a whiteout that the next view honours, and a container engine's images
-and deletions kept by a snapshot written out and loaded in another allocation.
+store, by which an overlay's options name the 200 layers of [`MAX_LAYERS`](#slurm) in one
+page; a stack that a Sandbox booted from a snapshot would view past them is copied, as its
+view shows it, into one layer as the snapshot is saved. A snapshot records each path's
+stack, and a step unmounts its views before the Host hears of its snapshot, as a mounted
+upper layer is no other overlay's lower. A snapshot written out for an allocation of its own
+carries each of its layers beside its image as an uncompressed tar that keeps owners,
+whiteouts and the overlay's extended attributes, which that allocation unpacks before it
+starts anything. The allocation is sized for the separate verifier too where a partition
+holds both, and loads that verifier's image, prepared for the cluster as the solver's is,
+when it starts; destroying a snapshot removes its layers that no other snapshot and no
+running view stacks. Measured on OpenRSI (Linux 6.8, Podman, gVisor 0.1.4): a Podman volume
+filled from the image, a view of a stack of two layers, a deletion through it kept as a
+whiteout that the next view honours, and a container engine's images and deletions kept by a
+snapshot written out and loaded in another allocation.
 
 ## Shown stage
 
@@ -1054,13 +1056,14 @@ nine hours, 72 GPU-hours, where two allocations would hold 16. A Sandbox booted 
 snapshot that does not fit beside what runs in its allocation, or that it would not last,
 gets an allocation of its own, which loads the snapshot written out with `podman save`; a
 snapshot the Run keeps (`sandbox_retention.solver = "snapshot"`) is written out as it is
-saved, as its allocation ends with the episode, and costs that copy.
-`orbit sandbox destroy slurm:<job name>/<index>` removes one; `orbit sandbox list` lists
-those written out in the cache, each with `--config` naming the Run configuration where it
-sets another `shared_fs_dir`. A chain of 200 commits, each booted from the one before,
-over a one-layer image was measured, so each profile saves 200 in a row; a container
-engine's storage is volumes, which a snapshot keeps as layers beside its commit. Slurm keeps
-no running Sandbox.
+saved, as its allocation ends with the episode, and costs that copy. `orbit sandbox destroy
+slurm:<job name>/<index>` removes one; `orbit sandbox list` lists those written out in the
+cache, each with `--config` naming the Run configuration where it sets another
+`shared_fs_dir`. A chain of 200 commits, each booted from the one before, over a one-layer
+image was measured; a commit that a Sandbox booted from it would stack past that is rebuilt
+as one layer with its configuration (`podman build --squash-all`), so each profile saves any
+number in a row. A container engine's storage is volumes, which a snapshot keeps as layers
+beside its commit. Slurm keeps no running Sandbox.
 
 A Sandbox that names `storage_mb` is held to it on each of its nodes by its step there,
 outside the Sandbox, as a Docker leaf holds one ([Docker writable

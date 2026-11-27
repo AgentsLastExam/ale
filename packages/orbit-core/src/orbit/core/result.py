@@ -94,9 +94,6 @@ class ValidationRound(BaseModel):
     failure: FailureInfo | None = None
     feedback: ValidationFeedback | None = None
     """The text the agent was shown below the reward; none when the verifier wrote none."""
-    turn_ended_by: FailureInfo | None = None
-    """What ended the turn before the round where the agent did not: the turn's time, or a
-    Gateway limit, each of which ends that turn only."""
     started_at: datetime
     finished_at: datetime
 
@@ -158,8 +155,8 @@ class EpisodeProgress(BaseModel):
     schema_version: Literal[1] = 1
     episode_id: str
     phase: Literal["agent", "moving", "validating", "verifying"]
-    agent_sec: float = Field(ge=0)
-    """The agent's time across all its turns."""
+    agent_sec: float | None = Field(default=None, ge=0)
+    """The agent's time across all its turns; None where unlimited."""
     agent_used_sec: float = Field(ge=0)
     """What of it was spent, the run going on included."""
     rounds: int = Field(ge=0)

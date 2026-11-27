@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -181,20 +182,19 @@ MIN_TURN_SEC = 60.0
 MOVED_PROMPT = (
     "Your work was interrupted and moved to another machine. Your files are as you left "
     "them, but every process you were running, and any command in progress, was stopped. "
-    "Continue the task. Time left: {minutes} minutes.\n"
+    "Continue the task."
 )
+#: After it, where the agent's time is limited.
+MOVED_TIME = " Time left: {minutes} minutes."
 
-#: Below the instruction, first, and last in each validation round's prompt: the time the turn
-#: has. Framework-owned and minimal: how the agent is scored, how often and on what, and what
-#: it may do with a round's result, are the Task's to say in its instruction.
+#: Below the instruction, first: the agent's time, which all its turns share, where it is
+#: limited. Framework-owned and minimal: how the agent is scored, how often and on what, and
+#: what it may do with a round's result, are the Task's to say in its instruction.
 TIME_NOTE = (
     "Your time limit is {minutes} minutes. If it runs out, your work is scored as it is then.\n"
 )
-#: The same for an agent that receives validation rounds, each turn of which has that time.
-TURN_TIME_NOTE = (
-    "Your time limit for this turn is {minutes} minutes. If it runs out, your work is scored "
-    "as it is then.\n"
-)
+#: Last in each validation round's prompt: what is left of that time.
+TIME_LEFT_NOTE = "Time left: {minutes} minutes. If it runs out, your work is scored as it is then."
 #: Below the instruction, last, the machine the agent has, each one of a Sandbox of several
 #: nodes, as its Sandbox was given it: tools in a container can report the host's instead.
 #: Framework-owned and neutral: it states the agent's limits, never how to do the Task.
@@ -436,39 +436,26 @@ class _Solver:
     """That snapshot's handle."""
     continuation: NativeContinuation | None = None
     """The native session the agent's work goes on in, once one was reported."""
-    turn_stop: PhaseTimeoutError | BudgetExceededError | None = None
-    """What ended the last turn where a validation round follows it: its time, or a Gateway
-    limit, which end that turn only."""
 
 
 @dataclass
 class _AgentTime:
-    """The agent's time: ``total`` for each of its turns, of which the current turn has
-    spent ``turn_used``; ``used`` across all its turns; and the run going on since ``running``
-    (monotonic), if one is."""
+    """The agent's time: ``total`` across all its turns, ``None`` where unlimited, of which
+    ``used`` is spent, and the run going on since ``running`` (monotonic), if one is."""
 
-    total: float
+    total: float | None
     used: float = 0.0
-    turn_used: float = 0.0
     running: float | None = None
 
     @property
     def remaining(self) -> float:
-        """What is left of the current turn's time."""
-        return self.total - self.turn_used
+        """What is left, ``inf`` where the agent's time is unlimited."""
+        return math.inf if self.total is None else self.total - self.used
 
     @property
     def spent(self) -> float:
-        """What all turns spent, the run going on included."""
+        """What is spent, the run going on included."""
         return self.used + (time.monotonic() - self.running if self.running is not None else 0)
-
-    def begin_turn(self) -> None:
-        """Give a new turn the whole of its time; a move goes on in the turn it cut."""
-        self.turn_used = 0.0
-
-    def spend(self, seconds: float) -> None:
-        self.used += seconds
-        self.turn_used += seconds
 
 
 @dataclass(frozen=True)
@@ -493,7 +480,7 @@ class _Moved(Exception):
 
 def _cut(left: float | None, budget: _AgentTime) -> bool:
     """Whether a run its Sandbox has ``left`` for ended at its Sandbox's deadline rather than
-    at the end of the turn's time, which ``budget`` holds as the run began."""
+    at the end of the agent's time, which ``budget`` holds as the run began."""
     return left is not None and left < budget.remaining
 
 
@@ -507,8 +494,9 @@ def _too_brief(sandbox: Sandbox, budget: _AgentTime, kept: float = 0.0) -> bool:
 def _unresumable(harness: Harness, budget: _AgentTime) -> ProviderCapabilityError:
     """What ends an episode whose Sandbox's deadline cut a run that cannot go on elsewhere."""
     return ProviderCapabilityError(
-        f"the Sandbox's deadline cut {harness.name}'s run before the agent's time was up "
-        f"({budget.remaining:.0f} s of it), and it left no native session to resume"
+        f"the Sandbox's deadline cut {harness.name}'s run before the agent's time was up"
+        + ("" if budget.total is None else f" ({budget.remaining:.0f} s of it)")
+        + ", and it left no native session to resume"
     )
 
 
@@ -600,7 +588,7 @@ class EpisodeProtocol:
         agent_enabled: bool = True,
         timeouts: RunTimeouts | None = None,
         resume: Resume | None = None,
-        validation_rounds: int = 0,
+        validation_rounds: int | Literal["unlimited"] = 0,
         check_validation: bool = False,
     ) -> None:
         self.harness = harness
@@ -610,17 +598,39 @@ class EpisodeProtocol:
         self.timeouts = timeouts or RunTimeouts()
         self.resume = resume
         self.validation_rounds = validation_rounds
-        """How many validation results the agent receives, each between two turns."""
+        """How many validation results the agent receives, each between two turns, or
+        ``"unlimited"``: as many as its time and Gateway limits, and its solver's Provider,
+        allow."""
         self.check_validation = check_validation
         """Validate once on the final state, before ``tests/`` scores it, with no turn after
         it, as calibration checks the stage that validates."""
 
     @property
     def validations(self) -> int:
-        """How many times its episodes validate before ``tests/`` scores the final state: once
-        for each of the agent's validation rounds, or once for calibration's validation check;
-        each saves the solver as a snapshot."""
+        """How many times its episodes plan to validate before ``tests/`` scores the final
+        state: once for each of the agent's validation rounds, the next one where they are
+        unlimited, or once for calibration's validation check; each saves the solver as a
+        snapshot."""
+        if self.validation_rounds == "unlimited":
+            return 1
         return self.validation_rounds or int(self.check_validation)
+
+    def _round_may_follow(self, ctx: EpisodeContext, sandbox: Sandbox) -> bool:
+        """Whether a validation round may follow the turn that runs in ``sandbox``: one still
+        to come, or, where they are unlimited, one whose save its Provider can still take, a
+        turn's after it included."""
+        if self.validation_rounds != "unlimited":
+            return len(ctx.validation_rounds) < self.validations
+        return _rounds_left(sandbox) != 0
+
+    def _planned_after(self, sandbox: Sandbox, done: int) -> int:
+        """How many validations the solver booted from ``sandbox``'s next save plans, ``done``
+        of them done: those still to come, or, where they are unlimited, the next, if its
+        Provider can still take its save."""
+        if self.validation_rounds != "unlimited":
+            return max(self.validations - done, 0)
+        left = _rounds_left(sandbox)
+        return 1 if left is None or left > 1 else 0
 
     @property
     def validates(self) -> bool:
@@ -652,7 +662,7 @@ class EpisodeProtocol:
             if self.agent_enabled and self.harness.logs
             else None
         )
-        budget = _AgentTime(self.timeouts.agent or spec.timeouts.agent)
+        budget = _AgentTime(self.timeouts.agent_time(spec))
         try:
             await self._with_deadline(
                 ctx, Phase.SETUP, SETUP_TIMEOUT_SEC, self._setup(task, ctx, solver.sandbox)
@@ -1134,7 +1144,7 @@ class EpisodeProtocol:
         round_index: int | None = None,
         segment: int | None = None,
     ) -> _Cut | None:
-        """One turn of the agent, with what is left of the turn's time: the first, launched with the
+        """One turn of the agent, with what is left of its time: the first, launched with the
         instruction, or resumed with it in the session a continued episode left; or a later
         one, resumed with ``prompt``, validation round ``round_index``'s, or the one that
         resumes the turn a move cut in ``segment``, in its own ``continuation``.
@@ -1172,9 +1182,9 @@ class EpisodeProtocol:
     ) -> _Cut | None:
         spec = ctx.spec
         sandbox = solver.sandbox
-        budget = budget or _AgentTime(self.timeouts.agent or spec.timeouts.agent)
+        budget = budget or _AgentTime(self.timeouts.agent_time(spec))
         asked = _Cut(prompt, continuation, ran=False)
-        kept = self._kept_for_verification(ctx)
+        kept = self._kept_for_verification(ctx, sandbox)
         if _too_brief(sandbox, budget, kept):
             return asked
         ctx.agent_started = True
@@ -1191,7 +1201,7 @@ class EpisodeProtocol:
                 await self._with_deadline(
                     ctx,
                     Phase.AGENT,
-                    budget.remaining if left is None else min(left, budget.remaining),
+                    _bound(budget.remaining if left is None else min(left, budget.remaining)),
                     self._rollout(harness, ctx, sandbox),
                 )
             except _AGENT_STOPS as error:
@@ -1258,7 +1268,7 @@ class EpisodeProtocol:
         if _too_brief(sandbox, budget, kept):
             return asked
         left = _left(sandbox, kept)
-        timeout = budget.remaining if left is None else min(left, budget.remaining)
+        timeout = _bound(budget.remaining if left is None else min(left, budget.remaining))
 
         variables = ctx.variables.values
 
@@ -1302,7 +1312,7 @@ class EpisodeProtocol:
                 finally:
                     # Only the agent's own run spends its time and its model session: no
                     # save, validation or boot, and nothing its programs left running.
-                    budget.spend(time.monotonic() - started)
+                    budget.used += time.monotonic() - started
                     budget.running = None
                     if ctx.open_agent_session is not None:
                         ctx.open_agent_session(False)
@@ -1314,39 +1324,20 @@ class EpisodeProtocol:
 
         polling = asyncio.create_task(self._poll_logs(ctx, logs, budget, solver))
         try:
-            backstop = timeout + AGENT_STOP_GRACE_SEC
+            backstop = None if timeout is None else timeout + AGENT_STOP_GRACE_SEC
             await self._with_deadline(ctx, Phase.AGENT, backstop, launch())
         except _Moved as moved:
             solver.continuation = moved.continuation
             with self._traced(ctx, Phase.AGENT):
                 logging.getLogger("orbit.execution").info(
                     "the solver's Sandbox reached its deadline; the agent's run was cut",
-                    extra={"orbit_data": {"left_sec": round(budget.remaining)}},
+                    extra={"orbit_data": {"left_sec": _rounded(budget.remaining)}},
                 )
             return _Cut(None, moved.continuation, ran=True)
         except _AGENT_STOPS as error:
             # Past the backstop the guest no longer replies, so nothing there can be verified.
             if isinstance(error, PhaseTimeoutError) and isinstance(error.__cause__, TimeoutError):
                 raise
-            # The turn's time and Gateway limits are each turn's own: reaching one ends this
-            # turn, and its round follows, in the session the cut run left.
-            limited = isinstance(error, PhaseTimeoutError) or (
-                isinstance(error, BudgetExceededError) and error.layer == "gateway"
-            )
-            left_by = (error.native_session_id if limited else None) or (
-                continuation.native_session_id if continuation else None
-            )
-            if limited and left_by is not None and self._round_follows(ctx):
-                solver.continuation = NativeContinuation(
-                    harness=harness.name, native_session_id=left_by
-                )
-                solver.turn_stop = error
-                with self._traced(ctx, Phase.AGENT):
-                    logging.getLogger("orbit.execution").info(
-                        "the turn reached a limit; its validation round follows",
-                        extra={"orbit_data": {"error": type(error).__name__, "detail": str(error)}},
-                    )
-                return None
             ctx.agent_stop = error
         finally:
             polling.cancel()
@@ -1354,18 +1345,14 @@ class EpisodeProtocol:
                 await polling
         return None
 
-    def _round_follows(self, ctx: EpisodeContext) -> bool:
-        """Whether a validation round, and a turn after it, follow the turn that runs."""
-        return len(ctx.validation_rounds) < self.validation_rounds
-
-    def _kept_for_verification(self, ctx: EpisodeContext) -> float:
-        """What a run leaves of its Sandbox for the verification after it: a shared
+    def _kept_for_verification(self, ctx: EpisodeContext, sandbox: Sandbox) -> float:
+        """What a run in ``sandbox`` leaves of it for the verification after it: a shared
         verifier's limit, where no save comes between the run's end and ``tests/``, so that
         ``tests/`` runs where the agent's processes still do, rather than in a solver a move
         stopped them in."""
         if ctx.spec.verify.environment_mode is not VerificationMode.SHARED:
             return 0.0
-        if len(ctx.validation_rounds) < self.validations:
+        if self._round_may_follow(ctx, sandbox):
             return 0.0  # a round saves the solver first, which stops every process anyway
         return self._verify_timeout(ctx) or 0.0
 
@@ -1406,13 +1393,9 @@ class EpisodeProtocol:
         continuation: NativeContinuation | None = None,
         round_index: int | None = None,
     ) -> None:
-        """One turn of the agent, with the whole of a turn's time and Gateway limits, in as
-        many solvers as its Sandboxes' deadlines take: each time one cuts the turn, or leaves
-        no time to start it, the solver moves where it can go on, and the agent resumes its
-        session there, with what the turn has left."""
-        budget.begin_turn()
-        if ctx.begin_agent_turn is not None:
-            ctx.begin_agent_turn()
+        """One turn of the agent, in as many solvers as its Sandboxes' deadlines take: each
+        time one cuts the turn, or leaves no time to start it, the solver moves where it can
+        go on, and the agent resumes its session there, with the time it has left."""
         segment: int | None = None
         moved = False
         while True:
@@ -1430,7 +1413,7 @@ class EpisodeProtocol:
             if cut is None:
                 return
             if moved and not cut.ran:
-                kept = self._kept_for_verification(ctx)
+                kept = self._kept_for_verification(ctx, solver.sandbox)
                 raise ProviderCapabilityError(
                     "the solver moved to a Sandbox its Provider holds too briefly to start a "
                     f"turn in: less than {MIN_TURN_SEC:g} s before its deadline"
@@ -1440,7 +1423,15 @@ class EpisodeProtocol:
             moved = True
             prompt, continuation = cut.prompt, cut.continuation
             if cut.ran:
-                prompt = MOVED_PROMPT.format(minutes=_minutes(budget.remaining))
+                prompt = (
+                    MOVED_PROMPT
+                    + (
+                        ""
+                        if budget.total is None
+                        else MOVED_TIME.format(minutes=_minutes(budget.remaining))
+                    )
+                    + "\n"
+                )
                 round_index, segment = None, len(ctx.segments)
 
     async def _move(
@@ -1478,7 +1469,7 @@ class EpisodeProtocol:
                 raise
             earlier, solver.rounds = solver.rounds, [solver.sandbox]
             await self._release_rounds(ctx, earlier)
-        validations = max(self.validations - len(ctx.validation_rounds), 0)
+        validations = self._planned_after(solver.sandbox, len(ctx.validation_rounds))
         booted = await self._timed(
             ctx,
             Phase.PROVISION,
@@ -1561,14 +1552,14 @@ class EpisodeProtocol:
         )
 
     def _instruction(self, ctx: EpisodeContext) -> str:
-        """The first prompt: the instruction, verbatim, and below it the time the turn has and
-        the machine the solver was given, as provisioning recorded it."""
+        """The first prompt: the instruction, verbatim, and below it the agent's time, where it
+        is limited, and the machine the solver was given, as provisioning recorded it."""
         spec = ctx.spec
-        note = TURN_TIME_NOTE if self.validation_rounds else TIME_NOTE
-        below = [note.format(minutes=_minutes(self.timeouts.agent or spec.timeouts.agent))]
+        total = self.timeouts.agent_time(spec)
+        below = [] if total is None else [TIME_NOTE.format(minutes=_minutes(total))]
         if ctx.resource_allocation is not None:
             below.append(_machine(ctx.resource_allocation))
-        return spec.instruction + "\n\n---\n\n" + "".join(below)
+        return spec.instruction + ("\n\n---\n\n" + "".join(below) if below else "")
 
     async def _validation_rounds(
         self,
@@ -1579,9 +1570,9 @@ class EpisodeProtocol:
         logs: LogMirror | None,
         budget: _AgentTime,
     ) -> None:
-        """Validate each time a turn of the agent ends, normally or at its time or a Gateway
-        limit, and give the agent each result as its next turn, in a solver booted from the
-        snapshot the round saved; a turn that something else ended is the last.
+        """Validate each time a turn of the agent ends normally, and give the agent each
+        result as its next turn, in a solver booted from the snapshot the round saved; a turn
+        that something else ended, a Gateway limit included, is the last.
         ``check_validation`` validates once, with no turn after it.
 
         Each round copies the agent's logs and converts its trajectory so far, saves the
@@ -1594,23 +1585,43 @@ class EpisodeProtocol:
         """
         mode = ctx.spec.validation_spec.environment_mode
         logger = logging.getLogger("orbit.execution")
-        for index in range(1, self.validations + 1):
+        for index in itertools.count(1):
+            if self.validation_rounds != "unlimited" and index > self.validations:
+                return
             if ctx.agent_stop is not None:
                 return
-            stop, solver.turn_stop = solver.turn_stop, None
             if self.validation_rounds:
                 refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
-                if stop is None and refusal is not None:
+                if refusal is not None:
                     # A turn that exited normally after the Gateway refused one of its calls
-                    # ended at that limit.
-                    stop = BudgetExceededError(
+                    # was stopped by that limit.
+                    ctx.agent_stop = BudgetExceededError(
                         refusal.name, float(refusal.configured_value), refusal.observed_value
                     )
-                if solver.continuation is None:
+                    return
+                run = ctx.agent_run
+                if run is None or run.continuation is None:
                     ctx.agent_stop = NativeContinuationError(
                         f"{self.harness.name} reported no native session to resume"
                     )
                     return
+                if budget.remaining <= 0:
+                    return
+                if not self._round_may_follow(ctx, solver.sandbox):
+                    with self._traced(ctx, Phase.AGENT):
+                        logger.info(
+                            "the solver's Provider saves no more snapshots in a row; the "
+                            "turn is the last",
+                            extra={"orbit_data": {"rounds": index - 1}},
+                        )
+                    return
+            # What the solver booted from this round's save plans, and the rounds left then.
+            planned = self._planned_after(solver.sandbox, index)
+            left = (
+                self.validation_rounds - index
+                if self.validation_rounds != "unlimited"
+                else _after(_rounds_left(solver.sandbox))
+            )
             directory = ctx.run_dir / "validation" / str(index)
             artifacts: ArtifactSink | None = None
             viewed: tuple[str, ...] = ()
@@ -1648,23 +1659,17 @@ class EpisodeProtocol:
                 await self._release_rounds(ctx, earlier)
             try:
                 feedback = await self._validate(
-                    task,
-                    ctx,
-                    index,
-                    handle,
-                    solver.image,
-                    artifacts,
-                    viewed,
-                    trajectory,
-                    turn_stop=stop,
+                    task, ctx, index, handle, solver.image, artifacts, viewed, trajectory
                 )
             finally:
                 if artifacts is not None:
                     artifacts.cleanup()
 
-            async def boot(handle: str = handle, index: int = index) -> Sandbox:
+            async def boot(
+                handle: str = handle, index: int = index, planned: int = planned
+            ) -> Sandbox:
                 booted = await self._boot_when_there_is_room(
-                    ctx, handle, solver.image, validations=max(self.validations - index, 0)
+                    ctx, handle, solver.image, validations=planned
                 )
                 logger.info(
                     "a validation round booted the next solver",
@@ -1679,8 +1684,14 @@ class EpisodeProtocol:
             if not self.validation_rounds:
                 return
             self._segment_begins(ctx, solver, budget, "round", index)
-            assert solver.continuation is not None
-            prompt = _round_prompt(ctx.validation_rounds[-1], feedback, budget.total)
+            assert ctx.agent_run is not None and ctx.agent_run.continuation is not None
+            prompt = _round_prompt(
+                ctx.validation_rounds[-1],
+                None if self.validation_rounds == "unlimited" else self.validation_rounds,
+                left,
+                feedback,
+                None if budget.total is None else budget.remaining,
+            )
             await self._work(
                 task,
                 ctx,
@@ -1688,7 +1699,7 @@ class EpisodeProtocol:
                 logs=logs,
                 budget=budget,
                 prompt=prompt,
-                continuation=solver.continuation,
+                continuation=ctx.agent_run.continuation,
                 round_index=index,
             )
 
@@ -1751,13 +1762,10 @@ class EpisodeProtocol:
         artifacts: ArtifactSink | None,
         viewed: tuple[str, ...] = (),
         trajectory: Path | None = None,
-        *,
-        turn_stop: PhaseTimeoutError | BudgetExceededError | None = None,
     ) -> str | None:
         """Score the snapshot ``handle`` with the stage that validates and the agent's
-        ``trajectory`` so far under its verifier's limit and record the round, with the
-        ``turn_stop`` that ended the turn before it, if any; return the feedback text the agent
-        receives.
+        ``trajectory`` so far under its verifier's limit and record the round; return the
+        feedback text the agent receives.
 
         A round that produces no score is recorded with its failure, and the agent receives
         it as such: the round counts, and the episode goes on. One whose verifier's
@@ -1826,9 +1834,7 @@ class EpisodeProtocol:
                     )
                 continue
             break
-        feedback = self._record_round(
-            ctx, index, directory, started_at, failure_phase, outcome, turn_stop
-        )
+        feedback = self._record_round(ctx, index, directory, started_at, failure_phase, outcome)
         if unreleased is not None:
             raise unreleased
         return feedback
@@ -1841,21 +1847,10 @@ class EpisodeProtocol:
         started_at: datetime,
         failure_phase: Phase | None,
         outcome: tuple[float, str | None] | Exception,
-        turn_stop: PhaseTimeoutError | BudgetExceededError | None = None,
     ) -> str | None:
-        """Record round ``index``'s ``outcome``, its score or why it has none, and what ended
-        the turn before it where not the agent, and return the feedback text the agent
-        receives."""
+        """Record round ``index``'s ``outcome``, its score or why it has none, and return the
+        feedback text the agent receives."""
         logger = logging.getLogger("orbit.execution")
-        turn_ended_by = (
-            None
-            if turn_stop is None
-            else FailureInfo(
-                error_type=type(turn_stop).__name__,
-                message=str(turn_stop),
-                phase=Phase.AGENT.value,
-            )
-        )
         if isinstance(outcome, Exception):
             error = outcome
             # The episode goes on, so the failure is the round's, not the episode's.
@@ -1871,7 +1866,6 @@ class EpisodeProtocol:
                         message=message,
                         phase=Phase.VALIDATE.value,
                     ),
-                    turn_ended_by=turn_ended_by,
                     started_at=started_at,
                     finished_at=datetime.now(UTC),
                 )
@@ -1900,7 +1894,6 @@ class EpisodeProtocol:
                 status=Status.COMPLETED,
                 reward=reward,
                 feedback=record,
-                turn_ended_by=turn_ended_by,
                 started_at=started_at,
                 finished_at=datetime.now(UTC),
             )
@@ -3235,9 +3228,12 @@ async def _require_snapshot_episode(
         )
 
 
-def validation_rounds(task: Task, harness: Harness, override: int | None) -> int:
+def validation_rounds(
+    task: Task, harness: Harness, override: int | Literal["unlimited"] | None
+) -> int | Literal["unlimited"]:
     """How many validation rounds an agent of ``harness`` receives in an episode of ``task``:
-    the Run's ``override``, else the Task's; none for the oracle and nop, which never loop.
+    the Run's ``override``, which may be ``"unlimited"``, else the Task's; none for the oracle
+    and nop, which never loop.
 
     A count that cannot hold is refused, before anything is prepared.
     """
@@ -3278,6 +3274,15 @@ def _round_status(error: Exception) -> Status:
     if isinstance(error, (TaskError, ResourceExhaustedError)):
         return Status.TASK_ERROR
     return Status.ENV_ERROR
+
+
+def _bound(seconds: float) -> float | None:
+    """A limit of ``seconds``, ``None`` where they are unlimited."""
+    return None if math.isinf(seconds) else seconds
+
+
+def _rounded(seconds: float) -> int | None:
+    return None if math.isinf(seconds) else round(seconds)
 
 
 def _minutes(seconds: float) -> str:
@@ -3330,20 +3335,46 @@ def _machine(allocation: ResourceAllocation) -> str:
     return text + "\n"
 
 
-def _round_prompt(record: ValidationRound, feedback: str | None, seconds: float) -> str:
+def _round_prompt(
+    record: ValidationRound,
+    rounds: int | None,
+    left: int | None,
+    feedback: str | None,
+    seconds_left: float | None,
+) -> str:
     """The prompt that gives the agent one validation round's result: framework-owned and
-    minimal, the reward, or that there is none and why, the feedback of the stage that
-    validates verbatim, if it wrote any, and the next turn's time."""
+    minimal, which round it was, of how many where they are counted, and its reward, or that
+    it has none and why, the feedback of the stage that validates verbatim, if it wrote any,
+    and the rounds left and the time the agent has left, each where it is limited."""
     result = (
-        f"Your work was scored: reward {record.reward:.2f}."
+        f"reward {record.reward:.2f}"
         if record.reward is not None
-        else f"Your work could not be scored ({record.status.value})."
+        else f"no score ({record.status.value})"
     )
-    lines = [result, ""]
+    counted = f" of {rounds}" if rounds is not None else ""
+    lines = [f"Validation round {record.index}{counted}: {result}."]
     if feedback is not None:
-        lines += ["Feedback:", "<feedback>", feedback.rstrip("\n"), "</feedback>", ""]
-    lines.append(TURN_TIME_NOTE.format(minutes=_minutes(seconds)).rstrip("\n"))
+        lines += ["", "Feedback:", "<feedback>", feedback.rstrip("\n"), "</feedback>"]
+    last = [] if left is None else [f"Validation rounds left: {left or 'none'}."]
+    if seconds_left is not None:
+        last.append(TIME_LEFT_NOTE.format(minutes=_minutes(seconds_left)))
+    if last:
+        lines += ["", " ".join(last)]
     return "\n".join(lines)
+
+
+def _rounds_left(sandbox: Sandbox) -> int | None:
+    """How many validation rounds the solver ``sandbox``'s Provider can still save it for, a
+    save its end may need kept aside; None where it saves any number."""
+    if sandbox.saves_left is None:
+        return None
+    final = sandbox.request.saves - sandbox.request.planned_saves
+    return max(sandbox.saves_left - final, 0)
+
+
+def _after(left: int | None) -> int | None:
+    """The rounds left once one more is done."""
+    return None if left is None else max(left - 1, 0)
 
 
 def _with_marked_prompts(
@@ -3489,12 +3520,7 @@ def _attributed(ctx: EpisodeContext) -> Iterator[None]:
         refusal = ctx.limit_refusal() if ctx.limit_refusal is not None else None
         if refusal is not None:
             raise BudgetExceededError(
-                refusal.name,
-                float(refusal.configured_value),
-                refusal.observed_value,
-                native_session_id=error.native_session_id
-                if isinstance(error, AgentError)
-                else None,
+                refusal.name, float(refusal.configured_value), refusal.observed_value
             ) from error
         failure = ctx.model_provider_failure() if ctx.model_provider_failure is not None else None
         if failure is None or not _program_failed(error):
