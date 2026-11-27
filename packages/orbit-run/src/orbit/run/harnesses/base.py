@@ -317,7 +317,7 @@ class CliHarness(AutonomousHarness):
         sandbox: Sandbox,
         session: HarnessSession,
         *,
-        timeout_sec: float,
+        timeout_sec: float | None,
     ) -> AgentRun:
         return await self._invoke(instruction, sandbox, session, None, timeout_sec)
 
@@ -329,7 +329,7 @@ class CliHarness(AutonomousHarness):
         sandbox: Sandbox,
         session: HarnessSession,
         *,
-        timeout_sec: float,
+        timeout_sec: float | None,
     ) -> AgentRun:
         if self.resume_support is not ResumeSupport.NATIVE:
             raise AgentUnsupportedError(f"{self.name} does not support native resume")
@@ -380,7 +380,7 @@ class CliHarness(AutonomousHarness):
         sandbox: Sandbox,
         session: HarnessSession,
         native_session_id: str | None,
-        timeout_sec: float,
+        timeout_sec: float | None,
     ) -> AgentRun:
         home = agent_path(session.home)
         prompt_path, stdout_path, stderr_path, invocations_path = (

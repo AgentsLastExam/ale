@@ -36,8 +36,9 @@ reaches its deadline [moves](#moves), `save, boot`, and goes on.
 Every phase is timed and attributed independently. Agent and verify default to the Task's
 `[agent].timeout_sec` and `[verifier].timeout_sec`. Setup has a fixed framework bound of
 1800 s, a guard against a hung setup rather than a scored budget. Run policy may override
-`timeouts.agent` with positive seconds and `timeouts.verify` with positive seconds or
-`"unlimited"`, and `validation_rounds` with a non-negative count. These overrides are
+`timeouts.agent` and `timeouts.verify` with positive seconds or `"unlimited"`, and
+`validation_rounds` with a non-negative count; an agent whose time is unlimited runs each
+turn until its program ends. These overrides are
 recorded in RunLock and the configuration hash without changing the Task identity. The Agent
 deadline starts at Harness launch (or policy rollout), after installation, resource staging,
 and network policy. Evidence capture, verification, and cleanup do not consume it. An Agent
@@ -89,13 +90,14 @@ the oracle, which runs a calibration case, both run as the image's agent account
 autonomous CLI Harnesses use the base's Git Bash.
 
 Below the instruction, the first prompt of an autonomous Harness states the agent's time
-limit in minutes and that the work is scored as it is when it runs out, and the machine the
-agent has, as its Sandbox was given it rather than as the Task asked: its CPUs, memory,
-disk limit and GPUs, since tools in a container, such as `nproc` and `nvidia-smi`, may
-report the Host's. It says nothing of how, where or when the work is verified: the agent
-could game what it is told, so what the agent needs to know of it is the instruction's. For
-a Sandbox of several [nodes](task-authoring.md#nodes) it states each node's, names the
-nodes, and says that `ssh` reaches them and that `/shared` is one directory they all see.
+limit in minutes and that the work is scored as it is when it runs out, where its time is
+limited, and the machine the agent has, as its Sandbox was given it rather than as the Task
+asked: its CPUs, memory, disk limit and GPUs, since tools in a container, such as `nproc`
+and `nvidia-smi`, may report the Host's. It says nothing of how, where or when the work is
+verified: the agent could game what it is told, so what the agent needs to know of it is the
+instruction's. For a Sandbox of several [nodes](task-authoring.md#nodes) it states each
+node's, names the nodes, and says that `ssh` reaches them and that `/shared` is one
+directory they all see.
 
 Only the directory of the calibration case the oracle runs is uploaded, the reference
 solution's under `orbit run --agent oracle`, and only for an oracle episode; none is present
@@ -301,9 +303,9 @@ episode without a score, as a failed save for a snapshot verifier does.
 The prompts are framework-owned and minimal. The first states the agent's time limit below
 the instruction, as for every episode. Each round's prompt gives its reward, or that it has
 none and why, the [feedback](verification.md#feedback) of the stage that validated
-verbatim, if it wrote any, and the time left. Neither says what ending a turn does, how many
-rounds there are, or what scores the final state: what rounds are for is the instruction's
-to say.
+verbatim, if it wrote any, and the time left, where it is limited. Neither says what ending
+a turn does, how many rounds there are, or what scores the final state: what rounds are for
+is the instruction's to say.
 
 Rounds need what each step does: a Harness with native resume, since every turn after the
 first resumes the session, and a leaf that saves as many snapshots in a row as the solver
@@ -331,7 +333,7 @@ solver moves, so that an episode can be longer than any one Sandbox lasts.
 3. The Harness resumes the session the cut run left with a framework prompt, neutral as the
    rounds' are: the work was interrupted and moved to another machine, the files are as the
    agent left them, every process and any command in progress was stopped, and the time
-   left.
+   left, where the agent's time is limited.
 
 The run's time until the cut is the agent's; the save, any wait for the next solver's room,
 such as in a scheduler's queue, and its boot are not. A move ends no turn, so no round

@@ -420,8 +420,15 @@ class RunTimeouts(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    agent: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
+    agent: Annotated[float, Field(gt=0, allow_inf_nan=False)] | Literal["unlimited"] | None = None
     verify: Annotated[float, Field(gt=0, allow_inf_nan=False)] | Literal["unlimited"] | None = None
+
+    def agent_time(self, spec: TaskSpec) -> float | None:
+        """The agent's time across all its turns: this Run's, or else the Task's own; None
+        where unlimited."""
+        if self.agent == "unlimited":
+            return None
+        return self.agent or spec.timeouts.agent
 
     def verification(self, spec: TaskSpec, *, validation: bool = False) -> float | None:
         """The limit of ``spec``'s verifier of ``tests/``, or of its validation rounds: this

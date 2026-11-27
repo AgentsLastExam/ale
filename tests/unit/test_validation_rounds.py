@@ -23,7 +23,7 @@ from tests.support import (
 from tests.unit.test_runtime_contracts import DIGEST, make_lock
 
 from orbit.core.capability import GpuHold
-from orbit.core.config import RunConfig, SandboxRetentionConfig
+from orbit.core.config import RunConfig, RunTimeouts, SandboxRetentionConfig
 from orbit.core.errors import (
     AgentError,
     AgentUnsupportedError,
@@ -357,6 +357,43 @@ async def test_each_turn_has_what_is_left_of_the_agents_time(
         "Time left: 9",
         "Time left: 8",
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_whose_time_is_unlimited_runs_without_a_limit_and_is_told_none(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    harness = TurnsHarness()
+    task = _task(tmp_path, rounds=1)
+    lock = make_lock()
+    result = await run_episode(
+        task,
+        EpisodeProtocol(harness, validation_rounds=1, timeouts=RunTimeouts(agent="unlimited")),
+        provider_registry(RoundsProvider()),
+        run_dir=tmp_path / "runs",
+        provenance=ProvenanceInputs(
+            source=lock.task.source,
+            agent=lock.agent,
+            gateway=lock.gateway,
+            config_hash=lock.config_hash,
+            framework=lock.framework,
+            validation_rounds=1,
+        ),
+    )
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert harness.timeouts == [None, None]
+    first, second = harness.prompts
+    assert "time limit" not in first.lower() and "time left" not in second.lower()
+    assert second.splitlines() == [
+        "Your work was scored: reward 0.33.",
+        "",
+        "Feedback:",
+        "<feedback>",
+        "1 lines; write more",
+        "</feedback>",
+    ]
+    # Its progress names no limit.
+    assert "agent_sec" not in json.loads((result.run_dir / "progress.json").read_text())
 
 
 @pytest.mark.asyncio

@@ -155,8 +155,8 @@ class EpisodeProgress(BaseModel):
     schema_version: Literal[1] = 1
     episode_id: str
     phase: Literal["agent", "moving", "validating", "verifying"]
-    agent_sec: float = Field(ge=0)
-    """The agent's time across all its turns."""
+    agent_sec: float | None = Field(default=None, ge=0)
+    """The agent's time across all its turns; None where unlimited."""
     agent_used_sec: float = Field(ge=0)
     """What of it was spent, the run going on included."""
     rounds: int = Field(ge=0)

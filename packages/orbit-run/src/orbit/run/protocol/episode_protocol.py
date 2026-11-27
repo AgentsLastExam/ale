@@ -181,12 +181,14 @@ MIN_TURN_SEC = 60.0
 MOVED_PROMPT = (
     "Your work was interrupted and moved to another machine. Your files are as you left "
     "them, but every process you were running, and any command in progress, was stopped. "
-    "Continue the task. Time left: {minutes} minutes.\n"
+    "Continue the task."
 )
+#: After it, where the agent's time is limited.
+MOVED_TIME = " Time left: {minutes} minutes."
 
-#: Below the instruction, first: the agent's time, which all its turns share. Framework-owned
-#: and minimal: how the agent is scored, how often and on what, and what it may do with a
-#: round's result, are the Task's to say in its instruction.
+#: Below the instruction, first: the agent's time, which all its turns share, where it is
+#: limited. Framework-owned and minimal: how the agent is scored, how often and on what, and
+#: what it may do with a round's result, are the Task's to say in its instruction.
 TIME_NOTE = (
     "Your time limit is {minutes} minutes. If it runs out, your work is scored as it is then.\n"
 )
@@ -437,16 +439,17 @@ class _Solver:
 
 @dataclass
 class _AgentTime:
-    """The agent's time: ``total`` across all its turns, of which ``used`` is spent, and the
-    run going on since ``running`` (monotonic), if one is."""
+    """The agent's time: ``total`` across all its turns, ``None`` where unlimited, of which
+    ``used`` is spent, and the run going on since ``running`` (monotonic), if one is."""
 
-    total: float
+    total: float | None
     used: float = 0.0
     running: float | None = None
 
     @property
     def remaining(self) -> float:
-        return self.total - self.used
+        """What is left, ``inf`` where the agent's time is unlimited."""
+        return math.inf if self.total is None else self.total - self.used
 
     @property
     def spent(self) -> float:
@@ -490,8 +493,9 @@ def _too_brief(sandbox: Sandbox, budget: _AgentTime, kept: float = 0.0) -> bool:
 def _unresumable(harness: Harness, budget: _AgentTime) -> ProviderCapabilityError:
     """What ends an episode whose Sandbox's deadline cut a run that cannot go on elsewhere."""
     return ProviderCapabilityError(
-        f"the Sandbox's deadline cut {harness.name}'s run before the agent's time was up "
-        f"({budget.remaining:.0f} s of it), and it left no native session to resume"
+        f"the Sandbox's deadline cut {harness.name}'s run before the agent's time was up"
+        + ("" if budget.total is None else f" ({budget.remaining:.0f} s of it)")
+        + ", and it left no native session to resume"
     )
 
 
@@ -635,7 +639,7 @@ class EpisodeProtocol:
             if self.agent_enabled and self.harness.logs
             else None
         )
-        budget = _AgentTime(self.timeouts.agent or spec.timeouts.agent)
+        budget = _AgentTime(self.timeouts.agent_time(spec))
         try:
             await self._with_deadline(
                 ctx, Phase.SETUP, SETUP_TIMEOUT_SEC, self._setup(task, ctx, solver.sandbox)
@@ -1155,7 +1159,7 @@ class EpisodeProtocol:
     ) -> _Cut | None:
         spec = ctx.spec
         sandbox = solver.sandbox
-        budget = budget or _AgentTime(self.timeouts.agent or spec.timeouts.agent)
+        budget = budget or _AgentTime(self.timeouts.agent_time(spec))
         asked = _Cut(prompt, continuation, ran=False)
         kept = self._kept_for_verification(ctx)
         if _too_brief(sandbox, budget, kept):
@@ -1174,7 +1178,7 @@ class EpisodeProtocol:
                 await self._with_deadline(
                     ctx,
                     Phase.AGENT,
-                    budget.remaining if left is None else min(left, budget.remaining),
+                    _bound(budget.remaining if left is None else min(left, budget.remaining)),
                     self._rollout(harness, ctx, sandbox),
                 )
             except _AGENT_STOPS as error:
@@ -1241,7 +1245,7 @@ class EpisodeProtocol:
         if _too_brief(sandbox, budget, kept):
             return asked
         left = _left(sandbox, kept)
-        timeout = budget.remaining if left is None else min(left, budget.remaining)
+        timeout = _bound(budget.remaining if left is None else min(left, budget.remaining))
 
         variables = ctx.variables.values
 
@@ -1297,14 +1301,14 @@ class EpisodeProtocol:
 
         polling = asyncio.create_task(self._poll_logs(ctx, logs, budget, solver))
         try:
-            backstop = timeout + AGENT_STOP_GRACE_SEC
+            backstop = None if timeout is None else timeout + AGENT_STOP_GRACE_SEC
             await self._with_deadline(ctx, Phase.AGENT, backstop, launch())
         except _Moved as moved:
             solver.continuation = moved.continuation
             with self._traced(ctx, Phase.AGENT):
                 logging.getLogger("orbit.execution").info(
                     "the solver's Sandbox reached its deadline; the agent's run was cut",
-                    extra={"orbit_data": {"left_sec": round(budget.remaining)}},
+                    extra={"orbit_data": {"left_sec": _rounded(budget.remaining)}},
                 )
             return _Cut(None, moved.continuation, ran=True)
         except _AGENT_STOPS as error:
@@ -1396,7 +1400,15 @@ class EpisodeProtocol:
             moved = True
             prompt, continuation = cut.prompt, cut.continuation
             if cut.ran:
-                prompt = MOVED_PROMPT.format(minutes=_minutes(budget.remaining))
+                prompt = (
+                    MOVED_PROMPT
+                    + (
+                        ""
+                        if budget.total is None
+                        else MOVED_TIME.format(minutes=_minutes(budget.remaining))
+                    )
+                    + "\n"
+                )
                 round_index, segment = None, len(ctx.segments)
 
     async def _move(
@@ -1517,14 +1529,14 @@ class EpisodeProtocol:
         )
 
     def _instruction(self, ctx: EpisodeContext) -> str:
-        """The first prompt: the instruction, verbatim, and below it the agent's time and the
-        machine the solver was given, as provisioning recorded it."""
+        """The first prompt: the instruction, verbatim, and below it the agent's time, where it
+        is limited, and the machine the solver was given, as provisioning recorded it."""
         spec = ctx.spec
-        minutes = _minutes(self.timeouts.agent or spec.timeouts.agent)
-        below = [TIME_NOTE.format(minutes=minutes)]
+        total = self.timeouts.agent_time(spec)
+        below = [] if total is None else [TIME_NOTE.format(minutes=_minutes(total))]
         if ctx.resource_allocation is not None:
             below.append(_machine(ctx.resource_allocation))
-        return spec.instruction + "\n\n---\n\n" + "".join(below)
+        return spec.instruction + ("\n\n---\n\n" + "".join(below) if below else "")
 
     async def _validation_rounds(
         self,
@@ -1631,7 +1643,11 @@ class EpisodeProtocol:
                 return
             self._segment_begins(ctx, solver, budget, "round", index)
             assert ctx.agent_run is not None and ctx.agent_run.continuation is not None
-            prompt = _round_prompt(ctx.validation_rounds[-1], feedback, budget.remaining)
+            prompt = _round_prompt(
+                ctx.validation_rounds[-1],
+                feedback,
+                None if budget.total is None else budget.remaining,
+            )
             await self._work(
                 task,
                 ctx,
@@ -3213,6 +3229,15 @@ def _round_status(error: Exception) -> Status:
     return Status.ENV_ERROR
 
 
+def _bound(seconds: float) -> float | None:
+    """A limit of ``seconds``, ``None`` where they are unlimited."""
+    return None if math.isinf(seconds) else seconds
+
+
+def _rounded(seconds: float) -> int | None:
+    return None if math.isinf(seconds) else round(seconds)
+
+
 def _minutes(seconds: float) -> str:
     return f"{max(seconds, 0.0) / 60:.1f}".removesuffix(".0")
 
@@ -3263,19 +3288,21 @@ def _machine(allocation: ResourceAllocation) -> str:
     return text + "\n"
 
 
-def _round_prompt(record: ValidationRound, feedback: str | None, seconds_left: float) -> str:
+def _round_prompt(record: ValidationRound, feedback: str | None, seconds_left: float | None) -> str:
     """The prompt that gives the agent one validation round's result: framework-owned and
     minimal, the reward, or that there is none and why, the feedback of the stage that
-    validates verbatim, if it wrote any, and the time the agent has left."""
+    validates verbatim, if it wrote any, and the time the agent has left, where it is
+    limited."""
     result = (
         f"Your work was scored: reward {record.reward:.2f}."
         if record.reward is not None
         else f"Your work could not be scored ({record.status.value})."
     )
-    lines = [result, ""]
+    lines = [result]
     if feedback is not None:
-        lines += ["Feedback:", "<feedback>", feedback.rstrip("\n"), "</feedback>", ""]
-    lines.append(TIME_LEFT_NOTE.format(minutes=_minutes(seconds_left)))
+        lines += ["", "Feedback:", "<feedback>", feedback.rstrip("\n"), "</feedback>"]
+    if seconds_left is not None:
+        lines += ["", TIME_LEFT_NOTE.format(minutes=_minutes(seconds_left))]
     return "\n".join(lines)
 
 
