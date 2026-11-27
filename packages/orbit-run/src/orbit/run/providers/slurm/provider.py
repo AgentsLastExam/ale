@@ -79,8 +79,9 @@ from orbit.run.transport import GuestClient
 JOB_OVERHEAD_MB = 512
 #: What a Sandbox's own step holds beside its container: the step's process and conmon.
 STEP_OVERHEAD_MB = 32
-#: Measured: a chain of 200 commits, each booted from the one before, over a one-layer image.
-MAX_SAVES = 200
+#: Measured: a chain of 200 commits, each booted from the one before, over a one-layer image,
+#: and views of 200 layers. A snapshot whose image or volume stacks more is flattened to one.
+MAX_LAYERS = 200
 #: How long a Sandbox's step may take to start once its allocation runs.
 START_TIMEOUT_SEC = 900
 #: How long copying a snapshot's shared directory for a Sandbox booted from it may take.
@@ -119,7 +120,6 @@ def _profiles(
             gui=True,
             network_modes=frozenset(NetworkMode),
             snapshot=True,
-            max_saves=MAX_SAVES,
             gpus=partition.gpu_model is not None,
             gpu_models=(partition.gpu_model,) if partition.gpu_model else (),
             max_cpus=partition.max_cpus,
@@ -1000,6 +1000,7 @@ class SlurmProvider(Provider):
             env=env,
             sealed=sealed,
             candidates=list(candidates),
+            max_layers=MAX_LAYERS,
         )
         if shared is not None:
             # A Sandbox that views another's volumes holds none of the shared directory it

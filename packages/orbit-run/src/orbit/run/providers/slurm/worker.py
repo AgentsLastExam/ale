@@ -462,7 +462,7 @@ def interval(schedule: dict[str, float], headroom: int) -> float:
 
 def volumes(directory: str, operations: list[list[object]]) -> None:
     """In Podman's namespace: copy a layer, mount a view whose root gets its stack's owner
-    and mode, unmount one, or remove a layer."""
+    and mode, merge a mounted view into one layer, unmount one, or remove a layer."""
     os.chdir(directory)
     for operation in operations:
         match operation:
@@ -484,6 +484,11 @@ def volumes(directory: str, operations: list[list[object]]) -> None:
                     ],
                     check=True,
                 )  # fmt: skip
+            case ["merge", str(view), str(layer)]:
+                # A view as it is, its stack's whiteouts applied, as one plain layer.
+                subprocess.run(
+                    ["sh", "-c", COPY, "sh", f"{VIEWS}/{view}", f"{LAYERS}/{layer}"], check=True
+                )
             case ["unmount", str(layer)]:
                 if os.path.ismount(f"{VIEWS}/{layer}"):
                     subprocess.run(["umount", f"{VIEWS}/{layer}"], check=True)
@@ -1339,7 +1344,15 @@ def start(index: str) -> None:
             # The Host writes it on another machine: the directory is listed first.
             order = read(box / "stop") if appeared(box / "stop") else ""
             if order == "save":
-                kept = save(command, stored["directory"], name, own, mounts, written)
+                kept = save(
+                    command,
+                    stored["directory"],
+                    name,
+                    own,
+                    mounts,
+                    written,
+                    max_layers=int(spec["max_layers"]),
+                )
                 return
             if order:
                 return
@@ -1389,10 +1402,14 @@ def save(
     own: Path,
     mounts: list[dict[str, object]],
     written: Callable[[], int],
+    *,
+    max_layers: int,
 ) -> set[str]:
     """Stop a node of the Sandbox and commit its disk to the node's store, and record each
     volume's stack, the layer that holds its writes on what it viewed, and what the node
-    has written. Return the layers the snapshot keeps."""
+    has written. A commit, or a volume's stack, that a Sandbox booted from it would stack
+    past ``max_layers`` with its own writable layer is flattened to one layer. Return the
+    layers the snapshot keeps."""
     stop = [*command, "stop", "-t", "30", name]
     # A guest session whose srun on the Host was killed ended with its step, and Podman's
     # monitor of it too, before the monitor wrote the session's exit: Podman stops the
@@ -1403,14 +1420,22 @@ def save(
     # By the Sandbox's index alone, which its handle names on every node.
     tag = f"{SNAPSHOT_REPOSITORY}:{own.parent.parent.name}"
     image = output(*command, "commit", "-q", name, tag)
-    stacks = {
-        str(m["path"]): dict(
-            layers=[m["layer"], *m["lowers"]],
-            root=root_of(command, directory, str(m["layer"])),
-            copied=m["copied"],
-        )
-        for m in mounts
-    }
+    if layers_of(command, image) + 1 > max_layers:
+        image = squash(command, directory, image, tag)
+    stacks: dict[str, dict[str, object]] = {}
+    merges: list[list[object]] = []
+    for m in mounts:
+        layers = [str(m["layer"]), *(str(lower) for lower in m["lowers"])]
+        root = root_of(command, directory, layers[0])
+        if m["lowers"] and len(layers) + 1 > max_layers:
+            merged = f"{layers[0]}.f"
+            (Path(directory) / LAYERS / merged).mkdir()
+            (Path(directory) / LINKS / merged).symlink_to(f"../{LAYERS}/{merged}")
+            merges.append(["merge", layers[0], merged])
+            layers = [merged]
+        stacks[str(m["path"])] = dict(layers=layers, root=root, copied=m["copied"])
+    if merges:
+        in_namespace(command, "volumes", directory, json.dumps(merges))
     if any(m["lowers"] for m in mounts):
         # Before the Host hears of the snapshot: a view's upper layer is no lower of
         # another view while it is mounted.
@@ -1421,9 +1446,36 @@ def save(
             json.dumps([["unmount", m["layer"]] for m in mounts if m["lowers"]]),
         )
     write(
-        own / "saved", dict(image=image.removeprefix("sha256:"), stacks=stacks, written=written())
+        own / "saved",
+        dict(
+            image=image.removeprefix("sha256:"),
+            layers=layers_of(command, image),
+            stacks=stacks,
+            written=written(),
+        ),
     )
-    return {str(m["layer"]) for m in mounts}
+    return {str(stack["layers"][0]) for stack in stacks.values()}
+
+
+def layers_of(command: list[str], image: str) -> int:
+    """How many layers ``image`` stacks."""
+    return int(output(*command, "image", "inspect", "--format", "{{len .RootFS.Layers}}", image))
+
+
+def squash(command: list[str], directory: str, image: str, tag: str) -> str:
+    """Rebuild ``image`` as ``tag`` in one layer, with its configuration, and remove it;
+    the new image's ID."""
+    context = tempfile.mkdtemp(dir=directory)
+    try:
+        Path(context, "Containerfile").write_text(f"FROM {image}\n")
+        squashed = output(
+            *command, "build", "--quiet", "--squash-all", "--pull=never", "--tag", tag,
+            "--file", f"{context}/Containerfile", context,
+        )  # fmt: skip
+    finally:
+        shutil.rmtree(context, ignore_errors=True)
+    subprocess.run([*command, "rmi", image], check=False, stdout=subprocess.DEVNULL)
+    return squashed
 
 
 def export(
