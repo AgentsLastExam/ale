@@ -41,17 +41,18 @@ against that schema before atomic replacement:
 }
 ```
 
-Step IDs start at 1 and are contiguous. The complete instruction is the first agent-visible
-user content, followed by what the framework states below it, the turn's time limit and the
-agent's [machine](episode-protocol.md#agent-or-oracle), as it was sent. Each round's prompt
-is a user message of the same native session, so one trajectory covers every turn. Native
-tool-use/result events are grouped into one agent step; every observation `source_call_id`
-resolves to a tool call in that step. An empty result is valid, while a missing result
-remains absent. A call that a tool's own program made, rather than a model inference, is a
-separate agent step with `llm_call_count: 0`, ATIF's mark for a deterministic dispatch, so
-no export treats it as sampled model output. It stands where it happened, after the model
-call that preceded it, and names the call that ran the program, since a program can outlive
-the model call that started it.
+Step IDs start at 1 and are contiguous. The complete instruction is the first
+agent-visible user content, followed by what the framework states below it, the agent's
+time limit and [machine](episode-protocol.md#agent-or-oracle), as it was sent. Each round's
+prompt is a user message of the same
+native session, so one trajectory covers every turn. Native tool-use/result events are
+grouped into one agent step; every observation `source_call_id` resolves to a tool call in
+that step. An empty result is valid, while a missing result remains absent. A call that a
+tool's own program made, rather than a model inference, is a separate agent step with
+`llm_call_count: 0`, ATIF's mark for a deterministic dispatch, so no export treats it as
+sampled model output. It stands where it happened, after the model call that preceded it,
+and names the call that ran the program, since a program can outlive the model call that
+started it.
 
 All Orbit extensions live under `extra.orbit`:
 

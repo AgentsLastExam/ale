@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from orbit.core.errors import (
-    AgentError,
     AgentUnsupportedError,
     BudgetExceededError,
     ConfigError,
@@ -231,25 +230,6 @@ async def test_native_resume_follows_the_session_files_and_rejects_another_harne
             current,
             timeout_sec=10,
         )
-
-
-@pytest.mark.asyncio
-async def test_a_failed_run_names_the_session_it_left() -> None:
-    """A run a Gateway limit stopped fails, and its turn goes on in the session it left."""
-
-    class Failing(FakeSandbox):
-        async def exec(self, argv, *, env=None, **kwargs):  # type: ignore[no-untyped-def]
-            result = await super().exec(argv, env=env, **kwargs)
-            failed = "2>> " in " ".join(str(part) for part in argv)
-            return ExecResult(exit_code=1, stderr="refused") if failed else result
-
-    sandbox = Failing()
-    with pytest.raises(AgentError) as caught:
-        await ClaudeCodeHarness().launch(  # type: ignore[arg-type]
-            "first", sandbox, native_session(), timeout_sec=10
-        )
-    match = re.search(r"--session-id ([^ ]+)", sandbox.commands[-1])
-    assert match and caught.value.native_session_id == match.group(1).strip("'")
 
 
 @pytest.mark.asyncio

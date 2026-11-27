@@ -711,11 +711,10 @@ With `[agent].validation_rounds = N`, the agent works in up to `N + 1` turns: it
 ends, `validation/`, or else `tests/`, scores the state it left, the agent receives that
 result as its next turn begins, and so on until `tests/` scores the state its last turn
 left, once. A turn ends when the agent's program finishes normally, so the agent submits its
-work by ending its turn; there is nothing else to call. A turn also ends, and its round
-follows, at `[agent].timeout_sec` or a Gateway limit, which are each turn's own; a turn that
-a failure ends is the last. The framework tells the agent only each turn's time limit, so
-the instruction says what ending a turn does, as often as rounds remain. Between turns the
-agent's Sandbox is saved and a new one booted from what it saved, without setup: files on
+work by ending its turn; there is nothing else to call. A turn that a timeout, a limit or a
+failure ends is the last. `[agent].timeout_sec` covers all turns together. The framework
+tells the agent only its time, so the instruction says what ending a turn does. Between turns
+the agent's Sandbox is saved and a new one booted from what it saved, without setup: files on
 its disk survive the end of a turn; files in memory, such as a tmpfs, and its desktop
 session do not, nor does any process, the agent's or a service setup started. A round
 therefore never sees a process the agent or setup left running. How the rounds run is in the

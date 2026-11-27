@@ -465,14 +465,9 @@ class CliHarness(AutonomousHarness):
                 stdout=stdout,
                 token=session.token,
             )
-            failed = (
-                classify_subscription_error(self.name, detail)
-                if session.authentication == "subscription"
-                else self.classify_failure(detail)
-            )
-            if isinstance(failed, AgentError):
-                failed.native_session_id = native.session_id or command.session_id
-            raise failed
+            if session.authentication == "subscription":
+                raise classify_subscription_error(self.name, detail)
+            raise self.classify_failure(detail)
         if command.session_id is not None and native.session_id != command.session_id:
             raise NativeContinuationError(f"{self.name} did not confirm the requested session ID")
         if not native.session_id:
