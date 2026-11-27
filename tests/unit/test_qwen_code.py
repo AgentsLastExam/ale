@@ -332,7 +332,7 @@ def child_transcript(agent: str) -> list[dict[str, object]]:
             "call-3",
             "run_shell_command",
             {"command": "echo hi"},
-            usageMetadata={"promptTokenCount": 7},
+            usageMetadata={"promptTokenCount": 7, "candidatesTokenCount": 1},
         ),
         function_response("call-3", "hi"),
     ]
@@ -362,7 +362,9 @@ def qwen_logs(tmp_path: Path) -> Path:
             *spawning("call-1"),
             function_call("call-2", "read_file", {"file_path": "a.png"}),
             function_response("call-2", "1x1 pixels", parts=[image]),
-            assistant_text("PARENT-DONE", usageMetadata={"promptTokenCount": 5}),
+            assistant_text(
+                "PARENT-DONE", usageMetadata={"promptTokenCount": 5, "candidatesTokenCount": 1}
+            ),
             prompt(PROMPTS[1]),
             assistant_text("SECOND-DONE"),
         ],
@@ -536,4 +538,90 @@ def test_without_the_session_each_turn_comes_from_its_prompt_and_stdout(tmp_path
     orbit = trajectory.extra["orbit"]  # type: ignore[index]
     assert {"reason": "native_session_unavailable", "session_id": SESSION_ID} in orbit[
         "parse_issues"
+    ]
+
+
+def api_response(response_id: str, **fields: object) -> dict[str, object]:
+    event = {"event.name": "qwen-code.api_response", "response_id": response_id, **fields}
+    return {"type": "system", "subtype": "ui_telemetry", "systemPayload": {"uiEvent": event}}
+
+
+def test_each_model_call_carries_its_time_usage_and_response(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    write_run(logs, stdout("DONE"), stdout("AGAIN"))
+    write_jsonl(
+        logs / CHAT,
+        [
+            prompt(PROMPTS[0]) | {"timestamp": "2026-10-26T00:00:01.000Z"},
+            api_response("resp-first"),
+            # A subagent's call, such as Qwen's memory extraction, is no step of the session.
+            api_response("resp-memory", subagent_id="managed-auto-memory-extractor-1"),
+            function_call(
+                "call-1",
+                "read_file",
+                {"file_path": "a.txt"},
+                timestamp="2026-10-26T00:00:02.500Z",
+                usageMetadata={
+                    "promptTokenCount": 90,
+                    "candidatesTokenCount": 7,
+                    "cachedContentTokenCount": 40,
+                },
+            ),
+            function_response("call-1", "text"),
+            # The cache count is optional; a time that names no zone is ambiguous.
+            function_call(
+                "call-2",
+                "read_file",
+                {},
+                timestamp="2026-10-26T00:00:03",
+                usageMetadata={"promptTokenCount": 95, "candidatesTokenCount": 2},
+            ),
+            function_response("call-2", "text"),
+            # Usage without an output count.
+            assistant_text("DONE", usageMetadata={"promptTokenCount": 9}, uuid="record-3"),
+            prompt(PROMPTS[1]),
+            api_response("resp-second"),
+            # Usage that reports no tokens is none, and no usage is no issue.
+            function_call(
+                "call-3",
+                "read_file",
+                {},
+                usageMetadata={"promptTokenCount": 0, "candidatesTokenCount": 0},
+            ),
+            assistant_text("AGAIN", timestamp="2026-10-26T00:00:04Z"),
+        ],
+    )
+
+    trajectory = QwenCodeHarness().parse_trajectory(context(logs, tmp_path))
+
+    steps = trajectory.steps
+    assert [step.timestamp for step in steps] == [
+        "2026-10-26T00:00:01.000Z",
+        "2026-10-26T00:00:02.500Z",
+        None,
+        None,
+        None,
+        None,
+        "2026-10-26T00:00:04Z",
+    ]
+    metrics = [
+        (step.metrics.prompt_tokens, step.metrics.cached_tokens, step.metrics.completion_tokens)
+        if step.metrics
+        else None
+        for step in steps
+    ]
+    assert metrics == [None, (90, 40, 7), (95, 0, 2), None, None, None, None]
+    assert [(step.extra or {}).get("orbit") for step in steps] == [
+        None,
+        {"native_event_ids": ["resp-first"]},
+        None,
+        None,
+        None,
+        {"native_event_ids": ["resp-second"]},
+        None,
+    ]
+    assert trajectory.final_metrics is not None
+    assert trajectory.final_metrics.total_prompt_tokens == 185
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "invalid_token_usage", "uuid": "record-3"}
     ]

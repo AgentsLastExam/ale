@@ -6,7 +6,6 @@ import base64
 import binascii
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -27,12 +26,15 @@ from orbit.core.trajectory import (
 from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     NativeResult,
+    call_metrics,
     invocations,
+    iso_time,
     json_lines,
     mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -42,6 +44,8 @@ PROJECTS = f"{HOME}/projects"
 STDIN_SEPARATOR = "\n\n"
 #: Qwen's wrapper for calling a deferred tool after ``tool_search`` reviewed it.
 DEFERRED_CALL = "tool_call"
+#: The telemetry event Qwen records in a session when a model call's response has streamed.
+API_RESPONSE = "qwen-code.api_response"
 _IMAGE_TYPES = frozenset(("image/png", "image/jpeg", "image/gif", "image/webp"))
 
 
@@ -152,6 +156,8 @@ class _Step:
     calls: list[AtifToolCall] = field(default_factory=list)
     results: dict[str, AtifObservationResult] = field(default_factory=dict)
     metrics: AtifMetrics | None = None
+    #: The provider's response ID for the model call.
+    response_id: str | None = None
 
 
 @dataclass
@@ -176,33 +182,41 @@ class _Conversation:
         """Add one agent's conversation to ``builder``; return the subagents it spawned.
 
         ``turns`` holds the root's per-invocation stdout, whose failures the session
-        lacks; they are added at the end of their turn.
+        lacks; they are added at the end of their turn. Each assistant record is one model
+        call, recorded once its response has streamed, just after the agent's
+        ``api_response`` telemetry that names the response. A subagent's transcript records
+        no such telemetry.
         """
         root = agent_id is None
         embedded, refs = self._children(builder.trajectory_id, agent_id, records)
         steps: list[_Step] = []
         owner: dict[str, _Step] = {}
         prompts = 0
+        response_id: str | None = None
         for record in records:
             kind = record.get("type")
             parts = _parts(record)
-            if _is_prompt(record, root=root):
+            if (response := _api_response(record, agent_id)) is not None:
+                response_id = response
+            elif _is_prompt(record, root=root):
                 if turns is not None and prompts and (error := _turn_error(turns[prompts - 1])):
                     steps.append(_Step("system", error))
                 prompts += 1
                 text = "".join(str(part.get("text") or "") for part in parts)
                 if root and text.endswith(STDIN_SEPARATOR):
                     text = text.removesuffix(STDIN_SEPARATOR)
-                steps.append(_Step("user", text, _timestamp(record)))
+                steps.append(_Step("user", text, iso_time(record.get("timestamp"))))
             elif kind == "user" or (kind == "system" and record.get("subtype") == "notification"):
                 # Model-visible text the CLI injected rather than a prompt Orbit sent.
                 text = "".join(str(part.get("text") or "") for part in parts)
                 if text:
-                    steps.append(_Step("system", text, _timestamp(record)))
+                    steps.append(_Step("system", text, iso_time(record.get("timestamp"))))
             elif kind == "system" and record.get("subtype") == "chat_compression":
-                steps.append(_Step("system", "Context compressed.", _timestamp(record)))
+                steps.append(
+                    _Step("system", "Context compressed.", iso_time(record.get("timestamp")))
+                )
             elif kind == "assistant":
-                step = _Step("agent", timestamp=_timestamp(record))
+                step = _Step("agent", timestamp=iso_time(record.get("timestamp")))
                 texts: list[str] = []
                 for part in parts:
                     if isinstance(part.get("functionCall"), dict):
@@ -214,7 +228,18 @@ class _Conversation:
                     elif isinstance(part.get("text"), str):
                         texts.append(part["text"])
                 step.message = "".join(texts)
-                step.metrics = _metrics(record.get("usageMetadata"), totals)
+                if record.get("usageMetadata") is not None:
+                    try:
+                        step.metrics = _metrics(record["usageMetadata"])
+                    except ValueError:
+                        self.issues.append(
+                            {"reason": "invalid_token_usage", "uuid": record.get("uuid")}
+                        )
+                if totals is not None and step.metrics is not None:
+                    totals["input"] += step.metrics.prompt_tokens or 0
+                    totals["output"] += step.metrics.completion_tokens or 0
+                    totals["cached"] += step.metrics.cached_tokens or 0
+                step.response_id, response_id = response_id, None
                 steps.append(step)
             elif kind == "tool_result":
                 status = (record.get("toolCallResult") or {}).get("status")
@@ -355,6 +380,7 @@ def _emit(builder: TrajectoryBuilder, step: _Step) -> None:
         tool_calls=step.calls or None,
         observation=AtifObservation(results=results) if results else None,
         metrics=step.metrics,
+        extra={"orbit": {"native_event_ids": [step.response_id]}} if step.response_id else None,
     )
 
 
@@ -393,36 +419,34 @@ def _parts(record: dict[str, Any]) -> list[dict[str, Any]]:
     return [part for part in parts or () if isinstance(part, dict)]
 
 
-def _metrics(usage: Any, totals: dict[str, int] | None) -> AtifMetrics | None:
+def _api_response(record: dict[str, Any], agent_id: str | None) -> str | None:
+    """The response ID an ``api_response`` telemetry record names for ``agent_id``'s call."""
+    payload = record.get("systemPayload") if record.get("subtype") == "ui_telemetry" else None
+    event = payload.get("uiEvent") if isinstance(payload, dict) else None
+    if (
+        not isinstance(event, dict)
+        or event.get("event.name") != API_RESPONSE
+        or event.get("subagent_id") != agent_id
+    ):
+        return None
+    value = event.get("response_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _metrics(usage: Any) -> AtifMetrics | None:
+    """An assistant record's ``usageMetadata``; raises ``ValueError`` when it cannot be read,
+    as when the provider reported only a total.
+
+    Qwen counts the prompt with its cache reads and writes and the candidates with their
+    reasoning, as the Gateway does.
+    """
     if not isinstance(usage, dict):
-        return None
-    counts = {
-        key: value if isinstance(value, int) and not isinstance(value, bool) else 0
-        for key, value in (
-            (key, usage.get(key))
-            for key in ("promptTokenCount", "candidatesTokenCount", "cachedContentTokenCount")
-        )
-    }
-    if totals is not None:
-        totals["input"] += counts["promptTokenCount"]
-        totals["output"] += counts["candidatesTokenCount"]
-        totals["cached"] += counts["cachedContentTokenCount"]
-    return AtifMetrics(
-        prompt_tokens=counts["promptTokenCount"],
-        completion_tokens=counts["candidatesTokenCount"],
-        cached_tokens=counts["cachedContentTokenCount"],
+        raise ValueError(f"not a usage object: {usage!r}")
+    return call_metrics(
+        token_count(usage.get("promptTokenCount")),
+        token_count(usage.get("candidatesTokenCount")),
+        token_count(usage.get("cachedContentTokenCount"), optional=True),
     )
-
-
-def _timestamp(record: dict[str, Any]) -> str | None:
-    value = record.get("timestamp")
-    if not isinstance(value, str):
-        return None
-    try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return value
 
 
 def _result(events: list[dict[str, Any]]) -> dict[str, Any] | None:
