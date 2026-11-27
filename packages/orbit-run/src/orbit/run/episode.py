@@ -20,7 +20,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -28,7 +28,7 @@ from typing import Literal
 
 from orbit.core.capability import unmet
 from orbit.core.config import LoggingPolicy, SandboxRetentionConfig, VerificationConfig
-from orbit.core.episode import ArtifactSink, Budget, EpisodeContext, Phase
+from orbit.core.episode import ArtifactSink, Budget, EpisodeContext, EpisodeContinuation, Phase
 from orbit.core.errors import (
     AgentError,
     AgentRefusalError,
@@ -40,6 +40,7 @@ from orbit.core.errors import (
     ProviderCapabilityError,
     ResourceExhaustedError,
     RetentionFinalizationError,
+    SandboxHandOff,
     StorageExhaustedError,
     TaskDefinitionError,
     TaskError,
@@ -73,7 +74,7 @@ from orbit.run import artifact_files, guestd
 from orbit.run.assets import observe_task_assets
 from orbit.run.gateway.server import Gateway
 from orbit.run.gateway.session import GatewaySession, Limits, SessionRegistry
-from orbit.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol
+from orbit.run.protocol.episode_protocol import SETUP_TIMEOUT_SEC, EpisodeProtocol, HandedOff
 from orbit.run.provenance import ProvenanceInputs, build_lock, judge_provenance
 from orbit.run.providers import ProviderRegistry
 from orbit.run.recording import EpisodeRecording, Redactor
@@ -172,7 +173,8 @@ async def run_episode_with_retries(
 
 @dataclass
 class _LeaseEntry:
-    sandbox: Sandbox
+    sandbox: Sandbox | None
+    """None for a snapshot an earlier process of the episode saved, whose Sandbox it was."""
     provider: Provider
     roles: tuple[Literal["solver", "verifier"], ...]
     requested: Literal["destroy", "keep", "snapshot"]
@@ -198,7 +200,8 @@ class _Lease:
     its role: ``solver`` by provider id, and ``verifier`` for a verifier of its own; one
     booted from a snapshot the lease holds comes from the Provider that saved it. A solver
     saved for a snapshot verifier or a validation round is held as its snapshot, which
-    outlasts the Sandboxes booted from it.
+    outlasts the Sandboxes booted from it. A snapshot of a move or a round can pass to and from
+    another process of the same episode, whose lease owns it from then on.
     """
 
     def __init__(
@@ -228,14 +231,7 @@ class _Lease:
             policy = "destroy"
         # A separate verifier mounts views of its solver's snapshot's volumes.
         saved = request.snapshot or request.volumes_from
-        origin = next(
-            (
-                entry
-                for entry in self.live
-                if entry.saved is not None and entry.saved.handle == saved
-            ),
-            None,
-        )
+        origin = self._saved(saved) if saved is not None else None
         if origin is not None:
             # Only the Provider that saved a snapshot holds it.
             provider = origin.provider
@@ -313,10 +309,7 @@ class _Lease:
         if entry is None:
             return
         if entry.saved is not None:
-            # Its snapshot is what remains, kept only as the snapshot its retention asks for,
-            # and kept while a Sandbox booted from it lives, which finalize then reaps first.
-            if entry.requested != "snapshot" and not self._booted_from(entry):
-                await self._destroy_saved(entry)
+            await self._release_saved(entry)
             return
         if entry.requested != "destroy":
             if entry.sanitation == "succeeded":
@@ -324,6 +317,39 @@ class _Lease:
             await self._destroy(entry, outcome="retention-failed")
             return
         await self._destroy(entry, outcome="destroyed")
+
+    async def release_snapshot(self, handle: str) -> None:
+        entry = self._saved(handle)
+        if entry is not None:
+            await self._release_saved(entry)
+
+    async def _release_saved(self, entry: _LeaseEntry) -> None:
+        # Its snapshot is what remains, kept only as the snapshot its retention asks for, and
+        # kept while a Sandbox booted from it lives, which finalize then reaps first.
+        if entry.requested != "snapshot" and not self._booted_from(entry):
+            await self._destroy_saved(entry)
+
+    def hand_off(self, handle: str) -> tuple[str, RetainedSandbox]:
+        entry = self._saved(handle)
+        assert entry is not None and entry.saved is not None, "only a leased snapshot passes on"
+        self.live.remove(entry)
+        return entry.provider.id, entry.saved
+
+    def take_over(self, provider: str, snapshot: RetainedSandbox) -> None:
+        """Own ``snapshot``, which the Provider ``provider`` names holds for this episode from
+        an earlier process, as a snapshot this lease saved for a move: a Sandbox leased from
+        it comes from that Provider, and it goes as such a snapshot does."""
+        self.live.append(
+            _LeaseEntry(
+                None,
+                self.providers.get(provider),
+                snapshot.roles,
+                "destroy",
+                sanitation="succeeded",
+                saved=snapshot,
+                carried=True,
+            )
+        )
 
     async def snapshot(
         self, sandbox: Sandbox, *, carried: Literal["round", "move"] | None = None
@@ -497,12 +523,13 @@ class _Lease:
                     f"could not destroy snapshot {saved.handle}: a Sandbox that could not be "
                     "destroyed still runs on it"
                 )
-            try:
-                await entry.sandbox.destroy()
-            except Exception as exc:
-                raise RetentionFinalizationError(
-                    f"could not destroy sandbox {entry.sandbox.sandbox_id}: {exc}"
-                ) from exc
+            if entry.sandbox is not None:
+                try:
+                    await entry.sandbox.destroy()
+                except Exception as exc:
+                    raise RetentionFinalizationError(
+                        f"could not destroy sandbox {entry.sandbox.sandbox_id}: {exc}"
+                    ) from exc
             try:
                 await entry.provider.destroy_retained(saved.handle)
             except Exception as exc:
@@ -555,6 +582,7 @@ class _Lease:
     ) -> None:
         """Destroy an entry's Sandbox, recording ``outcome`` unless one is recorded already;
         one that cannot be destroyed is recorded as not destroyed, with why, never as gone."""
+        assert entry.sandbox is not None, "a snapshot taken over goes as a saved one"
         error: Exception | None = None
         left: RetainedSandbox | None = None
         try:
@@ -606,6 +634,17 @@ class _Lease:
 
     def _find(self, sandbox: Sandbox) -> _LeaseEntry | None:
         return next((entry for entry in self.live if entry.sandbox is sandbox), None)
+
+    def _saved(self, handle: str) -> _LeaseEntry | None:
+        """The entry of the snapshot ``handle`` it holds."""
+        return next(
+            (
+                entry
+                for entry in self.live
+                if entry.saved is not None and entry.saved.handle == handle
+            ),
+            None,
+        )
 
 
 def _open_sessions(sessions: tuple[GatewaySession, ...], opened: bool) -> None:
@@ -907,11 +946,18 @@ async def run_episode(
     destroy_failed_sandboxes: bool = False,
     authentication: Literal["api-key", "subscription"] = "api-key",
     profile_slot_id: str | None = None,
-) -> EpisodeResult:
+    continuation: EpisodeContinuation | None = None,
+) -> EpisodeResult | EpisodeContinuation:
     """Administer one task and return its verdict.
 
     Never raises for an episode that merely failed: a failure is a result with a status,
     and the caller decides what to do with it.
+
+    Where the Provider holds the agent's next solver only in a later process, the episode is
+    handed off: this process's part of it ends without verification or a result, and the
+    record a later process continues it from is returned instead. Given that
+    ``continuation``, an episode goes on in the same episode directory, with the same ids,
+    and its result describes it whole.
     """
     if task.variables is None:
         # Resolved by the caller for every Task at once, so a missing one fails the whole
@@ -944,6 +990,13 @@ async def run_episode(
         )
     if alone:
         await providers.preflight([task])
+    if continuation is not None:
+        if episode_id not in (None, continuation.episode_id) or trajectory_id not in (
+            None,
+            continuation.trajectory_id,
+        ):
+            raise ConfigError("an episode goes on under its own episode and trajectory ids")
+        episode_id, trajectory_id = continuation.episode_id, continuation.trajectory_id
     episode_id = episode_id or f"{task_component(task.spec.name)}-{uuid.uuid4().hex[:8]}"
     trajectory_id = trajectory_id or f"trajectory-{uuid.uuid4().hex}"
     episode_dir = run_dir / episode_id
@@ -981,6 +1034,11 @@ async def run_episode(
             else session_registry.open(candidate)  # type: ignore[union-attr]
         )
         session_token = session.token
+        if continuation is not None and continuation.gateway is not None:
+            # Its limits cover the whole episode, so they go on counting from there; closed
+            # until the agent's next run opens it.
+            session.restore(continuation.gateway)
+            session.suspended = True
     judge_sessions = (
         open_judge_sessions(
             gateway,
@@ -1019,7 +1077,11 @@ async def run_episode(
         solver=task.provider,
         verifier=task.verifier_provider,
     )
-    started_at = datetime.now(UTC)
+    if continuation is not None:
+        # The snapshot is this episode's from the start, whatever ends it.
+        lease.take_over(continuation.provider, continuation.snapshot)
+        lease.outcomes = list(continuation.sandbox_outcomes)
+    started_at = continuation.started_at if continuation is not None else datetime.now(UTC)
     started = time.monotonic()
     ctx = EpisodeContext(
         episode_id=episode_id,
@@ -1073,11 +1135,23 @@ async def run_episode(
         judge_tokens={kind: opened.token for kind, opened in judge_sessions.items()},
         open_judge_sessions=partial(_open_sessions, tuple(judge_sessions.values())),
     )
+    if continuation is not None:
+        _continue(ctx, continuation)
     redact = Redactor(ctx.secrets)
     verdict: Verdict | None = None
+    handed: HandedOff | None = None
     try:
         verdict = await protocol.run(task, ctx)
+    except HandedOff as handing_off:
+        handed = handing_off
     except Exception as exc:  # every failure becomes a typed result, not a traceback
+        if isinstance(exc, SandboxHandOff):
+            # Only the agent's work goes on in a later process; a Sandbox its Provider could
+            # not hold anywhere else ends the episode.
+            exc = ProviderCapabilityError(
+                f"the Provider holds no Sandbox booted from snapshot {exc.handle} long enough "
+                "here, and only the agent's work goes on in the episode's next process"
+            )
         if isinstance(exc, BudgetExceededError):
             ctx.limit_termination = LimitTermination(
                 layer=exc.layer,  # type: ignore[arg-type]
@@ -1136,6 +1210,16 @@ async def run_episode(
             finalization_error = finalization_error or exc
         ctx.sandbox_outcomes = tuple(lease.outcomes)
         sink.cleanup()
+        if finalization_error is None and continuation is not None:
+            # As one this process could not destroy, one an earlier process could not.
+            lost = next(
+                (item for item in continuation.sandbox_outcomes if item.outcome == "not-destroyed"),
+                None,
+            )
+            if lost is not None:
+                finalization_error = RetentionFinalizationError(
+                    lost.reason or "a Sandbox of the episode's earlier process was not destroyed"
+                )
         if (
             finalization_error is not None
             and verdict is not None
@@ -1148,6 +1232,9 @@ async def run_episode(
                 message=redact(str(finalization_error)),
             )
 
+    if handed is not None:
+        # No result: the episode goes on, and its next process writes it.
+        return _continuation(ctx, handed, started_at=started_at, session=session)
     assert verdict is not None
     finalize_started_at = datetime.now(UTC)
     finalize_started = time.monotonic()
@@ -1236,7 +1323,11 @@ async def run_episode(
         ),
         durable=True,
     )
-    duration = time.monotonic() - started
+    duration = (
+        time.monotonic() - started
+        if continuation is None
+        else (finished_at - continuation.started_at).total_seconds()
+    )
     return EpisodeResult(
         episode_id=episode_id,
         verdict=verdict,
@@ -1245,6 +1336,94 @@ async def run_episode(
         record=record,
         lock=lock,
     )
+
+
+def _continuation(
+    ctx: EpisodeContext,
+    handed: HandedOff,
+    *,
+    started_at: datetime,
+    session: GatewaySession | None,
+) -> EpisodeContinuation:
+    """What the episode's next process continues it from, once this one handed it off."""
+    tokens = (
+        ctx.session.token,
+        ctx.egress_token,
+        *ctx.verification_secrets,
+        *ctx.judge_tokens.values(),
+        *ctx.earlier_secrets,
+    )
+    return EpisodeContinuation(
+        episode_id=ctx.episode_id,
+        trajectory_id=ctx.trajectory_id,
+        started_at=started_at,
+        snapshot=handed.snapshot,
+        provider=handed.provider,
+        image=handed.image,
+        planned_saves=handed.planned_saves,
+        turn=handed.turn,
+        agent_time=handed.agent_time,
+        session=handed.session,
+        agent_started=ctx.agent_started,
+        agent_version=ctx.agent_version,
+        agent_run=ctx.agent_run,
+        failure_phase=ctx.failure_phase,
+        prepared_image=ctx.prepared_image,
+        resolved_image=ctx.resolved_image,
+        resource_allocation=ctx.resource_allocation,
+        sandbox_identity=ctx.sandbox_identity,
+        home=ctx.home,
+        resumed_from=ctx.resumed_from,
+        prepared_validation_image=ctx.prepared_validation_image,
+        validation_resolved_image=ctx.validation_resolved_image,
+        validation_resource_allocation=ctx.validation_resource_allocation,
+        orbit_verify_provenance=ctx.orbit_verify_provenance,
+        phases=tuple(ctx.phases),
+        segments=tuple(ctx.segments),
+        validation_rounds=tuple(ctx.validation_rounds),
+        validation_prompts=dict(ctx.validation_prompts),
+        move_prompts=dict(ctx.move_prompts),
+        # As JSON holds them, which the next process reads.
+        validation_judge_invocations=tuple(
+            json.loads(json.dumps(asdict(item)))
+            for item in ctx.validation_judge_invocations
+            if isinstance(item, JudgeInvocation)
+        ),
+        harness_execution_counter=ctx.harness_execution_counter,
+        sandbox_outcomes=ctx.sandbox_outcomes,
+        gateway=session.accounting() if session is not None else None,
+        # The Task's own secrets are its variables', which every process resolves again.
+        redacted=tuple(dict.fromkeys(token for token in tokens if token)),
+    )
+
+
+def _continue(ctx: EpisodeContext, continuation: EpisodeContinuation) -> None:
+    """Go on with what the episode's earlier process recorded and observed."""
+    ctx.continued = continuation
+    ctx.earlier_secrets = continuation.redacted
+    ctx.agent_started = continuation.agent_started
+    ctx.agent_version = continuation.agent_version
+    ctx.agent_run = continuation.agent_run
+    ctx.failure_phase = continuation.failure_phase
+    ctx.prepared_image = continuation.prepared_image
+    ctx.resolved_image = continuation.resolved_image
+    ctx.resource_allocation = continuation.resource_allocation
+    ctx.sandbox_identity = continuation.sandbox_identity
+    ctx.home = continuation.home
+    ctx.resumed_from = continuation.resumed_from
+    ctx.prepared_validation_image = continuation.prepared_validation_image
+    ctx.validation_resolved_image = continuation.validation_resolved_image
+    ctx.validation_resource_allocation = continuation.validation_resource_allocation
+    ctx.orbit_verify_provenance = continuation.orbit_verify_provenance
+    ctx.phases = list(continuation.phases)
+    ctx.segments = list(continuation.segments)
+    ctx.validation_rounds = list(continuation.validation_rounds)
+    ctx.validation_prompts = dict(continuation.validation_prompts)
+    ctx.move_prompts = dict(continuation.move_prompts)
+    ctx.validation_judge_invocations = tuple(
+        JudgeInvocation.from_dict(item) for item in continuation.validation_judge_invocations
+    )
+    ctx.harness_execution_counter = continuation.harness_execution_counter
 
 
 def _write_lock(

@@ -38,6 +38,7 @@ __all__ = [
     "RegistryError",
     "ResourceExhaustedError",
     "RetentionFinalizationError",
+    "SandboxHandOff",
     "StorageExhaustedError",
     "SubscriptionAuthenticationError",
     "SubscriptionCompatibilityError",
@@ -126,6 +127,16 @@ class ProviderCapacityError(ProviderCapabilityError):
 
 class ProviderStartError(EnvironmentError_):
     """A sandbox could not be provisioned or did not become ready."""
+
+
+class SandboxHandOff(EnvironmentError_):
+    """The Provider holds no Sandbox past the deadline of the process that drives it, as a
+    cluster's episode job holds none past its wall time: it cannot boot from ``handle``
+    here, and has made the snapshot durable for the same Provider in a later process."""
+
+    def __init__(self, handle: str) -> None:
+        super().__init__(f"snapshot {handle} goes on in the episode's next process")
+        self.handle = handle
 
 
 class GuestUnreachableError(EnvironmentError_):

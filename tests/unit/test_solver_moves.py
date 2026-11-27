@@ -356,27 +356,48 @@ async def test_the_last_turn_keeps_its_sandbox_for_a_shared_verifier(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "rounds", "timeouts"),
-    [("snapshot", 0, [0.8]), ("separate", 0, [0.8]), ("shared", 1, [0.8, 0.5])],
-)
-async def test_only_the_last_turn_before_tests_in_the_solver_keeps_its_sandbox(
+@pytest.mark.parametrize("mode", ["shared", "snapshot", "separate"])
+@pytest.mark.parametrize("rounds", [0, 1])
+async def test_only_a_shared_verifier_keeps_its_sandbox_from_the_agent(
     tmp_path: Path,
     verifiers: Verifiers,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
     rounds: int,
-    timeouts: list[float],
 ) -> None:
-    """A verifier of its own boots from a save, and a turn a round follows is saved for the
-    round, which stops every process anyway: neither keeps time for verification."""
+    """A shared tests/ runs where the agent's processes still do, so each run, which may be
+    the last, leaves its Sandbox that verifier's limit; every other verifier, a round's
+    included, boots from a snapshot, so the agent may work until the deadline."""
     monkeypatch.setattr(EpisodeProtocol, "_kept_for_verification", KEEPS)
     provider, harness = DeadlineProvider(0.8), WorkHarness(*[0.05] * (rounds + 1))
     task = _task(tmp_path, rounds=rounds, mode=mode)
+    timeouts = task.spec.timeouts.model_copy(update={"verify": 0.3, "validation": 0.4})
+    task.spec = task.spec.model_copy(update={"timeouts": timeouts})
+    result = await _run(tmp_path, provider, task, harness)
+
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    kept = 0.3 if mode == "shared" else 0.0
+    assert harness.timeouts == pytest.approx([0.8 - kept] * (rounds + 1), abs=0.05)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_verifier_the_sandbox_would_not_last_moves_the_solver_first(
+    tmp_path: Path, verifiers: Verifiers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent worked until near its Sandbox's deadline, which would not last the verifier:
+    the solver moves first to a Sandbox that does, and the verifier boots from it there."""
+    monkeypatch.setattr(EpisodeProtocol, "_kept_for_verification", KEEPS)
+    provider, harness = DeadlineProvider(0.8, 5.0), WorkHarness(0.7)
+    task = _task(tmp_path, mode="snapshot")
     result = await _run(tmp_path, provider, task, harness, RunTimeouts(verify=0.3))
 
     assert result.verdict.status is Status.COMPLETED, result.verdict.failure
-    assert harness.timeouts == pytest.approx(timeouts, abs=0.05)
+    assert harness.timeouts[0] == pytest.approx(0.8, abs=0.05)
+    assert [item.began for item in result.record.segments] == ["provisioned"]
+    solvers = _solvers(provider)
+    assert len(solvers) == 2 and solvers[1].request.duration_sec == 0.3
+    verifier = next(box for box in provider.sandboxes if box.request.role is SandboxRole.VERIFIER)
+    assert verifier.request.snapshot is not None
 
 
 @pytest.mark.asyncio

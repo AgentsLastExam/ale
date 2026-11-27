@@ -17,7 +17,7 @@ Important modules:
 | `sandbox.py` | Provider and Sandbox contracts |
 | `capability.py` | capability profiles, a Sandbox's needs, and the one rule that compares them |
 | `harness.py` | Harness families, sessions and native continuation |
-| `episode.py` | Episode lifecycle contracts and context |
+| `episode.py` | Episode lifecycle contracts and context, and the record a handed-off episode continues from |
 | `trace.py`, `trajectory.py` | execution evidence and ATIF trajectory |
 | `result.py`, `lock.py` | terminal result and reproducibility provenance |
 | `fleet.py` | the Fleet protocol between Runs, the control plane and node agents |
