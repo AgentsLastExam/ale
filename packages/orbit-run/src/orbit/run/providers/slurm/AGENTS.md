@@ -241,3 +241,36 @@ released by a file it polls: srun turns a SIGTERM into SIGKILL for its tasks, wh
 leave the store. Measured: after each of six such removals, the store's directory came back
 empty, naming no job; a job starting on the node removes the empty ones of this account
 older than ten minutes.
+
+## Ending a guest session
+
+Each guest session, guestd's two, the memory watcher's and a node's Gateway tunnel, is an
+`srun` on the login node whose step runs `podman exec`. Podman runs a monitor, conmon, for
+the session in that step, which writes the session's exit code to a file below the
+container's directory as it ends. Killing the `srun` ends the step and the monitor with it,
+before that file is written: on OpenRSI (Podman 4.9.3, November 2026) a Sandbox's container
+had four exec monitors on its node, and three 5 s after one session's `srun` was killed.
+`podman stop` then stops the container, but its cleanup waits 5 s for that file and fails
+(`timed out waiting for file …/userdata/<session>/exit/<container>`, exit 125), and the save
+with it. Closing a tunnel used to kill its `srun`, so the first save of every Sandbox that
+reached a Gateway failed this way, and with it every run of a real agent's CLI, at its first
+validation round, snapshot verifier, separate verifier of its volumes or move.
+
+The Host ends a session as a command ends: it closes the session's input, which ends the
+guest's end of it once that reads it, and kills the `srun` only if it still runs 5 s later
+([`process.end`](../../process.py)). Measured there: every session of a saved Sandbox ended
+so, with exit 0, 1.05 to 1.22 s after its input closed.
+
+A save whose first `podman stop` fails stops the container once more. Podman records a
+session whose exit file it waited for in vain as ended all the same (`getActiveExecSessions`
+in Podman's `libpod/container_exec.go`), so the second stop finds the container stopped and
+no session running, and completes Podman's cleanup of it, of its network and mounted
+storage, which the first left undone. Measured: with one session's `srun` killed, the first
+stop failed as above, the second succeeded, and a Sandbox booted from the snapshot read what
+the first had written and reached its Gateway.
+
+Decided: both, rather than either alone. Ending sessions by their input spares every save
+Podman's 5 s wait for each session and leaves nothing on the node half ended; the second
+stop covers an `srun` lost any other way, by the Host's own kill after 5 s or on the login
+node. The stop is repeated once, on any failure: Podman marks every lost session in the
+first, so a second failure has another cause, which it reports.

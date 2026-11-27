@@ -43,6 +43,8 @@ from orbit.run.providers.slurm.provider import (
     step_memory_mb,
 )
 
+pytestmark = pytest.mark.unit
+
 #: Orbit's directory on the cluster by default, below the home.
 CACHE = ".cache/orbit/slurm"
 
@@ -955,6 +957,33 @@ def test_a_sandbox_step_spans_the_first_nodes_of_the_allocation(monkeypatch, tmp
     argv = started[0]
     assert "--nodelist=n0,n1" in argv and "--ntasks=2" in argv and "--ntasks-per-node=1" in argv
     assert "--kill-on-bad-exit=1" in argv and "--gres=gpu:8" in argv
+
+
+def test_a_save_stops_the_container_again_where_podman_lost_a_session_s_end(monkeypatch, tmp_path):
+    """A guest session whose srun on the Host was killed leaves Podman one it never saw end:
+    the first stop fails on it, and a second finishes it; one that fails again fails the
+    save."""
+    codes: list[int] = []
+    ran = []
+
+    def run(argv, *, check=False, stdout=None):
+        ran.append(argv[1])
+        code = codes.pop(0)
+        if check and code:
+            raise subprocess.CalledProcessError(code, argv)
+        return subprocess.CompletedProcess(argv, code)
+
+    monkeypatch.setattr(worker.subprocess, "run", run)
+    monkeypatch.setattr(worker, "output", lambda *argv: "sha256:abc")
+    own = tmp_path / "1" / "nodes" / "0"
+    own.mkdir(parents=True)
+    codes[:] = [125, 0]
+    assert worker.save(["podman"], str(tmp_path), "sandbox-1", own, [], lambda: 0) == set()
+    assert ran == ["stop", "stop"]
+    assert json.loads((own / "saved").read_text())["image"] == "abc"
+    codes[:] = [125, 125]
+    with pytest.raises(subprocess.CalledProcessError):
+        worker.save(["podman"], str(tmp_path), "sandbox-1", own, [], lambda: 0)
 
 
 def test_a_router_derives_its_wireguard_public_key_as_x25519_does():

@@ -1393,7 +1393,13 @@ def save(
     """Stop a node of the Sandbox and commit its disk to the node's store, and record each
     volume's stack, the layer that holds its writes on what it viewed, and what the node
     has written. Return the layers the snapshot keeps."""
-    subprocess.run([*command, "stop", "-t", "30", name], check=True, stdout=subprocess.DEVNULL)
+    stop = [*command, "stop", "-t", "30", name]
+    # A guest session whose srun on the Host was killed ended with its step, and Podman's
+    # monitor of it too, before the monitor wrote the session's exit: Podman stops the
+    # container, then fails as it waits for that exit, but records the session ended, so a
+    # second stop finishes the first (AGENTS.md).
+    if subprocess.run(stop, stdout=subprocess.DEVNULL).returncode:
+        subprocess.run(stop, check=True, stdout=subprocess.DEVNULL)
     # By the Sandbox's index alone, which its handle names on every node.
     tag = f"{SNAPSHOT_REPOSITORY}:{own.parent.parent.name}"
     image = output(*command, "commit", "-q", name, tag)

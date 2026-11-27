@@ -530,7 +530,7 @@ class SlurmSandbox(TunneledSandbox):
         the Sandboxes its episode boots from it, with its volumes' layers. A snapshot its Run
         keeps after the episode is written to the cluster's shared file system too, as the
         allocation ends then."""
-        # The relay and the guest's sessions end with the container.
+        # The relay and the guest's sessions end before the container stops.
         for client in self._clients:
             await relay.stop(client, self.request)
         self._relay = None

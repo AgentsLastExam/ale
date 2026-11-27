@@ -69,6 +69,18 @@ async def test_a_guest_watcher_reads_again_a_file_whose_changes_nothing_announce
 
 
 @pytest.mark.asyncio
+async def test_a_closed_guest_watcher_is_settled_at_once_and_cancels_no_caller() -> None:
+    """A save closes a Sandbox's sessions, and a guest session lost then is explained after:
+    the watcher's reading, cancelled as it closed, cancels no one that waits for it."""
+    watcher = await memory.GuestEvents.start(
+        ["sh", "-c", "echo oom 0 oom_kill 0; cat > /dev/null"], counter="its cgroup"
+    )
+    await watcher.close()
+    await asyncio.wait_for(watcher.settled(5), 1)
+    assert watcher.oom_killed() is None
+
+
+@pytest.mark.asyncio
 async def test_a_guest_watcher_that_never_writes_fails_the_start() -> None:
     with pytest.raises(ProviderStartError, match="could not watch the guest's memory: absent"):
         await memory.GuestEvents.start(["sh", "-c", "echo absent >&2"], counter="its cgroup")

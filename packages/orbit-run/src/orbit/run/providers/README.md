@@ -1073,6 +1073,11 @@ gVisor. Opening removes the filters while the container keeps running. `allowlis
 `blocklist` use the same seal and the Run's authenticated proxy through the tunnel. The
 runtime modes grant nested Docker or raw sockets separately.
 
+When Orbit is done with one of these sessions, it closes its input, and kills its `srun`
+only if it still runs 5 s later. A save whose first `podman stop` fails, as it does when a
+session's `srun` was killed, stops the container once more
+([Slurm](slurm/AGENTS.md#ending-a-guest-session)).
+
 A Sandbox's step gets the Task's memory plus what `docker:gvisor` adds for the Sentry
 ([Docker on gVisor](#docker-on-gvisor)) and 32 MiB for the step's own process and conmon;
 the job adds 512 MiB for its batch step, Podman's namespace and every Sandbox's control

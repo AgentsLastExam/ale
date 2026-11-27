@@ -3,20 +3,61 @@ Orbit's cache with its compute nodes; no Docker is needed there."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import shlex
+from pathlib import Path, PurePosixPath
 
 import pytest
 
+from orbit.core.sandbox import Identity, ImageRef, SandboxRequest
+from orbit.core.taskspec import NetworkMode, NetworkPolicy, Resources
+from orbit.run.episode import run_episode
+from orbit.run.gateway.server import Gateway
+from orbit.run.harnesses.base import CliCommand
+from orbit.run.protocol.episode_protocol import EpisodeProtocol
 from orbit.run.providers.slurm import SlurmProvider
 from orbit.run.providers.slurm.job import Job
+from orbit.run.secrets import resolve_task_variables
+from orbit.run.tasksets.manifest import load_tasks
+from tests.integration.scripted_model import ScriptedModel
 from tests.integration.test_validation_rounds import _check as check_rounds
 from tests.integration.test_validation_rounds import _episode as rounds_episode
 from tests.integration.test_validation_rounds import _task as rounds_task
 from tests.integration.test_volume_artifacts import _check as check_volume
 from tests.integration.test_volume_artifacts import _episode as volume_episode
-from tests.support import slurm_config
+from tests.support import CONTAINER_BASE, ScriptedCliHarness, provider_registry, slurm_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_slurm]
+
+#: Asks the model once through the Gateway at ``argv[1]``, as an agent's CLI does, a question
+#: of its own each time, which the Gateway does not answer again from an earlier call.
+ASK = """
+import json, os, sys, urllib.request
+body = {"model": sys.argv[2], "messages": [{"role": "user", "content": os.urandom(8).hex()}]}
+request = urllib.request.Request(
+    sys.argv[1] + "/v1/chat/completions",
+    data=json.dumps(body).encode(),
+    headers={"Authorization": "Bearer " + os.environ["GATEWAY_TOKEN"]},
+)
+print(json.load(urllib.request.urlopen(request, timeout=60))["choices"][0]["message"]["content"])
+"""
+
+
+class GatewayCliHarness(ScriptedCliHarness):
+    """The scripted CLI, which first asks the model through the Gateway each turn, as a real
+    CLI reaches it: on Slurm, by its Sandbox's tunnel."""
+
+    async def prepare_command(  # type: ignore[no-untyped-def]
+        self, prompt_path, sandbox, session, *, native_session_id
+    ):
+        scripted = await super().prepare_command(
+            prompt_path, sandbox, session, native_session_id=native_session_id
+        )
+        ask = shlex.join(["python3", "-I", "-c", ASK, session.gateway_url, session.model])
+        return CliCommand(
+            f"{ask} > /dev/null\n{scripted.script}",
+            {"GATEWAY_TOKEN": session.token},
+            scripted.session_id,
+        )
 
 
 @pytest.mark.asyncio
@@ -72,3 +113,69 @@ async def test_an_agent_works_in_a_volume_in_one_slurm_allocation(
     check_volume(result, mode, validation)
     assert len(submitted) == 1
     assert provider.snapshots == {}
+
+
+@pytest.mark.asyncio
+async def test_every_turn_reaches_the_gateway_through_its_tunnel_over_slurm_rounds(
+    tmp_path: Path,
+) -> None:
+    """Each turn's solver reaches the Gateway through its node's tunnel, and the save of each
+    solver whose tunnel is open succeeds."""
+    model = ScriptedModel()
+    gateway = Gateway(
+        api_key="host-only",
+        upstream=await model.start(),
+        dialect="openai-chat-completions",
+        host="127.0.0.1",
+    )
+    try:
+        gateway_url = await gateway.start()
+        task = load_tasks(rounds_task(tmp_path / "rounds-slurm-gateway", "snapshot"))[0]
+        resolve_task_variables([task], oracle=False, protected={})
+        result = await run_episode(
+            task,
+            EpisodeProtocol(GatewayCliHarness(), validation_rounds=task.spec.validation_rounds),
+            provider_registry(SlurmProvider(slurm_config())),
+            run_dir=tmp_path / "runs",
+            gateway=gateway,
+            gateway_url=gateway_url,
+            model="scripted-model",
+        )
+    finally:
+        await gateway.stop()
+        await model.stop()
+    check_rounds(result)
+    assert len(model.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_save_outlasts_a_guest_session_whose_srun_was_killed() -> None:
+    """A guest session whose srun on the login node was killed leaves Podman a session it
+    never saw end, which fails the save's first ``podman stop``: the save still keeps the
+    Sandbox's disk (the Provider's AGENTS.md)."""
+    provider = SlurmProvider(slurm_config())
+    request = SandboxRequest(
+        episode_id="slurm-lost-session",
+        prepared_image=await provider.prepare_image(
+            ImageRef(kind="container", reference=CONTAINER_BASE)
+        ),
+        resources=Resources(cpus=2, memory_mb=2048),
+        network=NetworkPolicy(mode=NetworkMode.BLOCK),
+        retention="snapshot",
+    )
+    sandbox = await provider.create(request)
+    kept = str(PurePosixPath(sandbox.agent_home) / "kept.txt")
+    try:
+        await sandbox.write_file(kept, b"kept", identity=Identity.AGENT)
+        lost = sandbox._file_client._transport._proc  # type: ignore[attr-defined]
+        lost.kill()
+        await lost.wait()
+        retained = await sandbox.snapshot(roles=("solver",), reason="test")
+    finally:
+        await sandbox.destroy()
+    try:
+        booted = await provider.create(request.model_copy(update={"snapshot": retained.handle}))
+        async with booted:
+            assert await booted.read_file(kept) == b"kept"
+    finally:
+        await provider.destroy_retained(retained.handle)

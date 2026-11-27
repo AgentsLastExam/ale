@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 
 from orbit.core.errors import ProviderStartError
+from orbit.run.process import end
 
 __all__ = ["WATCHER", "GuestEvents", "shm_mb"]
 
@@ -107,9 +108,10 @@ class GuestEvents:
 
     async def settled(self, timeout_sec: float) -> None:
         """Wait, up to ``timeout_sec``, for the watcher's session to end, as it does with
-        its Sandbox, so that what it wrote before has arrived."""
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(self._reading), timeout_sec)
+        its Sandbox, so that what it wrote before has arrived; once it is closed, as a save
+        closes it before a session lost then is explained, not at all. The closed reading's
+        cancellation is never the caller's."""
+        await asyncio.wait((self._reading,), timeout=timeout_sec)
 
     def oom_killed(self) -> str | None:
         """What it counted since the Sandbox started, once an OOM killer ended a process
@@ -128,15 +130,7 @@ class GuestEvents:
 
     async def close(self) -> None:
         self._reading.cancel()
-        if self._process.returncode is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                assert self._process.stdin is not None
-                self._process.stdin.close()
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=5)
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    self._process.kill()
+        await end(self._process)
 
 
 def _pairs(raw: bytes) -> dict[str, int]:
