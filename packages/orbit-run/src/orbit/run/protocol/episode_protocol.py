@@ -116,6 +116,7 @@ from orbit.core.verdict import Status, Verdict
 from orbit.run import artifact_files, guestd
 from orbit.run.envs import DEFAULT_MAX_STEPS, DEFAULT_STALL_LIMIT, SandboxEnv
 from orbit.run.harnesses import credential_files
+from orbit.run.harnesses.base import redact_invocation_streams
 from orbit.run.harnesses.builtin import NopHarness, OracleHarness, solution_dir
 from orbit.run.protocol.log_mirror import (
     FINAL_SYNC_TIMEOUT_SEC,
@@ -2406,9 +2407,10 @@ class EpisodeProtocol:
                 )
             collection_failed = collection_failed or logs.incomplete
             # Copied while the agent ran, so only now can the copies lose what they held.
-            redact_files(
-                ctx.run_dir / "logs" / self.harness.name, Redactor(ctx.secrets, patterns=False)
-            )
+            copies = ctx.run_dir / "logs" / self.harness.name
+            redactor = Redactor(ctx.secrets, patterns=False)
+            redact_invocation_streams(copies, redactor)
+            redact_files(copies, redactor)
 
         if ctx.agent_started and not ctx.trajectory_written:
             self._parse_harness_trajectory(ctx, collection_failed=collection_failed)
