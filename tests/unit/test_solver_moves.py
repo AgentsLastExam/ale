@@ -63,7 +63,7 @@ def margins(monkeypatch: pytest.MonkeyPatch) -> None:
     """Seconds where an episode has minutes."""
     monkeypatch.setattr(episode_protocol, "MOVE_MARGIN_SEC", 0.0)
     monkeypatch.setattr(episode_protocol, "MIN_TURN_SEC", 0.05)
-    monkeypatch.setattr(EpisodeProtocol, "_kept_for_verification", lambda self, ctx: 0.0)
+    monkeypatch.setattr(EpisodeProtocol, "_kept_for_verification", lambda self, ctx, sandbox: 0.0)
 
 
 class DeadlineProvider(RoundsProvider):

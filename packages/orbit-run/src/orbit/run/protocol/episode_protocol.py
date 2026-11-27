@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -587,7 +588,7 @@ class EpisodeProtocol:
         agent_enabled: bool = True,
         timeouts: RunTimeouts | None = None,
         resume: Resume | None = None,
-        validation_rounds: int = 0,
+        validation_rounds: int | Literal["unlimited"] = 0,
         check_validation: bool = False,
     ) -> None:
         self.harness = harness
@@ -597,17 +598,39 @@ class EpisodeProtocol:
         self.timeouts = timeouts or RunTimeouts()
         self.resume = resume
         self.validation_rounds = validation_rounds
-        """How many validation results the agent receives, each between two turns."""
+        """How many validation results the agent receives, each between two turns, or
+        ``"unlimited"``: as many as its time and Gateway limits, and its solver's Provider,
+        allow."""
         self.check_validation = check_validation
         """Validate once on the final state, before ``tests/`` scores it, with no turn after
         it, as calibration checks the stage that validates."""
 
     @property
     def validations(self) -> int:
-        """How many times its episodes validate before ``tests/`` scores the final state: once
-        for each of the agent's validation rounds, or once for calibration's validation check;
-        each saves the solver as a snapshot."""
+        """How many times its episodes plan to validate before ``tests/`` scores the final
+        state: once for each of the agent's validation rounds, the next one where they are
+        unlimited, or once for calibration's validation check; each saves the solver as a
+        snapshot."""
+        if self.validation_rounds == "unlimited":
+            return 1
         return self.validation_rounds or int(self.check_validation)
+
+    def _round_may_follow(self, ctx: EpisodeContext, sandbox: Sandbox) -> bool:
+        """Whether a validation round may follow the turn that runs in ``sandbox``: one still
+        to come, or, where they are unlimited, one whose save its Provider can still take, a
+        turn's after it included."""
+        if self.validation_rounds != "unlimited":
+            return len(ctx.validation_rounds) < self.validations
+        return _rounds_left(sandbox) != 0
+
+    def _planned_after(self, sandbox: Sandbox, done: int) -> int:
+        """How many validations the solver booted from ``sandbox``'s next save plans, ``done``
+        of them done: those still to come, or, where they are unlimited, the next, if its
+        Provider can still take its save."""
+        if self.validation_rounds != "unlimited":
+            return max(self.validations - done, 0)
+        left = _rounds_left(sandbox)
+        return 1 if left is None or left > 1 else 0
 
     @property
     def validates(self) -> bool:
@@ -1161,7 +1184,7 @@ class EpisodeProtocol:
         sandbox = solver.sandbox
         budget = budget or _AgentTime(self.timeouts.agent_time(spec))
         asked = _Cut(prompt, continuation, ran=False)
-        kept = self._kept_for_verification(ctx)
+        kept = self._kept_for_verification(ctx, sandbox)
         if _too_brief(sandbox, budget, kept):
             return asked
         ctx.agent_started = True
@@ -1322,14 +1345,14 @@ class EpisodeProtocol:
                 await polling
         return None
 
-    def _kept_for_verification(self, ctx: EpisodeContext) -> float:
-        """What a run leaves of its Sandbox for the verification after it: a shared
+    def _kept_for_verification(self, ctx: EpisodeContext, sandbox: Sandbox) -> float:
+        """What a run in ``sandbox`` leaves of it for the verification after it: a shared
         verifier's limit, where no save comes between the run's end and ``tests/``, so that
         ``tests/`` runs where the agent's processes still do, rather than in a solver a move
         stopped them in."""
         if ctx.spec.verify.environment_mode is not VerificationMode.SHARED:
             return 0.0
-        if len(ctx.validation_rounds) < self.validations:
+        if self._round_may_follow(ctx, sandbox):
             return 0.0  # a round saves the solver first, which stops every process anyway
         return self._verify_timeout(ctx) or 0.0
 
@@ -1390,7 +1413,7 @@ class EpisodeProtocol:
             if cut is None:
                 return
             if moved and not cut.ran:
-                kept = self._kept_for_verification(ctx)
+                kept = self._kept_for_verification(ctx, solver.sandbox)
                 raise ProviderCapabilityError(
                     "the solver moved to a Sandbox its Provider holds too briefly to start a "
                     f"turn in: less than {MIN_TURN_SEC:g} s before its deadline"
@@ -1446,7 +1469,7 @@ class EpisodeProtocol:
                 raise
             earlier, solver.rounds = solver.rounds, [solver.sandbox]
             await self._release_rounds(ctx, earlier)
-        validations = max(self.validations - len(ctx.validation_rounds), 0)
+        validations = self._planned_after(solver.sandbox, len(ctx.validation_rounds))
         booted = await self._timed(
             ctx,
             Phase.PROVISION,
@@ -1562,7 +1585,9 @@ class EpisodeProtocol:
         """
         mode = ctx.spec.validation_spec.environment_mode
         logger = logging.getLogger("orbit.execution")
-        for index in range(1, self.validations + 1):
+        for index in itertools.count(1):
+            if self.validation_rounds != "unlimited" and index > self.validations:
+                return
             if ctx.agent_stop is not None:
                 return
             if self.validation_rounds:
@@ -1582,6 +1607,21 @@ class EpisodeProtocol:
                     return
                 if budget.remaining <= 0:
                     return
+                if not self._round_may_follow(ctx, solver.sandbox):
+                    with self._traced(ctx, Phase.AGENT):
+                        logger.info(
+                            "the solver's Provider saves no more snapshots in a row; the "
+                            "turn is the last",
+                            extra={"orbit_data": {"rounds": index - 1}},
+                        )
+                    return
+            # What the solver booted from this round's save plans, and the rounds left then.
+            planned = self._planned_after(solver.sandbox, index)
+            left = (
+                self.validation_rounds - index
+                if self.validation_rounds != "unlimited"
+                else _after(_rounds_left(solver.sandbox))
+            )
             directory = ctx.run_dir / "validation" / str(index)
             artifacts: ArtifactSink | None = None
             viewed: tuple[str, ...] = ()
@@ -1625,9 +1665,11 @@ class EpisodeProtocol:
                 if artifacts is not None:
                     artifacts.cleanup()
 
-            async def boot(handle: str = handle, index: int = index) -> Sandbox:
+            async def boot(
+                handle: str = handle, index: int = index, planned: int = planned
+            ) -> Sandbox:
                 booted = await self._boot_when_there_is_room(
-                    ctx, handle, solver.image, validations=max(self.validations - index, 0)
+                    ctx, handle, solver.image, validations=planned
                 )
                 logger.info(
                     "a validation round booted the next solver",
@@ -1645,7 +1687,8 @@ class EpisodeProtocol:
             assert ctx.agent_run is not None and ctx.agent_run.continuation is not None
             prompt = _round_prompt(
                 ctx.validation_rounds[-1],
-                self.validation_rounds,
+                None if self.validation_rounds == "unlimited" else self.validation_rounds,
+                left,
                 feedback,
                 None if budget.total is None else budget.remaining,
             )
@@ -3185,9 +3228,12 @@ async def _require_snapshot_episode(
         )
 
 
-def validation_rounds(task: Task, harness: Harness, override: int | None) -> int:
+def validation_rounds(
+    task: Task, harness: Harness, override: int | Literal["unlimited"] | None
+) -> int | Literal["unlimited"]:
     """How many validation rounds an agent of ``harness`` receives in an episode of ``task``:
-    the Run's ``override``, else the Task's; none for the oracle and nop, which never loop.
+    the Run's ``override``, which may be ``"unlimited"``, else the Task's; none for the oracle
+    and nop, which never loop.
 
     A count that cannot hold is refused, before anything is prepared.
     """
@@ -3290,25 +3336,45 @@ def _machine(allocation: ResourceAllocation) -> str:
 
 
 def _round_prompt(
-    record: ValidationRound, rounds: int, feedback: str | None, seconds_left: float | None
+    record: ValidationRound,
+    rounds: int | None,
+    left: int | None,
+    feedback: str | None,
+    seconds_left: float | None,
 ) -> str:
     """The prompt that gives the agent one validation round's result: framework-owned and
-    minimal, which round of how many it was and its reward, or that it has none and why, the
-    feedback of the stage that validates verbatim, if it wrote any, the rounds left and the
-    time the agent has left, where it is limited."""
+    minimal, which round it was, of how many where they are counted, and its reward, or that
+    it has none and why, the feedback of the stage that validates verbatim, if it wrote any,
+    and the rounds left and the time the agent has left, each where it is limited."""
     result = (
         f"reward {record.reward:.2f}"
         if record.reward is not None
         else f"no score ({record.status.value})"
     )
-    lines = [f"Validation round {record.index} of {rounds}: {result}."]
+    counted = f" of {rounds}" if rounds is not None else ""
+    lines = [f"Validation round {record.index}{counted}: {result}."]
     if feedback is not None:
         lines += ["", "Feedback:", "<feedback>", feedback.rstrip("\n"), "</feedback>"]
-    left = f"Validation rounds left: {rounds - record.index or 'none'}."
+    last = [] if left is None else [f"Validation rounds left: {left or 'none'}."]
     if seconds_left is not None:
-        left += " " + TIME_LEFT_NOTE.format(minutes=_minutes(seconds_left))
-    lines += ["", left]
+        last.append(TIME_LEFT_NOTE.format(minutes=_minutes(seconds_left)))
+    if last:
+        lines += ["", " ".join(last)]
     return "\n".join(lines)
+
+
+def _rounds_left(sandbox: Sandbox) -> int | None:
+    """How many validation rounds the solver ``sandbox``'s Provider can still save it for, a
+    save its end may need kept aside; None where it saves any number."""
+    if sandbox.saves_left is None:
+        return None
+    final = sandbox.request.saves - sandbox.request.planned_saves
+    return max(sandbox.saves_left - final, 0)
+
+
+def _after(left: int | None) -> int | None:
+    """The rounds left once one more is done."""
+    return None if left is None else max(left - 1, 0)
 
 
 def _with_marked_prompts(

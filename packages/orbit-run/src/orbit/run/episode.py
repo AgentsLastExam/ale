@@ -1297,7 +1297,7 @@ def _write_lock(
         verifier_resolved_image=ctx.verifier_resolved_image,
         verifier_allocation=ctx.verifier_resource_allocation,
         prepared_verifier_image=ctx.prepared_verifier_image,
-        validated=inputs.validation_rounds > 0 or bool(ctx.validation_rounds),
+        validated=bool(inputs.validation_rounds) or bool(ctx.validation_rounds),
         validation_resolved_image=ctx.validation_resolved_image,
         validation_allocation=ctx.validation_resource_allocation,
         prepared_validation_image=ctx.prepared_validation_image,
@@ -1312,7 +1312,7 @@ def _write_lock(
         # The agent was to receive rounds, or calibration's validation check ran.
         validation_stage="tests"
         if ctx.validation_stage is Stage.TESTS
-        and (inputs.validation_rounds > 0 or bool(ctx.validation_rounds))
+        and (bool(inputs.validation_rounds) or bool(ctx.validation_rounds))
         else "validation",
     )
     return lock

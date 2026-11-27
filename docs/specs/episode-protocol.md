@@ -37,15 +37,16 @@ Every phase is timed and attributed independently. Agent and verify default to t
 `[agent].timeout_sec` and `[verifier].timeout_sec`. Setup has a fixed framework bound of
 1800 s, a guard against a hung setup rather than a scored budget. Run policy may override
 `timeouts.agent` and `timeouts.verify` with positive seconds or `"unlimited"`, and
-`validation_rounds` with a non-negative count; an agent whose time is unlimited runs each
-turn until its program ends. These overrides are
-recorded in RunLock and the configuration hash without changing the Task identity. The Agent
-deadline starts at Harness launch (or policy rollout), after installation, resource staging,
-and network policy. Evidence capture, verification, and cleanup do not consume it. An Agent
-timeout terminates execution, is not retried, and destroys its Sandbox even if retention was
-requested, after verification. Teardown is cancellation-shielded on every exit path, and
-SIGTERM cancels a command as Ctrl-C does, so a supervisor or timeout that stops `orbit`
-still lets it destroy every Sandbox it created.
+`validation_rounds` with a non-negative count or `"unlimited"`; an agent whose time is
+unlimited runs each turn until its program ends. A Run that leaves the agent's time, its
+rounds and every Gateway limit unlimited is refused, as nothing would end its agent. These
+overrides are recorded in RunLock and the configuration hash without changing the Task
+identity. The Agent deadline starts at Harness launch (or policy rollout), after
+installation, resource staging, and network policy. Evidence capture, verification, and
+cleanup do not consume it. An Agent timeout terminates execution, is not retried, and
+destroys its Sandbox even if retention was requested, after verification. Teardown is
+cancellation-shielded on every exit path, and SIGTERM cancels a command as Ctrl-C does, so a
+supervisor or timeout that stops `orbit` still lets it destroy every Sandbox it created.
 
 ### Provision
 
@@ -254,14 +255,17 @@ A Task's `[agent].validation_rounds`, or the Run's `validation_rounds`, is `N`, 
 results of [`validation/`](task-authoring.md#validation), or of `tests/` for a Task without
 it, the agent receives. With `N = 0` the episode is the one above. With `N > 0` the agent
 works in up to `N + 1` turns, and a round follows each turn but the last: its result is the
-agent's next prompt, and `tests/` scores the final state once, as above. Only the evaluated
-agent receives rounds; the oracle never does. A turn ends when the Harness's program
-finishes normally, exiting zero with no limit, timeout or failure, so the agent submits by
-ending its turn and needs no command in the Sandbox to do it, and any Harness that resumes
-its session can take part. A turn that anything else ends, or that leaves none of the
-agent's time, is the last, and its state is verified as any stopped agent's is, but for one
-its Sandbox's deadline cuts, which [moves](#moves) and goes on. Each round,
-whatever the verification mode:
+agent's next prompt, and `tests/` scores the final state once, as above. With `"unlimited"`,
+which only a Run sets, a round follows every turn that ends normally while the agent's time
+and Gateway limits last and its solver's Provider can still save it: one that caps how many
+snapshots it stacks in a row ends the rounds there, and the turn after the last round it can
+save for is the last. Only the evaluated agent receives rounds; the oracle never does. A
+turn ends when the Harness's program finishes normally, exiting zero with no limit, timeout
+or failure, so the agent submits by ending its turn and needs no command in the Sandbox to
+do it, and any Harness that resumes its session can take part. A turn that anything else
+ends, or that leaves none of the agent's time, is the last, and its state is verified as any
+stopped agent's is, but for one its Sandbox's deadline cuts, which [moves](#moves) and goes
+on. Each round, whatever the verification mode:
 
 1. copies the agent's logs, as the final copy does, converts its trajectory of the turns
    so far into the round's directory, and, under separate verification, captures the
@@ -301,18 +305,20 @@ to the agent as unscored, and the episode goes on; a save or boot that fails end
 episode without a score, as a failed save for a snapshot verifier does.
 
 The prompts are framework-owned and minimal. The first states the agent's time limit below
-the instruction, as for every episode. Each round's prompt gives which round it was of how
-many and its reward, or that it has none and why, the [feedback](verification.md#feedback)
-of the stage that validated verbatim, if it wrote any, the rounds left and, where the
-agent's time is limited, the time left. Neither says what ending a turn does or what scores
-the final state: what rounds are for is the instruction's to say.
+the instruction, as for every episode. Each round's prompt gives which round it was, of how
+many where they are counted, and its reward, or that it has none and why, the
+[feedback](verification.md#feedback) of the stage that validated verbatim, if it wrote any,
+the rounds left, where they are counted, as a Provider that caps its saves counts unlimited
+ones, and, where the agent's time is limited, the time left. Neither says what ending a turn
+does or what scores the final state: what rounds are for is the instruction's to say.
 
 Rounds need what each step does: a Harness with native resume, since every turn after the
 first resumes the session, and a leaf that saves as many snapshots in a row as the solver
-plans ([Provider selection](sandbox-image.md#provider-selection)) and, for a shared or
-snapshot verifier, serves the round's verifier too. A Run giving rounds to a Harness without
-native resume is refused before provisioning, and one that no leaf serves before anything is
-prepared; either can set `validation_rounds = 0`.
+plans, the next one where rounds are unlimited ([Provider
+selection](sandbox-image.md#provider-selection)) and, for a shared or snapshot verifier,
+serves the round's verifier too. A Run giving rounds to a Harness without native resume is
+refused before provisioning, and one that no leaf serves before anything is prepared; either
+can set `validation_rounds = 0`.
 
 ### Moves
 

@@ -405,6 +405,95 @@ async def test_an_agent_whose_time_is_unlimited_runs_without_a_limit_and_is_told
     assert "agent_sec" not in json.loads((result.run_dir / "progress.json").read_text())
 
 
+class _Chaining(RoundsProvider):
+    """Saves ``cap`` snapshots in a row: each solver booted from the one before can save one
+    fewer, as Firecracker's microVMs stack their layers."""
+
+    def __init__(self, cap: int) -> None:
+        super().__init__()
+        self.cap = cap
+        self.solvers = 0
+
+    async def create(self, request: SandboxRequest) -> MemorySandbox:
+        sandbox = await super().create(request)
+        if request.role is not SandboxRole.VERIFIER:
+            sandbox.saves_left = self.cap - self.solvers
+            self.solvers += 1
+        return sandbox
+
+
+async def _unlimited(tmp_path: Path, provider: RoundsProvider, harness: TurnsHarness) -> Any:
+    task = _task(tmp_path, rounds=0)
+    lock = make_lock()
+    return await run_episode(
+        task,
+        EpisodeProtocol(harness, validation_rounds="unlimited"),
+        provider_registry(provider),
+        run_dir=tmp_path / "runs",
+        provenance=ProvenanceInputs(
+            source=lock.task.source,
+            agent=lock.agent,
+            gateway=lock.gateway,
+            config_hash=lock.config_hash,
+            framework=lock.framework,
+            validation_rounds="unlimited",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_unlimited_rounds_end_where_the_solvers_provider_saves_no_more(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    """Rounds go on while the agent has time and Gateway limits left and its solver's
+    Provider can take the next save: one that caps its chain ends them there, and the turn
+    after the last round it can save for is the last, verified as any final state is."""
+    harness = TurnsHarness()
+    result = await _unlimited(tmp_path, _Chaining(3), harness)
+    assert result.verdict.status is Status.COMPLETED, result.verdict.failure
+    assert [item.index for item in result.record.validation_rounds] == [1, 2, 3]
+    assert len(harness.prompts) == 4
+    assert [prompt.splitlines()[0] for prompt in harness.prompts[1:]] == [
+        "Validation round 1: reward 0.33.",
+        "Validation round 2: reward 0.67.",
+        "Validation round 3: reward 1.00.",
+    ]
+    assert [prompt.splitlines()[-1].partition(" Time")[0] for prompt in harness.prompts[1:]] == [
+        "Validation rounds left: 2.",
+        "Validation rounds left: 1.",
+        "Validation rounds left: none.",
+    ]
+    assert result.lock is not None and result.lock.validation_rounds == "unlimited"
+
+
+@pytest.mark.asyncio
+async def test_unlimited_rounds_go_on_until_the_agents_time_runs_out(
+    tmp_path: Path, verifiers: Verifiers
+) -> None:
+    """Where the Provider saves any number, nothing counts the rounds: the agent learns of
+    none left, and the turn that runs out of time is the last."""
+    harness = TurnsHarness(stops={4: PhaseTimeoutError("agent", 600)})
+    result = await _unlimited(tmp_path, RoundsProvider(), harness)
+    assert result.verdict.status is Status.TIMEOUT, result.verdict.failure
+    assert [item.index for item in result.record.validation_rounds] == [1, 2, 3]
+    assert harness.prompts[1].splitlines()[0] == "Validation round 1: reward 0.33."
+    assert all("rounds left" not in prompt for prompt in harness.prompts)
+    assert all(prompt.splitlines()[-1] == _TIME_LEFT for prompt in harness.prompts[1:])
+
+
+def test_a_run_whose_agent_nothing_limits_is_refused() -> None:
+    """Unlimited time, rounds and Gateway limits could run for ever: one of them holds."""
+    with pytest.raises(ValueError, match="could run for ever"):
+        RunConfig(validation_rounds="unlimited", timeouts={"agent": "unlimited"})  # type: ignore[arg-type]
+    for limited in (
+        {"timeouts": {"agent": 3600}},
+        {"validation_rounds": 5},
+        {"gateway": {"limits": {"max_total_tokens": 10**8}}},
+    ):
+        config = {"validation_rounds": "unlimited", "timeouts": {"agent": "unlimited"}}
+        RunConfig.model_validate(config | limited)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stop", "status"),

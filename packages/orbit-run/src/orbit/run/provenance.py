@@ -208,7 +208,7 @@ class ProvenanceInputs:
     gateway: GatewayProvenance
     config_hash: str
     timeouts: RunTimeouts = field(default_factory=RunTimeouts)
-    validation_rounds: int = 0
+    validation_rounds: int | Literal["unlimited"] = 0
     """The effective count, which the run layer resolves before anything is prepared."""
     judges: tuple[JudgeProvenance, ...] = ()
     framework: FrameworkProvenance = field(default_factory=framework_provenance)

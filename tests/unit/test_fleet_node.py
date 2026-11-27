@@ -407,6 +407,27 @@ class TestCreation:
         _, profile = agent.admit(grant, boot)
         assert profile.provider == "docker:kata"
 
+    async def test_a_sandbox_tells_the_run_how_many_more_snapshots_it_saves(
+        self,
+        client: TestClient,
+        agent: NodeAgent,
+        provider: MemoryProvider,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Where the Node's Provider caps a snapshot chain, by which unlimited validation
+        rounds end there."""
+        created = provider.create
+
+        async def capped(request: SandboxRequest) -> MemorySandbox:
+            sandbox = await created(request)
+            sandbox.saves_left = 5
+            return sandbox
+
+        monkeypatch.setattr(provider, "create", capped)
+        response = await create(client, agent)
+        assert response.status == 200
+        assert (await response.json())["saves_left"] == 5
+
     async def test_the_node_creates_only_on_its_own_grant(
         self, client: TestClient, agent: NodeAgent, provider: MemoryProvider
     ) -> None:

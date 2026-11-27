@@ -169,8 +169,8 @@ expect = { reward = [0.4, 0.6] }            # reward and other numbers: exact or
 per OS. It must be a directory when the agent starts; stages keep their fixed directories.
 `[agent].validation_rounds`, an integer from 0, is how many results of
 [`validation/`](#validation), or of `tests/` for a Task without it, the agent receives. Run
-policy may replace it with `validation_rounds`, a non-negative integer, recorded as the
-timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
+policy may replace it with `validation_rounds`, a non-negative integer or `"unlimited"`,
+recorded as the timeouts' overrides are ([Episode protocol](episode-protocol.md#phase-order)).
 
 When the instruction requires deliverable files, every instructed destination must equal or be
 contained by a declared `artifacts` path, or matched by a declared glob. Commands and examples in `instruction.md` must write to

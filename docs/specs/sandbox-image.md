@@ -595,16 +595,19 @@ rather than failing its episodes one by one.
 
 Each [validation round](episode-protocol.md#validation-rounds) saves the solver and boots
 the next from the snapshot, on the same leaf, so a solver plans its saves: one for each
-round still to come, or for calibration's validation check, and one at its end only when
-it is kept as a snapshot or saved for a snapshot verifier. A shared solver is never saved at
-its end for its verifier. Selection compares that count with how many snapshots in a row a
-profile saves (`max_saves`), and a leaf that saves fewer in a row is not chosen. Under
-shared verification a solver with rounds also carries the needs of the round's verifier,
-which boots from its snapshot with the solver's resources and no sudo, and of
-`[verifier.validation]`'s snapshot verifier when that places one, each with its own
-network. Volumes ask nothing of selection: a separate verifier mounts views of its solver's
-volumes only where, as the episode finds, the solver's leaf serves it and saves the solver
-once more for it, and a Sandbox's volumes are copied otherwise.
+round still to come, the next one where they are unlimited, or for calibration's validation
+check, and one at its end only when it is kept as a snapshot or saved for a snapshot
+verifier. A shared solver is never saved at its end for its verifier. Selection compares
+that count with how many snapshots in a row a profile saves (`max_saves`), and a leaf that
+saves fewer in a row is not chosen. A Sandbox of a leaf that caps its chain says how many
+more it and the Sandboxes booted from its snapshots can save (`saves_left`), by which
+unlimited rounds end there; a leaf that flattens a snapshot before its chain would pass what
+it stacks saves any number. Under shared verification a solver with rounds also carries the
+needs of the round's verifier, which boots from its snapshot with the solver's resources and
+no sudo, and of `[verifier.validation]`'s snapshot verifier when that places one, each with
+its own network. Volumes ask nothing of selection: a separate verifier mounts views of its
+solver's volumes only where, as the episode finds, the solver's leaf serves it and saves the
+solver once more for it, and a Sandbox's volumes are copied otherwise.
 
 Before any episode starts, the Run has each selected leaf run its preflight with the needs
 of the Sandboxes selected for it, which finds what the leaf runs those with, such as its

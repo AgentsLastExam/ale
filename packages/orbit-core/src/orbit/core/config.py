@@ -449,9 +449,9 @@ class RunConfig(BaseModel):
     gateway: GatewayConfig = GatewayConfig()
     verification: VerificationConfig = VerificationConfig()
     timeouts: RunTimeouts = RunTimeouts()
-    validation_rounds: int | None = Field(default=None, ge=0, strict=True)
+    validation_rounds: Annotated[int, Field(ge=0, strict=True)] | Literal["unlimited"] | None = None
     """How many validation rounds each agent receives instead of each Task's
-    ``[agent].validation_rounds``; ``None`` keeps the Task's."""
+    ``[agent].validation_rounds``, or ``"unlimited"``; ``None`` keeps the Task's."""
     sandbox_retention: SandboxRetentionConfig = SandboxRetentionConfig()
     desktop_resolution: DesktopResolution = Field(
         default=DesktopResolution(),
@@ -498,6 +498,24 @@ class RunConfig(BaseModel):
     @property
     def authentication_source(self) -> Literal["cli", "run", "preset", "default"]:
         return self._authentication_source
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _some_limit(self) -> Self:
+        """An agent whose time, rounds and Gateway limits are all unlimited could run for
+        ever: one of them must hold."""
+        limits = self.gateway.limits
+        if (
+            self.timeouts.agent == "unlimited"
+            and self.validation_rounds == "unlimited"
+            and all(value == "unlimited" for value in limits.model_dump().values())
+        ):
+            raise ValueError(
+                "timeouts.agent and validation_rounds are unlimited, and so is every "
+                "gateway.limits: set one of them, or the agent could run for ever"
+            )
+        return self
 
 
 def parse_override(text: str) -> tuple[list[str], Any]:

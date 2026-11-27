@@ -528,6 +528,10 @@ class Sandbox(ABC):
         #: what saving it and writing it where another Sandbox can boot from it takes is left
         #: after it. None where the Provider holds it as long as it is asked to.
         self.deadline: datetime | None = None
+        #: How many snapshots in a row it, and each Sandbox booted from the snapshot before,
+        #: can still save, where its Provider caps that chain; None where it saves any
+        #: number.
+        self.saves_left: int | None = None
 
     def release_resources(self) -> None:
         """Release Provider allocations after the underlying sandbox has stopped."""

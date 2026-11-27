@@ -282,13 +282,15 @@ async def _run_one(
     try:
         resolved = resolve(reference)
         tasks = _load(resolved.task_dir)
-        rounds: dict[str, int] = {}
+        rounds: dict[str, int | Literal["unlimited"]] = {}
         for task in tasks:
             harness.validate_os(task.spec.os)
             rounds[str(task.spec.name)] = validation_rounds(
                 task, harness, settings.validation_rounds
             )
-            task.validations = rounds[str(task.spec.name)]
+            # What its Sandboxes plan for: every round, or the next where they are unlimited.
+            planned = rounds[str(task.spec.name)]
+            task.validations = 1 if planned == "unlimited" else planned
         _resolve_variables(tasks, settings, oracle=settings.agent.name == "oracle")
         await preflight_judges(_verify_dirs(tasks), settings.verification)
         continued = (
