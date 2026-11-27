@@ -810,6 +810,160 @@ def test_grok_parser_names_only_sessions_it_did_not_convert(tmp_path: Path) -> N
     ]
 
 
+GROK_PROMPT = {
+    "type": "user",
+    "content": [{"type": "text", "text": "<user_query>\nUse the task MCP.\n</user_query>"}],
+    "prompt_index": 0,
+}
+
+
+def grok_call(second: int, usage: object = None, session: str = "session") -> dict:
+    """Grok's log record of a model call that completed at ``second``, with its usage."""
+    record = {"ts": at(second), "sid": session, "msg": "shell.turn.inference_done"}
+    return record if usage is None else {**record, "ctx": usage}
+
+
+def grok_usage(prompt: int, cached: int, completion: int) -> dict[str, int]:
+    return {
+        "prompt_tokens": prompt,
+        "cached_prompt_tokens": cached,
+        "completion_tokens": completion,
+    }
+
+
+def grok_prompt_start(session: str = "session") -> dict[str, object]:
+    """Grok's log record of a prompt that started at second 1."""
+    return {"ts": at(1), "sid": session, "msg": "shell.handle_prompt.start"}
+
+
+def grok_session(tmp_path: Path, log: list[dict[str, object]] | None) -> AtifTrajectory:
+    """A session of one prompt and three assistant messages, the first one empty, with
+    Grok's log, if given."""
+    write_jsonl(
+        tmp_path / ".grok-orbit/sessions/session/chat_history.jsonl",
+        [
+            GROK_PROMPT,
+            {"type": "assistant", "content": ""},
+            {"type": "reasoning", "summary": [{"text": "plan"}]},
+            {
+                "type": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-1", "name": "list_dir", "arguments": "{}"}],
+            },
+            {"type": "tool_result", "tool_call_id": "call-1", "content": "task.json"},
+            {"type": "assistant", "content": "done"},
+        ],
+    )
+    if log is not None:
+        write_jsonl(tmp_path / ".grok-orbit/logs/unified.jsonl", log)
+    return GrokBuildHarness().parse_trajectory(context(tmp_path, "grok"))
+
+
+def test_grok_steps_take_their_times_and_usage_from_grok_s_log(tmp_path: Path) -> None:
+    trajectory = grok_session(
+        tmp_path,
+        [
+            # Another session's records, and a record that is no prompt or model call.
+            grok_prompt_start("other"),
+            grok_call(2, grok_usage(9, 0, 9), session="other"),
+            {"sid": "session", "msg": "shell.turn.inference_start"},
+            grok_prompt_start(),
+            # The empty message is no step; its call's usage stays off the next one.
+            grok_call(3, grok_usage(1000, 0, 30)),
+            grok_call(4, grok_usage(1100, 1000, 20)),
+            grok_call(6, grok_usage(1200, 1100, 5)),
+        ],
+    )
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", at(1)),
+        ("agent", at(4)),
+        ("agent", at(6)),
+    ]
+    assert trajectory.steps[1].reasoning_content == "plan"
+    # Prompt tokens include the cached ones; Grok records no response ID to link.
+    assert [step.metrics for step in trajectory.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=1100, completion_tokens=20, cached_tokens=1000),
+        AtifMetrics(prompt_tokens=1200, completion_tokens=5, cached_tokens=1100),
+    ]
+    assert all(step.extra is None for step in trajectory.steps)
+    assert trajectory.extra is None
+
+
+@pytest.mark.parametrize(
+    ("usage", "metrics"),
+    [
+        # Grok records no cache reads: none.
+        (
+            {"prompt_tokens": 1200, "completion_tokens": 5},
+            AtifMetrics(prompt_tokens=1200, completion_tokens=5, cached_tokens=0),
+        ),
+        # No tokens, or no usage at all: no usage, and nothing to report.
+        (grok_usage(0, 0, 0), None),
+        (None, None),
+        # A count that is missing or no count: reported.
+        ({"prompt_tokens": 1200}, "invalid"),
+        ({"prompt_tokens": 1200, "completion_tokens": "?"}, "invalid"),
+        ("no usage record", "invalid"),
+    ],
+)
+def test_grok_reads_a_call_s_usage_only_when_it_holds_its_counts(
+    tmp_path: Path, usage: object, metrics: object
+) -> None:
+    trajectory = grok_session(
+        tmp_path,
+        [
+            grok_prompt_start(),
+            grok_call(3, grok_usage(1000, 0, 30)),
+            grok_call(4, grok_usage(1100, 1000, 20)),
+            grok_call(6, usage),
+        ],
+    )
+
+    assert trajectory.steps[2].timestamp == at(6)
+    if metrics == "invalid":
+        assert trajectory.steps[2].metrics is None
+        assert trajectory.extra["orbit"]["parse_issues"] == [
+            {
+                "reason": "invalid_token_usage",
+                "source": ".grok-orbit/logs/unified.jsonl",
+                "session_id": "session",
+                "timestamp": at(6),
+            }
+        ]
+    else:
+        assert trajectory.steps[2].metrics == metrics
+        assert trajectory.extra is None
+
+
+@pytest.mark.parametrize(
+    ("prompts", "calls"),
+    # The session holds one prompt and three assistant messages: one call too few, and one
+    # prompt too many with as many calls as messages.
+    [(1, 2), (2, 3)],
+)
+def test_grok_pairs_no_log_records_unless_their_counts_agree(
+    tmp_path: Path, prompts: int, calls: int
+) -> None:
+    log = [grok_prompt_start()] * prompts
+    log += [grok_call(second, grok_usage(1000, 0, 30)) for second in range(3, 3 + calls)]
+    trajectory = grok_session(tmp_path, log)
+
+    assert all(step.timestamp is None and step.metrics is None for step in trajectory.steps)
+    assert trajectory.extra["orbit"]["parse_issues"] == [
+        {"reason": "unpaired_log_records", "session_id": "session"}
+    ]
+
+
+def test_grok_steps_have_no_times_or_usage_without_grok_s_log(tmp_path: Path) -> None:
+    trajectory = grok_session(tmp_path, None)
+
+    assert len(trajectory.steps) == 3
+    assert all(step.timestamp is None and step.metrics is None for step in trajectory.steps)
+    assert trajectory.extra is None
+
+
 def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     native_path(tmp_path, STDOUT_PATH).write_text(
         "\n".join(

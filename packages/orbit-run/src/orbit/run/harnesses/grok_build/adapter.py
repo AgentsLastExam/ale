@@ -53,7 +53,7 @@ class GrokBuildHarness(CliHarness):
     }
     settings_type = GrokBuildSettings
     settings: GrokBuildSettings
-    logs = (LOG_ROOT, ".grok-orbit/sessions")
+    logs = (LOG_ROOT, trajectory.SESSIONS, trajectory.LOGS)
     # Its GROK_HOME, where a login keeps its credentials.
     credentials = (".grok-orbit/auth.json",)
 
