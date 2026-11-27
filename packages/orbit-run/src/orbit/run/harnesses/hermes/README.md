@@ -50,6 +50,17 @@ and a message the summary was folded into follows it. When a compaction instead
 continues the conversation in a new session, whose parent ended for `compression`, that
 session's messages follow on in the same trajectory.
 
+A step takes the time Hermes stored its message, in Unix seconds; an assistant message is
+stored once its model call's response has arrived. Hermes keeps neither a model call's
+usage nor its response ID, only the session's totals, so steps carry no metrics and are
+not linked to Gateway calls. The final metrics are the last `result` event's tokens, whose
+`input` includes the cache reads and writes and whose `output` includes reasoning; tokens
+that cannot be read are reported as `invalid_token_usage`. A turn rebuilt from stream-json
+lacks the same usage and response IDs, and takes the time Hermes printed each event: a
+text step its last delta's, a tool use the time its call started. With a custom provider
+Hermes asks the model for a session title once the first turn has ended, a call that
+produces no step.
+
 A session records its origin, never the call that caused it: a `delegate_task` child has
 `parent_session_id` and an equal `_delegate_from` in its `model_config`. It becomes a
 subagent trajectory, embedded in its spawner's, when its first message is the goal of
