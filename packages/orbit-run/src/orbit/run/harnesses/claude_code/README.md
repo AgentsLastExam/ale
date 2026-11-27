@@ -13,6 +13,17 @@ stream-only `result` events after the record that preceded them. A subagent sess
 `agent-<id>.jsonl` names the call that spawned it in the `toolUseId` of the
 `agent-<id>.meta.json` beside it.
 
+A step takes the time its native line records, when that names its zone. Claude Code
+writes each content block of a response as its own line, every one with the response's
+message ID, which is the provider's response ID, and its full usage. Every step a response
+produced lists that ID in `extra.orbit.native_event_ids`: the root session's steps link to
+their Gateway calls; a subagent's steps keep the ID, unlinked. The first step of a response
+carries its usage as metrics: the prompt tokens are `input_tokens` plus the cache writes and
+reads, and the completion tokens are `output_tokens`, which include the thinking. Usage that
+cannot be read is reported as `invalid_token_usage`. Stdout counts a response's output
+tokens only up to each block, so a turn rebuilt from stdout alone has times and response IDs
+but no usage.
+
 WebSearch runs Anthropic's `web_search` server tool in a request of its own, so unless
 the Task's network is `open` Orbit adds it to `--disallowedTools`. WebFetch fetches from
 inside the Sandbox and stays under its network policy.

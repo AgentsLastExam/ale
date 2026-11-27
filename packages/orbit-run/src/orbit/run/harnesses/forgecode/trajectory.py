@@ -22,7 +22,13 @@ from orbit.core.trajectory import (
     AtifTrajectory,
     TrajectoryBuilder,
 )
-from orbit.run.harnesses.base import NativeResult, invocations, requested_session_id
+from orbit.run.harnesses.base import (
+    NativeResult,
+    call_metrics,
+    invocations,
+    requested_session_id,
+    token_count,
+)
 
 #: ``FORGE_CONFIG``.
 STATE = ".forge-orbit"
@@ -84,7 +90,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     turns = 0
     if isinstance(root, dict):
         turns = _convert(
-            builder, root, context, servers, related, children, claimed, failures=failures
+            builder, root, context, servers, related, children, claimed, issues, failures=failures
         )
         if turns < len(recorded):
             issues.append({"reason": "prompt_not_in_native_session", "invocation": turns + 1})
@@ -151,6 +157,7 @@ def _convert(
     related: dict[str, dict[str, Any]],
     children: list[AtifTrajectory],
     claimed: set[str],
+    issues: list[dict[str, Any]],
     *,
     failures: list[str | None],
 ) -> int:
@@ -162,7 +169,7 @@ def _convert(
         if isinstance(tool, dict):
             results[str(tool.get("call_id") or "")] = tool
     prompts = 0
-    for message in messages:
+    for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
         if isinstance(message.get("image"), dict):
@@ -207,6 +214,7 @@ def _convert(
                             related,
                             children,
                             claimed,
+                            issues,
                         )
                     )
             reasoning = "".join(
@@ -214,6 +222,17 @@ def _convert(
                 for item in text.get("reasoning_details") or ()
                 if isinstance(item, dict)
             )
+            try:
+                metrics = _metrics(message.get("usage"))
+            except ValueError:
+                metrics = None
+                issues.append(
+                    {
+                        "reason": "invalid_token_usage",
+                        "session_id": conversation.get("id"),
+                        "message": index,
+                    }
+                )
             builder.add(
                 source="agent",
                 message=str(text.get("content") or ""),
@@ -221,7 +240,7 @@ def _convert(
                 reasoning_content=reasoning or None,
                 tool_calls=calls or None,
                 observation=AtifObservation(results=observed) if observed else None,
-                metrics=_metrics(message.get("usage")),
+                metrics=metrics,
             )
     _failure(builder, failures, prompts)
     return prompts
@@ -241,6 +260,7 @@ def _result(
     related: dict[str, dict[str, Any]],
     children: list[AtifTrajectory],
     claimed: set[str],
+    issues: list[dict[str, Any]],
 ) -> AtifObservationResult:
     """A tool result; a ``task`` result names the child conversation it delegated to,
     which embeds in the ``spawner`` trajectory."""
@@ -258,7 +278,7 @@ def _result(
             child_id = str(delegated.get("conversation_id") or "")
             if child_id in related and child_id not in claimed:
                 claimed.add(child_id)
-                child = _child(spawner, child_id, related, context, servers, claimed)
+                child = _child(spawner, child_id, related, context, servers, claimed, issues)
                 children.append(child)
                 refs.append(
                     AtifSubagentTrajectoryRef(
@@ -288,6 +308,7 @@ def _child(
     context: TrajectoryParseContext,
     servers: dict[str, str],
     claimed: set[str],
+    issues: list[dict[str, Any]],
 ) -> AtifTrajectory:
     """A delegated conversation as an embedded subagent trajectory; its own delegations
     embed in it."""
@@ -299,7 +320,9 @@ def _child(
         ),
     )
     nested: list[AtifTrajectory] = []
-    _convert(builder, related[child_id], context, servers, related, nested, claimed, failures=[])
+    _convert(
+        builder, related[child_id], context, servers, related, nested, claimed, issues, failures=[]
+    )
     if not builder.steps:
         builder.add(source="user", message=str(related[child_id].get("title") or ""))
     return builder.build(subagent_trajectories=nested or None)
@@ -335,19 +358,22 @@ def _image(image: dict[str, Any], context: TrajectoryParseContext) -> str | list
 
 
 def _metrics(usage: Any) -> AtifMetrics | None:
+    """A message's usage. Forge gives each count as ``{"actual": n}``, or as ``{"approx": n}``
+    when it estimated the count itself, which is not the model's usage: only actual prompt
+    and completion counts report usage. The prompt already counts the cache reads and writes,
+    and the completion the reasoning."""
+    if usage is None:
+        return None
     if not isinstance(usage, dict):
+        raise ValueError(f"not a usage: {usage!r}")
+    counts = [usage.get(key) for key in ("prompt_tokens", "completion_tokens", "cached_tokens")]
+    prompt, completion, cached = (count if isinstance(count, dict) else {} for count in counts)
+    if "actual" not in prompt or "actual" not in completion:
         return None
-
-    def actual(key: str) -> int | None:
-        value = usage.get(key)
-        count = value.get("actual") if isinstance(value, dict) else None
-        return count if isinstance(count, int) else None
-
-    prompt, completion = actual("prompt_tokens"), actual("completion_tokens")
-    if prompt is None and completion is None:
-        return None
-    return AtifMetrics(
-        prompt_tokens=prompt, completion_tokens=completion, cached_tokens=actual("cached_tokens")
+    return call_metrics(
+        token_count(prompt["actual"]),
+        token_count(completion["actual"]),
+        token_count(cached.get("actual"), optional=True),
     )
 
 

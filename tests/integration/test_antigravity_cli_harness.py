@@ -33,7 +33,7 @@ from orbit.run.harnesses.antigravity_cli import AntigravityCliHarness
 from orbit.run.harnesses.base import CONTINUE_PROMPT
 from orbit.run.protocol.log_mirror import LogMirror
 from orbit.run.recording import EpisodeRecording
-from tests.support import cli_os, cli_sandbox
+from tests.support import check_steps_against_gateway, cli_os, cli_sandbox
 
 pytestmark = [
     pytest.mark.integration,
@@ -101,6 +101,8 @@ class ScriptedGemini:
 
     steps: list[tuple[str, Any]]
     requests: list[dict[str, Any]] = field(default_factory=list)
+    #: The response ID of each call the agent loop made, in order.
+    loop: list[str] = field(default_factory=list)
     url: str = ""
     _runner: web.AppRunner | None = None
 
@@ -138,17 +140,25 @@ class ScriptedGemini:
             ]
         else:
             parts = [{"text": value}]
+        # Each call's counts differ from every other call's, so a step's usage names its call:
+        # uncached input, cache reads and output.
+        number = len(self.requests)
+        fresh, read, output = 10 + number, 100 * number, 3 + number
         chunk = {
+            "responseId": f"scripted-{number}",
             "candidates": [
                 {"content": {"role": "model", "parts": parts}, "finishReason": "STOP", "index": 0}
             ],
             "usageMetadata": {
-                "promptTokenCount": 11,
-                "candidatesTokenCount": 7,
-                "totalTokenCount": 18,
+                "promptTokenCount": fresh + read,
+                "cachedContentTokenCount": read,
+                "candidatesTokenCount": output,
+                "totalTokenCount": fresh + read + output,
             },
             "modelVersion": MODEL,
         }
+        if SHELL[0] in offered:
+            self.loop.append(chunk["responseId"])
         if not request.path.endswith(":streamGenerateContent"):
             return web.json_response(chunk)
         response = web.StreamResponse(headers={"content-type": "text/event-stream"})
@@ -294,6 +304,7 @@ async def test_agy_runs_through_the_gateway_with_resources_and_resumes(tmp_path:
     assert harness.parse_trajectory(context) == trajectory
     # Every native file is converted or a copy of what the converted records hold.
     assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
+    check_steps_against_gateway(trajectory, transport, upstream.loop)
     assert [step.message for step in trajectory.steps if step.source == "user"] == [
         first_prompt,
         "second",

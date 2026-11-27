@@ -14,7 +14,8 @@ named by `QWEN_CODE_SYSTEM_SETTINGS_PATH`, so they override a workspace's own
 `.qwen/settings.json`; an empty system defaults file replaces any machine-wide one. The
 route reads the episode token from `ORBIT_GATEWAY_TOKEN` through `envKey` and takes
 precedence over `OPENAI_*` variables, which the command also unsets. Usage statistics,
-telemetry and the models.dev refresh are off. `QWEN_CODE_NO_RELAUNCH` keeps Qwen from
+the telemetry export and the models.dev refresh are off; Qwen still writes its
+`ui_telemetry` records into the session. `QWEN_CODE_NO_RELAUNCH` keeps Qwen from
 relaunching itself with a heap of half the host's total memory, which ignores the
 Sandbox's memory limit; Node's own default heap follows the limit. Everything else,
 including Qwen's managed memory and its deferred tools, keeps the pinned program's
@@ -41,6 +42,19 @@ defers, MCP tools and `agent` among them, are reviewed with `tool_search` and ma
 through `tool_call`; the parser records such a call as the call it made and notes the
 wrapper. A failed turn has no record in the session; its stdout `result` is added at the
 end of the turn.
+
+Each assistant record is one model call, written once its response has streamed; the
+step takes its time and its `usageMetadata` as metrics. `promptTokenCount` already
+includes the cache reads and writes and `candidatesTokenCount` the reasoning, so they are
+`prompt_tokens` and `completion_tokens`; usage without both, as when the provider reported
+only a total, is reported as `invalid_token_usage`. The record names no response ID, but
+the `qwen-code.api_response` record Qwen writes into the session just before it does, so
+the step lists that `response_id` in `extra.orbit.native_event_ids` and the root
+session's steps link to their Gateway calls; a record that names a subagent is that
+subagent's call. A subagent's own transcript has no such records, so its steps list no
+response ID. After the final answer Qwen's managed memory may run its extraction agent, a
+model call that produces no step. A turn rebuilt from stdout keeps only its final answer,
+with no time, usage or response ID.
 
 A subagent writes `subagents/<session id>/agent-<type>-<call id>.jsonl` beside a
 `.meta.json` naming the session, the parent agent and the spawning call. It becomes an

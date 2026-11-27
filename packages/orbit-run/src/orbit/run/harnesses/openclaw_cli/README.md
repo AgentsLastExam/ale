@@ -3,7 +3,16 @@
 Runs `openclaw agent --local --agent main` with `--message-file`. Orbit always uses agent
 `main`, so the session is `.openclaw-orbit/agents/main/sessions/<session id>.jsonl`. The
 parser follows that file; without it, each turn keeps only the reply text the CLI
-printed.
+printed, with no time, usage or response ID.
+
+Each transcript entry records, as `timestamp`, when OpenClaw wrote it, and its step takes
+that time. An assistant message is one model call's output, with the call's `usage` and
+the provider's `responseId`. Its step carries the usage as metrics: `input` plus
+`cacheRead` and `cacheWrite` as `prompt_tokens`, and `output`, which includes reasoning,
+as `completion_tokens`. It lists the response ID in `extra.orbit.native_event_ids`; the
+root session's steps link to their Gateway calls, and a subagent's steps keep the ID,
+unlinked. Usage that reports no tokens is left out, and usage that cannot be read is
+reported as `invalid_token_usage`.
 
 A `sessions_spawn` result names the session key of the child it started, and the session
 index, `sessions.json`, maps that key to the child's session ID and to the key of the

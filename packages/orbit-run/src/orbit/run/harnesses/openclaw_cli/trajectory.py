@@ -14,7 +14,6 @@ from orbit.core.trajectory import (
     AtifContentPart,
     AtifFinalMetrics,
     AtifImageSource,
-    AtifMetrics,
     AtifObservation,
     AtifObservationResult,
     AtifSubagentTrajectoryRef,
@@ -25,10 +24,13 @@ from orbit.core.trajectory import (
 from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     NativeResult,
+    call_metrics,
     invocations,
+    iso_time,
     mirrored_files,
     native_events,
     requested_session_id,
+    token_count,
     unconverted,
 )
 
@@ -117,10 +119,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         issues.append({"reason": "prompt_not_in_native_session", "invocation": native_turns + 1})
     results = _results(events, context, spawned)
     builder = TrajectoryBuilder(
-        trajectory_id=context.trajectory_id,
-        session_id=expected,
-        agent=_agent(context),
-        extra=_extra(context, issues),
+        trajectory_id=context.trajectory_id, session_id=expected, agent=_agent(context)
     )
     turn = 0
     totals = dict.fromkeys(_USAGE_KEYS, 0)
@@ -128,7 +127,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if text := _user_text(event):
             if turn:
                 _failure(builder, envelopes[min(turn, len(envelopes)) - 1])
-            builder.add(source="user", message=text)
+            builder.add(source="user", message=text, timestamp=iso_time(event.get("timestamp")))
             turn += 1
             continue
         if not _is_message(event, "assistant"):
@@ -136,7 +135,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if not turn:
             builder.add(source="user", message=recorded[0].prompt)
             turn = 1
-        _assistant_step(builder, event, results, totals)
+        _assistant_step(builder, event, results, totals, issues)
     if events and not turn:
         builder.add(source="user", message=recorded[0].prompt)
         turn = 1
@@ -150,6 +149,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         _failure(builder, envelope)
     if not any(step.source == "agent" for step in builder.steps) and context.final_message:
         builder.add(source="agent", message=context.final_message)
+    builder.extra = _extra(context, issues)
     trajectory = builder.build(
         final_metrics=_final_metrics(builder, totals), subagent_trajectories=subagents or None
     )
@@ -251,9 +251,9 @@ def _session_trajectory(
     totals = dict.fromkeys(_USAGE_KEYS, 0)
     for event in events:
         if text := _user_text(event):
-            builder.add(source="user", message=text)
+            builder.add(source="user", message=text, timestamp=iso_time(event.get("timestamp")))
         elif _is_message(event, "assistant"):
-            _assistant_step(builder, event, results, totals)
+            _assistant_step(builder, event, results, totals, issues)
     if not builder.steps:
         return None
     return builder.build(
@@ -314,10 +314,13 @@ def _assistant_step(
     event: dict[str, Any],
     results: dict[str, AtifObservationResult],
     totals: dict[str, int],
+    issues: list[dict[str, Any]],
 ) -> None:
-    """One assistant message as an agent step, adding its usage to ``totals``.
+    """One assistant message, the output of one model call, as an agent step.
 
-    Native ``input`` excludes cache reads and writes; ATIF prompt tokens include both.
+    The step takes the time OpenClaw recorded the message, the call's usage, which it adds
+    to ``totals``, and the provider's response ID. Native ``input`` excludes cache reads
+    and writes, which ATIF prompt tokens include, and ``output`` includes the reasoning.
     """
     message = event.get("message") or {}
     blocks = message.get("content") or []
@@ -346,25 +349,38 @@ def _assistant_step(
             )
             if call_id in results:
                 observations.append(results[call_id])
-    usage = message.get("usage") or {}
-    tokens = dict.fromkeys(_USAGE_KEYS, 0)
-    if isinstance(usage, dict):
-        for key in _USAGE_KEYS:
-            tokens[key] = int(usage.get(key) or 0)
-            totals[key] += tokens[key]
+    usage, metrics = message.get("usage"), None
+    if usage is not None:
+        counts = usage if isinstance(usage, dict) else {}
+        try:
+            tokens = {
+                key: token_count(counts.get(key), optional=key.startswith("cache"))
+                for key in _USAGE_KEYS
+            }
+        except ValueError:
+            issues.append(
+                {
+                    "reason": "invalid_token_usage",
+                    "session_id": builder.session_id,
+                    "entry_id": event.get("id"),
+                }
+            )
+        else:
+            for key in _USAGE_KEYS:
+                totals[key] += tokens[key]
+            metrics = call_metrics(_prompt_tokens(tokens), tokens["output"], tokens["cacheRead"])
+    response = message.get("responseId")
     builder.add(
         source="agent",
         message="\n".join(text),
         reasoning_content="\n".join(reasoning) or None,
         tool_calls=calls or None,
         observation=AtifObservation(results=observations) if observations else None,
-        metrics=(
-            AtifMetrics(
-                prompt_tokens=_prompt_tokens(tokens),
-                completion_tokens=tokens["output"],
-                cached_tokens=tokens["cacheRead"],
-            )
-            if usage
+        timestamp=iso_time(event.get("timestamp")),
+        metrics=metrics,
+        extra=(
+            {"orbit": {"native_event_ids": [response]}}
+            if isinstance(response, str) and response
             else None
         ),
     )

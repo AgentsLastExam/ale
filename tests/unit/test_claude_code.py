@@ -19,6 +19,7 @@ from orbit.core.errors import (
 )
 from orbit.core.harness import HarnessSession, TrajectoryParseContext
 from orbit.core.sandbox import ExecResult, SandboxFile
+from orbit.core.trajectory import AtifMetrics
 from orbit.run.harnesses.base import STDOUT_PATH
 from orbit.run.harnesses.builtin import NopHarness
 from orbit.run.harnesses.claude_code import ClaudeCodeHarness
@@ -890,4 +891,141 @@ def test_without_a_native_session_each_turn_starts_with_its_recorded_prompt(
     ]
     assert trajectory.extra["orbit"]["parse_issues"] == [
         {"reason": "native_session_unavailable", "session_id": "root"}
+    ]
+
+
+def claude_usage(fresh: int, written: int, read: int, output: int) -> dict[str, int]:
+    return {
+        "input_tokens": fresh,
+        "cache_creation_input_tokens": written,
+        "cache_read_input_tokens": read,
+        "output_tokens": output,
+    }
+
+
+def claude_assistant(
+    second: int, message_id: str, part: dict[str, object], usage: object = None
+) -> dict[str, object]:
+    """One content block of response ``message_id``, as Claude Code records each on a line."""
+    message: dict[str, object] = {"id": message_id, "content": [part]}
+    if usage is not None:
+        message["usage"] = usage
+    return {
+        "type": "assistant",
+        "sessionId": "root",
+        "timestamp": f"2026-10-26T00:00:{second:02d}.000Z",
+        "message": message,
+    }
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_steps_keep_native_times_and_each_model_call_its_usage_once(
+    tmp_path: Path, native: bool
+) -> None:
+    from dataclasses import replace
+
+    full = claude_usage(2, 300, 1000, 40)
+    call = {"type": "tool_use", "id": "call-1", "name": "Bash", "input": {}}
+    result = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "a.txt"}],
+    }
+    events = [
+        {
+            "type": "user",
+            "sessionId": "root",
+            "timestamp": "2026-10-26T00:00:00.000Z",
+            "message": {"role": "user", "content": "Do the task."},
+        },
+        # Every block of a response repeats its full usage; only the first step takes it.
+        claude_assistant(1, "msg_one", {"type": "thinking", "thinking": "Look."}, full),
+        claude_assistant(2, "msg_one", call, full),
+        {"type": "user", "sessionId": "root", "message": result},
+        # A cache count the usage leaves out or gives as null is zero.
+        claude_assistant(
+            3,
+            "msg_two",
+            {"type": "text", "text": "a"},
+            {"input_tokens": 9, "cache_read_input_tokens": None, "output_tokens": 3},
+        ),
+        claude_assistant(4, "msg_bad", {"type": "text", "text": "b"}, {"output_tokens": 3}),
+        # A line that names no zone, or no time, is untimed; usage with no tokens, as on a
+        # message Claude Code writes itself, is none.
+        {
+            **claude_assistant(
+                0, "msg_zero", {"type": "text", "text": "c"}, claude_usage(0, 0, 0, 0)
+            ),
+            "timestamp": "2026-10-26T00:00:05",
+        },
+        {**claude_assistant(0, "msg_none", {"type": "text", "text": "d"}), "timestamp": "late"},
+    ]
+    if native:
+        project = tmp_path / ".claude-config/projects/project"
+        project.mkdir(parents=True)
+        (project / "root.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    # Stdout counts a response's output tokens only as far as each block.
+    partial = claude_usage(2, 300, 1000, 1)
+    stdout_log(tmp_path).write_text(
+        "".join(
+            json.dumps({"session_id": "root", **event}) + "\n"
+            for event in (
+                claude_assistant(1, "msg_one", {"type": "thinking", "thinking": "Look."}, partial),
+                claude_assistant(2, "msg_one", call, partial),
+                {"type": "user", "message": result},
+            )
+        )
+    )
+
+    trajectory = ClaudeCodeHarness().parse_trajectory(
+        replace(parse_context(tmp_path), session_id="root")
+    )
+
+    agent = [step for step in trajectory.steps if step.source == "agent"]
+    if not native:
+        assert [step.timestamp for step in agent] == [
+            "2026-10-26T00:00:01.000Z",
+            "2026-10-26T00:00:02.000Z",
+        ]
+        assert all(step.metrics is None for step in agent)
+        return
+    assert [step.timestamp for step in trajectory.steps] == [
+        *(f"2026-10-26T00:00:{second:02d}.000Z" for second in range(5)),
+        None,
+        None,
+    ]
+    assert [step.extra["orbit"]["native_event_ids"] for step in agent] == [
+        ["msg_one"],
+        ["msg_one"],
+        ["msg_two"],
+        ["msg_bad"],
+        ["msg_zero"],
+        ["msg_none"],
+    ]
+    # Input counts the cache writes and reads, as the Gateway does.
+    assert [step.metrics for step in agent] == [
+        AtifMetrics(prompt_tokens=1302, completion_tokens=40, cached_tokens=1000),
+        None,
+        AtifMetrics(prompt_tokens=9, completion_tokens=3, cached_tokens=0),
+        None,
+        None,
+        None,
+    ]
+    assert trajectory.extra["orbit"]["parse_issues"] == [
+        {"reason": "invalid_token_usage", "message_id": "msg_bad"}
+    ]
+
+
+def test_a_subagent_step_carries_its_own_model_call_usage(tmp_path: Path) -> None:
+    parse = delegated_run(tmp_path)
+    child = tmp_path / f"{CHILD_LOG}.jsonl"
+    events = [json.loads(line) for line in child.read_text().splitlines()]
+    events[1]["message"]["usage"] = claude_usage(5, 0, 0, 7)
+    child.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+    (subagent,) = ClaudeCodeHarness().parse_trajectory(parse).subagent_trajectories
+
+    assert [step.metrics for step in subagent.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=5, completion_tokens=7, cached_tokens=0),
+        None,
     ]

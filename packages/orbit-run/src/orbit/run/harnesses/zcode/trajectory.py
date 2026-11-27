@@ -6,11 +6,8 @@ import base64
 import binascii
 import json
 import re
-import shutil
 import sqlite3
-import tempfile
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -31,10 +28,14 @@ from orbit.core.trajectory import (
 from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     NativeResult,
+    call_metrics,
+    epoch_time,
     invocations,
     json_lines,
+    mirrored_store,
     requested_session_id,
     stdout_events,
+    token_count,
 )
 
 DB_DIR = ".zcode/cli/db"
@@ -143,9 +144,14 @@ def _descends(parents: dict[str, str | None], session: str, root: str) -> bool:
 
 @dataclass
 class _Message:
+    id: str
     role: str
     data: dict[str, Any]
     parts: list[dict[str, Any]]
+    #: When the model call that wrote an assistant message finished, in Unix milliseconds,
+    #: as ZCode's ``model_usage`` records it. The message's own ``time.completed`` comes
+    #: later, after its tool calls ran.
+    answered: Any = None
 
 
 @dataclass
@@ -157,20 +163,11 @@ class _Store:
 
 
 def _read_store(path: Path, issues: list[dict[str, Any]]) -> _Store | None:
-    """Read the mirrored store through a private copy, so the mirror is never touched.
-
-    The copy takes the write-ahead log along: SQLite folds in what a stopped process left
-    there.
-    """
+    """The mirrored store's sessions and their messages with their parts and, for an
+    assistant message, when its model call finished, the last attempt's if it was retried."""
     if not path.is_file():
         return None
-    with tempfile.TemporaryDirectory() as directory:
-        copy = Path(directory) / path.name
-        shutil.copyfile(path, copy)
-        wal = path.with_name(path.name + "-wal")
-        if wal.is_file():
-            shutil.copyfile(wal, copy.with_name(copy.name + "-wal"))
-        connection = sqlite3.connect(copy)
+    with mirrored_store(path) as connection:
         try:
             parents = dict(connection.execute("select id, parent_id from session"))
             ordered: dict[str, list[_Message]] = {}
@@ -179,7 +176,7 @@ def _read_store(path: Path, issues: list[dict[str, Any]]) -> _Store | None:
                 "select id, session_id, data from message order by session_id, sequence, id"
             ):
                 value = _json(data)
-                message = _Message(str(value.get("role") or ""), value, [])
+                message = _Message(message_id, str(value.get("role") or ""), value, [])
                 by_id[message_id] = message
                 ordered.setdefault(session_id, []).append(message)
             for message_id, data in connection.execute(
@@ -187,11 +184,15 @@ def _read_store(path: Path, issues: list[dict[str, Any]]) -> _Store | None:
             ):
                 if message_id in by_id:
                     by_id[message_id].parts.append(_json(data))
+            for message_id, completed in connection.execute(
+                "select assistant_message_id, max(completed_at) from model_usage"
+                " group by assistant_message_id"
+            ):
+                if message_id in by_id:
+                    by_id[message_id].answered = completed
         except sqlite3.Error as error:
             issues.append({"reason": "native_store_unreadable", "detail": str(error)[:500]})
             return None
-        finally:
-            connection.close()
     return _Store(parents, ordered)
 
 
@@ -234,16 +235,16 @@ class _Conversation:
         steps: list[_Step] = []
         prompts = 0
         for message in messages:
-            created = (message.data.get("time") or {}).get("created")
             if _is_prompt(message, root=root):
                 if turns is not None and prompts and (error := _turn_error(turns[prompts - 1])):
                     steps.append(_Step("system", error))
                 prompts += 1
-                steps.append(_Step("user", _text(message.parts), _timestamp(created)))
+                created = (message.data.get("time") or {}).get("created")
+                steps.append(_Step("user", _text(message.parts), epoch_time(created, 1000)))
                 continue
             if message.role != "assistant":
                 continue
-            step = _Step("agent", timestamp=_timestamp(created))
+            step = _Step("agent", timestamp=epoch_time(message.answered, 1000))
             texts: list[str] = []
             for part in message.parts:
                 kind = part.get("type")
@@ -256,8 +257,17 @@ class _Conversation:
                     step.calls.append(call)
                     if result is not None:
                         step.results.append(result)
-                elif kind == "step-finish":
-                    step.metrics = _metrics(part.get("tokens"), totals)
+                elif kind == "step-finish" and part.get("tokens") is not None:
+                    try:
+                        step.metrics = _metrics(part["tokens"], totals)
+                    except ValueError:
+                        self.issues.append(
+                            {
+                                "reason": "invalid_token_usage",
+                                "session_id": session_id,
+                                "message_id": message.id,
+                            }
+                        )
             step.message = "".join(texts)
             steps.append(step)
         if turns is not None and prompts and (error := _turn_error(turns[prompts - 1])):
@@ -428,32 +438,19 @@ def _text(parts: list[dict[str, Any]]) -> str:
     return "".join(str(part.get("text") or "") for part in parts if part.get("type") == "text")
 
 
-def _metrics(tokens: Any, totals: dict[str, int] | None) -> AtifMetrics | None:
-    if not isinstance(tokens, dict):
-        return None
-
-    def count(value: Any) -> int:
-        return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
-    cached = count(cache.get("read"))
-    # Input includes prompt-cache reads and writes, as the Gateway accounts it.
-    prompt = count(tokens.get("input")) + cached + count(cache.get("write"))
-    output = count(tokens.get("output"))
+def _metrics(tokens: object, totals: dict[str, int] | None) -> AtifMetrics | None:
+    """A model call's usage. ZCode keeps the AI SDK's totals: ``input`` already counts the
+    cache reads and writes, and ``output`` the reasoning, as the Gateway does."""
+    cache = tokens.get("cache") or {} if isinstance(tokens, dict) else None
+    if not isinstance(tokens, dict) or not isinstance(cache, dict):
+        raise ValueError(f"not a usage: {tokens!r}")
+    prompt, output = token_count(tokens.get("input")), token_count(tokens.get("output"))
+    cached = token_count(cache.get("read"), optional=True)
     if totals is not None:
         totals["input"] += prompt
         totals["output"] += output
         totals["cached"] += cached
-    return AtifMetrics(prompt_tokens=prompt, completion_tokens=output, cached_tokens=cached)
-
-
-def _timestamp(value: Any) -> str | None:
-    if not isinstance(value, int | float) or isinstance(value, bool) or value < 0:
-        return None
-    try:
-        return datetime.fromtimestamp(value / 1000, tz=UTC).isoformat()
-    except (OverflowError, OSError, ValueError):
-        return None
+    return call_metrics(prompt, output, cached)
 
 
 def _json(value: Any) -> dict[str, Any]:

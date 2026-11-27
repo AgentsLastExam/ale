@@ -18,6 +18,7 @@ from orbit.core.errors import (
 )
 from orbit.core.harness import EffectiveAgentResources, ResolvedMcpServer, TrajectoryParseContext
 from orbit.core.taskspec import OperatingSystem, StdioMcpServer, StreamableHttpMcpServer
+from orbit.core.trajectory import AtifMetrics
 from orbit.run.cli.tasks import PRESET_DIR, _harness
 from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
 from orbit.run.harnesses.forgecode import ForgecodeHarness
@@ -319,7 +320,10 @@ def write_resumed_run(root: Path) -> None:
                     "",
                     tool_calls=[{"name": "shell", "call_id": call, "arguments": {"command": "ls"}}],
                 ),
-                "usage": {"prompt_tokens": {"actual": 10 * turn}},
+                "usage": {
+                    "prompt_tokens": {"actual": 10 * turn},
+                    "completion_tokens": {"actual": 1},
+                },
             },
             {"tool": {"call_id": call, "output": {"values": [{"text": "ok"}]}}},
             message("Assistant", "Done."),
@@ -482,4 +486,47 @@ def test_delegation_mcp_names_and_failures_convert(tmp_path: Path) -> None:
     assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
         {"reason": "unlinked_subagent", "session_id": "orphan-a"},
         {"reason": "unlinked_subagent", "session_id": "orphan-b"},
+    ]
+
+
+def test_each_model_call_keeps_its_own_reported_usage(tmp_path: Path) -> None:
+    """Forge's prompt tokens already count the cache reads and writes; a count it only
+    estimated is not the model's. The export records no time or response ID per message."""
+
+    def answer(text: str, **usage: object) -> dict[str, object]:
+        return {**message("Assistant", text), "usage": usage}
+
+    messages = [
+        message("User", "<task>Go.</task>", raw_content={"Text": "Go."}),
+        answer(
+            "a",
+            prompt_tokens={"actual": 1300},
+            completion_tokens={"actual": 40},
+            cached_tokens={"actual": 1000},
+        ),
+        answer("b", prompt_tokens={"actual": 1400}, completion_tokens={"approx": 5}),
+        message("Assistant", "c"),
+        # Usage that reports no tokens is none.
+        answer("d", prompt_tokens={"actual": 0}, completion_tokens={"actual": 0}),
+        answer("e", prompt_tokens={"actual": True}, completion_tokens={"actual": 5}),
+    ]
+    write_dump(tmp_path, {"id": SESSION_ID, "context": {"messages": messages}}, [])
+    record(
+        tmp_path,
+        "Go.",
+        out=stdout(f"● [00:00:00] Initialize {SESSION_ID}", f"● [00:00:01] Finished {SESSION_ID}"),
+    )
+
+    trajectory = ForgecodeHarness().parse_trajectory(recorded_context(tmp_path))
+
+    assert [step.metrics for step in trajectory.steps if step.source == "agent"] == [
+        AtifMetrics(prompt_tokens=1300, completion_tokens=40, cached_tokens=1000),
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert all(step.timestamp is None and step.extra is None for step in trajectory.steps)
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "invalid_token_usage", "session_id": SESSION_ID, "message": 5}
     ]

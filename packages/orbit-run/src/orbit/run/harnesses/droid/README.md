@@ -28,6 +28,15 @@ sent: a message Droid writes as the user's, such as its warning that the model's
 suggests another provider, is a system step too. Stream-json supplies the per-invocation
 usage, a failure the session does not record, and every turn the session lacks.
 
+A step takes the time its session line records, when that names its zone, or, in a turn
+rebuilt from stream-json, the time of the event it starts with, which stream-json gives in
+Unix milliseconds; a failure stream-json reports takes its `error` event's time. Neither
+records a model call's usage or response ID, so no step carries metrics or links to a
+Gateway call. The trajectory's final metrics add up the per-invocation usage: the prompt
+tokens are `input_tokens` plus the cache reads and writes, and the completion tokens are
+`output_tokens`, which include the thinking. Usage that cannot be read is reported as
+`invalid_token_usage`.
+
 Task subagents need Factory's daemon and a signed-in Factory user, so Orbit always removes
 the `Task` tool; `disabled_tools` removes more, and `max_output_tokens` caps each reply.
 Droid cannot set a stdio MCP server's working directory, so Orbit rejects a server that

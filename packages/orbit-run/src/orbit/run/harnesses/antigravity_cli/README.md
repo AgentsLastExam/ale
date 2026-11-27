@@ -59,6 +59,21 @@ is a model turn with its tool calls, and the records after it are their results 
 order, since they carry no call ID; stdout's `step_update` events name each result's tool
 and must agree. Images agy inlined are read from the conversation's `logs/media`.
 
+A step takes its time, and a model call's step its response ID, from
+`conversations/<id>.db`. Its `steps` table keeps each step's `metadata` as a
+`CortexStepMetadata` protobuf, whose `created_at` is the time the transcript rounds down
+to the second and whose `model_usage` keeps the Gemini response's `responseId` as
+`message_id`. A `PLANNER_RESPONSE` is one model call: its step carries the transcript's
+usage, with `input_tokens` plus `cache_read_tokens` as `prompt_tokens` (Gemini reports no
+cache writes) and `output_tokens`, which include the thinking ones, as
+`completion_tokens`. It lists the response ID in `extra.orbit.native_event_ids`; the root
+conversation's steps link to their Gateway calls, and a subagent's steps keep the ID,
+unlinked. Without the database a step keeps the transcript's whole-second time and no
+response ID; without the transcript, each turn is its prompt and the response stdout's
+`result` reported, with no time, usage or response ID. An unreadable database, step
+metadata or usage is reported as `native_store_unreadable`, `invalid_step_metadata` or
+`invalid_token_usage`. The title call produces no step.
+
 A subagent is linked by `.system_generated/subagents/<child>.json` in its parent's
 directory: its `spawnStepIndex` is the step of the `invoke_subagent` result, which then
 references the child's trajectory `<parent trajectory>-subagent-<child id>`. The parent's
@@ -71,6 +86,6 @@ that file holds output the record lacks, it is kept on the step's result as
 `extra.orbit.final_output`, and the result's content stays what the model received.
 
 agy also keeps an abridged `transcript.jsonl`, chunked copies of both transcripts, the
-`messages/` delivered to a conversation, background `tasks/*.log`, the
-`.agents/agents/<name>/agent.md` a `define_subagent` call wrote, and
-`conversations/<id>.db`. The parser reads none of them.
+`messages/` delivered to a conversation, background `tasks/*.log`, and the
+`.agents/agents/<name>/agent.md` a `define_subagent` call wrote. The parser reads none of
+them.

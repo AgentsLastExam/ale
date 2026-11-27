@@ -319,7 +319,7 @@ def write_resumed_run(root: Path) -> None:
                 },
                 {"type": "tool_result", "id": call, "value": str(turn)},
                 {"type": "message", "role": "assistant", "text": "Done."},
-                {"type": "completion", "usage": {"input_tokens": 10 * turn}},
+                {"type": "completion", "usage": {"input_tokens": 10 * turn, "output_tokens": 1}},
             )
         )
     write_session(root, SESSION_ID, *events)
@@ -446,3 +446,96 @@ def test_a_failure_only_the_stream_reports_ends_its_turn(tmp_path: Path) -> None
     (issue,) = trajectory.extra["orbit"]["parse_issues"]  # type: ignore[index]
     assert issue["reason"] == "unconverted_native_sessions"
     assert issue["sources"] == [f".droid-orbit/.factory/sessions/-home-agent/{other}.jsonl"]
+
+
+def test_steps_take_the_times_droid_records(tmp_path: Path) -> None:
+    """The session's ISO times; a turn only stream-json has takes its events' Unix
+    milliseconds. Neither records a model call's usage or response ID."""
+    call = {"type": "tool_use", "id": "t1", "name": "LS", "input": {}}
+    write_session(
+        tmp_path,
+        SESSION_ID,
+        {**message("user", {"type": "text", "text": "List."}), "timestamp": "2026-10-26T00:00:00Z"},
+        {**message("assistant", call, id="a1"), "timestamp": "2026-10-26T00:00:01.500Z"},
+        message("user", {"type": "tool_result", "tool_use_id": "t1", "content": "a"}),
+        # A time that names no zone is ambiguous.
+        {
+            **message("assistant", {"type": "text", "text": "Done."}, id="a2"),
+            "timestamp": "2026-10-26T00:00:02",
+        },
+    )
+    epoch = 1792972800000  # 2026-10-26T00:00:00Z
+    record(
+        tmp_path,
+        "List.",
+        "Again.",
+        stdout=[
+            "",
+            stream(
+                {"type": "message", "role": "user", "timestamp": epoch + 3000},
+                {
+                    "type": "tool_call",
+                    "id": "t2",
+                    "messageId": "m2",
+                    "toolName": "LS",
+                    "parameters": {},
+                    "timestamp": epoch + 4000,
+                },
+                {"type": "tool_result", "id": "t2", "value": "a"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "text": "Done.",
+                    "timestamp": epoch + 5000,
+                },
+                {"type": "error", "message": "terminated", "timestamp": epoch + 6000},
+            ),
+        ],
+    )
+
+    trajectory = DroidHarness().parse_trajectory(recorded_context(tmp_path))
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", "2026-10-26T00:00:00Z"),
+        ("agent", "2026-10-26T00:00:01.500Z"),
+        ("agent", None),
+        ("user", "2026-10-26T00:00:03.000000Z"),
+        ("agent", "2026-10-26T00:00:04.000000Z"),
+        ("agent", "2026-10-26T00:00:05.000000Z"),
+        ("system", "2026-10-26T00:00:06.000000Z"),
+    ]
+    assert all(step.metrics is None for step in trajectory.steps)
+    assert trajectory.steps[1].extra == {"orbit": {"native_event_ids": ["a1"]}}
+
+
+def test_each_invocations_usage_counts_as_the_gateway_does(tmp_path: Path) -> None:
+    """Stream-json reports only each invocation's total; its input leaves out the cache
+    reads and writes."""
+    write_session(tmp_path, SESSION_ID, message("user", {"type": "text", "text": "Go."}))
+    usage = {
+        "input_tokens": 7,
+        "output_tokens": 40,
+        "cache_read_input_tokens": 1000,
+        "cache_creation_input_tokens": 300,
+    }
+    record(
+        tmp_path,
+        "Go.",
+        "Again.",
+        stdout=[
+            stream({"type": "completion", "usage": usage}),
+            stream({"type": "completion", "usage": {"input_tokens": 7, "output_tokens": "x"}}),
+        ],
+    )
+
+    trajectory = DroidHarness().parse_trajectory(recorded_context(tmp_path))
+
+    assert trajectory.final_metrics is not None
+    assert (
+        trajectory.final_metrics.total_prompt_tokens,
+        trajectory.final_metrics.total_completion_tokens,
+        trajectory.final_metrics.total_cached_tokens,
+    ) == (1307, 40, 1000)
+    assert {"reason": "invalid_token_usage", "invocation": 2} in trajectory.extra["orbit"][  # type: ignore[index]
+        "parse_issues"
+    ]

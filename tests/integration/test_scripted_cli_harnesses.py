@@ -38,7 +38,7 @@ from orbit.run.harnesses.pi_cli import PiCliHarness
 from orbit.run.protocol.log_mirror import LogMirror
 from orbit.run.recording import BlobStore, EpisodeRecording
 from tests.integration.scripted_model import FINAL, ScriptedModel
-from tests.support import cli_os, cli_sandbox
+from tests.support import check_steps_against_gateway, cli_os, cli_sandbox
 
 pytestmark = [
     pytest.mark.integration,
@@ -107,6 +107,17 @@ CASES: dict[str, Case] = {
         for dialect in DIALECTS
     },
 }
+
+#: Cases whose native logs record no step times, no usage per model call, or no provider
+#: response ID, so no step names its Gateway call.
+UNTIMED = frozenset(name for name in CASES if name.startswith("forgecode-"))
+UNMETERED = frozenset(name for name in CASES if name.startswith(("droid-", "hermes-")))
+UNLINKED = frozenset(
+    name
+    for name in CASES
+    if name.startswith(("droid-", "forgecode-", "grok-build-", "hermes-", "opencode-"))
+    or name == "openhands-cli-anthropic"
+)
 
 
 @dataclass
@@ -231,6 +242,14 @@ async def test_cli_runs_a_scripted_episode_through_the_gateway(tmp_path: Path, n
     transport = read_jsonl(tmp_path / "trace.transport.jsonl").records
     calls_made = [record for record in transport if record["kind"] == "call"]
     assert len(calls_made) >= 6 and len(calls_made) == len(model.requests)
+    check_steps_against_gateway(
+        trajectory,
+        transport,
+        model.loop,
+        timed=name not in UNTIMED,
+        metered=name not in UNMETERED,
+        linked=name not in UNLINKED,
+    )
 
 
 #: CLIs whose delegation tool spawns subagent sessions: the tool, and the arguments that

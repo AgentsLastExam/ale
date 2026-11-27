@@ -34,3 +34,12 @@ directory, so Orbit rejects a server that declares one. On Windows, forge's shel
 `max_requests_per_turn` and `input_modalities`, the listed model's. Unset, forge takes the
 model to be text-only, which only keeps its `read` tool from reading images and PDFs: MCP
 images and attached files reach the model either way.
+
+Each assistant message in the export is one model call's step. Its metrics are the message's
+`usage` when forge marks both its prompt and completion counts `actual`: the prompt tokens
+already count the cache reads and writes, and the completion tokens the reasoning, as the
+Gateway does. A count forge only estimated (`approx`) is no usage, and one that cannot be
+read is reported as `invalid_token_usage`. The export records no time and no response ID for
+a message, so steps are untimed and not linked to Gateway calls; the `[HH:MM:SS]` times
+stdout prints have no date and name no message. A turn without an export keeps only its
+prompt and outcome, with no usage. The title call above produces no step.

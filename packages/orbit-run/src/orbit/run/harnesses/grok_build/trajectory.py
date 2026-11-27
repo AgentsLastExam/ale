@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -13,6 +14,7 @@ from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
+    AtifMetrics,
     AtifObservation,
     AtifObservationResult,
     AtifToolCall,
@@ -22,11 +24,14 @@ from orbit.core.trajectory import (
 from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     NativeResult,
+    call_metrics,
     invocations,
+    iso_time,
     mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -34,6 +39,27 @@ _DATA_URL = re.compile(r"data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/
 
 
 SESSIONS = ".grok-orbit/sessions"
+#: Grok's own logs.
+LOGS = ".grok-orbit/logs"
+#: The one shared by every session Grok runs: when each prompt starts and what each model
+#: call used.
+LOG = f"{LOGS}/unified.jsonl"
+
+
+@dataclass(frozen=True)
+class _Call:
+    """A model call Grok's log records: when it completed and its usage."""
+
+    timestamp: str | None
+    metrics: AtifMetrics | None
+
+
+@dataclass
+class _Log:
+    """What Grok's log records of one session, in order."""
+
+    prompts: list[str | None] = field(default_factory=list)
+    calls: list[_Call] = field(default_factory=list)
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -90,6 +116,17 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if event.get("type") == "tool_result" and event.get("tool_call_id")
     }
     errors = _tool_errors(updates)
+    log = _log(context, expected, issues) if chat else _Log()
+    # The log names no message, so its records pair with the session's in order, and only
+    # when both hold as many prompts and model calls.
+    if (log.prompts or log.calls) and (
+        len(log.prompts) != sum(1 for event in chat if _is_prompt(event))
+        or len(log.calls) != sum(1 for event in chat if event.get("type") == "assistant")
+    ):
+        issues.append({"reason": "unpaired_log_records", "session_id": expected})
+        log = _Log()
+    prompt_times = iter(log.prompts)
+    model_calls = iter(log.calls)
     # Each native prompt is one invocation, in order; any invocation after the last one the
     # session holds is rebuilt from its own stdout.
     native_turns = max(
@@ -117,7 +154,11 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         if _is_prompt(event):
             if turn:
                 _failure(builder, turns[min(turn, len(turns)) - 1])
-            builder.add(source="user", message=_user_prompt(event.get("content")))
+            builder.add(
+                source="user",
+                message=_user_prompt(event.get("content")),
+                timestamp=next(prompt_times, None),
+            )
             turn += 1
             continue
         if event.get("type") == "reasoning":
@@ -129,6 +170,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             continue
         if event.get("type") != "assistant":
             continue
+        model_call = next(model_calls, _Call(None, None))
         calls: list[AtifToolCall] = []
         observations: list[AtifObservationResult] = []
         for raw_call in event.get("tool_calls") or ():
@@ -159,6 +201,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                     )
                 )
         message = _message(event.get("content"))
+        # One assistant message is one model call's output, so its step carries the call.
         if message or reasoning or calls:
             builder.add(
                 source="agent",
@@ -166,6 +209,8 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
                 reasoning_content="\n".join(reasoning).strip() or None,
                 tool_calls=calls or None,
                 observation=AtifObservation(results=observations) if observations else None,
+                timestamp=model_call.timestamp,
+                metrics=model_call.metrics,
             )
             reasoning.clear()
     if turn:
@@ -179,6 +224,51 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     if not any(step.source == "agent" for step in builder.steps) and context.final_message:
         builder.add(source="agent", message=context.final_message)
     return builder.build()
+
+
+def _log(
+    context: TrajectoryParseContext, session_id: str | None, issues: list[dict[str, Any]]
+) -> _Log:
+    """The session's prompts and model calls as Grok's log records them.
+
+    Grok records ``shell.handle_prompt.start`` as it starts each prompt and
+    ``shell.turn.inference_done`` as each model call of the turn completes, with its usage.
+    Its session title is a model call of its own, which it does not record there.
+    """
+    path = context.logs_dir / LOG
+    found = _Log()
+    if not session_id or not path.is_file():
+        return found
+    events, problems = native_events(context, path)
+    issues.extend(problems)
+    for event in events:
+        if event.get("sid") != session_id:
+            continue
+        if event.get("msg") == "shell.handle_prompt.start":
+            found.prompts.append(iso_time(event.get("ts")))
+        elif event.get("msg") == "shell.turn.inference_done":
+            # The record's context is the call's usage: its prompt tokens include the cached
+            # ones, and its completion tokens the reasoning ones.
+            usage, metrics = event.get("ctx"), None
+            if usage is not None:
+                counts = usage if isinstance(usage, dict) else {}
+                try:
+                    metrics = call_metrics(
+                        token_count(counts.get("prompt_tokens")),
+                        token_count(counts.get("completion_tokens")),
+                        token_count(counts.get("cached_prompt_tokens"), optional=True),
+                    )
+                except ValueError:
+                    issues.append(
+                        {
+                            "reason": "invalid_token_usage",
+                            "source": LOG,
+                            "session_id": session_id,
+                            "timestamp": event.get("ts"),
+                        }
+                    )
+            found.calls.append(_Call(iso_time(event.get("ts")), metrics))
+    return found
 
 
 def _is_prompt(event: dict[str, Any]) -> bool:

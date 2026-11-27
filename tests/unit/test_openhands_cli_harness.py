@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import shlex
 import shutil
@@ -12,6 +13,7 @@ from orbit.core.config import load_run_config
 from orbit.core.errors import AgentError, ConfigError
 from orbit.core.harness import EffectiveAgentResources, TrajectoryParseContext
 from orbit.core.taskspec import OperatingSystem
+from orbit.core.trajectory import AtifMetrics
 from orbit.run.cli.tasks import PRESET_DIR, _harness
 from orbit.run.harnesses.base import INVOCATIONS_PATH, STDOUT_PATH
 from orbit.run.harnesses.openhands_cli import OpenHandsCliHarness
@@ -65,6 +67,8 @@ async def test_the_gateway_is_the_model_route_the_sdk_takes(
     assert command.env["LLM_BASE_URL"] == base_url
     assert command.env["LLM_API_KEY"] == "token"
     assert command.env["OPENHANDS_PERSISTENCE_DIR"] == STATE
+    # The agent's tools see the Sandbox's own time zone.
+    assert "TZ" not in command.env
 
 
 @pytest.mark.parametrize(
@@ -113,7 +117,10 @@ async def test_command_resumes_or_creates_one_exact_conversation(
         session(model="claude"),
         native_session_id=native_session_id,
     )
-    invocation, stdin = command.script.split(" < ")
+    # The launch first keeps the Sandbox's UTC offset for the events' local times.
+    offset, run = command.script.split("; ")
+    assert offset == "date +%z > /home/agent/.orbit-harness/utc-offset"
+    invocation, stdin = run.split(" < ")
     assert stdin == "/dev/null"
     argv = shlex.split(invocation)
     assert argv[:5] == ["openhands", "--headless", "--json", "--override-with-envs", "--resume"]
@@ -473,3 +480,124 @@ def test_without_the_conversation_each_turn_comes_from_its_json_events(tmp_path:
         {"reason": "native_session_unavailable", "session_id": SESSION_ID}
     ]
     assert [(step.source, step.message) for step in trajectory.steps] == RESUMED_STEPS
+
+
+def test_steps_take_the_launchs_utc_offset_and_each_model_call_its_usage_once(
+    tmp_path: Path,
+) -> None:
+    """The SDK writes local times without a zone; the launch keeps the Sandbox's UTC offset.
+    The conversation's ``base_state.json`` holds each call's usage by response ID."""
+    record(tmp_path, "List.")
+    (tmp_path / ".orbit-harness/utc-offset").write_text("-0500\n")
+    write_events(
+        tmp_path,
+        text("user", framed("List."), timestamp="2026-10-26T10:00:00.250000"),
+        # One call's two actions, executed one after the other: two steps.
+        *terminal("c1", "resp_one", "2026-10-26T10:00:01"),
+        *terminal("c2", "resp_one", "2026-10-26T10:00:02"),
+        text("agent", "Done.", timestamp="2026-10-26T15:00:03+00:00", llm_response_id="resp_two"),
+        text("agent", "Again.", timestamp="not a time", llm_response_id="resp_bad"),
+        text("agent", "Unmetered.", llm_response_id="resp_missing"),
+        text("agent", "Zero.", llm_response_id="resp_zero"),
+    )
+    path = tmp_path / ".openhands-orbit/conversations" / SESSION_ID / "base_state.json"
+    usage = {
+        "agent": {
+            "token_usages": [
+                {
+                    # ``prompt_tokens`` already count the cache writes.
+                    "prompt_tokens": 1300,
+                    "completion_tokens": 40,
+                    "cache_read_tokens": 1000,
+                    "cache_write_tokens": 298,
+                    "response_id": "resp_one",
+                },
+                # A cache count given as null is zero.
+                {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 3,
+                    "cache_read_tokens": None,
+                    "response_id": "resp_two",
+                },
+                {"prompt_tokens": "9", "completion_tokens": 3, "response_id": "resp_bad"},
+                # Usage that reports no tokens is none.
+                {"prompt_tokens": 0, "completion_tokens": 0, "response_id": "resp_zero"},
+            ]
+        },
+        # A delegated conversation's calls, which its own state holds as well.
+        "task:1": {"token_usages": [{"response_id": "child"}]},
+    }
+    path.write_text(json.dumps({"stats": {"usage_to_metrics": usage}}))
+
+    trajectory = OpenHandsCliHarness().parse_trajectory(recorded_context(tmp_path))
+
+    assert [step.timestamp for step in trajectory.steps] == [
+        "2026-10-26T10:00:00.250000-05:00",
+        "2026-10-26T10:00:01-05:00",
+        "2026-10-26T10:00:02-05:00",
+        "2026-10-26T15:00:03+00:00",
+        None,
+        None,
+        None,
+    ]
+    agent = trajectory.steps[1:]
+    assert [step.extra["orbit"]["native_event_ids"] for step in agent] == [  # type: ignore[index]
+        ["resp_one"],
+        ["resp_one"],
+        ["resp_two"],
+        ["resp_bad"],
+        ["resp_missing"],
+        ["resp_zero"],
+    ]
+    assert [step.metrics for step in agent] == [
+        AtifMetrics(prompt_tokens=1300, completion_tokens=40, cached_tokens=1000),
+        None,
+        AtifMetrics(prompt_tokens=9, completion_tokens=3, cached_tokens=0),
+        None,
+        None,
+        None,
+    ]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "invalid_token_usage", "response_id": "resp_bad"}
+    ]
+
+
+def test_without_the_conversation_steps_name_their_call_but_carry_no_usage(
+    tmp_path: Path,
+) -> None:
+    write_resumed_run(tmp_path)
+    shutil.rmtree(tmp_path / ".openhands-orbit/conversations")
+    trajectory = OpenHandsCliHarness().parse_trajectory(recorded_context(tmp_path))
+
+    calls = [step for step in trajectory.steps if step.tool_calls]
+    assert [step.extra["orbit"]["native_event_ids"] for step in calls] == [["r1"], ["r2"]]  # type: ignore[index]
+    assert all(step.metrics is None for step in trajectory.steps)
+    # Without the offset the launch keeps, a time without a zone is ambiguous.
+    assert all(step.timestamp is None for step in trajectory.steps)
+
+
+def test_a_responses_call_also_names_the_provider_response_litellm_wrapped(
+    tmp_path: Path,
+) -> None:
+    """LiteLLM gives a Responses API call its own ID, which holds the provider's."""
+    wrapped = "resp_" + base64.b64encode(
+        b"litellm:custom_llm_provider:openai;model_id:None;response_id:resp_provider"
+    ).decode("ascii")
+    # Another ID that happens to be base64 names nothing more.
+    plain = "resp_" + base64.b64encode(b"plain").decode("ascii")
+    record(tmp_path, "List.")
+    write_events(
+        tmp_path,
+        text("user", framed("List.")),
+        *terminal("c1", wrapped, "2026-10-26T10:00:01"),
+        text("agent", "Done.", llm_response_id=plain),
+        text("agent", "Again.", llm_response_id="resp_plain"),
+    )
+
+    trajectory = OpenHandsCliHarness().parse_trajectory(recorded_context(tmp_path))
+
+    assert [step.extra["orbit"]["native_event_ids"] for step in trajectory.steps[1:]] == [  # type: ignore[index]
+        [wrapped, "resp_provider"],
+        [plain],
+        ["resp_plain"],
+    ]

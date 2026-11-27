@@ -7,7 +7,6 @@ import binascii
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -28,9 +27,12 @@ from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     Invocation,
     NativeResult,
+    call_metrics,
+    epoch_time,
     invocations,
     json_lines,
     requested_session_id,
+    token_count,
     unconverted,
 )
 
@@ -177,7 +179,7 @@ class _Parse:
                 continue
             kind = message.get("type") if isinstance(message.get("type"), str) else ""
             time = message.get("time") if isinstance(message.get("time"), dict) else {}
-            timestamp = _timestamp(time.get("created"))
+            timestamp = epoch_time(time.get("created"), 1000)
             if kind == "user":
                 text = str(message.get("text") or "")
                 if turns is not None:
@@ -191,7 +193,7 @@ class _Parse:
                     turns.current = matched
                 builder.add(source="user", message=text, timestamp=timestamp)
             elif kind == "assistant":
-                self._assistant(builder, session_id, message, timestamp, spawned)
+                self._assistant(builder, session_id, message, time, spawned)
             elif kind in {"synthetic", "system", "skill"}:
                 builder.add(
                     source="system", message=str(message.get("text") or ""), timestamp=timestamp
@@ -245,9 +247,16 @@ class _Parse:
         builder: TrajectoryBuilder,
         session_id: str,
         message: dict[str, Any],
-        timestamp: str | None,
+        time: dict[str, Any],
         spawned: list[AtifTrajectory],
     ) -> None:
+        """One model call's message as a step, at the time its response finished streaming.
+
+        ``created`` is when OpenCode sent the request, before the model output anything. A
+        call that failed or was cut off before its stream finished takes the time it ended,
+        as does its failure.
+        """
+        ended = epoch_time(time.get("completed"), 1000)
         texts: list[str] = []
         thoughts: list[str] = []
         calls: list[AtifToolCall] = []
@@ -284,15 +293,15 @@ class _Parse:
         builder.add(
             source="agent",
             message="\n\n".join(text for text in texts if text),
-            timestamp=timestamp,
+            timestamp=epoch_time(time.get("streamed"), 1000) or ended,
             model_name=model.get("id") if isinstance(model.get("id"), str) else None,
             reasoning_content="\n\n".join(thoughts) or None,
             tool_calls=calls or None,
             observation=AtifObservation(results=observed) if observed else None,
-            metrics=_metrics(message.get("tokens")),
+            metrics=self._usage(message.get("id"), message.get("tokens")),
         )
         if failure := error_text(message.get("error")):
-            builder.add(source="system", message=failure, timestamp=timestamp)
+            builder.add(source="system", message=failure, timestamp=ended)
 
     def _result(
         self,
@@ -397,7 +406,7 @@ class _Parse:
                 step["tools"][str(part.get("id") or "")] = part
             elif event.get("type") == "step_finish":
                 step["tokens"] = part.get("tokens")
-        for step in steps.values():
+        for message_id, step in steps.items():
             calls, observed = [], []
             for call_id, part in step["tools"].items():
                 name = str(part.get("tool") or "")
@@ -427,8 +436,19 @@ class _Parse:
                 message="\n\n".join(text for text in step["texts"].values() if text),
                 tool_calls=calls or None,
                 observation=AtifObservation(results=observed) if observed else None,
-                metrics=_metrics(step["tokens"]),
+                metrics=self._usage(message_id, step["tokens"]),
             )
+
+    def _usage(self, message_id: Any, tokens: Any) -> AtifMetrics | None:
+        """A model call's ``tokens``, if it recorded any; usage that cannot be read is an
+        issue."""
+        if tokens is None:
+            return None
+        try:
+            return _metrics(tokens)
+        except ValueError:
+            self.issues.append({"reason": "invalid_token_usage", "message_id": message_id})
+            return None
 
     def _mcp(self, name: str) -> dict[str, Any] | None:
         """``<server>_<tool>``, each as OpenCode normalizes it, for a configured server."""
@@ -543,20 +563,23 @@ def normalized_name(name: str) -> str:
 
 
 def _metrics(tokens: Any) -> AtifMetrics | None:
+    """A model call's ``tokens``; raises ``ValueError`` when they cannot be read.
+
+    OpenCode counts cached input and reasoning apart. As the Gateway counts them, the prompt
+    includes the cache reads and writes, and the completion the reasoning.
+    """
     if not isinstance(tokens, dict):
-        return None
-    fresh, text = tokens.get("input"), tokens.get("output")
-    if not isinstance(fresh, int) or not isinstance(text, int):
-        return None
-    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
-    read, written, thought = (
-        value if isinstance(value, int) else 0
-        for value in (cache.get("read"), cache.get("write"), tokens.get("reasoning"))
-    )
-    # OpenCode counts cached input and reasoning apart. As the Gateway accounts them, the
-    # prompt includes prompt-cache reads and writes, and the completion its reasoning.
-    return AtifMetrics(
-        prompt_tokens=fresh + read + written, completion_tokens=text + thought, cached_tokens=read
+        raise ValueError(f"not a usage object: {tokens!r}")
+    cache = tokens.get("cache") or {}
+    if not isinstance(cache, dict):
+        raise ValueError(f"not a cache count: {cache!r}")
+    read = token_count(cache.get("read"), optional=True)
+    written = token_count(cache.get("write"), optional=True)
+    thought = token_count(tokens.get("reasoning"), optional=True)
+    return call_metrics(
+        token_count(tokens.get("input")) + read + written,
+        token_count(tokens.get("output")) + thought,
+        read,
     )
 
 
@@ -571,15 +594,6 @@ def _arguments(value: Any) -> dict[str, Any]:
             return {"raw": value}
         return decoded if isinstance(decoded, dict) else {"value": decoded}
     return {} if value is None else {"value": value}
-
-
-def _timestamp(value: Any) -> str | None:
-    if not isinstance(value, int | float) or isinstance(value, bool):
-        return None
-    try:
-        return datetime.fromtimestamp(value / 1000, tz=UTC).isoformat()
-    except (OverflowError, OSError, ValueError):
-        return None
 
 
 def _extra(

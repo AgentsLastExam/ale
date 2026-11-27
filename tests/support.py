@@ -1074,3 +1074,53 @@ def rounds_task(
         },
     )
     return load_tasks(root)[0]
+
+
+def check_steps_against_gateway(
+    trajectory: AtifTrajectory,
+    transport: Sequence[Mapping[str, Any]],
+    loop: Sequence[str],
+    *,
+    timed: bool = True,
+    metered: bool = True,
+    linked: bool = True,
+) -> None:
+    """Check a scripted episode's trajectory against the Gateway's record of its calls.
+
+    ``loop`` names, by response ID and in order, the calls the agent loop made, which the
+    scripted model answered with one item each: each made exactly one model step, in that
+    order. Each step is timed, and each model step carries its own call's usage and names
+    its response ID, unless the native log records no time (``timed``), no usage per model
+    call (``metered``) or no response ID (``linked``). Calls outside the loop, such as a
+    title, make no step.
+    """
+    calls = {
+        record["provider_response_id"]: record
+        for record in transport
+        if record["kind"] == "call" and record["disposition"] == "forwarded"
+    }
+    assert set(loop) <= calls.keys(), "every loop call reached the Gateway"
+    untimed = [step.step_id for step in trajectory.steps if not step.timestamp]
+    assert untimed == ([] if timed else [step.step_id for step in trajectory.steps]), untimed
+    steps = [
+        step for step in trajectory.steps if step.source == "agent" and step.llm_call_count != 0
+    ]
+    assert len(steps) == len(loop), ([step.step_id for step in steps], loop)
+    for step, response in zip(steps, loop, strict=True):
+        call = calls[response]
+        named = [
+            native
+            for native in ((step.extra or {}).get("orbit") or {}).get("native_event_ids") or ()
+            if native in calls
+        ]
+        assert named == ([response] if linked else []), (step.step_id, named, response)
+        metrics = step.metrics
+        if not metered:
+            assert metrics is None, step.step_id
+            continue
+        assert metrics is not None, f"step {step.step_id} has no usage"
+        assert (metrics.prompt_tokens, metrics.cached_tokens, metrics.completion_tokens) == (
+            call["input_tokens"],
+            call.get("cache_read_tokens") or 0,
+            call["output_tokens"],
+        ), (step.step_id, response)

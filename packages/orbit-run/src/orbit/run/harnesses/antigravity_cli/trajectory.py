@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Sequence
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -27,10 +28,15 @@ from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     Invocation,
     NativeResult,
+    call_metrics,
+    epoch_time,
     invocations,
+    iso_time,
+    mirrored_store,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -59,6 +65,24 @@ _SUFFIX_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
+#: Field numbers of the protobuf messages agy stores as each step's ``metadata``:
+#: ``CortexStepMetadata.created_at`` and ``.model_usage``, ``google.protobuf.Timestamp``'s
+#: ``seconds`` and ``nanos``, and ``ModelUsageStats.message_id``.
+_CREATED_AT, _MODEL_USAGE = 1, 9
+_SECONDS, _NANOS = 1, 2
+_MESSAGE_ID = 7
+#: A planner response's token counts: uncached input, cache reads and output.
+_USAGE = ("input_tokens", "cache_read_tokens", "output_tokens")
+
+
+@dataclass(frozen=True)
+class _Stored:
+    """What the conversation database adds to a step record: its time below the second,
+    where the transcript keeps whole seconds, and the response ID of the model call that
+    produced it."""
+
+    timestamp: str | None
+    response_id: str | None
 
 
 def is_session_file(path: PurePosixPath, session_id: str) -> bool:
@@ -138,6 +162,7 @@ class _Conversation:
             self.visited.add(session_id)
         tools = _tool_events([event for turn in turns for event in turn])
         spawned = self._spawned(session_id)
+        stored = self._stored(session_id)
         embedded: list[AtifTrajectory] = []
         turn = _Turn(builder)
         prompts = 0
@@ -148,13 +173,20 @@ class _Conversation:
             kind = _type(record)
             if kind in _INTERNAL:
                 continue
-            timestamp = _timestamp(record.get("created_at"))
+            step = stored.get(record.get("step_index"), _Stored(None, None))
+            timestamp = step.timestamp or iso_time(record.get("created_at"))
             if kind == "PLANNER_RESPONSE":
                 turn.flush()
                 turn.open(
                     record,
                     timestamp=timestamp,
                     model_name=self.context.model or None,
+                    metrics=self._metrics(record, session_id),
+                    extra=(
+                        {"orbit": {"native_event_ids": [step.response_id]}}
+                        if step.response_id
+                        else None
+                    ),
                 )
                 continue
             if turn.pending and kind not in {"USER_INPUT", "SYSTEM_MESSAGE"}:
@@ -282,6 +314,72 @@ class _Conversation:
             return None
         return builder.build(subagent_trajectories=nested or None)
 
+    def _stored(self, session_id: str | None) -> dict[int, _Stored]:
+        """Each step's time and response ID from ``conversations/<id>.db``, by step index.
+
+        agy keeps a step's ``metadata`` there as a ``CortexStepMetadata`` protobuf. Its
+        ``created_at`` is the time the transcript rounds down to the second, and its
+        ``model_usage`` keeps the ``responseId`` of the Gemini response as ``message_id``.
+        """
+        path = self.context.logs_dir / CONVERSATIONS / f"{session_id}.db"
+        if not session_id or not path.is_file():
+            return {}
+        source = path.relative_to(self.context.logs_dir).as_posix()
+        stored: dict[int, _Stored] = {}
+        with mirrored_store(path) as connection:
+            try:
+                rows = connection.execute("select idx, metadata from steps").fetchall()
+            except sqlite3.Error as error:
+                self.issues.append(
+                    {
+                        "source": source,
+                        "reason": "native_store_unreadable",
+                        "detail": str(error)[:500],
+                    }
+                )
+                return {}
+        for index, blob in rows:
+            if blob is None:
+                continue
+            metadata = _fields(blob) if isinstance(blob, bytes) else None
+            if not isinstance(index, int) or metadata is None:
+                self.issues.append(
+                    {"source": source, "reason": "invalid_step_metadata", "step_index": index}
+                )
+                continue
+            created = _fields(_first(metadata, _CREATED_AT)) or {}
+            usage = _fields(_first(metadata, _MODEL_USAGE)) or {}
+            response = _first(usage, _MESSAGE_ID)
+            stored[index] = _Stored(
+                _proto_time(created), response.decode("utf-8", "replace") if response else None
+            )
+        return stored
+
+    def _metrics(self, record: dict[str, Any], session_id: str | None) -> AtifMetrics | None:
+        """A planner response's usage, which agy writes on the record itself rather than in a
+        usage object: a record with none of its counts has none.
+
+        agy reports uncached input apart from cache reads, which ATIF's prompt includes, and
+        output with the thinking. Gemini reports no cache writes.
+        """
+        if not any(name in record for name in _USAGE):
+            return None
+        try:
+            fresh, read, output = (
+                token_count(record.get(name), optional=name == "cache_read_tokens")
+                for name in _USAGE
+            )
+        except ValueError:
+            self.issues.append(
+                {
+                    "source": f"{BRAIN}/{session_id}/{TRANSCRIPT}",
+                    "reason": "invalid_token_usage",
+                    "step_index": record.get("step_index"),
+                }
+            )
+            return None
+        return call_metrics(fresh + read, output, read)
+
     def unlinked(self, path: Path) -> None:
         """Report a child left unconverted, once."""
         if path in self.reported:
@@ -389,7 +487,6 @@ class _Turn:
         self.step = {
             "message": _text(record.get("content")),
             "reasoning_content": _text(record.get("thinking")) or None,
-            "metrics": _metrics(record),
             **data,
         }
         self.results = []
@@ -499,21 +596,61 @@ def _native_name(call: AtifToolCall) -> str:
     return native if isinstance(native, str) else call.function_name
 
 
-def _metrics(record: dict[str, Any]) -> AtifMetrics | None:
-    """agy reports uncached input apart from cache reads; ATIF's prompt includes both."""
-    fields = ("input_tokens", "cache_read_tokens", "output_tokens")
-    values = {name: record.get(name) for name in fields}
-    if not any(isinstance(value, int) and not isinstance(value, bool) for value in values.values()):
+def _fields(data: bytes | None) -> dict[int, list[int | bytes]] | None:
+    """One protobuf message's fields by number: a varint as an int, any other value as its
+    bytes; ``None`` if ``data`` is not a message."""
+    if data is None:
         return None
-    counts = {
-        name: value if isinstance(value, int) and not isinstance(value, bool) else 0
-        for name, value in values.items()
-    }
-    return AtifMetrics(
-        prompt_tokens=counts["input_tokens"] + counts["cache_read_tokens"],
-        completion_tokens=counts["output_tokens"],
-        cached_tokens=counts["cache_read_tokens"],
-    )
+    fields: dict[int, list[int | bytes]] = {}
+    index = 0
+    try:
+        while index < len(data):
+            key, index = _varint(data, index)
+            wire = key & 7
+            if wire == 0:
+                value, index = _varint(data, index)
+                fields.setdefault(key >> 3, []).append(value)
+                continue
+            if wire == 2:
+                size, index = _varint(data, index)
+            elif wire in (1, 5):
+                size = 8 if wire == 1 else 4
+            else:
+                return None
+            if index + size > len(data):
+                return None
+            fields.setdefault(key >> 3, []).append(data[index : index + size])
+            index += size
+    except IndexError:
+        return None
+    return fields
+
+
+def _varint(data: bytes, index: int) -> tuple[int, int]:
+    value = shift = 0
+    while True:
+        byte = data[index]
+        index += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, index
+        shift += 7
+
+
+def _first(fields: dict[int, list[int | bytes]], number: int) -> bytes | None:
+    """A field's first value, if it holds bytes."""
+    value = next(iter(fields.get(number, ())), None)
+    return value if isinstance(value, bytes) else None
+
+
+def _proto_time(timestamp: dict[int, list[int | bytes]]) -> str | None:
+    """A ``google.protobuf.Timestamp``, seconds and nanoseconds since the epoch in UTC, in
+    ISO 8601 to the microsecond."""
+    seconds = next(iter(timestamp.get(_SECONDS, ())), None)
+    nanos = next(iter(timestamp.get(_NANOS, ())), 0)
+    if not isinstance(seconds, int) or not isinstance(nanos, int):
+        return None
+    return epoch_time(seconds * 1_000_000 + nanos // 1000, 1_000_000)
 
 
 def _agent(context: TrajectoryParseContext) -> AtifAgent:
@@ -537,16 +674,6 @@ def _text(value: Any) -> str:
 def _user_request(content: str) -> str:
     match = _REQUEST.search(content)
     return match.group(1) if match else content
-
-
-def _timestamp(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return value
 
 
 def _json(line: str) -> dict[str, Any] | None:

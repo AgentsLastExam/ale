@@ -53,6 +53,8 @@ class ScriptedModel:
     #: How many requests ``fail`` failed.
     failed: int = 0
     requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    #: The response ID of each call the agent loop made, in order.
+    loop: list[str] = field(default_factory=list)
     _runner: web.AppRunner | None = None
 
     async def start(self) -> str:
@@ -136,6 +138,20 @@ class ScriptedModel:
         self.requests.append((request.path, body))
         return body
 
+    def _answer(self, body: dict[str, Any], response_id: str) -> None:
+        """Note a call the agent loop made: one that offered the agent's shell tool, which a
+        side request, such as Grok's title with its ``session_title`` tool, does not."""
+        if self._matching(_offered(body.get("tools") or []), self.tool_pattern) is not None:
+            self.loop.append(response_id)
+
+    def _usage(self) -> tuple[int, int, int, int]:
+        """The current call's uncached input, cache reads, cache writes and output tokens.
+
+        Each call's counts differ from every other call's, so a step's usage names its call.
+        """
+        number = len(self.requests)
+        return 10 + number, 100 * number, 2 * number, 3 + number
+
     # --- OpenAI Chat Completions ---
 
     async def _chat(self, request: web.Request) -> web.StreamResponse:
@@ -147,9 +163,16 @@ class ScriptedModel:
             bool(messages) and messages[-1].get("role") == "tool",
             _first_user(messages),
         )
-        usage = {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+        fresh, read, _, output = self._usage()
+        usage = {
+            "prompt_tokens": fresh + read,
+            "completion_tokens": output,
+            "total_tokens": fresh + read + output,
+            "prompt_tokens_details": {"cached_tokens": read},
+        }
         call_id = f"call_{uuid.uuid4().hex[:12]}"
         base = {"id": f"chatcmpl-{uuid.uuid4().hex[:12]}", "created": 0, "model": body["model"]}
+        self._answer(body, base["id"])
         finish = "tool_calls" if tool else "stop"
         call = (
             {
@@ -221,6 +244,7 @@ class ScriptedModel:
                 "status": "completed",
                 "content": [{"type": "output_text", "text": FINAL, "annotations": []}],
             }
+        fresh, read, _, output = self._usage()
         response = {
             "id": f"resp_{uuid.uuid4().hex[:12]}",
             "object": "response",
@@ -229,13 +253,14 @@ class ScriptedModel:
             "model": body["model"],
             "output": [item],
             "usage": {
-                "input_tokens": 11,
-                "output_tokens": 7,
-                "total_tokens": 18,
-                "input_tokens_details": {"cached_tokens": 0},
+                "input_tokens": fresh + read,
+                "output_tokens": output,
+                "total_tokens": fresh + read + output,
+                "input_tokens_details": {"cached_tokens": read},
                 "output_tokens_details": {"reasoning_tokens": 0},
             },
         }
+        self._answer(body, response["id"])
         if not body.get("stream"):
             return web.json_response(response)
         pending = {**response, "status": "in_progress", "output": []}
@@ -323,7 +348,13 @@ class ScriptedModel:
             else {"type": "text", "text": FINAL}
         )
         stop = "tool_use" if tool else "end_turn"
-        usage = {"input_tokens": 11, "output_tokens": 7}
+        fresh, read, write, output = self._usage()
+        usage = {
+            "input_tokens": fresh,
+            "cache_read_input_tokens": read,
+            "cache_creation_input_tokens": write,
+            "output_tokens": output,
+        }
         message = {
             "id": f"msg_{uuid.uuid4().hex[:12]}",
             "type": "message",
@@ -334,6 +365,7 @@ class ScriptedModel:
             "stop_sequence": None,
             "usage": usage,
         }
+        self._answer(body, message["id"])
         if not body.get("stream"):
             return web.json_response(message)
         start = {**block, "input": {}} if tool else {"type": "text", "text": ""}
@@ -349,7 +381,13 @@ class ScriptedModel:
                     "message_start",
                     {
                         "type": "message_start",
-                        "message": {**message, "content": [], "stop_reason": None},
+                        # As Anthropic streams it: the output count comes with the end.
+                        "message": {
+                            **message,
+                            "content": [],
+                            "stop_reason": None,
+                            "usage": {**usage, "output_tokens": 1},
+                        },
                     },
                 ),
                 (
@@ -366,7 +404,7 @@ class ScriptedModel:
                     {
                         "type": "message_delta",
                         "delta": {"stop_reason": stop},
-                        "usage": {"output_tokens": 7},
+                        "usage": {"output_tokens": output},
                     },
                 ),
                 ("message_stop", {"type": "message_stop"}),
@@ -399,17 +437,21 @@ class ScriptedModel:
             if tool
             else {"text": FINAL}
         )
+        fresh, read, _, output = self._usage()
         chunk = {
+            "responseId": f"scripted-{uuid.uuid4().hex[:12]}",
             "candidates": [
                 {"content": {"role": "model", "parts": [part]}, "finishReason": "STOP", "index": 0}
             ],
             "usageMetadata": {
-                "promptTokenCount": 11,
-                "candidatesTokenCount": 7,
-                "totalTokenCount": 18,
+                "promptTokenCount": fresh + read,
+                "cachedContentTokenCount": read,
+                "candidatesTokenCount": output,
+                "totalTokenCount": fresh + read + output,
             },
             "modelVersion": request.match_info["target"].partition(":")[0],
         }
+        self._answer(body, chunk["responseId"])
         if not request.match_info["target"].endswith(":streamGenerateContent"):
             return web.json_response(chunk)
         return await _sse(request, [(None, chunk)])

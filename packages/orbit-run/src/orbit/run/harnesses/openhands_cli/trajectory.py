@@ -7,6 +7,7 @@ import binascii
 import json
 import re
 from dataclasses import dataclass, field, replace
+from datetime import datetime, tzinfo
 from functools import cached_property
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -16,6 +17,7 @@ from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
+    AtifMetrics,
     AtifObservation,
     AtifObservationResult,
     AtifSubagentTrajectoryRef,
@@ -24,11 +26,15 @@ from orbit.core.trajectory import (
     TrajectoryBuilder,
 )
 from orbit.run.harnesses.base import (
+    LOG_ROOT,
     NativeResult,
+    call_metrics,
     invocations,
+    iso_time,
     json_lines,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 
@@ -39,6 +45,9 @@ STATE = ".openhands-orbit"
 CONVERSATIONS = f"{STATE}/conversations"
 #: The MCP configuration, which names the servers the tools came from.
 MCP_CONFIG = f"{STATE}/mcp.json"
+#: The Sandbox's UTC offset, ``date +%z``, which each launch writes before the CLI starts:
+#: its events record local time without a zone.
+UTC_OFFSET = f"{LOG_ROOT}/utc-offset"
 _CONVERSATION_ID = re.compile(r"^Conversation ID: ([0-9a-f]{32})\s*$", re.MULTILINE)
 #: How the CLI frames the contents of `--file` as the first user message.
 _FILE_PROMPT = re.compile(
@@ -178,8 +187,9 @@ class _Tree:
         )
 
     @cached_property
-    def tasks(self) -> dict[str, set[str]]:
-        """The response IDs the parent recorded for each task, by task ID."""
+    def recorded_usage(self) -> dict[str, Any]:
+        """``base_state.json``'s metrics, keyed by the LLM that made the calls or by
+        ``task:<task id>``."""
         path = self.root / "base_state.json"
         try:
             state = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
@@ -190,8 +200,35 @@ class _Tree:
             if isinstance(state, dict)
             else {}
         )
+        return usage if isinstance(usage, dict) else {}
+
+    @cached_property
+    def usage(self) -> dict[str, AtifMetrics]:
+        """The usage of each model call this conversation's own LLMs made, by response ID."""
+        found: dict[str, AtifMetrics] = {}
+        for key, metrics in self.recorded_usage.items():
+            if str(key).startswith("task:") or not isinstance(metrics, dict):
+                continue
+            for entry in metrics.get("token_usages") or ():
+                response_id = entry.get("response_id") if isinstance(entry, dict) else None
+                if not isinstance(response_id, str) or not response_id:
+                    continue
+                try:
+                    reported = _metrics(entry)
+                except ValueError:
+                    self.issues.append(
+                        {"reason": "invalid_token_usage", "response_id": response_id}
+                    )
+                    continue
+                if reported is not None:
+                    found[response_id] = reported
+        return found
+
+    @cached_property
+    def tasks(self) -> dict[str, set[str]]:
+        """The response IDs the parent recorded for each task, by task ID."""
         found: dict[str, set[str]] = {}
-        for key, metrics in usage.items() if isinstance(usage, dict) else ():
+        for key, metrics in self.recorded_usage.items():
             if not str(key).startswith("task:") or not isinstance(metrics, dict):
                 continue
             found[str(key)[5:]] = {
@@ -275,8 +312,30 @@ def _convert(
     recorded_prompts: bool,
 ) -> int:
     """Add the events' steps; the number of user messages among them. ``tree`` links
-    delegated conversations; stdout events have none."""
+    delegated conversations and holds each model call's usage; stdout events have none.
+
+    Every step a model call produced names its ``llm_response_id``, and the provider's
+    response ID when that one holds it, and the first carries its usage.
+    """
     servers = tree.servers if tree else []
+    usage = tree.usage if tree else {}
+    zone = _launch_zone(context)
+    charged: set[str] = set()
+
+    def produced_by(event: dict[str, Any]) -> dict[str, Any]:
+        """The step fields of the model call that produced ``event``."""
+        response_id = event.get("llm_response_id")
+        if not isinstance(response_id, str) or not response_id:
+            return {}
+        named = [response_id]
+        if provider := _provider_response_id(response_id):
+            named.append(provider)
+        fields: dict[str, Any] = {"extra": {"orbit": {"native_event_ids": named}}}
+        if response_id not in charged:
+            charged.add(response_id)
+            fields["metrics"] = usage.get(response_id)
+        return fields
+
     results = {
         str(event.get("tool_call_id") or ""): event
         for event in events
@@ -312,9 +371,11 @@ def _convert(
         builder.add(
             source="agent",
             message="",
+            timestamp=_timestamp(pending[0].get("timestamp"), zone),
             reasoning_content="\n".join(reasoning) or None,
             tool_calls=calls,
             observation=AtifObservation(results=observed) if observed else None,
+            **produced_by(pending[0]),
         )
         pending.clear()
 
@@ -326,7 +387,7 @@ def _convert(
             pending.append(event)
             continue
         flush()
-        timestamp = event.get("timestamp") if isinstance(event.get("timestamp"), str) else None
+        timestamp = _timestamp(event.get("timestamp"), zone)
         if kind == "MessageEvent":
             content = (event.get("llm_message") or {}).get("content")
             if event.get("source") == "user":
@@ -343,6 +404,7 @@ def _convert(
                     message=_content(content, context),
                     timestamp=timestamp,
                     reasoning_content=message if isinstance(message, str) and message else None,
+                    **produced_by(event),
                 )
         elif kind == "ConversationErrorEvent":
             builder.add(
@@ -390,6 +452,49 @@ def _result(
         content=_content(observation.get("content"), context),
         subagent_trajectory_ref=refs,
         extra={"orbit": {"is_error": True}} if observation.get("is_error") else None,
+    )
+
+
+def _launch_zone(context: TrajectoryParseContext) -> tzinfo | None:
+    """The Sandbox's UTC offset as the launch recorded it, if it did."""
+    try:
+        return datetime.strptime(
+            (context.logs_dir / UTC_OFFSET).read_text(encoding="utf-8").strip(), "%z"
+        ).tzinfo
+    except (OSError, ValueError):
+        return None
+
+
+def _timestamp(value: Any, zone: tzinfo | None) -> str | None:
+    """An event's time. The SDK records the process's local time without a zone, so it
+    takes the Sandbox's UTC offset from the launch; without that it is ambiguous."""
+    if (zoned := iso_time(value)) is not None or zone is None or not isinstance(value, str):
+        return zoned
+    try:
+        return datetime.fromisoformat(value).replace(tzinfo=zone).isoformat()
+    except ValueError:
+        return None
+
+
+def _provider_response_id(response_id: str) -> str | None:
+    """The provider's response ID in one LiteLLM made for a Responses API call: ``resp_``
+    and the base64 of ``litellm:custom_llm_provider:<p>;model_id:<m>;response_id:<id>``."""
+    if not response_id.startswith("resp_"):
+        return None
+    try:
+        decoded = base64.b64decode(response_id[5:], validate=True).decode("utf-8")
+    except (binascii.Error, ValueError):
+        return None
+    return decoded.partition(";response_id:")[2] or None
+
+
+def _metrics(usage: dict[str, Any]) -> AtifMetrics | None:
+    """One call's ``token_usages`` entry: its ``prompt_tokens`` already count the cache
+    reads and writes, and its ``completion_tokens`` the reasoning, as the Gateway does."""
+    return call_metrics(
+        token_count(usage.get("prompt_tokens")),
+        token_count(usage.get("completion_tokens")),
+        token_count(usage.get("cache_read_tokens"), optional=True),
     )
 
 

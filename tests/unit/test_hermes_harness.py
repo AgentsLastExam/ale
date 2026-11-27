@@ -587,7 +587,7 @@ def test_a_launch_and_its_resume_convert_in_native_order(tmp_path: Path) -> None
             "messages": [{**item, "timestamp": at} for at, item in enumerate(messages)],
         },
         # Each result counts the tokens of the session so far.
-        stdout=[events(result(tokens={"input": 10 * turn})) for turn in (1, 2)],
+        stdout=[events(result(tokens={"input": 10 * turn, "output": turn})) for turn in (1, 2)],
     )
 
     assert trajectory.session_id == SESSION_ID
@@ -716,3 +716,62 @@ async def test_windows_runs_the_launcher_the_installer_publishes() -> None:
     # gateway stop, chat and sessions export.
     assert command.script.count("C:/Users/agent/.hermes-orbit/bin/hermes.exe ") == 3
     assert command.env["HERMES_HOME"] == "C:/Users/agent/.hermes-orbit"
+
+
+def test_each_step_takes_the_time_hermes_stored_it(tmp_path: Path) -> None:
+    trajectory = parse(
+        tmp_path,
+        ["Go."],
+        {
+            "id": SESSION_ID,
+            "messages": [
+                {**user("Go."), "timestamp": 1_795_000_000.5},
+                {**agent("", call("c1", "terminal", {})), "timestamp": 1_795_000_002.25},
+                tool("c1", "ok"),
+                {**agent("Done."), "timestamp": -1},
+            ],
+        },
+    )
+
+    assert [step.timestamp for step in trajectory.steps] == [
+        "2026-11-18T11:06:40.500000Z",
+        "2026-11-18T11:06:42.250000Z",
+        None,
+    ]
+    # Hermes stores no model call's usage or response ID.
+    assert all(step.metrics is None and step.extra is None for step in trajectory.steps)
+
+
+def test_a_turn_from_its_events_takes_the_time_each_was_printed(tmp_path: Path) -> None:
+    record(
+        tmp_path,
+        "Go.",
+        stdout=events(
+            {"type": "text", "text": "Look", "timestamp": 1_795_000_001_000},
+            {"type": "text", "text": "ing.", "timestamp": 1_795_000_001_500},
+            {
+                "type": "tool_use",
+                "name": "terminal",
+                "tool_call_id": "t1",
+                "input": {},
+                "timestamp": 1_795_000_002_000,
+            },
+            {"type": "tool_result", "tool_call_id": "t1", "output": "a"},
+            {"type": "text", "text": "Done"},
+            # Tokens without an output count.
+            result(tokens={"input": 5}),
+        ),
+    )
+    trajectory = HermesHarness().parse_trajectory(recorded_context(tmp_path))
+
+    assert [(step.message, step.timestamp) for step in trajectory.steps] == [
+        ("Go.", None),
+        ("Looking.", "2026-11-18T11:06:41.500000Z"),
+        ("", "2026-11-18T11:06:42.000000Z"),
+        ("Done", None),
+    ]
+    assert trajectory.final_metrics is None
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "native_session_unavailable", "session_id": SESSION_ID},
+        {"reason": "invalid_token_usage", "invocation": 1},
+    ]

@@ -385,3 +385,91 @@ def test_without_the_session_each_turn_comes_from_its_json_events(tmp_path: Path
         (call,) = step.tool_calls or ()
         assert call.tool_call_id == f"call-{turn}"
         assert step.observation.results[0].source_call_id == call.tool_call_id  # type: ignore[union-attr]
+
+
+def call_message(call: str, **fields: object) -> dict[str, object]:
+    return {
+        "role": "assistant",
+        "content": [{"type": "toolCall", "id": call, "name": "bash", "arguments": {}}],
+        **fields,
+    }
+
+
+def test_each_model_call_carries_its_time_usage_and_response(tmp_path: Path) -> None:
+    record(tmp_path, "Count.")
+    full = {"input": 3, "output": 7, "cacheRead": 40, "cacheWrite": 50}
+    entries = [
+        entry("u", None, {"role": "user", "content": "Count."})
+        | {"timestamp": "2026-10-26T00:00:01.000Z"},
+        entry("a1", "u", call_message("t1", usage=full, responseId="resp-first"))
+        | {"timestamp": "2026-10-26T00:00:02.500Z"},
+        # Cache counts are optional; a missing entry time leaves the step untimed.
+        entry("a2", "a1", call_message("t2", usage={"input": 4, "output": 1})),
+        # No usage is no metrics, and a time that names no zone is ambiguous.
+        entry("a3", "a2", call_message("t3")) | {"timestamp": "2026-10-26T00:00:03"},
+        # Usage that reports no tokens is none.
+        entry("a4", "a3", call_message("t4", usage={"input": 0, "output": 0})),
+        entry("a5", "a4", assistant("Done.", usage={"input": 2}, responseId="resp-last"))
+        | {"timestamp": "2026-10-26T00:00:04Z"},
+    ]
+    write_session(tmp_path, *entries)
+    trajectory = PiCliHarness().parse_trajectory(recorded_context(tmp_path))
+
+    steps = trajectory.steps
+    assert [step.timestamp for step in steps] == [
+        "2026-10-26T00:00:01.000Z",
+        "2026-10-26T00:00:02.500Z",
+        None,
+        None,
+        None,
+        "2026-10-26T00:00:04Z",
+    ]
+    # Pi's input leaves out the cache reads and writes the Gateway counts as input.
+    assert [
+        (step.metrics.prompt_tokens, step.metrics.cached_tokens, step.metrics.completion_tokens)
+        if step.metrics
+        else None
+        for step in steps
+    ] == [None, (93, 40, 7), (4, 0, 1), None, None, None]
+    assert [step.extra["orbit"]["native_event_ids"] for step in steps] == [  # type: ignore[index]
+        ["u"],
+        ["a1", "resp-first"],
+        ["a2"],
+        ["a3"],
+        ["a4"],
+        ["a5", "resp-last"],
+    ]
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "invalid_token_usage", "entry_id": "a5", "response_id": "resp-last"}
+    ]
+
+
+def test_a_turn_from_json_events_times_its_prompt_only(tmp_path: Path) -> None:
+    usage = {"input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4}
+    messages = [
+        {"role": "user", "content": "Count.", "timestamp": 1_795_000_000_000},
+        # Created when the model call began, before its output arrived: not the step's time.
+        call_message("t1", usage=usage, responseId="resp-first", timestamp=1_795_000_001_250),
+        assistant("Done."),
+    ]
+    record(
+        tmp_path,
+        "Count.",
+        stdout=events(*({"type": "message_end", "message": item} for item in messages)),
+    )
+    trajectory = PiCliHarness().parse_trajectory(recorded_context(tmp_path))
+
+    assert [step.timestamp for step in trajectory.steps] == [
+        "2026-11-18T11:06:40.000000Z",
+        None,
+        None,
+    ]
+    assert [(step.extra or {}).get("orbit") for step in trajectory.steps[1:]] == [
+        {"native_event_ids": ["resp-first"]},
+        None,
+    ]
+    assert trajectory.steps[1].metrics is not None
+    assert trajectory.steps[1].metrics.prompt_tokens == 8
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "native_session_unavailable", "session_id": SESSION_ID}
+    ]

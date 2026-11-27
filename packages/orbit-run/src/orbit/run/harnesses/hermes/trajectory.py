@@ -26,10 +26,12 @@ from orbit.core.trajectory import (
 )
 from orbit.run.harnesses.base import (
     NativeResult,
+    epoch_time,
     invocations,
     json_lines,
     requested_session_id,
     stdout_events,
+    token_count,
 )
 
 #: ``HERMES_HOME``.
@@ -106,17 +108,21 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
         builder.add(source="agent", message=context.final_message)
     if expected is not None and root is not None:
         issues.extend(sessions.unlinked(expected))
+    # The last result's tokens, whose input already includes the cache reads and writes.
     tokens = _result(streams[-1]).get("tokens") if streams else None
-    final_metrics = (
-        AtifFinalMetrics(
-            total_prompt_tokens=_count(tokens, "input"),
-            total_completion_tokens=_count(tokens, "output"),
-            total_cached_tokens=_count(tokens, "cache_read"),
-            total_steps=len(builder.steps),
-        )
-        if isinstance(tokens, dict)
-        else None
-    )
+    final_metrics = None
+    if tokens is not None:
+        try:
+            if not isinstance(tokens, dict):
+                raise ValueError(f"not a usage object: {tokens!r}")
+            final_metrics = AtifFinalMetrics(
+                total_prompt_tokens=token_count(tokens.get("input")),
+                total_completion_tokens=token_count(tokens.get("output")),
+                total_cached_tokens=token_count(tokens.get("cache_read"), optional=True),
+                total_steps=len(builder.steps),
+            )
+        except ValueError:
+            issues.append({"reason": "invalid_token_usage", "invocation": len(streams)})
     trajectory = builder.build(final_metrics=final_metrics, subagent_trajectories=children or None)
     extra = _extra(context, issues, native=root is not None)
     return trajectory.model_copy(update={"extra": extra}) if extra else trajectory
@@ -216,13 +222,19 @@ class _Sessions:
         prompts = 0
         for message in messages:
             role = message.get("role")
+            # When Hermes stored the message; an assistant message once its response arrived.
+            timestamp = epoch_time(message.get("timestamp"), 1)
             if message.get("_compressed_summary"):
-                builder.add(source="system", message=_text(message.get("content")))
+                builder.add(
+                    source="system", message=_text(message.get("content")), timestamp=timestamp
+                )
             elif role == "user":
                 if prompts and 0 < prompts <= len(failures) and failures[prompts - 1]:
                     builder.add(source="system", message=str(failures[prompts - 1]))
                 prompts += 1
-                builder.add(source="user", message=_text(message.get("content")))
+                builder.add(
+                    source="user", message=_text(message.get("content")), timestamp=timestamp
+                )
             elif role == "assistant":
                 calls: list[AtifToolCall] = []
                 observed: list[AtifObservationResult] = []
@@ -250,6 +262,7 @@ class _Sessions:
                 builder.add(
                     source="agent",
                     message=_text(message.get("content")),
+                    timestamp=timestamp,
                     reasoning_content=reasoning or None if isinstance(reasoning, str) else None,
                     tool_calls=calls or None,
                     observation=AtifObservation(results=observed) if observed else None,
@@ -470,19 +483,25 @@ def _stream_steps(
     servers: dict[str, str],
     context: TrajectoryParseContext,
 ) -> None:
-    """One invocation's stream-json: each tool use with its result, then its text."""
+    """One invocation's stream-json: each tool use with its result, then its text.
+
+    Each event carries the time Hermes printed it, in Unix milliseconds: a text step takes
+    its last delta's, and a tool use the time its call started.
+    """
     results = {
         str(event.get("tool_call_id") or ""): event
         for event in stream
         if event.get("type") == "tool_result"
     }
     text: list[str] = []
+    printed: str | None = None
     for event in stream:
         if event.get("type") == "text":
             text.append(str(event.get("text") or ""))
+            printed = epoch_time(event.get("timestamp"), 1000)
         elif event.get("type") == "tool_use":
             if "".join(text).strip():
-                builder.add(source="agent", message="".join(text).strip())
+                builder.add(source="agent", message="".join(text).strip(), timestamp=printed)
             text.clear()
             call_id = str(event.get("tool_call_id") or "")
             name = str(event.get("name") or "")
@@ -490,6 +509,7 @@ def _stream_steps(
             builder.add(
                 source="agent",
                 message="",
+                timestamp=epoch_time(event.get("timestamp"), 1000),
                 tool_calls=[_call(call_id, name, _arguments(event.get("input")), servers)],
                 observation=(
                     AtifObservation(
@@ -508,7 +528,7 @@ def _stream_steps(
                 ),
             )
     if "".join(text).strip():
-        builder.add(source="agent", message="".join(text).strip())
+        builder.add(source="agent", message="".join(text).strip(), timestamp=printed)
 
 
 def _result(stream: list[dict[str, Any]]) -> dict[str, Any]:
@@ -572,11 +592,6 @@ def _arguments(value: Any) -> dict[str, Any]:
 def _sanitized(name: str) -> str:
     """Hermes' ``sanitize_mcp_name_component``."""
     return re.sub(r"[^A-Za-z0-9_]", "_", name)
-
-
-def _count(tokens: Any, key: str) -> int | None:
-    value = tokens.get(key) if isinstance(tokens, dict) else None
-    return value if isinstance(value, int) else None
 
 
 def _extra(

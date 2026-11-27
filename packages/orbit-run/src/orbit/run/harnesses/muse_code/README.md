@@ -36,13 +36,24 @@ Muse's `web_fetch` as well, though it fetches locally; no switch keeps it alone.
 A launch passes a new UUID to `--session-id`, and a resume passes the same ID again. The
 session is `.local/share/muse/sessions/<year>/<month>/<day>/<session id>/session.jsonl`.
 The parser unwraps retained frames, drops repeated records, and follows the `run` events
-in native order: one agent step per model response, with its usage. A call names an MCP
+in native order: one agent step per model response. A call names an MCP
 tool `mcp__<server>__<tool>`, each part sanitized; the parser takes the server and tool as
 declared from the session's catalog of its MCP tools. A tool's failure is a `task` failure
 linked by `tool:<call id>`. A tool Meta runs inside a response, such as hosted web search,
 is a `provider_tool_call_completed` event: it becomes a call on that response's step, with
 the action as its arguments and its status and results as its result. A run Muse starts
 itself has no prompt; what it delivers, such as a subagent's result, is a system step.
+
+A step takes its first record's `recorded_at`, microseconds since the epoch. A model
+response is one model call: `model_response_created` names the provider's response ID,
+which the response's committed message, reasoning and calls repeat, and `model_completed`
+then records its usage. Its `input_tokens`, as the Responses API counts them, include
+cache reads and writes, and its `output_tokens` the reasoning. The response's step carries
+that usage and lists the response ID in `extra.orbit.native_event_ids`; the root
+session's steps link to their Gateway calls, and a subagent's steps keep the ID, unlinked.
+A completion that follows no new response is on no step, and usage that cannot be read is
+reported as `invalid_token_usage`. A turn the session lacks, rebuilt from its prompt and
+stdout, has no times, usage or response IDs.
 
 A subagent's start is attested with the call that dispatched it and its child session,
 stored in the parent's `subagent/<child id>/`. It becomes an embedded trajectory when

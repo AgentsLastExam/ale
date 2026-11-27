@@ -23,6 +23,7 @@ from orbit.core.trajectory import (
     AtifAgent,
     AtifContentPart,
     AtifImageSource,
+    AtifMetrics,
     AtifObservation,
     AtifObservationResult,
     AtifSubagentTrajectoryRef,
@@ -34,11 +35,14 @@ from orbit.run.harnesses._diagnostics import error_text
 from orbit.run.harnesses.base import (
     Invocation,
     NativeResult,
+    call_metrics,
     invocations,
+    iso_time,
     mirrored_files,
     native_events,
     requested_session_id,
     stdout_events,
+    token_count,
     unconverted,
 )
 from orbit.run.tools import CUA_DESKTOP_NAME
@@ -69,6 +73,7 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
     ]
     consumed: set[Path] = set()
     events = _with_prompts(recorded, turns)
+    usage: dict[str, AtifMetrics] = {}
     if len(roots) == 1:
         native, native_issues = native_events(context, roots[0])
         consumed.add(roots[0])
@@ -114,11 +119,12 @@ def parse_trajectory(context: TrajectoryParseContext) -> AtifTrajectory:
             events = [
                 event for event in events if event.get("parent_tool_use_id") not in covered
             ] + sidechains
+            usage = _usage([*native, *sidechains], issues)
     else:
         issues.append({"reason": "native_session_unavailable", "session_id": expected})
     sessions = {path for path in files if path.suffix == ".jsonl"}
     issues.extend(unconverted(context, sessions - consumed))
-    return _parse_events(context, events, issues, instruction=None)
+    return _parse_events(context, events, issues, usage, instruction=None)
 
 
 def _with_prompts(
@@ -192,10 +198,15 @@ def _parse_events(
     context: TrajectoryParseContext,
     events: list[dict[str, Any]],
     issues: list[dict[str, Any]],
+    usage: dict[str, AtifMetrics],
     *,
     instruction: str | None,
 ) -> AtifTrajectory:
-    """Convert ordered events; a subagent's delegated ``instruction`` opens its trajectory."""
+    """Convert ordered events; a subagent's delegated ``instruction`` opens its trajectory.
+
+    The first step a model call produced takes that call's ``usage``, keyed by its message
+    ID, out of the mapping.
+    """
     sidechains = _sidechain_groups(events)
     events = [event for event in events if not event.get("isSidechain")]
     results: dict[str, tuple[Any, bool]] = {}
@@ -248,7 +259,7 @@ def _parse_events(
     native_session_id = context.session_id
     for event in events:
         kind = event.get("type")
-        timestamp = event.get("timestamp") if isinstance(event.get("timestamp"), str) else None
+        timestamp = iso_time(event.get("timestamp"))
         if kind == "system":
             message, attachments = _atif_content(
                 event.get("message") or event.get("content") or "",
@@ -348,6 +359,7 @@ def _parse_events(
                 reasoning_content="".join(reasoning_parts) or None,
                 tool_calls=calls or None,
                 observation=AtifObservation(results=observations) if observations else None,
+                metrics=usage.pop(str(message.get("id")), None),
                 extra=_step_extra(event, attachments=attachments),
             )
             continue
@@ -383,7 +395,7 @@ def _parse_events(
     if native_session_id and trajectory.session_id != native_session_id:
         trajectory = trajectory.model_copy(update={"session_id": native_session_id})
     if sidechains:
-        trajectory = _embed_sidechains(trajectory, sidechains, context)
+        trajectory = _embed_sidechains(trajectory, sidechains, context, usage)
         return AtifTrajectory.model_validate(trajectory.model_dump())
     return trajectory
 
@@ -392,6 +404,7 @@ def _embed_sidechains(
     root: AtifTrajectory,
     groups: dict[str, list[dict[str, Any]]],
     context: TrajectoryParseContext,
+    usage: dict[str, AtifMetrics],
 ) -> AtifTrajectory:
     embedded: list[AtifTrajectory] = []
     refs_by_call: dict[str, list[AtifSubagentTrajectoryRef]] = {}
@@ -418,6 +431,7 @@ def _embed_sidechains(
             replace(context, trajectory_id=trajectory_id, session_id=_event_session(events)),
             normalized,
             [],
+            usage,
             instruction=_delegated_instruction(root, parent_call),
         )
         embedded.append(child)
@@ -477,6 +491,47 @@ def _embed_sidechains(
                 *embedded,
             ],
         }
+    )
+
+
+def _usage(events: list[dict[str, Any]], issues: list[dict[str, Any]]) -> dict[str, AtifMetrics]:
+    """Each model call's usage in the native session, keyed by its message ID.
+
+    Claude Code records each content block of a response as its own line, every one with the
+    response's message ID and full usage. Stdout's copy counts only the output tokens so far.
+    """
+    usage: dict[str, AtifMetrics] = {}
+    seen: set[str] = set()
+    for event in events:
+        message = event.get("message")
+        if event.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        native_id, reported = message.get("id"), message.get("usage")
+        if not isinstance(native_id, str) or reported is None or native_id in seen:
+            continue
+        seen.add(native_id)
+        try:
+            metrics = _metrics(reported)
+        except ValueError:
+            issues.append({"reason": "invalid_token_usage", "message_id": native_id})
+            continue
+        if metrics is not None:
+            usage[native_id] = metrics
+    return usage
+
+
+def _metrics(usage: object) -> AtifMetrics | None:
+    """An Anthropic usage, whose ``input_tokens`` leave out the cache reads and writes and
+    whose ``output_tokens`` include the thinking."""
+    if not isinstance(usage, dict):
+        raise ValueError(f"not a usage: {usage!r}")
+    read = token_count(usage.get("cache_read_input_tokens"), optional=True)
+    return call_metrics(
+        token_count(usage.get("input_tokens"))
+        + token_count(usage.get("cache_creation_input_tokens"), optional=True)
+        + read,
+        token_count(usage.get("output_tokens")),
+        read,
     )
 
 

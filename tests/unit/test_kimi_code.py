@@ -317,10 +317,20 @@ def step(
     agent: str, *events: dict[str, object], usage: dict[str, int] | None = None
 ) -> list[dict[str, object]]:
     """One native step: its loop events between the step's begin and end."""
-    loop = [{"type": "step.begin"}, *events, {"type": "step.end", "usage": usage}]
+    end = {"type": "step.end"} | ({"usage": usage} if usage is not None else {})
+    loop = [{"type": "step.begin"}, *events, end]
     return [
         {"type": "context.append_loop_event", "agentId": agent, "event": event} for event in loop
     ]
+
+
+def tokens(other: int, read: int = 0, created: int = 0, output: int = 0) -> dict[str, int]:
+    return {
+        "inputOther": other,
+        "inputCacheRead": read,
+        "inputCacheCreation": created,
+        "output": output,
+    }
 
 
 def tool(
@@ -353,9 +363,7 @@ def child_wire(agent: str) -> list[dict[str, object]]:
     """A subagent's conversation: the delegated task, then one command."""
     return [
         prompt(agent, "run child"),
-        *step(
-            agent, *tool("call-3", "Bash", {"command": "echo hi"}, "hi"), usage={"inputOther": 7}
-        ),
+        *step(agent, *tool("call-3", "Bash", {"command": "echo hi"}, "hi"), usage=tokens(7)),
     ]
 
 
@@ -374,7 +382,7 @@ def kimi_logs(tmp_path: Path) -> Path:
                 "main",
                 *tool("call-2", "ReadMediaFile", {"path": "a.png"}, image, note="1x1 pixels"),
             ),
-            *step("main", text_part("PARENT-DONE"), usage={"inputOther": 5}),
+            *step("main", text_part("PARENT-DONE"), usage=tokens(5)),
             prompt("main", PROMPTS[1], origin={"kind": "user"}),
             *step("main", text_part("SECOND-DONE")),
         ],
@@ -508,3 +516,94 @@ def test_without_the_session_each_turn_comes_from_its_prompt_and_stdout(tmp_path
         "parse_issues"
     ]
     assert orbit["limitations"]
+
+
+def loop_event(time: int, event: dict[str, object]) -> dict[str, object]:
+    return {"type": "context.append_loop_event", "agentId": "main", "time": time, "event": event}
+
+
+def test_each_step_carries_its_call_time_usage_and_response(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    write_run(logs, stdout("DONE"), "")
+    begin = {"type": "step.begin"}
+    write_jsonl(
+        logs / SESSION_DIR / "agents/main/wire.jsonl",
+        [
+            prompt("main", PROMPTS[0], origin={"kind": "user"}, time=1_000),
+            loop_event(1_010, begin),
+            loop_event(2_000, {"type": "content.part", "part": {"type": "think", "think": "t"}}),
+            *(
+                loop_event(2_500 + index, event)
+                for index, event in enumerate(tool("c1", "Bash", {}, "ok"))
+            ),
+            loop_event(
+                3_000,
+                {
+                    "type": "step.end",
+                    "usage": tokens(3, read=40, created=50, output=7),
+                    "messageId": "resp-first",
+                },
+            ),
+            loop_event(3_010, begin),
+            *(
+                loop_event(4_000 + index, event)
+                for index, event in enumerate(tool("c2", "Bash", {}, "ok"))
+            ),
+            # Cache counts are optional.
+            loop_event(4_500, {"type": "step.end", "usage": {"inputOther": 4, "output": 1}}),
+            loop_event(4_510, begin),
+            loop_event(5_000, text_part("DONE")),
+            loop_event(
+                5_100,
+                {
+                    "type": "step.end",
+                    "uuid": "step-3",
+                    "usage": {"inputOther": 2},
+                    "messageId": "resp-last",
+                },
+            ),
+            # A step that failed records no usage, and one that reports no tokens has none.
+            loop_event(5_110, begin),
+            loop_event(5_200, text_part("cut")),
+            loop_event(5_300, {"type": "step.end"}),
+            loop_event(5_310, begin),
+            loop_event(5_400, text_part("empty")),
+            loop_event(5_500, {"type": "step.end", "usage": tokens(0)}),
+        ],
+    )
+
+    trajectory = KimiCodeHarness().parse_trajectory(context(logs, tmp_path))
+
+    *steps, rebuilt = trajectory.steps
+    assert (rebuilt.source, rebuilt.message, rebuilt.timestamp) == ("user", PROMPTS[1], None)
+    # A step takes the time of its first part or call, which Kimi records once the model's
+    # response has streamed; its usage and response ID come at its end.
+    assert [step.timestamp for step in steps] == [
+        "1970-01-01T00:00:01.000000Z",
+        "1970-01-01T00:00:02.000000Z",
+        "1970-01-01T00:00:04.000000Z",
+        "1970-01-01T00:00:05.000000Z",
+        "1970-01-01T00:00:05.200000Z",
+        "1970-01-01T00:00:05.400000Z",
+    ]
+    metrics = [
+        (step.metrics.prompt_tokens, step.metrics.cached_tokens, step.metrics.completion_tokens)
+        if step.metrics
+        else None
+        for step in steps
+    ]
+    assert metrics == [None, (93, 40, 7), (4, 0, 1), None, None, None]
+    assert [(step.extra or {}).get("orbit") for step in steps] == [
+        None,
+        {"native_event_ids": ["resp-first"]},
+        None,
+        {"native_event_ids": ["resp-last"]},
+        None,
+        None,
+    ]
+    assert trajectory.final_metrics is not None
+    assert trajectory.final_metrics.total_prompt_tokens == 97
+    assert trajectory.extra["orbit"]["parse_issues"] == [  # type: ignore[index]
+        {"reason": "invalid_token_usage", "agent_id": "main", "step": "step-3"},
+        {"reason": "prompt_not_in_native_session", "invocation": 2},
+    ]

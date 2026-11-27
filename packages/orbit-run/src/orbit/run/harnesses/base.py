@@ -11,9 +11,14 @@ import asyncio
 import json
 import re
 import shlex
+import shutil
+import sqlite3
+import tempfile
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from itertools import accumulate
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, ClassVar, final
@@ -40,6 +45,7 @@ from orbit.core.harness import (
 )
 from orbit.core.sandbox import Identity, Sandbox
 from orbit.core.taskspec import OperatingSystem, SseMcpServer
+from orbit.core.trajectory import AtifMetrics
 from orbit.run.harnesses import _install
 from orbit.run.harnesses._agent import agent_home, agent_path, bash_command
 from orbit.run.harnesses._diagnostics import failure_detail
@@ -653,6 +659,71 @@ def native_events(
     events, issues = json_lines(path.read_text(encoding="utf-8", errors="replace"))
     source = path.relative_to(context.logs_dir).as_posix()
     return events, [{"source": source, **issue} for issue in issues]
+
+
+def epoch_time(value: object, per_second: int) -> str | None:
+    """A native Unix time, counted in ``1 / per_second`` seconds, in ISO 8601 UTC."""
+    if not isinstance(value, int | float) or isinstance(value, bool) or value < 0:
+        return None
+    try:
+        moment = datetime.fromtimestamp(value / per_second, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def iso_time(value: object) -> str | None:
+    """A native ISO 8601 time as written, if it names its zone; one that does not is
+    ambiguous."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return value if moment.tzinfo is not None else None
+
+
+def token_count(value: object, *, optional: bool = False) -> int:
+    """A native token count; an optional one the usage leaves out, or gives as null, is 0.
+
+    Raises ``ValueError`` for anything else that is not a count, which a parser reports as
+    ``invalid_token_usage``.
+    """
+    if value is None and optional:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"not a token count: {value!r}")
+    return value
+
+
+def call_metrics(prompt: int, completion: int, cached: int) -> AtifMetrics | None:
+    """One model call's usage as a step's metrics, counted as the Gateway counts it: the
+    prompt includes the cache reads and writes, the completion the reasoning. Usage that
+    reports no tokens is none."""
+    if not (prompt or completion):
+        return None
+    return AtifMetrics(prompt_tokens=prompt, completion_tokens=completion, cached_tokens=cached)
+
+
+@contextmanager
+def mirrored_store(path: Path) -> Iterator[sqlite3.Connection]:
+    """A mirrored SQLite store, read through a private copy so the mirror is never touched.
+
+    The copy takes the write-ahead log along: SQLite folds in what a stopped process left
+    there.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        copy = Path(directory) / path.name
+        shutil.copyfile(path, copy)
+        wal = path.with_name(path.name + "-wal")
+        if wal.is_file():
+            shutil.copyfile(wal, copy.with_name(copy.name + "-wal"))
+        connection = sqlite3.connect(copy)
+        try:
+            yield connection
+        finally:
+            connection.close()
 
 
 def mirrored_files(context: TrajectoryParseContext, root: str) -> list[Path]:

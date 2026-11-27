@@ -39,7 +39,7 @@ from orbit.run.harnesses.qwen_code import QwenCodeHarness
 from orbit.run.harnesses.zcode import ZCodeHarness
 from orbit.run.protocol.log_mirror import LogMirror
 from orbit.run.recording import EpisodeRecording
-from tests.support import cli_os, cli_sandbox
+from tests.support import check_steps_against_gateway, cli_os, cli_sandbox
 
 pytestmark = [
     pytest.mark.integration,
@@ -99,6 +99,8 @@ class ScriptedUpstream:
     steps: list[tuple[str, Any]]
     marker: str
     requests: list[dict[str, Any]] = field(default_factory=list)
+    #: The response ID of each call the agent loop made, in order.
+    loop: list[str] = field(default_factory=list)
     url: str = ""
     _runner: web.AppRunner | None = None
 
@@ -135,6 +137,23 @@ class ScriptedUpstream:
             return body, self.steps.pop(0)
         return body, ("text", "ok")
 
+    def _answer(self, body: dict[str, Any], response_id: str) -> None:
+        """Note a call the agent loop made: one that offered the ``marker`` tool."""
+        offered = {
+            tool.get("name") or (tool.get("function") or {}).get("name")
+            for tool in body.get("tools") or ()
+        }
+        if self.marker in offered:
+            self.loop.append(response_id)
+
+    def _usage(self) -> tuple[int, int, int, int]:
+        """The current call's uncached input, cache reads, cache writes and output tokens.
+
+        Each call's counts differ from every other call's, so a step's usage names its call.
+        """
+        number = len(self.requests)
+        return 10 + number, 100 * number, 2 * number, 3 + number
+
     async def _sse(self, request: web.Request, events: list[str]) -> web.StreamResponse:
         response = web.StreamResponse(headers={"content-type": "text/event-stream"})
         await response.prepare(request)
@@ -159,6 +178,15 @@ class ScriptedUpstream:
             finish = "tool_calls"
         else:
             delta, finish = {"content": value}, "stop"
+        fresh, read, _, output = self._usage()
+        usage = {
+            "prompt_tokens": fresh + read,
+            "completion_tokens": output,
+            "total_tokens": fresh + read + output,
+            "prompt_tokens_details": {"cached_tokens": read},
+        }
+        response_id = f"chatcmpl-{len(self.requests)}"
+        self._answer(body, response_id)
         if not body.get("stream"):
             message = {"role": "assistant", "content": delta.get("content")}
             if kind == "tool":
@@ -168,18 +196,18 @@ class ScriptedUpstream:
                 ]
             return web.json_response(
                 {
-                    "id": "chatcmpl-scripted",
+                    "id": response_id,
                     "object": "chat.completion",
                     "created": int(time.time()),
                     "model": MODEL,
                     "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-                    "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+                    "usage": usage,
                 }
             )
 
         def chunk(choices: list[dict[str, Any]], **extra: Any) -> str:
             value = {
-                "id": "chatcmpl-scripted",
+                "id": response_id,
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": MODEL,
@@ -194,13 +222,14 @@ class ScriptedUpstream:
                 chunk([{"index": 0, "delta": {"role": "assistant", "content": ""}}]),
                 chunk([{"index": 0, "delta": delta}]),
                 chunk([{"index": 0, "delta": {}, "finish_reason": finish}]),
-                chunk([], usage={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}),
+                chunk([], usage=usage),
                 "data: [DONE]\n\n",
             ],
         )
 
     async def _anthropic(self, request: web.Request) -> web.StreamResponse:
-        _, (kind, value) = await self._next(request)
+        body, (kind, value) = await self._next(request)
+        self._answer(body, f"msg_{len(self.requests)}")
 
         def event(name: str, data: dict[str, Any]) -> str:
             return f"event: {name}\ndata: {json.dumps({'type': name, **data})}\n\n"
@@ -214,6 +243,7 @@ class ScriptedUpstream:
             start = {"type": "text", "text": ""}
             delta = {"type": "text_delta", "text": value}
             stop = "end_turn"
+        fresh, read, write, output = self._usage()
         message = {
             "id": f"msg_{len(self.requests)}",
             "type": "message",
@@ -221,7 +251,12 @@ class ScriptedUpstream:
             "model": MODEL,
             "content": [],
             "stop_reason": None,
-            "usage": {"input_tokens": 11, "output_tokens": 0},
+            "usage": {
+                "input_tokens": fresh,
+                "cache_read_input_tokens": read,
+                "cache_creation_input_tokens": write,
+                "output_tokens": 1,
+            },
         }
         return await self._sse(
             request,
@@ -231,14 +266,16 @@ class ScriptedUpstream:
                 event("content_block_delta", {"index": 0, "delta": delta}),
                 event("content_block_stop", {"index": 0}),
                 event(
-                    "message_delta", {"delta": {"stop_reason": stop}, "usage": {"output_tokens": 7}}
+                    "message_delta",
+                    {"delta": {"stop_reason": stop}, "usage": {"output_tokens": output}},
                 ),
                 event("message_stop", {}),
             ],
         )
 
     async def _responses(self, request: web.Request) -> web.StreamResponse:
-        _, (kind, value) = await self._next(request)
+        body, (kind, value) = await self._next(request)
+        self._answer(body, f"resp_{len(self.requests)}")
         number = len(self.requests)
         sequence = iter(range(1 << 16))
 
@@ -314,6 +351,7 @@ class ScriptedUpstream:
                     }
                 ),
             ]
+        fresh, read, _, output = self._usage()
         response = {
             "id": f"resp_{number}",
             "object": "response",
@@ -322,11 +360,11 @@ class ScriptedUpstream:
             "model": MODEL,
             "output": [item],
             "usage": {
-                "input_tokens": 11,
-                "input_tokens_details": {"cached_tokens": 0},
-                "output_tokens": 7,
+                "input_tokens": fresh + read,
+                "input_tokens_details": {"cached_tokens": read},
+                "output_tokens": output,
                 "output_tokens_details": {"reasoning_tokens": 0},
-                "total_tokens": 18,
+                "total_tokens": fresh + read + output,
             },
         }
         return await self._sse(
@@ -655,6 +693,10 @@ def _resources(tmp_path: Path) -> EffectiveAgentResources:
     )
 
 
+#: Cases whose native logs record no provider response ID, so no step names its Gateway call.
+UNLINKED = frozenset(name for name in CASES if name.startswith(("zcode-", "opencode-")))
+
+
 @pytest.mark.parametrize("case", CASES.values(), ids=CASES.keys())
 async def test_cli_runs_through_the_gateway_with_resources_and_resumes(
     tmp_path: Path, case: Case
@@ -771,6 +813,12 @@ async def test_cli_runs_through_the_gateway_with_resources_and_resumes(
         == trajectory
     )
     assert "parse_issues" not in (trajectory.extra or {}).get("orbit", {})
+    check_steps_against_gateway(
+        trajectory,
+        transport,
+        upstream.loop,
+        linked=f"{harness.name}-{case.dialect}" not in UNLINKED,
+    )
     assert [step.message for step in trajectory.steps if step.source == "user"] == [
         first_prompt,
         "second",

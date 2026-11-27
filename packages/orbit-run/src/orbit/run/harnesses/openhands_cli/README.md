@@ -34,3 +34,19 @@ every process, so the time window keeps a later task's metrics from claiming an 
 child. A child without that link, such as one stopped before its metrics were written,
 is left unconverted. With one MCP server its tools keep their
 names; with several, each is `<server>_<tool>`, resolved from `.openhands-orbit/mcp.json`.
+
+An event records when the SDK created it in the process's local time without a zone, so each
+launch first writes the Sandbox's UTC offset, `date +%z`, to `.orbit-harness/utc-offset`,
+and the parser gives those times that offset; without the file they stay untimed. A model
+call's consecutive actions make one step until another event, such as an observation,
+separates them, and an agent message makes its own, so a call can make several steps. Each
+lists the call's `llm_response_id` in `extra.orbit.native_event_ids`, and the first carries
+the call's usage, which the conversation's `base_state.json` keeps by response ID in
+`stats.usage_to_metrics`, under each of its own LLMs: `prompt_tokens` already count the
+cache reads and writes, and `completion_tokens` the reasoning, as the Gateway does. Usage
+that cannot be read is reported as `invalid_token_usage`. Over Chat Completions the ID is
+the provider's, which LiteLLM passes through; for a Responses API call LiteLLM wraps the
+provider's response ID in one of its own, and the step lists both; over the Anthropic
+dialect LiteLLM makes up `chatcmpl-<uuid>` instead, so those steps are not linked. The root
+conversation's steps link to their Gateway calls; a subagent's steps keep the ID, unlinked.
+A turn rebuilt from stdout has the IDs and its times but no usage.

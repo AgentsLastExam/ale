@@ -33,7 +33,7 @@ from orbit.core.taskspec import (
     StdioMcpServer,
     StreamableHttpMcpServer,
 )
-from orbit.core.trajectory import AtifTrajectory
+from orbit.core.trajectory import AtifMetrics, AtifTrajectory
 from orbit.run.cli.tasks import PRESET_DIR, _harness
 from orbit.run.harnesses._agent import reported_version
 from orbit.run.harnesses._install import ReleaseAsset, ReleaseAssets, release_identity
@@ -810,6 +810,160 @@ def test_grok_parser_names_only_sessions_it_did_not_convert(tmp_path: Path) -> N
     ]
 
 
+GROK_PROMPT = {
+    "type": "user",
+    "content": [{"type": "text", "text": "<user_query>\nUse the task MCP.\n</user_query>"}],
+    "prompt_index": 0,
+}
+
+
+def grok_call(second: int, usage: object = None, session: str = "session") -> dict:
+    """Grok's log record of a model call that completed at ``second``, with its usage."""
+    record = {"ts": at(second), "sid": session, "msg": "shell.turn.inference_done"}
+    return record if usage is None else {**record, "ctx": usage}
+
+
+def grok_usage(prompt: int, cached: int, completion: int) -> dict[str, int]:
+    return {
+        "prompt_tokens": prompt,
+        "cached_prompt_tokens": cached,
+        "completion_tokens": completion,
+    }
+
+
+def grok_prompt_start(session: str = "session") -> dict[str, object]:
+    """Grok's log record of a prompt that started at second 1."""
+    return {"ts": at(1), "sid": session, "msg": "shell.handle_prompt.start"}
+
+
+def grok_session(tmp_path: Path, log: list[dict[str, object]] | None) -> AtifTrajectory:
+    """A session of one prompt and three assistant messages, the first one empty, with
+    Grok's log, if given."""
+    write_jsonl(
+        tmp_path / ".grok-orbit/sessions/session/chat_history.jsonl",
+        [
+            GROK_PROMPT,
+            {"type": "assistant", "content": ""},
+            {"type": "reasoning", "summary": [{"text": "plan"}]},
+            {
+                "type": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-1", "name": "list_dir", "arguments": "{}"}],
+            },
+            {"type": "tool_result", "tool_call_id": "call-1", "content": "task.json"},
+            {"type": "assistant", "content": "done"},
+        ],
+    )
+    if log is not None:
+        write_jsonl(tmp_path / ".grok-orbit/logs/unified.jsonl", log)
+    return GrokBuildHarness().parse_trajectory(context(tmp_path, "grok"))
+
+
+def test_grok_steps_take_their_times_and_usage_from_grok_s_log(tmp_path: Path) -> None:
+    trajectory = grok_session(
+        tmp_path,
+        [
+            # Another session's records, and a record that is no prompt or model call.
+            grok_prompt_start("other"),
+            grok_call(2, grok_usage(9, 0, 9), session="other"),
+            {"sid": "session", "msg": "shell.turn.inference_start"},
+            grok_prompt_start(),
+            # The empty message is no step; its call's usage stays off the next one.
+            grok_call(3, grok_usage(1000, 0, 30)),
+            grok_call(4, grok_usage(1100, 1000, 20)),
+            grok_call(6, grok_usage(1200, 1100, 5)),
+        ],
+    )
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", at(1)),
+        ("agent", at(4)),
+        ("agent", at(6)),
+    ]
+    assert trajectory.steps[1].reasoning_content == "plan"
+    # Prompt tokens include the cached ones; Grok records no response ID to link.
+    assert [step.metrics for step in trajectory.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=1100, completion_tokens=20, cached_tokens=1000),
+        AtifMetrics(prompt_tokens=1200, completion_tokens=5, cached_tokens=1100),
+    ]
+    assert all(step.extra is None for step in trajectory.steps)
+    assert trajectory.extra is None
+
+
+@pytest.mark.parametrize(
+    ("usage", "metrics"),
+    [
+        # Grok records no cache reads: none.
+        (
+            {"prompt_tokens": 1200, "completion_tokens": 5},
+            AtifMetrics(prompt_tokens=1200, completion_tokens=5, cached_tokens=0),
+        ),
+        # No tokens, or no usage at all: no usage, and nothing to report.
+        (grok_usage(0, 0, 0), None),
+        (None, None),
+        # A count that is missing or no count: reported.
+        ({"prompt_tokens": 1200}, "invalid"),
+        ({"prompt_tokens": 1200, "completion_tokens": "?"}, "invalid"),
+        ("no usage record", "invalid"),
+    ],
+)
+def test_grok_reads_a_call_s_usage_only_when_it_holds_its_counts(
+    tmp_path: Path, usage: object, metrics: object
+) -> None:
+    trajectory = grok_session(
+        tmp_path,
+        [
+            grok_prompt_start(),
+            grok_call(3, grok_usage(1000, 0, 30)),
+            grok_call(4, grok_usage(1100, 1000, 20)),
+            grok_call(6, usage),
+        ],
+    )
+
+    assert trajectory.steps[2].timestamp == at(6)
+    if metrics == "invalid":
+        assert trajectory.steps[2].metrics is None
+        assert trajectory.extra["orbit"]["parse_issues"] == [
+            {
+                "reason": "invalid_token_usage",
+                "source": ".grok-orbit/logs/unified.jsonl",
+                "session_id": "session",
+                "timestamp": at(6),
+            }
+        ]
+    else:
+        assert trajectory.steps[2].metrics == metrics
+        assert trajectory.extra is None
+
+
+@pytest.mark.parametrize(
+    ("prompts", "calls"),
+    # The session holds one prompt and three assistant messages: one call too few, and one
+    # prompt too many with as many calls as messages.
+    [(1, 2), (2, 3)],
+)
+def test_grok_pairs_no_log_records_unless_their_counts_agree(
+    tmp_path: Path, prompts: int, calls: int
+) -> None:
+    log = [grok_prompt_start()] * prompts
+    log += [grok_call(second, grok_usage(1000, 0, 30)) for second in range(3, 3 + calls)]
+    trajectory = grok_session(tmp_path, log)
+
+    assert all(step.timestamp is None and step.metrics is None for step in trajectory.steps)
+    assert trajectory.extra["orbit"]["parse_issues"] == [
+        {"reason": "unpaired_log_records", "session_id": "session"}
+    ]
+
+
+def test_grok_steps_have_no_times_or_usage_without_grok_s_log(tmp_path: Path) -> None:
+    trajectory = grok_session(tmp_path, None)
+
+    assert len(trajectory.steps) == 3
+    assert all(step.timestamp is None and step.metrics is None for step in trajectory.steps)
+    assert trajectory.extra is None
+
+
 def test_codex_parser_preserves_mcp_call_and_result(tmp_path: Path) -> None:
     native_path(tmp_path, STDOUT_PATH).write_text(
         "\n".join(
@@ -1153,6 +1307,485 @@ def test_codex_function_output_images_become_atif_images(tmp_path: Path) -> None
     assert [part.type for part in content] == ["text", "image", "text"]
     assert (tmp_path / content[1].source.path).read_bytes() == b"\x89PNG fake"
     assert "remote.png" in content[2].text
+
+
+def at(second: int) -> str:
+    return f"2026-10-26T00:00:{second:02d}.000Z"
+
+
+def codex_token_count(
+    second: int, input_tokens: int, cached: int, output: int, total: int
+) -> dict[str, object]:
+    """Codex's record after a model call: that call's usage and the session's running total."""
+    return {
+        "timestamp": at(second),
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {"input_tokens": total, "output_tokens": 0},
+                "last_token_usage": {
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": cached,
+                    "output_tokens": output,
+                },
+            },
+        },
+    }
+
+
+def timed(second: int, record: dict[str, object]) -> dict[str, object]:
+    return {"timestamp": at(second), **record}
+
+
+def codex_event(second: int, kind: str) -> dict[str, object]:
+    return timed(second, {"type": "event_msg", "payload": {"type": kind}})
+
+
+def codex_item(second: int, **payload: object) -> dict[str, object]:
+    return timed(second, {"type": "response_item", "payload": payload})
+
+
+def codex_shell(second: int, call_id: str, item_id: str | None = None) -> dict[str, object]:
+    fields = {"id": item_id} if item_id else {}
+    return codex_item(
+        second, type="function_call", name="shell", arguments="{}", call_id=call_id, **fields
+    )
+
+
+def codex_reasoning(second: int, item_id: str | None = None) -> dict[str, object]:
+    fields = {"id": item_id} if item_id else {}
+    summary = [{"type": "summary_text", "text": "Look first."}]
+    return codex_item(second, type="reasoning", summary=summary, **fields)
+
+
+def test_codex_steps_keep_rollout_times_and_each_model_call_its_usage(tmp_path: Path) -> None:
+    rollout = [
+        timed(0, {"type": "session_meta", "payload": {"id": "session"}}),
+        # Rate limits alone: no model call.
+        timed(0, {"type": "event_msg", "payload": {"type": "token_count", "info": None}}),
+        codex_event(0, "task_started"),
+        timed(1, codex_message("user", "Use the task MCP.")),
+        codex_reasoning(2),
+        codex_shell(3, "call-1"),
+        codex_item(4, type="function_call_output", call_id="call-1", output="task.json"),
+        codex_token_count(4, 1200, 0, 40, total=1200),
+        # The same total again reports no new call.
+        codex_token_count(4, 1200, 0, 40, total=1200),
+        # A reasoning item without a summary is no step; the call's usage goes to its next one.
+        codex_item(5, type="reasoning", summary=[]),
+        timed(6, codex_message("assistant", "done")),
+        codex_token_count(6, 1500, 1024, 20, total=2700),
+        # Usage reset to nothing, as Codex reports after a compaction: no model call.
+        codex_token_count(7, 0, 0, 0, total=0),
+        # A call cut short with its turn reports no usage; the next turn's call keeps its own.
+        codex_shell(8, "call-2"),
+        codex_event(9, "turn_aborted"),
+        codex_event(9, "task_started"),
+        timed(10, codex_message("assistant", "resumed")),
+        codex_token_count(10, 1800, 1536, 10, total=4500),
+        # The run ended before this call's usage was recorded.
+        codex_shell(12, "call-3"),
+    ]
+    write_jsonl(tmp_path / f"{CODEX_DAY}/rollout-x-session.jsonl", rollout)
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", at(1)),
+        ("agent", at(2)),
+        ("agent", at(3)),
+        ("agent", at(6)),
+        ("agent", at(8)),
+        ("agent", at(10)),
+        ("agent", at(12)),
+    ]
+    # Each call's usage once, on the first step it produced; input includes the cached tokens.
+    assert [step.metrics for step in trajectory.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=1200, completion_tokens=40, cached_tokens=0),
+        None,
+        AtifMetrics(prompt_tokens=1500, completion_tokens=20, cached_tokens=1024),
+        None,
+        AtifMetrics(prompt_tokens=1800, completion_tokens=10, cached_tokens=1536),
+        None,
+    ]
+    assert all(step.extra is None for step in trajectory.steps)
+
+
+def codex_traced_responses(
+    bundle: Path,
+    responses: list[tuple[str, list[dict[str, str]], tuple[int, int, int] | None]],
+    thread: str = "session",
+) -> None:
+    """A rollout trace's ``inference_completed`` events: each response, the items it output
+    and its usage (input, cached, output), ``None`` where the response reported none."""
+    names = ("input_tokens", "cached_input_tokens", "output_tokens")
+    events = []
+    for n, (response_id, items, counts) in enumerate(responses, 1):
+        usage = dict(zip(names, counts, strict=True)) if counts else None
+        payload = bundle / f"payloads/{n}.json"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text(json.dumps({"token_usage": usage, "output_items": items}))
+        events.append(
+            {
+                "thread_id": thread,
+                "payload": {
+                    "type": "inference_completed",
+                    "inference_call_id": f"{thread}-inference-{n}",
+                    "response_id": response_id,
+                    "response_payload": {"path": f"payloads/{n}.json"},
+                },
+            }
+        )
+    write_jsonl(bundle / "trace.jsonl", events)
+
+
+def test_codex_model_steps_name_the_traced_response_that_output_them(tmp_path: Path) -> None:
+    rollout = [
+        {"type": "session_meta", "payload": {"id": "session"}},
+        codex_message("user", "Use the task MCP."),
+        # Output by a response the trace does not keep: it falls back to the rollout's usage.
+        codex_item(
+            1,
+            type="message",
+            role="assistant",
+            id="msg-0",
+            content=[{"type": "output_text", "text": "earlier"}],
+        ),
+        codex_token_count(1, 500, 0, 5, total=500),
+        codex_reasoning(2, "rs-1"),
+        codex_shell(3, "call-1", "fc-1"),
+        codex_token_count(3, 11, 0, 7, total=511),
+        codex_item(
+            4,
+            type="message",
+            role="assistant",
+            id="msg-2",
+            content=[{"type": "output_text", "text": "done"}],
+        ),
+        codex_token_count(4, 11, 0, 7, total=522),
+        # Cut short before its `token_count`; the trace still records its response.
+        codex_shell(5, "call-3", "fc-3"),
+    ]
+    write_jsonl(tmp_path / f"{CODEX_DAY}/rollout-x-session.jsonl", rollout)
+    # Equal usage throughout: only the items' identities pair a call with its response.
+    codex_traced_responses(
+        tmp_path / CODEX_TRACE,
+        [
+            (
+                "resp-1",
+                [{"type": "reasoning", "id": "rs-1"}, {"id": "fc-1", "call_id": "call-1"}],
+                (11, 0, 7),
+            ),
+            ("resp-2", [{"type": "message", "id": "msg-2"}], (11, 0, 7)),
+            ("resp-3", [{"call_id": "call-3"}], (11, 0, 7)),
+        ],
+    )
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+
+    used = AtifMetrics(prompt_tokens=11, completion_tokens=7, cached_tokens=0)
+    assert [
+        ((step.extra or {}).get("orbit", {}).get("native_event_ids"), step.metrics)
+        for step in trajectory.steps
+        if step.source == "agent"
+    ] == [
+        (None, AtifMetrics(prompt_tokens=500, completion_tokens=5, cached_tokens=0)),
+        (["resp-1"], used),
+        (["resp-1"], None),
+        (["resp-2"], used),
+        (["resp-3"], used),
+    ]
+
+
+def said(second: int, text: str, item_id: str | None = None) -> dict[str, object]:
+    fields = {"id": item_id} if item_id else {}
+    content = [{"type": "output_text", "text": text}]
+    return codex_item(second, type="message", role="assistant", content=content, **fields)
+
+
+def unreadable_count(second: int, last: object, total: int) -> dict[str, object]:
+    record = codex_token_count(second, 0, 0, 0, total=total)
+    record["payload"]["info"]["last_token_usage"] = last
+    return record
+
+
+def usage(prompt: int, completion: int, cached: int = 0) -> AtifMetrics:
+    return AtifMetrics(prompt_tokens=prompt, completion_tokens=completion, cached_tokens=cached)
+
+
+@pytest.mark.parametrize(
+    ("rollout", "expected", "unreadable"),
+    [
+        pytest.param(
+            [
+                said(1, "a"),
+                codex_token_count(1, 11, 0, 7, 11),
+                said(2, "b"),
+                codex_token_count(2, 11, 0, 7, 22),
+            ],
+            [usage(11, 7), usage(11, 7)],
+            [],
+            id="equal-usage-rising-total",
+        ),
+        pytest.param(
+            [
+                codex_shell(1, "call-1"),
+                codex_event(2, "task_started"),
+                said(3, "resumed"),
+                codex_token_count(3, 1800, 1536, 10, 1800),
+            ],
+            [None, usage(1800, 10, 1536)],
+            [],
+            id="cut-short-then-a-new-turn",
+        ),
+        pytest.param(
+            [
+                codex_shell(1, "call-1"),
+                codex_event(2, "turn_aborted"),
+                said(3, "redirected"),
+                codex_token_count(3, 900, 0, 30, 900),
+            ],
+            [None, usage(900, 30)],
+            [],
+            id="cut-short-by-an-abort",
+        ),
+        pytest.param(
+            [
+                said(1, "a"),
+                codex_token_count(1, 100, 0, 5, 100),
+                # The response reported no usage: Codex repeats the last count.
+                said(2, "b"),
+                codex_token_count(2, 100, 0, 5, 100),
+                said(3, "c"),
+                codex_token_count(3, 300, 0, 6, 400),
+            ],
+            [usage(100, 5), None, usage(300, 6)],
+            [],
+            id="a-response-without-usage",
+        ),
+        pytest.param(
+            [
+                said(1, "a"),
+                unreadable_count(1, None, 1240),
+                said(2, "b"),
+                unreadable_count(2, {"input_tokens": "many"}, 2480),
+                said(3, "c"),
+                codex_token_count(3, 1300, 0, 9, 3780),
+            ],
+            [None, None, usage(1300, 9)],
+            [at(1), at(2)],
+            id="unreadable-usage",
+        ),
+        pytest.param(
+            [
+                said(1, "a"),
+                # Usage with no tokens and a new total is no call's: the open call stays open.
+                codex_token_count(1, 0, 0, 0, 50),
+                codex_token_count(2, 200, 0, 8, 250),
+            ],
+            [usage(200, 8)],
+            [],
+            id="usage-with-no-tokens",
+        ),
+    ],
+)
+def test_codex_rollout_delimits_model_calls_without_a_trace(
+    tmp_path: Path,
+    rollout: list[dict[str, object]],
+    expected: list[AtifMetrics | None],
+    unreadable: list[str],
+) -> None:
+    write_jsonl(
+        tmp_path / f"{CODEX_DAY}/rollout-x-session.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "session"}},
+            codex_message("user", "Use the task MCP."),
+            *rollout,
+        ],
+    )
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+
+    assert [step.metrics for step in trajectory.steps if step.source == "agent"] == expected
+    assert (trajectory.extra or {}).get("orbit", {}).get("parse_issues", []) == [
+        {"reason": "invalid_token_usage", "session_id": "session", "timestamp": time}
+        for time in unreadable
+    ]
+
+
+def test_codex_reports_trace_responses_it_cannot_read(tmp_path: Path) -> None:
+    write_jsonl(
+        tmp_path / f"{CODEX_DAY}/rollout-x-session.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "session"}},
+            codex_message("user", "Use the task MCP."),
+            said(1, "first", "msg-1"),
+            codex_token_count(1, 100, 0, 5, total=100),
+            said(2, "second", "msg-2"),
+            codex_token_count(2, 200, 0, 6, total=300),
+        ],
+    )
+    bundle = tmp_path / CODEX_TRACE
+    codex_traced_responses(
+        bundle, [("resp-1", [{"id": "msg-1"}], (100, 0, 5)), ("resp-2", [], (200, 0, 6))]
+    )
+    (bundle / "payloads/1.json").write_text(
+        json.dumps({"token_usage": {"input_tokens": "many"}, "output_items": [{"id": "msg-1"}]})
+    )
+    (bundle / "payloads/2.json").write_text(
+        json.dumps({"token_usage": None, "output_items": "msg-2"})
+    )
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+
+    # The first response still names its item, which takes no rollout usage; the second
+    # names none, so its item falls back to the rollout's.
+    assert [
+        ((step.extra or {}).get("orbit", {}).get("native_event_ids"), step.metrics)
+        for step in trajectory.steps
+        if step.source == "agent"
+    ] == [(["resp-1"], None), (None, usage(200, 6))]
+    assert (trajectory.extra or {}).get("orbit", {}).get("parse_issues") == [
+        {"reason": "invalid_token_usage", "response_id": "resp-1"},
+        {"reason": "invalid_trace_response", "response_id": "resp-2"},
+    ]
+
+
+def test_codex_trace_pairs_items_only_by_an_unambiguous_identity(tmp_path: Path) -> None:
+    rollout = [
+        {"type": "session_meta", "payload": {"id": "session"}},
+        codex_message("user", "Use the task MCP."),
+        # Call 1: the provider left the message's id empty and Codex made one of its own, so
+        # only the call's `call_id` names it; the unnamed message takes no rollout usage.
+        said(1, "first", "msg-codex-uuid"),
+        codex_shell(1, "call-1", "fc-reused"),
+        codex_token_count(1, 1000, 0, 10, total=1000),
+        # Call 2 reuses item id `fc-reused`; its `call_id` still names it.
+        codex_shell(2, "call-2", "fc-reused"),
+        codex_token_count(2, 2000, 0, 20, total=3000),
+        # Calls 3 and 4 share a response ID and an item id: the item names no call, so both
+        # take the rollout's usage and name no response.
+        said(3, "third", "msg-reused"),
+        codex_token_count(3, 3000, 0, 30, total=6000),
+        said(4, "fourth", "msg-reused"),
+        codex_token_count(4, 4000, 0, 40, total=10000),
+        # Call 5's response reported no usage.
+        said(5, "fifth", "msg-5"),
+    ]
+    write_jsonl(tmp_path / f"{CODEX_DAY}/rollout-x-session.jsonl", rollout)
+    codex_traced_responses(
+        tmp_path / CODEX_TRACE,
+        [
+            ("resp-1", [{"id": ""}, {"id": "fc-reused", "call_id": "call-1"}], (1000, 0, 10)),
+            ("resp-2", [{"id": "fc-reused", "call_id": "call-2"}], (2000, 0, 20)),
+            ("resp-same", [{"id": "msg-reused"}], (3000, 0, 30)),
+            ("resp-same", [{"id": "msg-reused"}], (4000, 0, 40)),
+            ("resp-5", [{"id": "msg-5"}], None),
+        ],
+    )
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+
+    assert [
+        ((step.extra or {}).get("orbit", {}).get("native_event_ids"), step.metrics)
+        for step in trajectory.steps
+        if step.source == "agent"
+    ] == [
+        (None, None),
+        (["resp-1"], usage(1000, 10)),
+        (["resp-2"], usage(2000, 20)),
+        (None, usage(3000, 30)),
+        (None, usage(4000, 40)),
+        (["resp-5"], None),
+    ]
+    # A response that reported no usage is no parse issue.
+    assert not (trajectory.extra or {}).get("orbit", {}).get("parse_issues")
+
+
+def test_codex_model_steps_name_no_response_without_the_trace(tmp_path: Path) -> None:
+    write_jsonl(
+        tmp_path / f"{CODEX_DAY}/rollout-x-session.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "session"}},
+            codex_message("user", "Use the task MCP."),
+            codex_message("assistant", "done"),
+            codex_token_count(1, 1200, 0, 40, total=1200),
+        ],
+    )
+    trajectory = CodexCliHarness().parse_trajectory(context(tmp_path, "codex"))
+
+    (agent,) = [step for step in trajectory.steps if step.source == "agent"]
+    assert agent.extra is None
+    assert agent.metrics == AtifMetrics(prompt_tokens=1200, completion_tokens=40, cached_tokens=0)
+
+
+def test_codex_subagent_steps_keep_their_times_and_usage(tmp_path: Path) -> None:
+    run = codex_subagent_run(tmp_path)
+    write_jsonl(
+        tmp_path / f"{CODEX_DAY}/rollout-2026-10-26T00-00-01-child.jsonl",
+        [
+            timed(
+                10,
+                {"type": "session_meta", "payload": {"id": "child", "parent_thread_id": "session"}},
+            ),
+            timed(10, codex_message("user", "<environment_context/>")),
+            timed(
+                11, {"type": "event_msg", "payload": {"type": "user_message", "message": "Wait."}}
+            ),
+            said(12, "Waiting.", "msg-child-1"),
+            codex_token_count(12, 300, 0, 5, total=300),
+            timed(
+                13, {"type": "event_msg", "payload": {"type": "user_message", "message": "Reply."}}
+            ),
+            timed(14, codex_message("assistant", "DONE")),
+            codex_token_count(14, 320, 256, 3, total=620),
+        ],
+    )
+    # The root's bundle traces the child's first call: its usage comes from there.
+    codex_traced_responses(
+        tmp_path / CODEX_TRACE, [("resp-child-1", [{"id": "msg-child-1"}], (310, 0, 5))], "child"
+    )
+    (subagent,) = CodexCliHarness().parse_trajectory(run).subagent_trajectories
+
+    assert [
+        (step.source, step.timestamp, step.metrics, (step.extra or {}).get("orbit"))
+        for step in subagent.steps
+    ] == [
+        ("user", at(11), None, None),
+        ("agent", at(12), usage(310, 5), {"native_event_ids": ["resp-child-1"]}),
+        ("user", at(13), None, None),
+        ("agent", at(14), usage(320, 3, 256), None),
+    ]
+
+
+def test_codex_calls_a_script_made_take_their_trace_time_and_no_model_usage(
+    tmp_path: Path,
+) -> None:
+    run = codex_code_mode_run(tmp_path)
+    path = tmp_path / f"{CODEX_DAY}/rollout-2026-10-26T00-00-00-session.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    # After `exec-1`, the model call that chose it reports its usage.
+    write_jsonl(path, [*records[:3], codex_token_count(1, 900, 0, 30, total=900), *records[3:]])
+    log = tmp_path / CODEX_TRACE / "trace.jsonl"
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    for event in events:
+        if event["payload"]["type"] == "tool_call_started":
+            number = int(event["payload"]["tool_call_id"].removeprefix("script-"))
+            # The third is out of any calendar's range: no time, not a failed conversion.
+            started = 1_793_000_000_000 + 1_000 * number
+            event["wall_time_unix_ms"] = started if number < 3 else 10**20
+    write_jsonl(log, events)
+    trajectory = CodexCliHarness().parse_trajectory(run)
+
+    agent = [step for step in trajectory.steps if step.source == "agent"]
+    assert [(step.llm_call_count, step.metrics) for step in agent[:2]] == [
+        (None, AtifMetrics(prompt_tokens=900, completion_tokens=30, cached_tokens=0)),
+        (0, None),
+    ]
+    # `exec-2` and `exec-3` come from a call whose usage the rollout never recorded.
+    assert all(step.metrics is None for step in agent[2:])
+    assert [step.timestamp for step in agent if step.llm_call_count == 0] == [
+        "2026-10-26T07:33:21.000000Z",
+        "2026-10-26T07:33:22.000000Z",
+        None,
+    ]
 
 
 def test_codex_children_are_unconverted_without_the_root_rollout(tmp_path: Path) -> None:
@@ -2007,6 +2640,141 @@ def test_openclaw_reports_other_transcripts_but_not_what_it_keeps_beside_them(
             "sources": [f"{sessions}/subagent.jsonl"],
         }
     ]
+
+
+def openclaw_entry(second: int | None, role: str, **message: object) -> dict[str, object]:
+    """A transcript entry OpenClaw wrote at ``second``, or without a time."""
+    entry: dict[str, object] = {"type": "message", "message": {"role": role, **message}}
+    return entry if second is None else {"timestamp": at(second), **entry}
+
+
+def openclaw_usage(fresh: int, read: int, written: int, output: int) -> dict[str, object]:
+    return {"input": fresh, "cacheRead": read, "cacheWrite": written, "output": output}
+
+
+def test_openclaw_steps_keep_entry_times_and_each_call_its_usage_and_response(
+    tmp_path: Path,
+) -> None:
+    text = [{"type": "text", "text": "done"}]
+    write_jsonl(
+        tmp_path / OPENCLAW_SESSIONS / "session.jsonl",
+        [
+            openclaw_entry(1, "user", content="Use the task MCP."),
+            openclaw_entry(
+                3,
+                "assistant",
+                content=[{"type": "toolCall", "id": "call-1", "name": "exec", "arguments": {}}],
+                usage=openclaw_usage(3, 0, 1000, 20),
+                responseId="resp-1",
+            ),
+            openclaw_entry(None, "toolResult", toolCallId="call-1", content=text),
+            openclaw_entry(
+                6,
+                "assistant",
+                content=text,
+                usage=openclaw_usage(2, 1000, 5, 4),
+                responseId="msg-2",
+            ),
+            # A message whose usage reports no tokens, and one OpenClaw wrote without a time
+            # or usage.
+            openclaw_entry(7, "assistant", content=text, usage=openclaw_usage(0, 0, 0, 0)),
+            openclaw_entry(None, "assistant", content=text),
+        ],
+    )
+
+    trajectory = OpenClawCliHarness().parse_trajectory(context(tmp_path, "openclaw"))
+
+    assert [(step.source, step.timestamp) for step in trajectory.steps] == [
+        ("user", at(1)),
+        ("agent", at(3)),
+        ("agent", at(6)),
+        ("agent", at(7)),
+        ("agent", None),
+    ]
+    # Prompt tokens include cache reads and writes.
+    assert [step.metrics for step in trajectory.steps] == [
+        None,
+        AtifMetrics(prompt_tokens=1003, completion_tokens=20, cached_tokens=0),
+        AtifMetrics(prompt_tokens=1007, completion_tokens=4, cached_tokens=1000),
+        None,
+        None,
+    ]
+    assert [step.extra for step in trajectory.steps] == [
+        None,
+        {"orbit": {"native_event_ids": ["resp-1"]}},
+        {"orbit": {"native_event_ids": ["msg-2"]}},
+        None,
+        None,
+    ]
+    assert (
+        trajectory.final_metrics.total_prompt_tokens,
+        trajectory.final_metrics.total_cached_tokens,
+    ) == (2010, 1000)
+    assert trajectory.extra is None
+
+
+@pytest.mark.parametrize(
+    ("usage", "metrics"),
+    [
+        # A cache count OpenClaw leaves out or gives as null: none.
+        (
+            {"input": 3, "output": 20, "cacheRead": None},
+            AtifMetrics(prompt_tokens=3, completion_tokens=20, cached_tokens=0),
+        ),
+        # A count that is missing or no count: reported.
+        ({"input": 3, "cacheRead": 0, "cacheWrite": 0}, "invalid"),
+        ({**openclaw_usage(3, 0, 0, 20), "cacheRead": "many"}, "invalid"),
+        ("no usage record", "invalid"),
+    ],
+)
+def test_openclaw_reads_a_call_s_usage_only_when_it_holds_its_counts(
+    tmp_path: Path, usage: object, metrics: object
+) -> None:
+    reply = openclaw_entry(
+        2, "assistant", content=[{"type": "text", "text": "done"}], usage=usage, responseId="r1"
+    )
+    write_jsonl(
+        tmp_path / OPENCLAW_SESSIONS / "session.jsonl",
+        [openclaw_entry(1, "user", content="Use the task MCP."), {**reply, "id": "entry-2"}],
+    )
+
+    trajectory = OpenClawCliHarness().parse_trajectory(context(tmp_path, "openclaw"))
+
+    assert trajectory.steps[1].extra == {"orbit": {"native_event_ids": ["r1"]}}
+    if metrics == "invalid":
+        assert trajectory.steps[1].metrics is None
+        assert trajectory.final_metrics is None
+        assert trajectory.extra["orbit"]["parse_issues"] == [
+            {"reason": "invalid_token_usage", "session_id": "session", "entry_id": "entry-2"}
+        ]
+    else:
+        assert trajectory.steps[1].metrics == metrics
+        assert trajectory.extra is None
+
+
+def test_openclaw_subagent_steps_keep_their_times_usage_and_responses(tmp_path: Path) -> None:
+    run = openclaw_subagent_run(tmp_path)
+    write_jsonl(
+        tmp_path / OPENCLAW_SESSIONS / "child.jsonl",
+        [
+            openclaw_entry(1, "user", content="[Subagent Task] Write the marker."),
+            openclaw_entry(
+                2,
+                "assistant",
+                content=[{"type": "text", "text": "Wrote the marker."}],
+                usage=openclaw_usage(20, 0, 0, 1),
+                responseId="resp-child",
+            ),
+        ],
+    )
+
+    (subagent,) = OpenClawCliHarness().parse_trajectory(run).subagent_trajectories
+
+    assert [step.timestamp for step in subagent.steps] == [at(1), at(2)]
+    assert subagent.steps[1].metrics == AtifMetrics(
+        prompt_tokens=20, completion_tokens=1, cached_tokens=0
+    )
+    assert subagent.steps[1].extra == {"orbit": {"native_event_ids": ["resp-child"]}}
 
 
 @pytest.mark.parametrize(
