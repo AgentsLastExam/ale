@@ -80,6 +80,7 @@ RETAINING_PROVIDERS = (
     "slurm",
     "pbs",
     "lsf",
+    "kubernetes",
     "fleet",
 )
 
@@ -110,14 +111,14 @@ def leaf(
     cluster: ClusterProviderConfig | None = None,
 ) -> Provider:
     """The leaf a provider id names: ``docker:<runtime>`` for each runtime Docker's table
-    holds, ``qemu``, ``firecracker``, ``orchard``, or a cluster's workload manager, ``slurm``,
-    ``pbs`` or ``lsf``. ``docker`` holds a Docker leaf's settings: the Host GPUs it may lease
-    and the margin it admits a shared one with; ``cluster``, the cluster's."""
+    holds, ``qemu``, ``firecracker``, ``orchard``, or a cluster's workload manager.
+    ``docker`` supplies the Docker leaf's Host GPU leases and admission margin.
+    ``cluster`` supplies the site configuration."""
     if provider_id in CLUSTERS:
         from orbit.run.providers.cluster import ClusterProvider
 
         cluster = cluster or getattr(SandboxConfig(), provider_id)
-        if cluster.workload_manager != provider_id:
+        if cluster is None or cluster.workload_manager != provider_id:
             raise ConfigError(f"{provider_id} needs its own cluster configuration")
         return ClusterProvider(cluster)
     if provider_id.startswith("docker:"):

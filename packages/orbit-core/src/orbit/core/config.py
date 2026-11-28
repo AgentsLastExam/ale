@@ -43,6 +43,8 @@ __all__ = [
     "DockerProviderConfig",
     "FleetConfig",
     "GatewayLimits",
+    "KubernetesProviderConfig",
+    "KubernetesQueue",
     "LLMJudgeConfig",
     "LSFProviderConfig",
     "LSFQueue",
@@ -289,7 +291,7 @@ class SandboxRetentionConfig(BaseModel):
 
 #: The batch clusters' Providers: each of a Run's episodes runs in a job of the cluster, which
 #: holds every Sandbox of the episode.
-CLUSTER_PROVIDERS = ("slurm", "pbs", "lsf")
+CLUSTER_PROVIDERS = ("slurm", "pbs", "lsf", "kubernetes")
 
 #: Every Provider a Run can select. A leaf starts the final Sandbox directly. A scheduler
 #: places the request on machines it manages.
@@ -300,6 +302,7 @@ ProviderId = Literal[
     "slurm",
     "pbs",
     "lsf",
+    "kubernetes",
     "qemu",
     "firecracker",
     "orchard",
@@ -481,6 +484,84 @@ class LSFProviderConfig(ClusterProviderConfig):
     shared_fs_dir: str = Field(default="~/.cache/orbit/lsf", min_length=1)
 
 
+class KubernetesQueue(ClusterPartition):
+    """A node pool's capacity and the labels that place Jobs on its nodes."""
+
+    max_nodes: int = Field(default=1, ge=1, le=254)
+    """Distinct nodes available per allocation. Each peer needs a usable IPv4 /24 address."""
+    node_selector: dict[str, str] = Field(default_factory=dict)
+    min_gpus: int = Field(default=0, ge=0)
+    """Whole GPUs reserved for every Pod in this pool."""
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _gpu_floor(self) -> Self:
+        if self.min_gpus > self.max_gpus:
+            raise ValueError("min_gpus must fit the GPU capacity of the Kubernetes pool")
+        return self
+
+
+class KubernetesProviderConfig(ClusterProviderConfig):
+    """The namespace, worker image and shared volume for Kubernetes Jobs."""
+
+    workload_manager: ClassVar[str] = "kubernetes"
+    node_local_dir: str = "/scratch"
+    namespace: str = Field(min_length=1, max_length=63, pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    worker_image: str = Field(min_length=1, pattern=r"^\S+$")
+    shared_claim: str = Field(
+        min_length=1,
+        max_length=253,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+    )
+    context: str | None = Field(default=None, min_length=1)
+    kubeconfig: str | None = Field(default=None, min_length=1)
+    runtime_class: str | None = Field(default=None, min_length=1)
+    node_selector: dict[str, str] = Field(default_factory=dict)
+    partitions: tuple[KubernetesQueue, ...] = Field(min_length=1)
+
+    @property
+    def node_labels(self) -> dict[str, str]:
+        """The platform of every Job's worker and its Sandbox images."""
+        arch = "amd64" if self.architecture is Arch.X86_64 else "arm64"
+        return {"kubernetes.io/os": "linux", "kubernetes.io/arch": arch}
+
+    # --- validation ---
+
+    @field_validator("shared_fs_dir")
+    @classmethod
+    def _volume_mount(cls, value: str) -> str:
+        # The serialized episode must use the submit host's mount path even if the
+        # worker image has a different HOME or environment.
+        return str(Path(os.path.expandvars(value)).expanduser())
+
+    @model_validator(mode="after")
+    def _job_placement(self) -> Self:
+        cache = Path(self.shared_fs_dir)
+        scratch = Path(self.node_local_dir)
+        for field, mount in (("shared_fs_dir", cache), ("node_local_dir", scratch)):
+            if (
+                not mount.is_absolute()
+                or len(mount.parts) < 2
+                or ".." in mount.parts
+                or mount.parts[1]
+                in {"bin", "dev", "etc", "lib", "lib64", "proc", "run", "sbin", "sys", "usr"}
+            ):
+                raise ValueError(f"{field} must be an absolute data directory in the worker image")
+        if cache.is_relative_to(scratch) or scratch.is_relative_to(cache):
+            raise ValueError("shared_fs_dir and node_local_dir must be separate mount paths")
+        if self.account:
+            raise ValueError("account is not a Kubernetes Job setting")
+        for queue in self.partitions:
+            labels = self.node_labels
+            for selector in (self.node_selector, queue.node_selector):
+                for key, value in selector.items():
+                    if key in labels and labels[key] != value:
+                        raise ValueError(f"node_selector for {queue.name} conflicts on {key!r}")
+                    labels[key] = value
+        return self
+
+
 class DaytonaProviderConfig(BaseModel):
     """Settings for the Daytona scheduler. The API key is read from the environment."""
 
@@ -519,6 +600,7 @@ class SandboxConfig(BaseModel):
     slurm: SlurmProviderConfig = SlurmProviderConfig()
     pbs: PBSProviderConfig = PBSProviderConfig()
     lsf: LSFProviderConfig = LSFProviderConfig()
+    kubernetes: KubernetesProviderConfig | None = None
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
     fleet: FleetConfig = FleetConfig()
 
@@ -528,8 +610,8 @@ class SandboxConfig(BaseModel):
         return next(
             (
                 site
-                for site in (self.slurm, self.pbs, self.lsf)
-                if site.workload_manager in self.providers
+                for site in (self.slurm, self.pbs, self.lsf, self.kubernetes)
+                if site is not None and site.workload_manager in self.providers
             ),
             None,
         )
@@ -557,6 +639,8 @@ class SandboxConfig(BaseModel):
                 "a cluster's Provider runs each episode in a job of its own, so it is the "
                 "Run's only Provider"
             )
+        if "kubernetes" in self.providers and self.kubernetes is None:
+            raise ValueError("the kubernetes Provider needs sandbox.kubernetes and its partitions")
         if (site := self.cluster) is not None and not site.partitions:
             name = site.workload_manager
             raise ValueError(f"the {name} Provider needs sandbox.{name}.partitions")
