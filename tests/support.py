@@ -172,11 +172,13 @@ def sibling_checkout(name: str) -> Path:
 def provider_registry(*providers: Provider, only: bool = False) -> ProviderRegistry:
     """A Run's registry, with ``providers`` standing for the Providers their ids name, first
     in ``sandbox.providers`` and in that order, then the default list's others unless
-    ``only``."""
+    ``only`` or one is a cluster's, which runs each episode in a job of its own and so is the
+    Run's only Provider."""
     if not providers:
         return ProviderRegistry(RunConfig())
     from orbit.run.providers.cluster import ClusterProvider
 
+    only = only or any(isinstance(provider, ClusterProvider) for provider in providers)
     ids = [provider.id for provider in providers]
     order = ids + ([] if only else [name for name in SandboxConfig().providers if name not in ids])
     sandbox: dict[str, Any] = {"providers": order}
