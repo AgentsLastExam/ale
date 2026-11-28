@@ -1,20 +1,18 @@
 """A job's Sandboxes, or the job that prepares an image for them. Copied to the cluster,
 standard library only.
 
-Orbit runs each episode in a job of its own, and this worker's ``supervise`` as its child on
-the job's first node, where it holds Podman's private namespace and store; a step of its own
-on every other node holds that node's. Each loads the image that node was seeded with. Each
-Sandbox Orbit asks for runs as a job step of its own over the first nodes it spans, one task
-on each, which Slurm holds to that Sandbox's CPUs, memory and GPUs on each; Orbit's control
-commands run on its own node, and as steps that overlap it on the others. A Sandbox saved as
-a snapshot is committed to the store of each of its nodes, where the next one boots from it.
+Orbit runs the episode on the job's first node. This worker holds each node's private
+Podman store and starts the Sandboxes assigned to it. Slurm launches remote steps;
+Kubernetes starts an indexed Pod per node, with a worker on each participating rank.
+PBS, LSF and Kubernetes use delegated cgroups for each Sandbox. A saved snapshot
+contains the disk state of each Sandbox node.
 
 The nodes of a Sandbox that spans several share a network of their own: on each node a
 router namespace, which only this worker enters, holds a WireGuard device to the other
 nodes' routers and forwards between it and the Sandbox's own namespace only the group's
 traffic, so nothing the Sandbox does to its own network reaches anything else. Each node
-gets the node's InfiniBand HCAs, which gVisor's RDMA proxy drives, and the Sandbox's shared
-directory, a directory of the shared file system at ``/shared``.
+mounts the Sandbox's shared directory at ``/shared``. On Slurm, gVisor's RDMA proxy also
+exposes the allocated nodes' InfiniBand HCAs.
 
 A preparation job pulls a Task's image, or builds it from its context, adds the framework
 layer and saves the result to the shared cache, from which every job loads it.
@@ -102,10 +100,17 @@ def output(*argv: str) -> str:
     return subprocess.check_output(argv, text=True).strip()
 
 
+def cache_dir() -> Path:
+    """The shared cache. Kubernetes groups each episode's allocations below its Job."""
+    if delegated is not None and delegated.workload_manager == "kubernetes":
+        return Path(os.environ["ORBIT_KUBERNETES_JOB_DIRECTORY"]).parent
+    return Path.cwd().parent
+
+
 def job_nodes() -> list[str]:
-    """The job's nodes, in the order Slurm lists them: a Sandbox of ``n`` spans the first."""
+    """The job's nodes in rank order: a Sandbox of ``n`` spans the first ``n``."""
     if delegated is not None:
-        return [delegated.node]
+        return delegated.group.nodes() if delegated.group else [delegated.node]
     return output("scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]).split()
 
 
@@ -129,7 +134,9 @@ def appeared(path: Path) -> bool:
 
 
 def node_address() -> str:
-    """The address Slurm reaches this node at, which the other nodes reach it at too."""
+    """The address the other nodes use to reach this worker's peer router."""
+    if delegated is not None and delegated.group is not None:
+        return delegated.group.address
     shown = output("scontrol", "show", "node", "-o", this_node())
     fields = dict(part.partition("=")[::2] for part in shown.split() if "=" in part)
     return socket.gethostbyname(fields.get("NodeAddr") or this_node())
@@ -557,7 +564,7 @@ def load_layers(command: list[str], directory: str, layers: dict[str, str]) -> N
         (store / LAYERS / layer).mkdir()
         (store / LINKS / layer).symlink_to(f"../{LAYERS}/{layer}")
         subprocess.run(
-            [*command, "unshare", *TAR, "-xf", str(Path.cwd().parent / archive),
+            [*command, "unshare", *TAR, "-xf", str(cache_dir() / archive),
              "-C", str(store / LAYERS / layer)],
             check=True,
         )  # fmt: skip
@@ -645,7 +652,10 @@ def _netlink(
 ) -> bytes:
     """One generic netlink request, acknowledged: its reply, if it has one, read up to its
     acknowledgement, so that the next request reads its own; or the error it got."""
-    body = struct.pack("=BBH", command, 1, 0) + payload
+    return _netlink_request(sock, family, struct.pack("=BBH", command, 1, 0) + payload, sequence)
+
+
+def _netlink_request(sock: socket.socket, family: int, body: bytes, sequence: int) -> bytes:
     # NLM_F_REQUEST | NLM_F_ACK
     sock.send(struct.pack("=IHHII", 16 + len(body), family, 5, sequence, 0) + body)
     answer = b""
@@ -664,6 +674,28 @@ def _netlink(
             if code:
                 raise OSError(-code, f"netlink: {os.strerror(-code)}")
             return answer
+
+
+def router_forwarding(own: str) -> None:
+    """Configure only the trusted router's two private links through rtnetlink.
+    Kubernetes keeps /proc/sys read-only even inside a worker's child netns."""
+    if read("/proc/sys/net/ipv4/conf/all/rp_filter") != "0":
+        # Strict reverse-path validation also consults the main table. Keep the
+        # more specific ingress rules and their unreachable defaults for forwarding.
+        for address, interface in ((GROUP + "0/24", TUNNEL), (own, ROUTER_INTERFACE)):
+            subprocess.run(["ip", "route", "add", address, "dev", interface], check=True)
+    with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE) as sock:
+        sock.bind((0, 0))
+        for sequence, interface in enumerate((ROUTER_INTERFACE, TUNNEL), start=1):
+            # ipv4_devconf indices: forwarding, proxy_arp and rp_filter. Forward
+            # on the peer links only. The uplink has no policy route into a Sandbox.
+            values = {1: 1, 3: int(interface == ROUTER_INTERFACE), 8: 0}
+            conf = b"".join(
+                _attribute(key, struct.pack("=I", value)) for key, value in values.items()
+            )
+            af = _attribute(socket.AF_INET, _attribute(1, conf, nested=True), nested=True)
+            header = struct.pack("=BBHiII", 0, 0, 0, socket.if_nametoindex(interface), 0, 0)
+            _netlink_request(sock, 16, header + _attribute(26, af, nested=True), sequence)
 
 
 def wireguard(config: dict[str, object]) -> None:
@@ -730,6 +762,17 @@ def infra_pid(command: list[str], pod: str) -> int:
     return int(output(*command, "inspect", "-f", "{{.State.Pid}}", infra))
 
 
+def peer_mtu(address: str) -> int:
+    if delegated is None or delegated.group is None:
+        return GROUP_MTU
+    links = json.loads(output("ip", "-j", "-4", "addr", "show"))
+    for link in links:
+        if any(a["local"] == address for a in link["addr_info"]):
+            # CNI overhead is already reflected in the Pod's interface MTU.
+            return min(GROUP_MTU, int(link["mtu"]) - 80)
+    raise RuntimeError(f"no IPv4 interface for the Kubernetes worker Pod address {address}")
+
+
 def group_up(command: list[str], box: Path, index: str, rank: int, count: int, shm_mb: int) -> str:
     """Give node ``rank`` of the Sandbox ``index`` its share of the group's network, once
     every node offers its router's key and endpoint, and return the pod whose network
@@ -738,11 +781,15 @@ def group_up(command: list[str], box: Path, index: str, rank: int, count: int, s
     A container in a pod gets the pod's ``/dev/shm``, whatever its own ``--shm-size``, so
     the pod has the Sandbox's ``shm_mb``."""
     router, pod = f"router-{index}", f"group-{index}"
+    # These two trusted infra processes hold only network namespaces. On Kubernetes
+    # they can use their worker Pod's PID namespace and its already-mounted procfs.
+    # Starting another private procfs is forbidden by the worker's OCI proc mask.
+    infra_pid_args = ["--pid=host"] if delegated is not None and delegated.group else []
     for _ in range(5):
         # The router's uplink, which forwards WireGuard's port from the node.
         port = free_udp_port()
         created = subprocess.run(
-            [*command, "pod", "create", "--name", router, "--share", "net",
+            [*command, "pod", "create", "--name", router, "--share", "net", *infra_pid_args,
              "--network", "pasta", "--publish", f"{port}:{port}/udp"],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False,
         )  # fmt: skip
@@ -757,8 +804,8 @@ def group_up(command: list[str], box: Path, index: str, rank: int, count: int, s
     else:
         raise RuntimeError(f"could not start the group's router: {created.stderr.strip()}")
     subprocess.run(
-        [*command, "pod", "create", "--name", pod, "--share", "net", f"--shm-size={shm_mb}m",
-         "--network", "slirp4netns:allow_host_loopback=false",
+        [*command, "pod", "create", "--name", pod, "--share", "net", *infra_pid_args,
+         f"--shm-size={shm_mb}m", "--network", "slirp4netns:allow_host_loopback=false",
          *(f"--add-host=node{k}:{GROUP}{k + 1}" for k in range(count))],
         check=True, stdout=subprocess.DEVNULL,
     )  # fmt: skip
@@ -766,25 +813,27 @@ def group_up(command: list[str], box: Path, index: str, rank: int, count: int, s
     private = os.urandom(32)
     offers = box / PEERS
     offers.mkdir(exist_ok=True)
+    address = node_address()
     write(
-        offers / f"{rank}.json", dict(host=node_address(), port=port, key=public_key(private).hex())
+        offers / f"{rank}.json",
+        dict(host=address, port=port, key=public_key(private).hex(), mtu=peer_mtu(address)),
     )
     deadline = time.monotonic() + GROUP_TIMEOUT_SEC
     while not all(appeared(offers / f"{k}.json") for k in range(count)):
+        if delegated is not None and (read(box / "error") or read(box / "stop") or read("stop")):
+            raise RuntimeError("the Sandbox stopped while waiting for the other ranks")
         if time.monotonic() > deadline:
             raise RuntimeError("the Sandbox's other nodes did not offer their routers")
         time.sleep(0.5)
+    peers = [json.loads((offers / f"{k}.json").read_text()) for k in range(count)]
     config = dict(
+        mtu=min(peer["mtu"] for peer in peers),
         router=infra_pid(command, router),
         sandbox=infra_pid(command, pod),
         rank=rank,
         port=port,
         private=private.hex(),
-        peers=[
-            dict(json.loads((offers / f"{k}.json").read_text()), address=f"{GROUP}{k + 1}")
-            for k in range(count)
-            if k != rank
-        ],
+        peers=[dict(peer, address=f"{GROUP}{k + 1}") for k, peer in enumerate(peers) if k != rank],
     )
     # The private key goes by a pipe, never by a command line another account can read.
     subprocess.run(
@@ -803,7 +852,7 @@ def group(config: dict[str, object]) -> None:
     router = ["nsenter", "-t", str(config["router"]), "-n"]
     sandbox = ["nsenter", "-t", str(config["sandbox"]), "-n"]
     own = f"{GROUP}{int(config['rank']) + 1}"  # type: ignore[call-overload]
-    mtu = str(GROUP_MTU)
+    mtu = str(config.get("mtu", GROUP_MTU))
 
     def run(*argv: str, given: bytes | None = None) -> None:
         subprocess.run(argv, input=given, check=True)
@@ -818,10 +867,18 @@ def group(config: dict[str, object]) -> None:
         run(*router, "ip", "link", "set", device, "mtu", mtu, "up")
     # Neither of the router's interfaces has an address its routes reach back through, which
     # a node's strict or loose reverse-path filter, inherited, would take as spoofing.
-    run(*router, "sh", "-c", "echo 1 >/proc/sys/net/ipv4/ip_forward && "
-        f"echo 1 >/proc/sys/net/ipv4/conf/{ROUTER_INTERFACE}/proxy_arp && "
-        "for c in all default " + ROUTER_INTERFACE + " " + TUNNEL + "; do "
-        "echo 0 >/proc/sys/net/ipv4/conf/$c/rp_filter; done")  # fmt: skip
+    if delegated is not None and delegated.group:
+        run(*router, "python3", "-I", __file__, "router-forwarding", own)
+        # This peer network is IPv4-only. Drop IPv6 at the trusted veth, including
+        # link-local destinations of the router and any inherited IPv6 forwarding.
+        run(*router, "tc", "qdisc", "replace", "dev", ROUTER_INTERFACE, "clsact")
+        run(*router, "tc", "filter", "replace", "dev", ROUTER_INTERFACE, "ingress",
+            "protocol", "ipv6", "matchall", "action", "drop")  # fmt: skip
+    else:
+        run(*router, "sh", "-c", "echo 1 >/proc/sys/net/ipv4/ip_forward && "
+            f"echo 1 >/proc/sys/net/ipv4/conf/{ROUTER_INTERFACE}/proxy_arp && "
+            "for c in all default " + ROUTER_INTERFACE + " " + TUNNEL + "; do "
+            "echo 0 >/proc/sys/net/ipv4/conf/$c/rp_filter; done")  # fmt: skip
     for table, route in (
         ("100", [GROUP + "0/24", "dev", TUNNEL]),
         ("101", [own, "dev", ROUTER_INTERFACE]),
@@ -830,6 +887,11 @@ def group(config: dict[str, object]) -> None:
         run(*router, "ip", "route", "add", "unreachable", "default", "table", table)
     run(*router, "ip", "rule", "add", "iif", ROUTER_INTERFACE, "lookup", "100", "pref", "100")
     run(*router, "ip", "rule", "add", "iif", TUNNEL, "lookup", "101", "pref", "101")
+    if delegated is not None and delegated.group:
+        # Peer ingress must hit the restrictive tables even for addresses of the
+        # trusted router's uplink. Its own WireGuard socket still gets local routing.
+        run(*router, "ip", "rule", "add", "lookup", "local", "pref", "200")
+        run(*router, "ip", "rule", "del", "lookup", "local", "pref", "0")
 
 
 def own_cgroup() -> Path:
@@ -872,7 +934,7 @@ def alive(pid: int) -> bool:
 def runtime(command: list[str], version: str, build: str) -> Path:
     """Orbit's gVisor build ``build`` of ``version``, copied once from GHCR into the cache,
     which every node shares: the directory that holds its ``runsc``."""
-    cache = Path.cwd().parent
+    cache = cache_dir()
     name = f"gvisor-{version}.{build}-{platform.machine()}"
     found = cache / name
     with (cache / (name + ".lock")).open("a") as lock:
@@ -933,7 +995,7 @@ def load(command: list[str], archive: str, image: str) -> None:
     image, a separate verifier's, or of a snapshot an earlier job wrote out, may start
     after."""
     subprocess.run(
-        [*command, "load", "-q", "-i", str(Path.cwd().parent / archive)],
+        [*command, "load", "-q", "-i", str(cache_dir() / archive)],
         check=True,
         stdout=subprocess.DEVNULL,
     )
@@ -1040,7 +1102,10 @@ def clean(command: list[str], directory: str) -> None:
         subprocess.run([*command, "rm", "-a", "-f", "-v", "-t", "1"], check=True)
         release(command, directory)
     except Exception as exc:
-        write("cleanup-error", str(exc))
+        if delegated is not None and delegated.group:
+            delegated.group.fail(Path("cleanup-error"), str(exc))
+        else:
+            write("cleanup-error", str(exc))
         raise
 
 
@@ -1070,7 +1135,7 @@ def prepare() -> None:
     recipe = json.loads(Path("recipe.json").read_text())
     framework = recipe["framework"]
     directory, command, node_local_dir = store(recipe)
-    archive = Path.cwd().parent / IMAGES / f"{recipe['key']}.tar.gz"
+    archive = cache_dir() / IMAGES / f"{recipe['key']}.tar.gz"
     job = delegated.job if delegated is not None else os.environ["SLURM_JOB_ID"]
     part = archive.with_name(f"{archive.name}.{job}.part")
     proxy = build_proxy()
@@ -1140,6 +1205,19 @@ def prepare() -> None:
         clean(command, directory)
 
 
+def nvproxy_abi(driver: str, supported: list[str], *, kubernetes: bool) -> str | None:
+    """Prefer the installed driver's ABI. Kubernetes workers also allow the one
+    equivalent ABI confirmed by the upstream maintainer in google/gvisor#12774."""
+    if driver in supported:
+        return None
+    if kubernetes and driver == "570.211.01" and "570.195.03" in supported:
+        return "570.195.03"
+    raise RuntimeError(
+        f"the NVIDIA driver {driver} of {this_node()} is unsupported by this gVisor; "
+        "its nvproxy lists compatible versions with list-supported-drivers"
+    )
+
+
 def set_up(command: list[str], directory: str, spec: dict[str, object], rank: int) -> str:
     """Load node ``rank``'s seed into its store, and record the store and the runtime there
     for the node's steps; the runtime's version."""
@@ -1151,28 +1229,31 @@ def set_up(command: list[str], directory: str, spec: dict[str, object], rank: in
     version = output(runsc, "--version").splitlines()[0]
     if not version.endswith(f"+orbit.{spec['version']}.{spec['build']}"):
         raise RuntimeError(f"unexpected gVisor build {version} on {this_node()}")
+    stored = dict(directory=directory, runsc=runsc)
     if spec["gpus"]:
         supported = output(runsc, "nvproxy", "list-supported-drivers").split()
         for driver in {str(device["driver_version"]) for device in devices()}:
-            if driver not in supported:
-                raise RuntimeError(
-                    f"the NVIDIA driver {driver} of {this_node()} is not one gVisor {version} "
-                    "supports; its nvproxy lists them with list-supported-drivers"
-                )
+            abi = nvproxy_abi(
+                driver,
+                supported,
+                kubernetes=delegated is not None and delegated.workload_manager == "kubernetes",
+            )
+            if abi is not None:
+                stored["nvproxy_driver_version"] = abi
     STORES.mkdir(exist_ok=True)
-    write(
-        STORES / f"{this_node()}.json",
-        dict(directory=directory, runsc=runsc),
-    )
+    write(STORES / f"{this_node()}.json", stored)
     return version
 
 
 def supervise() -> None:
     spec = json.loads(Path("allocation.json").read_text())
-    nodes = job_nodes()
+    group = delegated.group if delegated is not None else None
+    rank = group.rank if group else 0
+    nodes = [] if group else job_nodes()
     directory, command, node_local_dir = store(spec)
     steps: dict[str, subprocess.Popen[bytes]] = {}
     holders: subprocess.Popen[bytes] | None = None
+    bridge: subprocess.Popen[bytes] | None = None
     try:
         if delegated is not None:
             if "architecture" in spec:
@@ -1192,7 +1273,7 @@ def supervise() -> None:
                      "python3", "-I", __file__, "hold"],
                     stdout=log, stderr=subprocess.STDOUT,
                 )  # fmt: skip
-        version = set_up(command, directory, spec, 0)
+        version = set_up(command, directory, spec, rank)
         while not all(appeared(STORES / f"{node}.json") for node in nodes[1:]):
             assert holders is not None
             if holders.poll() is not None or read("error"):
@@ -1201,29 +1282,68 @@ def supervise() -> None:
                 )
             time.sleep(0.5)
         SANDBOXES.mkdir(exist_ok=True)
-        write("ready", dict(runtime=version, node=nodes[0], nodes=nodes))
+        if group and rank:
+            # Orbit reaches rank zero with a local subprocess. Only the peer Pods
+            # need a control stream across the private allocation directory.
+            endpoint = group.directory
+            (endpoint / "sessions").mkdir(mode=0o700, parents=True, exist_ok=True)
+            bridge = subprocess.Popen(
+                [sys.executable, "-I", str(Path(__file__).with_name("bridge.py")), "listen",
+                 str(endpoint)]
+            )  # fmt: skip
+        if group:
+            group.publish()
+            while not (nodes := group.nodes()):
+                if read("stop") or read("error"):
+                    return
+                if bridge is not None and bridge.poll() is not None:
+                    raise RuntimeError("the Kubernetes rank's control channel exited")
+                time.sleep(0.5)
+        if rank == 0:
+            write("ready", dict(runtime=version, node=nodes[0], nodes=nodes))
         while not read("stop"):
             for request in sorted(SANDBOXES.glob("*/request.json")):
                 index = request.parent.name
-                if index not in steps and not (request.parent / "done").exists():
-                    data = json.loads(request.read_text())
-                    if delegated is None:
-                        steps[index] = launch(index, data, nodes, gpus=bool(spec["gpus"]))
-                    else:
-                        try:
-                            with (request.parent / "step.log").open("wb") as log:
-                                steps[index] = delegated.allocation.launch(
-                                    index, data, __file__, log
-                                )
-                        except Exception as exc:
-                            write(request.parent / "error", str(exc))
-                            write(request.parent / "done", 1)
+                box = request.parent
+                if index in steps or appeared(box / "done"):
+                    continue
+                data = json.loads(request.read_text())
+                count = len(data["nodes"])
+                if group:
+                    if rank >= count:
+                        continue
+                    if appeared(box / NODES / str(rank) / "done"):
+                        if rank == 0 and (code := group.completion(box, count)) is not None:
+                            write(box / "done", code)
+                        continue
+                if delegated is None:
+                    steps[index] = launch(index, data, nodes, gpus=bool(spec["gpus"]))
+                else:
+                    try:
+                        logfile = box / ("step.log" if rank == 0 else f"step-{rank}.log")
+                        with logfile.open("wb") as log:
+                            steps[index] = delegated.allocation.launch(index, data, __file__, log)
+                    except Exception as exc:
+                        if group:
+                            group.step_failure(box, str(exc))
+                            group.done(box, 1)
+                        else:
+                            write(box / "error", str(exc))
+                            write(box / "done", 1)
             for index, step in list(steps.items()):
                 if (code := step.poll()) is not None:
+                    box = SANDBOXES / index
                     if delegated is not None:
-                        delegated.allocation.end(index, SANDBOXES / index / NODES / "0" / "memory")
-                    write(SANDBOXES / index / "done", code)
+                        delegated.allocation.end(index, box / NODES / str(rank) / "memory")
+                    if group:
+                        group.done(box, code)
+                    else:
+                        write(box / "done", code)
                     del steps[index]
+            if bridge is not None and bridge.poll() is not None:
+                raise RuntimeError("the Kubernetes rank's control channel exited")
+            if group and read("error"):
+                raise RuntimeError(read("error"))
             if holders is not None and holders.poll() is not None:
                 raise RuntimeError("a node's store ended: " + read("hold.log")[-2000:])
             time.sleep(0.5)
@@ -1239,17 +1359,23 @@ def supervise() -> None:
                 step.kill()
                 step.wait()
             if delegated is not None:
-                delegated.allocation.end(index, SANDBOXES / index / NODES / "0" / "memory")
-            write(SANDBOXES / index / "done", step.returncode)
+                delegated.allocation.end(index, SANDBOXES / index / NODES / str(rank) / "memory")
+            if group:
+                group.done(SANDBOXES / index, step.returncode)
+            else:
+                write(SANDBOXES / index / "done", step.returncode)
         if holders is not None and not read("stop"):
             # Each removes its node's store once the job is stopped or released: a signal
             # would not let it, as srun turns SIGTERM into SIGKILL for its tasks.
             write("release", "1")
         # The batch step outlives each Sandbox's step, including an OOM that kills every
         # process there. Keep the job's counters before the allocation goes away.
+        if bridge is not None:
+            bridge.terminate()
+            bridge.wait()
         if delegated is None:
             Path("memory").write_text((job_cgroup() / "memory.events").read_text())
-        elif delegated.allocation is not None:
+        elif delegated.allocation is not None and rank == 0:
             Path("memory").write_text((delegated.allocation.group / "memory.events").read_text())
         try:
             clean(command, directory)
@@ -1286,7 +1412,7 @@ def start(index: str) -> None:
     its container; then hold it until it is saved or destroyed, measuring what
     it writes where it is held to ``storage_mb``."""
     box = SANDBOXES / index
-    rank = 0 if delegated is not None else int(os.environ["SLURM_PROCID"])
+    rank = delegated.rank if delegated is not None else int(os.environ["SLURM_PROCID"])
     own = box / NODES / str(rank)
     deadline = time.monotonic() + GROUP_TIMEOUT_SEC
     while not appeared(box / "request.json"):
@@ -1341,6 +1467,8 @@ def start(index: str) -> None:
     env = dict(spec["env"])
     if gpus:
         flags += ["--runtime-flag=nvproxy", "-e", "NVIDIA_VISIBLE_DEVICES=void"]
+        if abi := stored.get("nvproxy_driver_version"):
+            flags.append("--runtime-flag=nvproxy-driver-version=" + abi)
         for gpu in gpus:
             flags.extend(["--device", "nvidia.com/gpu=" + str(gpu["id"])])
     try:
@@ -1351,8 +1479,15 @@ def start(index: str) -> None:
             pods = [f"router-{index}", f"group-{index}"]
             pod = group_up(command, box, index, rank, count, spec["shm_mb"])
             sealing = output(*command, "pod", "inspect", "-f", "{{.InfraContainerID}}", pod)
-            hcas = infiniband()
-            flags += ["--pod", pod, f"--hostname=node{rank}", "--ulimit=memlock=-1:-1"]
+            # A worker Pod requests GPUs only. Never infer RDMA allocation from
+            # sysfs visibility on a Kubernetes node.
+            hcas = [] if delegated is not None else infiniband()
+            flags += ["--pod", pod, f"--hostname=node{rank}"]
+            if delegated is None:
+                flags.append("--ulimit=memlock=-1:-1")
+            else:
+                # Only the network belongs to the infra pod.
+                flags.append("--pid=private")
             for device in hcas:
                 flags.extend(["--device", device])
             if hcas:
@@ -1364,7 +1499,7 @@ def start(index: str) -> None:
             # Every file there is the Sandbox's account's, whoever made it; on the host, the
             # job's account owns them all, as the shared file system lets it.
             given = dict(spec["shared"])  # type: ignore[call-overload]
-            shared = [str(Path.cwd().parent / str(given["path"]))]
+            shared = [str(cache_dir() / str(given["path"]))]
             owner = in_namespace(
                 command, "account", stored["directory"], node["image"], str(given["account"])
             )
@@ -1457,6 +1592,8 @@ def start(index: str) -> None:
                 return
             if order:
                 return
+            if delegated is not None and delegated.group and appeared(box / "error"):
+                raise RuntimeError("another rank of this Sandbox failed")
             if not alive(conmon):
                 raise RuntimeError(f"the sandbox image command exited on {this_node()}")
             if schedule and time.monotonic() >= due:
@@ -1586,7 +1723,7 @@ def export(
     its image, and each of its volumes' ``layers`` beside it, ``<destination
     stem>.<layer>.tar``. Neither is compressed, as one gzip process is the slowest part:
     see this Provider's AGENTS.md."""
-    path = Path.cwd().parent / destination
+    path = cache_dir() / destination
     path.parent.mkdir(mode=0o700, exist_ok=True)
     temporary = path.with_name(path.name + ".part")
     with temporary.open("wb") as file:
@@ -1623,7 +1760,9 @@ def main() -> None:
         try:
             supervise()
         except Exception as exc:
-            if not Path("ready").exists():
+            if delegated is not None and delegated.group:
+                delegated.group.fail(Path("error"), str(exc))
+            elif not Path("ready").exists():
                 write("error", str(exc))
             raise
         return
@@ -1641,6 +1780,9 @@ def main() -> None:
         except Exception as exc:
             write("error", str(exc))
             raise
+        return
+    if mode == "router-forwarding":
+        router_forwarding(args[0])
         return
     if mode in ("group", "wireguard"):
         # Their input holds a private key, which goes by a pipe, never by a command line.
@@ -1660,7 +1802,7 @@ def main() -> None:
         return
     if mode == "copy":
         # A Sandbox's shared directory, below the cache, from a snapshot's.
-        copy_tree(str(Path.cwd().parent / args[0]), str(Path.cwd().parent / args[1]))
+        copy_tree(str(cache_dir() / args[0]), str(cache_dir() / args[1]))
         return
     if mode == "release":
         directory = Path(args[0]).resolve()
@@ -1676,7 +1818,11 @@ def main() -> None:
         try:
             start(args[0])
         except Exception as exc:
-            write(SANDBOXES / args[0] / "error", str(exc))
+            path = SANDBOXES / args[0] / "error"
+            if delegated is not None and delegated.group:
+                delegated.group.step_failure(path.parent, str(exc))
+            else:
+                write(path, str(exc))
             raise
         return
     stored = node_store()

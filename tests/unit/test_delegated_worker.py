@@ -1,11 +1,15 @@
 """The worker's PBS and LSF adapter: each Sandbox held to its share of the job."""
 
 import os
+import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from orbit.run.providers.cluster import bridge
 from orbit.run.providers.cluster import delegated_worker as worker
 
 pytestmark = pytest.mark.unit
@@ -98,3 +102,136 @@ def test_compute_node_defaults_cannot_inject_scheduler_environment(tmp_path, mon
         ]
     finally:
         context.store_owner.close()
+
+
+def test_indexed_worker_readiness_and_completion(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ORBIT_KUBERNETES_RANK", "1")
+    monkeypatch.setenv("ORBIT_KUBERNETES_POD_IP", "10.42.2.17")
+    peer = worker.KubernetesGroup(2, "worker-b")
+    peer.publish()
+    assert peer.nodes() == []
+    monkeypatch.setenv("ORBIT_KUBERNETES_RANK", "0")
+    monkeypatch.setenv("ORBIT_KUBERNETES_POD_IP", "10.42.1.17")
+    leader = worker.KubernetesGroup(2, "worker-a")
+    leader.publish()
+    assert leader.nodes() == peer.nodes() == ["worker-a", "worker-b"]
+    assert leader.address == "10.42.1.17" and peer.address == "10.42.2.17"
+    box = tmp_path / "sandboxes" / "0"
+    for rank in (0, 1):
+        (box / "nodes" / str(rank)).mkdir(parents=True)
+    leader.done(box, 0)
+    assert leader.completion(box, 2) is None
+    assert leader.completion(box, 1) == 0  # A single-node verifier uses rank zero only.
+    (box / "step-1.log").write_text("could not attach assigned GPU")
+    peer.done(box, 9)
+    assert leader.completion(box, 2) == 9
+    leader.fail(box / "error", "another rank of this Sandbox failed")
+    assert (
+        "rank 1 on worker-b: Sandbox step exited 9: could not attach assigned GPU"
+        in (box / "error").read_text()
+    )
+
+
+def test_indexed_worker_refuses_incorrect_placement(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ORBIT_KUBERNETES_POD_IP", "10.42.0.1")
+    for index in range(2):
+        monkeypatch.setenv("ORBIT_KUBERNETES_RANK", str(index))
+        group = worker.KubernetesGroup(2, "same-machine")
+        group.publish()
+    with pytest.raises(RuntimeError, match="multiple allocation ranks on one node"):
+        group.nodes()
+    monkeypatch.setenv("ORBIT_KUBERNETES_RANK", "2")
+    with pytest.raises(RuntimeError, match="outside allocation"):
+        worker.KubernetesGroup(2, "other-machine")
+
+
+def test_multinode_bridge_routes_each_session_to_its_target(tmp_path):
+    (tmp_path / "stop").touch()
+    script = tmp_path / "bridge.py"
+    shutil.copyfile(bridge.__file__, script)
+    (tmp_path / "worker.py").write_text("import os\nprint(os.environ['TEST_NODE'])\n")
+    peers = []
+    try:
+        for name in ("worker-a", "worker-b"):
+            endpoint = tmp_path / "workers" / name
+            endpoint.mkdir(parents=True)
+            proc = subprocess.Popen(
+                [sys.executable, "-I", str(script), "listen", str(endpoint)],
+                env={**os.environ, "TEST_NODE": name},
+                cwd=tmp_path,
+            )
+            peers.append(proc)
+            deadline = time.monotonic() + 5
+            while not (endpoint / "sessions").is_dir():
+                assert time.monotonic() < deadline and proc.poll() is None
+                time.sleep(0.01)
+        for name in ("worker-b", "worker-a"):
+            target = tmp_path / "workers" / name
+            result = subprocess.run(
+                [sys.executable, "-I", str(script), "connect", str(target), "exec", "0"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            assert result.stdout.strip() == name
+    finally:
+        (tmp_path / "stop").write_text("stop")
+        for proc in peers:
+            proc.wait(timeout=8)
+
+
+def test_kubernetes_driver_override_requires_exact_upstream_abi_pair(monkeypatch):
+    from orbit.run.providers.cluster import worker as runtime
+
+    monkeypatch.setattr(runtime, "this_node", lambda: "worker-b")
+    assert runtime.nvproxy_abi("570.211.01", ["570.195.03"], kubernetes=True) == "570.195.03"
+    assert runtime.nvproxy_abi("570.211.01", ["570.211.01", "570.195.03"], kubernetes=True) is None
+    for driver, supported, kubernetes in (
+        ("570.211.01", ["570.195.03"], False),
+        ("570.211.02", ["570.195.03"], True),
+        ("570.211.01", ["570.195.04"], True),
+    ):
+        with pytest.raises(RuntimeError, match=f"{driver} of worker-b is unsupported"):
+            runtime.nvproxy_abi(driver, supported, kubernetes=kubernetes)
+
+
+def test_kubernetes_peer_mtu_and_router_policy(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from orbit.run.providers.cluster import worker as runtime
+
+    monkeypatch.setattr(runtime, "delegated", SimpleNamespace(group=object()))
+    monkeypatch.setattr(
+        runtime,
+        "output",
+        lambda *args: json.dumps(
+            [
+                {"mtu": 65536, "addr_info": [{"local": "127.0.0.1"}]},
+                {"mtu": 1450, "addr_info": [{"local": "10.42.1.19"}]},
+            ]
+        ),
+    )
+    assert runtime.peer_mtu("10.42.1.19") == 1370
+    with pytest.raises(RuntimeError, match="no IPv4 interface"):
+        runtime.peer_mtu("10.42.1.20")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(" ".join(argv))
+
+    monkeypatch.setattr(runtime.subprocess, "run", run)
+    runtime.group(dict(router=10, sandbox=20, rank=0, mtu=1320, peers=[]))
+    router = "nsenter -t 10 -n "
+    assert router + "ip rule add iif peers-router lookup 100 pref 100" in calls
+    assert router + "ip rule add lookup local pref 200" in calls
+    assert router + "ip rule del lookup local pref 0" in calls
+    assert router + "ip link set wg0 mtu 1320 up" in calls
+    assert (
+        router + "tc filter replace dev peers-router ingress protocol ipv6 matchall action drop"
+        in calls
+    )

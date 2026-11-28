@@ -1,18 +1,20 @@
-"""The worker's helper where the workload manager delegates the job's cgroup rather than
-starting steps, as PBS Pro and LSF do, staged beside it: one node, whose Sandboxes it holds
-each to its share of the job in a cgroup of its own."""
+"""Hold each Sandbox step to its share of a delegated cgroup on this compute node.
+Kubernetes indexed Jobs run one such worker on each allocated node."""
 
 from __future__ import annotations
 
 import contextlib
 import ctypes
 import fcntl
+import ipaddress
+import json
 import os
 import platform
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -94,8 +96,10 @@ class Allocation:
     """The worker's subtree of the job's delegated cgroup v2 hierarchy, which Orbit made for
     it beside its own process's (``delegated.py``), and the Sandboxes reserved in it."""
 
-    def __init__(self, group: Path, gpu_ids: list[str]):
+    def __init__(self, group: Path, gpu_ids: list[str], *, nodes: int = 1, rank: int = 0):
         self.group = group
+        self.nodes = nodes
+        self.rank = rank
         self.control = group / f"orbit-control-{os.getpid()}"
         self.enabled: set[str] = set()
         self.cpus = sorted(os.sched_getaffinity(0))
@@ -152,8 +156,8 @@ class Allocation:
         self.control.rmdir()
 
     def launch(self, index: str, request: dict, script: str, log):
-        if len(request["nodes"]) != 1:
-            raise RuntimeError("this batch allocation can start only a single-node Sandbox")
+        if not self.rank < len(request["nodes"]) <= self.nodes:
+            raise RuntimeError("Sandbox node count does not fit this allocation")
         taken_cpus = {cpu for _, cpus, _ in self.steps.values() for cpu in cpus}
         taken_gpus = {gpu for _, _, gpus in self.steps.values() for gpu in gpus}
         cpus = [c for c in self.cpus if c not in taken_cpus][: request["cpus"]]
@@ -203,6 +207,78 @@ class Allocation:
         group.rmdir()
 
 
+class KubernetesGroup:
+    """One indexed, non-restartable worker per node. The private shared job directory
+    carries readiness and completion for all ranks, including single-node verifiers
+    running inside a multi-node allocation. Only rank zero announces group completion."""
+
+    def __init__(self, count: int, node: str):
+        self.rank = int(os.environ["ORBIT_KUBERNETES_RANK"])
+        if not 0 <= self.rank < count:
+            raise RuntimeError(f"Kubernetes rank {self.rank} outside allocation of {count} nodes")
+        self.address = str(ipaddress.IPv4Address(os.environ["ORBIT_KUBERNETES_POD_IP"]))
+        self.count = count
+        self.node = node
+        self.ranks_dir = Path("ranks")
+        self.directory = Path("workers") / node
+
+    def publish(self) -> None:
+        self.ranks_dir.mkdir(exist_ok=True)
+        target = self.ranks_dir / f"{self.rank}.json"
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.node))
+        temporary.replace(target)
+
+    def nodes(self) -> list[str]:
+        # Refresh the directory listing before opening entries on an NFS client.
+        names = set(os.listdir(self.ranks_dir))
+        ranks = [f"{rank}.json" for rank in range(self.count)]
+        if not all(rank in names for rank in ranks):
+            return []
+        nodes = [json.loads((self.ranks_dir / rank).read_text()) for rank in ranks]
+        if len(set(nodes)) != self.count:
+            raise RuntimeError(f"Kubernetes placed multiple allocation ranks on one node: {nodes}")
+        return nodes
+
+    def fail(self, path: Path, reason: str) -> None:
+        # Concurrent failures must preserve the first published cause. Publish the full
+        # diagnostic atomically before making it visible under the common failure name.
+        with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", delete=False) as stream:
+            json.dump(f"rank {self.rank} on {self.node}: {reason}", stream)
+        try:
+            with contextlib.suppress(FileExistsError):
+                os.link(stream.name, path)
+        finally:
+            os.unlink(stream.name)
+
+    def step_failure(self, box: Path, message: str) -> None:
+        log = box / ("step.log" if self.rank == 0 else f"step-{self.rank}.log")
+        detail = ""
+        if log.is_file():
+            with log.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 2000))
+                detail = stream.read().decode(errors="replace").strip()
+        self.fail(box / "error", f"{message}: {detail}" if detail else message)
+
+    def done(self, box: Path, code: int) -> None:
+        if code and not (box / "error").exists():
+            self.step_failure(box, f"Sandbox step exited {code}")
+        target = box / "nodes" / str(self.rank) / "done"
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(str(code))
+        temporary.replace(target)
+
+    def completion(self, box: Path, count: int) -> int | None:
+        codes = []
+        for rank in range(count):
+            directory = box / "nodes" / str(rank)
+            if "done" not in os.listdir(directory):
+                return None
+            codes.append(int((directory / "done").read_text()))
+        return next((code for code in codes if code), 0)
+
+
 class Delegated:
     def __init__(self, config: dict):
         self.workload_manager = config["workload_manager"]
@@ -213,7 +289,16 @@ class Delegated:
         #: The subtree of the job's cgroup Orbit made for the worker, where it holds an
         #: allocation's Sandboxes; none for an image's preparation.
         self.cgroup = config.get("cgroup")
-        self.node = socket.gethostname()
+        self.node = (
+            os.environ["ORBIT_KUBERNETES_NODE"]
+            if self.workload_manager == "kubernetes"
+            else socket.gethostname()
+        )
+        self.nodes = config.get("nodes", 1)
+        self.group = KubernetesGroup(self.nodes, self.node) if self.nodes > 1 else None
+        self.rank = self.group.rank if self.group else 0
+        if self.rank:
+            self.cgroup = os.environ.get("ORBIT_KUBERNETES_PEER_CGROUP")
         self.allocation: Allocation | None = None
         self.store_owner = None
 
@@ -232,7 +317,9 @@ class Delegated:
         if not self.cgroup:
             raise RuntimeError("Orbit gave the worker no cgroup to hold Sandboxes in")
         gpus = allocated(visible, self.gpu_count)
-        allocation = Allocation(Path(self.cgroup), [gpu["id"] for gpu in gpus])
+        allocation = Allocation(
+            Path(self.cgroup), [gpu["id"] for gpu in gpus], nodes=self.nodes, rank=self.rank
+        )
         if self.cpu_count is not None:
             if len(allocation.cpus) < self.cpu_count:
                 raise RuntimeError(
