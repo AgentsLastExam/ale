@@ -108,6 +108,18 @@ left after its release, turns SIGTERM into an exit so that its cleanup runs, and
 starts, removes the stores on its node of this account's jobs that have ended, which each
 store names in its `job` file.
 
+OpenRSI's epilog (`/data/slurm/etc/epilog.d/70-dcgm_jobstats.epi.sh`) writes each GPU job's
+DCGM statistics as root into `<job id>.gpu_stats/` beside the job's Slurm output file, or in
+its working directory without one. In the job's directory on the shared home that directory
+stayed root's, and since the account cannot remove what it holds, Orbit could not remove the
+job's directory (`PermissionError`) after any GPU job. A job's Slurm output file and working
+directory are therefore on the node's `/tmp` (`/tmp/orbit-<account>.out`, which Slurm fills
+with nothing, as the job's command writes its own log), and Slurm's own messages about the
+job, such as its cancellation at its wall time, reach `job.log` as its error file. Measured
+on OpenRSI (November 2026): a GPU job cut at its wall time wrote that message into
+`job.log`, its directory held nothing else, and its statistics went to the node's `/tmp`,
+the account's.
+
 A commit chain of 200, each booted from the one before, worked under rootless Podman 4.9.3
 on Linux 6.8, which is the declared `max_saves`.
 
