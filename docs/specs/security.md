@@ -235,6 +235,11 @@ provider's key along. `--base-url` and `--api-key-env` (`gateway.base_url`,
 must name the variable holding its key, by name rather than value, so the key stays out of
 shell history and process listings.
 
+On a cluster each [episode job](lexicon.md) is its episode's Host. The dispatcher hands it
+the Run's `.env`, with the credentials its own environment sets, in a file only the account
+reads; no workload manager's command carries them, as one exports a submitter's environment
+into the job.
+
 The Sandbox receives a URL and a bearer token that is worthless anywhere else and is
 revoked when the episode ends — verified by `test_a_revoked_session_loses_its_egress`.
 

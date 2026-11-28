@@ -1,12 +1,13 @@
-"""A Slurm allocation and the Sandboxes in it, or the job that prepares an image for them.
-Copied to the cluster, standard library only.
+"""A job's Sandboxes, or the job that prepares an image for them. Copied to the cluster,
+standard library only.
 
-On each node of the allocation, the batch step on the first and a step of its own on every
-other hold Podman's private namespace and store there and load the image that node was
-seeded with. Each Sandbox the engine asks for runs as a job step of its own over the first
-nodes it spans, one task on each, which Slurm holds to that Sandbox's CPUs, memory and GPUs
-on each; control steps overlap it. A Sandbox saved as a snapshot is committed to the store
-of each of its nodes, where the next one boots from it.
+Orbit runs each episode in a job of its own, and this worker's ``supervise`` as its child on
+the job's first node, where it holds Podman's private namespace and store; a step of its own
+on every other node holds that node's. Each loads the image that node was seeded with. Each
+Sandbox Orbit asks for runs as a job step of its own over the first nodes it spans, one task
+on each, which Slurm holds to that Sandbox's CPUs, memory and GPUs on each; Orbit's control
+commands run on its own node, and as steps that overlap it on the others. A Sandbox saved as
+a snapshot is committed to the store of each of its nodes, where the next one boots from it.
 
 The nodes of a Sandbox that spans several share a network of their own: on each node a
 router namespace, which only this worker enters, holds a WireGuard device to the other
@@ -16,7 +17,7 @@ gets the node's InfiniBand HCAs, which gVisor's RDMA proxy drives, and the Sandb
 directory, a directory of the shared file system at ``/shared``.
 
 A preparation job pulls a Task's image, or builds it from its context, adds the framework
-layer and saves the result to the shared cache, from which every allocation loads it.
+layer and saves the result to the shared cache, from which every job loads it.
 
 A Sandbox's volumes are layers in the store: a Podman volume of its own, which Podman fills
 from the image, a copy of a snapshot's layer, or an overlay view of a snapshot's layers under
@@ -32,6 +33,8 @@ import csv
 import fcntl
 import json
 import os
+import platform
+import runpy
 import shutil
 import signal
 import socket
@@ -44,6 +47,13 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit
+
+# Where the workload manager delegates the job's cgroup rather than starting steps, as PBS
+# and LSF do, the job stages its helper beside this script, which holds each Sandbox in a
+# cgroup of its own there. Isolated Python does not import sibling modules, and
+# guest-controlled directories never go on sys.path.
+delegated = None
 
 SANDBOXES = Path("sandboxes")
 #: Below the job's directory: each node's store and runtime, by the node's Slurm name.
@@ -83,6 +93,9 @@ COPY = (
 )
 #: How tar keeps an overlay layer's whiteouts and opaque directories, and its owners.
 TAR = ["tar", "--xattrs", "--xattrs-include=user.*", "--numeric-owner"]
+#: The proxies Podman gives a build's ``RUN`` steps from its own environment, in either case
+#: (``config.ProxyEnv`` of containers/common, less ``no_proxy``, which names no proxy).
+PROXIES = ("http_proxy", "https_proxy", "ftp_proxy")
 
 
 def output(*argv: str) -> str:
@@ -91,11 +104,13 @@ def output(*argv: str) -> str:
 
 def job_nodes() -> list[str]:
     """The job's nodes, in the order Slurm lists them: a Sandbox of ``n`` spans the first."""
+    if delegated is not None:
+        return [delegated.node]
     return output("scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]).split()
 
 
 def this_node() -> str:
-    return os.environ["SLURMD_NODENAME"]
+    return delegated.node if delegated is not None else os.environ["SLURMD_NODENAME"]
 
 
 def node_store() -> dict[str, str]:
@@ -170,7 +185,7 @@ def podman(directory: str) -> list[str]:
     os.environ["XDG_RUNTIME_DIR"] = str(xdg)
     os.environ["TMPDIR"] = directory
     return [
-        "podman",
+        *(delegated.podman_argv(directory) if delegated is not None else ["podman"]),
         "--root",
         directory + "/root",
         "--runroot",
@@ -465,54 +480,63 @@ def volumes(directory: str, operations: list[list[object]]) -> None:
     and mode, merge a mounted view into one layer, unmount one, or remove a layer."""
     os.chdir(directory)
     for operation in operations:
-        match operation:
-            case ["copy", str(source), str(layer)]:
-                subprocess.run(
-                    ["sh", "-c", COPY, "sh", f"{LINKS}/{source}", f"{LAYERS}/{layer}"],
-                    check=True,
-                )
-            case ["view", str(layer), [int(uid), int(gid), int(mode)], list(lowers)]:
-                upper = Path(LAYERS) / layer
-                os.chown(upper, uid, gid)
-                os.chmod(upper, mode)
-                stack = ":".join(f"{LINKS}/{lower}" for lower in lowers)
-                subprocess.run(
-                    [
-                        "mount", "-t", "overlay", "overlay", "-o",
-                        f"lowerdir={stack},upperdir={upper},workdir={WORK}/{layer},userxattr",
-                        f"{VIEWS}/{layer}",
-                    ],
-                    check=True,
-                )  # fmt: skip
-            case ["merge", str(view), str(layer)]:
-                # A view as it is, its stack's whiteouts applied, as one plain layer.
-                subprocess.run(
-                    ["sh", "-c", COPY, "sh", f"{VIEWS}/{view}", f"{LAYERS}/{layer}"], check=True
-                )
-            case ["unmount", str(layer)]:
-                if os.path.ismount(f"{VIEWS}/{layer}"):
-                    subprocess.run(["umount", f"{VIEWS}/{layer}"], check=True)
-                for part in (WORK, VIEWS):
-                    subprocess.run(
-                        ["rm", "-rf", "--one-file-system", f"{part}/{layer}"], check=True
-                    )
-            case ["remove", str(layer)]:
-                link = Path(LINKS) / layer
-                if not link.is_symlink():
-                    continue
-                target = os.readlink(link)
-                if target.startswith("../volumes/"):
-                    # A Podman volume: its directory, emptied here, goes with the store.
-                    subprocess.run(
-                        ["find", str(link) + "/", "-mindepth", "1", "-delete"], check=True
-                    )
-                else:
-                    subprocess.run(
-                        ["rm", "-rf", "--one-file-system", f"{LAYERS}/{layer}"], check=True
-                    )
-                link.unlink()
-            case _:
-                raise ValueError(operation)
+        if not isinstance(operation, (list, tuple)) or not operation:
+            raise ValueError(operation)
+        action, *args = operation
+        if action == "copy" and len(args) == 2 and all(isinstance(a, str) for a in args):
+            source, layer = args
+            subprocess.run(
+                ["sh", "-c", COPY, "sh", f"{LINKS}/{source}", f"{LAYERS}/{layer}"],
+                check=True,
+            )
+        elif (
+            action == "view"
+            and len(args) == 3
+            and isinstance(args[0], str)
+            and isinstance(args[1], (list, tuple))
+            and len(args[1]) == 3
+            and all(isinstance(a, int) for a in args[1])
+            and isinstance(args[2], list)
+        ):
+            layer, (uid, gid, mode), lowers = args
+            upper = Path(LAYERS) / layer
+            os.chown(upper, uid, gid)
+            os.chmod(upper, mode)
+            stack = ":".join(f"{LINKS}/{lower}" for lower in lowers)
+            subprocess.run(
+                [
+                    "mount", "-t", "overlay", "overlay", "-o",
+                    f"lowerdir={stack},upperdir={upper},workdir={WORK}/{layer},userxattr",
+                    f"{VIEWS}/{layer}",
+                ],
+                check=True,
+            )  # fmt: skip
+        elif action == "merge" and len(args) == 2 and all(isinstance(a, str) for a in args):
+            # A view as it is, its stack's whiteouts applied, as one plain layer.
+            view, layer = args
+            subprocess.run(
+                ["sh", "-c", COPY, "sh", f"{VIEWS}/{view}", f"{LAYERS}/{layer}"], check=True
+            )
+        elif action == "unmount" and len(args) == 1 and isinstance(args[0], str):
+            layer = args[0]
+            if os.path.ismount(f"{VIEWS}/{layer}"):
+                subprocess.run(["umount", f"{VIEWS}/{layer}"], check=True)
+            for part in (WORK, VIEWS):
+                subprocess.run(["rm", "-rf", "--one-file-system", f"{part}/{layer}"], check=True)
+        elif action == "remove" and len(args) == 1 and isinstance(args[0], str):
+            layer = args[0]
+            link = Path(LINKS) / layer
+            if not link.is_symlink():
+                continue
+            target = os.readlink(link)
+            if target.startswith("../volumes/"):
+                # A Podman volume: its directory, emptied here, goes with the store.
+                subprocess.run(["find", str(link) + "/", "-mindepth", "1", "-delete"], check=True)
+            else:
+                subprocess.run(["rm", "-rf", "--one-file-system", f"{LAYERS}/{layer}"], check=True)
+            link.unlink()
+        else:
+            raise ValueError(operation)
 
 
 def root_of(command: list[str], directory: str, layer: str) -> list[int]:
@@ -849,7 +873,7 @@ def runtime(command: list[str], version: str, build: str) -> Path:
     """Orbit's gVisor build ``build`` of ``version``, copied once from GHCR into the cache,
     which every node shares: the directory that holds its ``runsc``."""
     cache = Path.cwd().parent
-    name = f"gvisor-{version}.{build}"
+    name = f"gvisor-{version}.{build}-{platform.machine()}"
     found = cache / name
     with (cache / (name + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -906,7 +930,8 @@ def launch(
 def load(command: list[str], archive: str, image: str) -> None:
     """Load an image's archive, below the cache, into the store, and tag it: Podman removes
     an untagged image with the last snapshot committed over it, which a Sandbox of the
-    image, a separate verifier's, may start after."""
+    image, a separate verifier's, or of a snapshot an earlier job wrote out, may start
+    after."""
     subprocess.run(
         [*command, "load", "-q", "-i", str(Path.cwd().parent / archive)],
         check=True,
@@ -920,7 +945,11 @@ def load(command: list[str], archive: str, image: str) -> None:
 def stale_stores(node_local_dir: Path) -> list[Path]:
     """The stores on this node of this account's jobs that have ended: one that Slurm
     killed, at its wall time or by preemption, or whose node went down, cleaned up nothing."""
+    # A scheduler may reap this job on timeout or preemption. PBS/LSF give each
+    # job its own prefix. Never delete their stores using Slurm's job-id namespace.
     stale = []
+    if delegated is not None:
+        return delegated.abandoned(node_local_dir)
     for store in node_local_dir.glob(STORE_PREFIX + "*"):
         job = read(store / OWNER)
         if (
@@ -973,10 +1002,15 @@ def store(spec: dict[str, object]) -> tuple[str, list[str], Path]:
     else ``$SLURM_TMPDIR``, else ``/tmp``, and the command that uses it; the stores of this
     account's jobs that ended on the node are removed first."""
     named = os.path.expanduser(os.path.expandvars(str(spec.get("node_local_dir") or "")))
-    node_local_dir = Path(named or os.getenv("SLURM_TMPDIR") or "/tmp")
+    node_local_dir = Path(named or os.getenv("TMPDIR" if delegated else "SLURM_TMPDIR") or "/tmp")
     node_local_dir.mkdir(parents=True, exist_ok=True)
-    directory = tempfile.mkdtemp(prefix=STORE_PREFIX, dir=node_local_dir)
-    (Path(directory) / OWNER).write_text(os.environ["SLURM_JOB_ID"])
+    prefix = f"orbit-{delegated.workload_manager}-" if delegated is not None else STORE_PREFIX
+    directory = tempfile.mkdtemp(prefix=prefix, dir=node_local_dir)
+    owner = Path(directory) / OWNER
+    if delegated is not None:
+        delegated.claim(owner)
+    else:
+        owner.write_text(os.environ["SLURM_JOB_ID"])
     # Slurm signals the batch step before it kills it, as a job is cancelled or preempted:
     # clean up then too.
     signal.signal(signal.SIGTERM, terminated)
@@ -998,12 +1032,35 @@ def hold_namespace(command: list[str], node_local_dir: Path) -> None:
 
 
 def clean(command: list[str], directory: str) -> None:
+    if delegated is not None and not (Path(directory) / "root").exists():
+        # Preflight may have rejected the node before Podman created a store.
+        shutil.rmtree(directory)
+        return
     try:
         subprocess.run([*command, "rm", "-a", "-f", "-v", "-t", "1"], check=True)
         release(command, directory)
     except Exception as exc:
         write("cleanup-error", str(exc))
         raise
+
+
+def build_proxy() -> list[str]:
+    """What keeps the node's proxies out of a build's ``RUN`` steps, which run the Task's
+    and its image's own programs, where one of them holds credentials: Podman would hand
+    them over, and with them the site's password. Podman's own pulls still use them."""
+    for name in PROXIES:
+        for variable in (name, name.upper()):
+            value = os.environ.get(variable, "")
+            if urlsplit(value if "://" in value else "//" + value).username is not None:
+                print(
+                    f"{variable} holds credentials, so image builds get no proxy; registry "
+                    "pulls still use it, and a build that needs the network needs a proxy "
+                    "without credentials",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return ["--http-proxy=false"]
+    return []
 
 
 def prepare() -> None:
@@ -1014,9 +1071,14 @@ def prepare() -> None:
     framework = recipe["framework"]
     directory, command, node_local_dir = store(recipe)
     archive = Path.cwd().parent / IMAGES / f"{recipe['key']}.tar.gz"
-    part = archive.with_name(f"{archive.name}.{os.environ['SLURM_JOB_ID']}.part")
+    job = delegated.job if delegated is not None else os.environ["SLURM_JOB_ID"]
+    part = archive.with_name(f"{archive.name}.{job}.part")
+    proxy = build_proxy()
     step = "pull"
     try:
+        if delegated is not None:
+            expected = delegated.native(recipe["architecture"])
+            delegated.runtime_available(command, sandbox=False)
         hold_namespace(command, node_local_dir)
         reference = recipe.get("reference")
         if reference:
@@ -1032,21 +1094,25 @@ def prepare() -> None:
             # The context was copied without what the image must not hold; its own
             # .dockerignore still applies.
             subprocess.run(
-                [*command, "build", "-q", "--iidfile", "built", "--file", "context/Dockerfile",
-                 "context"],
+                [*command, "build", *proxy, "-q", "--iidfile", "built",
+                 "--file", "context/Dockerfile", "context"],
                 check=True,
                 stdout=subprocess.DEVNULL,
             )  # fmt: skip
             base, digests = read("built"), []
         step = "framework"
         base = "sha256:" + base.removeprefix("sha256:")
+        if delegated is not None:
+            actual = output(*command, "image", "inspect", "-f", "{{.Os}}/{{.Architecture}}", base)
+            if actual != expected:
+                raise RuntimeError(f"image {base} is {actual}, allocation requires {expected}")
         tag = "localhost/orbit-framework-base:" + base.removeprefix("sha256:")[:12]
         subprocess.run([*command, "tag", base, tag], check=True)
         user = output(*command, "image", "inspect", "-f", "{{.Config.User}}", base)
         lines = [f"FROM {tag}", *framework["body"], *([f"USER {user}"] if user else [])]
         Path("Framework.Dockerfile").write_text("\n".join([*lines, *framework["tail"]]) + "\n")
         subprocess.run(
-            [*command, "build", "-q", "--iidfile", "framed",
+            [*command, "build", *proxy, "-q", "--iidfile", "framed",
              "--build-context", "python=" + framework["python"],
              "--file", "Framework.Dockerfile", framework["context"]],
             check=True,
@@ -1108,6 +1174,12 @@ def supervise() -> None:
     steps: dict[str, subprocess.Popen[bytes]] = {}
     holders: subprocess.Popen[bytes] | None = None
     try:
+        if delegated is not None:
+            if "architecture" in spec:
+                delegated.native(spec["architecture"])
+            # Set up the delegated hierarchy before Podman starts its namespace keeper.
+            delegated.open(devices() if delegated.gpu_count else [])
+            delegated.runtime_available(command)
         hold_namespace(command, node_local_dir)
         if len(nodes) > 1:
             # Every other node's store, held by a step there for as long as this one runs,
@@ -1134,19 +1206,30 @@ def supervise() -> None:
             for request in sorted(SANDBOXES.glob("*/request.json")):
                 index = request.parent.name
                 if index not in steps and not (request.parent / "done").exists():
-                    steps[index] = launch(
-                        index, json.loads(request.read_text()), nodes, gpus=bool(spec["gpus"])
-                    )
+                    data = json.loads(request.read_text())
+                    if delegated is None:
+                        steps[index] = launch(index, data, nodes, gpus=bool(spec["gpus"]))
+                    else:
+                        try:
+                            with (request.parent / "step.log").open("wb") as log:
+                                steps[index] = delegated.allocation.launch(
+                                    index, data, __file__, log
+                                )
+                        except Exception as exc:
+                            write(request.parent / "error", str(exc))
+                            write(request.parent / "done", 1)
             for index, step in list(steps.items()):
                 if (code := step.poll()) is not None:
+                    if delegated is not None:
+                        delegated.allocation.end(index, SANDBOXES / index / NODES / "0" / "memory")
                     write(SANDBOXES / index / "done", code)
                     del steps[index]
             if holders is not None and holders.poll() is not None:
                 raise RuntimeError("a node's store ended: " + read("hold.log")[-2000:])
             time.sleep(0.5)
     finally:
-        # The Host stops the allocation once its Sandboxes are gone; any left now end with
-        # their steps, which srun ends on a signal.
+        # Orbit stops the worker once its Sandboxes are gone; any left now end with their
+        # steps, which srun ends on a signal.
         for step in steps.values():
             step.terminate()
         for index, step in steps.items():
@@ -1155,6 +1238,8 @@ def supervise() -> None:
             except subprocess.TimeoutExpired:
                 step.kill()
                 step.wait()
+            if delegated is not None:
+                delegated.allocation.end(index, SANDBOXES / index / NODES / "0" / "memory")
             write(SANDBOXES / index / "done", step.returncode)
         if holders is not None and not read("stop"):
             # Each removes its node's store once the job is stopped or released: a signal
@@ -1162,10 +1247,15 @@ def supervise() -> None:
             write("release", "1")
         # The batch step outlives each Sandbox's step, including an OOM that kills every
         # process there. Keep the job's counters before the allocation goes away.
-        Path("memory").write_text((job_cgroup() / "memory.events").read_text())
+        if delegated is None:
+            Path("memory").write_text((job_cgroup() / "memory.events").read_text())
+        elif delegated.allocation is not None:
+            Path("memory").write_text((delegated.allocation.group / "memory.events").read_text())
         try:
             clean(command, directory)
         finally:
+            if delegated is not None and delegated.allocation is not None:
+                delegated.allocation.close()
             if holders is not None:
                 try:
                     holders.wait(timeout=540)
@@ -1183,7 +1273,7 @@ def hold() -> None:
         hold_namespace(command, node_local_dir)
         set_up(command, directory, spec, job_nodes().index(this_node()))
         # Written on other machines: the directory is listed first (see appeared). The job's
-        # stop is there from the start, empty until the Host stops it.
+        # stop is there from the start, empty until Orbit stops it.
         while not (appeared(Path("stop")) and read("stop")) and not appeared(Path("release")):
             time.sleep(1)
     finally:
@@ -1196,7 +1286,7 @@ def start(index: str) -> None:
     its container; then hold it until it is saved or destroyed, measuring what
     it writes where it is held to ``storage_mb``."""
     box = SANDBOXES / index
-    rank = int(os.environ["SLURM_PROCID"])
+    rank = 0 if delegated is not None else int(os.environ["SLURM_PROCID"])
     own = box / NODES / str(rank)
     deadline = time.monotonic() + GROUP_TIMEOUT_SEC
     while not appeared(box / "request.json"):
@@ -1210,19 +1300,21 @@ def start(index: str) -> None:
         # Every control step finds a node's part of the Sandbox by the node's place in the job.
         raise RuntimeError(f"node {rank} of Sandbox {index} runs on {this_node()}")
     stored = node_store()
-    limit = limit_cgroup()
+    limit = delegated.join() if delegated is not None else limit_cgroup()
     if (
         int((limit / "memory.max").read_text()) != spec["memory_mb"] << 20
         or (limit / "memory.swap.max").read_text().strip() != "0"
         or len(os.sched_getaffinity(0)) != spec["cpus"]
     ):
         raise RuntimeError(
-            f"Slurm did not enforce the requested CPU, memory and zero-swap allocation on "
+            f"The scheduler did not enforce the requested CPU, memory and zero-swap allocation on "
             f"{this_node()}"
         )
     command = podman(stored["directory"])
     name = container(index)
     gpus = devices() if spec["gpus"] else []
+    if gpus and delegated is not None:
+        gpus = delegated.devices(gpus)
     if len(gpus) != spec["gpus"]:
         raise RuntimeError(f"{this_node()} gave {len(gpus)} GPUs, requested {spec['gpus']}")
     mounts: list[dict[str, object]] = []
@@ -1243,6 +1335,9 @@ def start(index: str) -> None:
         f"--shm-size={spec['shm_mb']}m",
         *spec["runtime_args"],
     ]
+    if delegated is not None:
+        # Keep conmon and the runtime in this exact delegated job step.
+        flags.extend(["--cgroups=no-conmon", "--env-host=false"])
     env = dict(spec["env"])
     if gpus:
         flags += ["--runtime-flag=nvproxy", "-e", "NVIDIA_VISIBLE_DEVICES=void"]
@@ -1311,6 +1406,11 @@ def start(index: str) -> None:
             if str(flag).startswith("--runtime-flag=")
         ]
         conmon = int(output(*command, "inspect", "--format", "{{.State.ConmonPid}}", name))
+        if delegated is not None:
+            delegated.verify_process(conmon, limit)
+            delegated.verify_process(
+                int(output(*command, "inspect", "--format", "{{.State.Pid}}", name)), limit
+            )
         upper = output(*command, "inspect", "--format", "{{.GraphDriver.Data.UpperDir}}", name)
         if spec.get("storage") and not os.path.isdir(upper):
             raise RuntimeError(
@@ -1334,14 +1434,15 @@ def start(index: str) -> None:
                 runtime_flags=runtime_flags,
                 image=node["image"],
                 devices=gpus,
-                step=os.environ["SLURM_STEP_ID"],
+                step=index if delegated is not None else os.environ["SLURM_STEP_ID"],
                 volumes=found,
                 node=this_node(),
                 hcas=hcas,
             ),
         )
         while True:
-            # The Host writes it on another machine: the directory is listed first.
+            # Orbit writes it, on another machine but for node 0: the directory is listed
+            # first.
             order = read(box / "stop") if appeared(box / "stop") else ""
             if order == "save":
                 kept = save(
@@ -1411,10 +1512,10 @@ def save(
     past ``max_layers`` with its own writable layer is flattened to one layer. Return the
     layers the snapshot keeps."""
     stop = [*command, "stop", "-t", "30", name]
-    # A guest session whose srun on the Host was killed ended with its step, and Podman's
-    # monitor of it too, before the monitor wrote the session's exit: Podman stops the
-    # container, then fails as it waits for that exit, but records the session ended, so a
-    # second stop finishes the first (AGENTS.md).
+    # A guest session whose process on Orbit's side was killed, an srun step's of another
+    # node, ended with its step, and Podman's monitor of it too, before the monitor wrote
+    # the session's exit: Podman stops the container, then fails as it waits for that exit,
+    # but records the session ended, so a second stop finishes the first (AGENTS.md).
     if subprocess.run(stop, stdout=subprocess.DEVNULL).returncode:
         subprocess.run(stop, check=True, stdout=subprocess.DEVNULL)
     # By the Sandbox's index alone, which its handle names on every node.
@@ -1437,7 +1538,7 @@ def save(
     if merges:
         in_namespace(command, "volumes", directory, json.dumps(merges))
     if any(m["lowers"] for m in mounts):
-        # Before the Host hears of the snapshot: a view's upper layer is no lower of
+        # Before Orbit hears of the snapshot: a view's upper layer is no lower of
         # another view while it is mounted.
         in_namespace(
             command,
@@ -1509,7 +1610,14 @@ def layer_archive(image_archive: str, layer: str) -> str:
     return f"{image_archive.removesuffix('.tar')}.{layer}.tar"
 
 
+#: Where the system keeps its administration tools, tc, ip and nsenter among them, which a
+#: job's PATH can lack: a PBS job starts from none of its submitter's environment.
+SYSTEM_PATH = ("/usr/local/sbin", "/usr/sbin", "/sbin")
+
+
 def main() -> None:
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join([*path, *(d for d in SYSTEM_PATH if d not in path)])
     mode, args = sys.argv[1], sys.argv[2:]
     if mode == "supervise":
         try:
@@ -1606,7 +1714,11 @@ def main() -> None:
     elif mode == "export":
         export(command, stored["directory"], args[0], args[1], args[2:])
     elif mode == "load":
+        # An image, and the volume layers of a snapshot an earlier job wrote out, by layer.
         load(command, args[0], args[1])
+        load_layers(
+            command, stored["directory"], {args[i]: args[i + 1] for i in range(2, len(args), 2)}
+        )
     elif mode == "drop":
         in_namespace(
             command, "volumes", stored["directory"], json.dumps([["remove", a] for a in args])
@@ -1616,4 +1728,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    settings = Path(__file__).with_name("delegated.json")
+    if settings.is_file():
+        helper = runpy.run_path(str(settings.with_name("delegated_worker.py")))
+        delegated = helper["Delegated"](json.loads(settings.read_text()))
     main()

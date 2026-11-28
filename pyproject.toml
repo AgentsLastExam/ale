@@ -56,6 +56,8 @@ markers = [
     "needs_cli_install: installs pinned agent CLIs from their package registries; slow",
     "needs_daytona: requires a Daytona API key and creates billable cloud sandboxes",
     "needs_slurm: allocates real batch jobs on a configured Slurm cluster",
+    "needs_pbs: allocates real batch jobs on a configured PBS Pro cluster",
+    "needs_lsf: allocates real batch jobs on a configured LSF cluster",
     "needs_gui: requires the desktop base image, which is large",
     "needs_llm: requires provider credentials and makes real model calls",
     "needs_kvm: VM work: requires hardware virtualisation (/dev/kvm) or builds VM disks",

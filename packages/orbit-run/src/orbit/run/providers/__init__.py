@@ -12,7 +12,7 @@ import os
 import platform
 import uuid
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -24,7 +24,14 @@ from orbit.core.capability import (
     solver_saves,
     unmet,
 )
-from orbit.core.config import DockerProviderConfig, RunConfig, RunTimeouts, SlurmProviderConfig
+from orbit.core.config import (
+    CLUSTER_PROVIDERS,
+    ClusterProviderConfig,
+    DockerProviderConfig,
+    RunConfig,
+    RunTimeouts,
+    SandboxConfig,
+)
 from orbit.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
 from orbit.core.sandbox import (
     Provider,
@@ -37,8 +44,11 @@ from orbit.core.sandbox import (
 from orbit.core.task import Task
 from orbit.core.taskspec import (
     ContainerFeature,
+    ImageKind,
     NetworkMode,
     NetworkPolicy,
+    OperatingSystem,
+    Resources,
     VerificationMode,
     VerifySpec,
 )
@@ -48,9 +58,11 @@ if TYPE_CHECKING:
     from orbit.run.providers.fleet import FleetClient
 
 __all__ = [
+    "CLUSTERS",
     "RETAINING_PROVIDERS",
     "SCHEDULERS",
     "ProviderRegistry",
+    "episode_needs",
     "leaf",
     "machine_arch",
     "missing_features",
@@ -59,7 +71,21 @@ __all__ = [
 
 #: Every Provider that can leave a sandbox behind. A retained sandbox outlives the run
 #: configuration that made it, so listing and destroying consult all of them.
-RETAINING_PROVIDERS = ("docker", "firecracker", "qemu", "daytona", "orchard", "slurm", "fleet")
+RETAINING_PROVIDERS = (
+    "docker",
+    "firecracker",
+    "qemu",
+    "daytona",
+    "orchard",
+    "slurm",
+    "pbs",
+    "lsf",
+    "fleet",
+)
+
+#: The provider ids of the batch clusters, each of whose episodes runs in a job of its own,
+#: where its Provider starts its Sandboxes: none starts on the machine that dispatches them.
+CLUSTERS = CLUSTER_PROVIDERS
 
 #: The provider ids of the schedulers, which start Sandboxes on machines they manage; every
 #: other provider id names a leaf, which starts the final Sandbox directly.
@@ -81,15 +107,19 @@ def leaf(
     provider_id: str,
     *,
     docker: DockerProviderConfig = DockerProviderConfig(),
-    slurm: SlurmProviderConfig | None = None,
+    cluster: ClusterProviderConfig | None = None,
 ) -> Provider:
     """The leaf a provider id names: ``docker:<runtime>`` for each runtime Docker's table
-    holds, ``qemu``, ``firecracker``, ``slurm`` or ``orchard``. ``docker`` holds a Docker leaf's
-    settings: the Host GPUs it may lease and the margin it admits a shared one with."""
-    if provider_id == "slurm":
-        from orbit.run.providers.slurm import SlurmProvider
+    holds, ``qemu``, ``firecracker``, ``orchard``, or a cluster's workload manager, ``slurm``,
+    ``pbs`` or ``lsf``. ``docker`` holds a Docker leaf's settings: the Host GPUs it may lease
+    and the margin it admits a shared one with; ``cluster``, the cluster's."""
+    if provider_id in CLUSTERS:
+        from orbit.run.providers.cluster import ClusterProvider
 
-        return SlurmProvider(slurm or SlurmProviderConfig())
+        cluster = cluster or getattr(SandboxConfig(), provider_id)
+        if cluster.workload_manager != provider_id:
+            raise ConfigError(f"{provider_id} needs its own cluster configuration")
+        return ClusterProvider(cluster)
     if provider_id.startswith("docker:"):
         from orbit.run.providers.docker import RUNTIMES, DockerProvider
 
@@ -149,7 +179,12 @@ _Planned = tuple[SandboxRole, str, SandboxNeeds, _Image]
 
 
 def _sandboxes(
-    task: Task, *, snapshot: bool, solver: bool, timeouts: RunTimeouts
+    task: Task,
+    *,
+    snapshot: bool,
+    solver: bool,
+    timeouts: RunTimeouts,
+    linux_arch: Arch = Arch.X86_64,
 ) -> Iterator[_Planned]:
     """Each Sandbox an episode of ``task`` starts, as the episode protocol requests it: its
     role, the agent's account in it, what it needs and which prepared image it runs. A
@@ -159,6 +194,12 @@ def _sandboxes(
     :func:`~orbit.core.capability.solver_saves` counts. Each verifier needs to be held for its
     limit, on the leaf that saved the snapshot it boots from, or in the solver it runs in."""
     spec = task.spec
+
+    def architecture(kind: ImageKind | None) -> Arch:
+        if spec.os is OperatingSystem.LINUX and kind is ImageKind.CONTAINER:
+            return linux_arch
+        return Arch.of(spec.os)
+
     mode = spec.verify.environment_mode
     tests = timeouts.verification(spec)
     rounds = timeouts.verification(spec, validation=True) if task.validations else None
@@ -180,6 +221,7 @@ def _sandboxes(
             (snapshot_verifier, spec.verify.network.mode),
             (round_verifier_resources(spec, task.validations), spec.validation_spec.network.mode),
         ),
+        arch=architecture(spec.image.kind),
     )
     saves = solver_saves(
         task.validations,
@@ -193,7 +235,7 @@ def _sandboxes(
             SandboxNeeds(
                 kind=spec.image.kind,
                 os=spec.os,
-                arch=Arch.of(spec.os),
+                arch=architecture(spec.image.kind),
                 # Able to apply the shared verifier's network too.
                 network_mode=spec.solver_network.mode,
                 resources=spec.resources,
@@ -230,13 +272,32 @@ def _sandboxes(
             SandboxNeeds(
                 kind=image.kind,
                 os=spec.os,
-                arch=Arch.of(spec.os),
+                arch=architecture(image.kind),
                 network_mode=placed.network.mode,
                 resources=placed.resources.as_resources(),
                 duration_sec=limit,
             ),
             prepared,
         )
+
+
+def episode_needs(task: Task, settings: RunConfig) -> tuple[SandboxNeeds, tuple[Resources, ...]]:
+    """What an episode of ``task`` needs where one machine holds all of its Sandboxes, one at a
+    time: its solver's needs, with the verifiers booted from its snapshots, and the resources
+    of each separate verifier."""
+    planned = list(
+        _sandboxes(
+            task,
+            snapshot=settings.sandbox_retention.solver == "snapshot",
+            solver=True,
+            timeouts=settings.timeouts,
+            linux_arch=settings.sandbox.linux_container_arch,
+        )
+    )
+    solver = planned[0][2]
+    # A snapshot verifier is among the solver's needs; a separate one boots from an image.
+    separate = tuple(needs.resources for _, _, needs, _ in planned[1:] if not needs.snapshot)
+    return solver, separate
 
 
 class ProviderRegistry:
@@ -246,9 +307,11 @@ class ProviderRegistry:
     The Fleet is reached through one connection, whatever asks for it.
     """
 
-    def __init__(self, settings: RunConfig) -> None:
+    def __init__(self, settings: RunConfig, instances: Mapping[str, Provider] = {}) -> None:
+        """``instances`` are Providers already built, by provider id, as an episode's job
+        builds its cluster's for the allocation it runs in."""
         self.settings = settings
-        self._instances: dict[str, Provider] = {}
+        self._instances: dict[str, Provider] = dict(instances)
         self._fleet: FleetClient | None = None
         #: The leaves whose preflight passed, each with the needs it passed for and the sets
         #: of container features a Sandbox of it was seen to have when it asked for them.
@@ -286,7 +349,9 @@ class ProviderRegistry:
             from orbit.run.providers.daytona import DaytonaProvider
 
             return DaytonaProvider(settings.daytona)
-        return leaf(provider_id, docker=settings.docker, slurm=settings.slurm)
+        if provider_id in CLUSTERS:
+            return leaf(provider_id, cluster=getattr(settings, provider_id))
+        return leaf(provider_id, docker=settings.docker)
 
     async def select(
         self, tasks: Sequence[Task], *, solvers: bool = True, snapshots: bool = False
@@ -311,7 +376,11 @@ class ProviderRegistry:
         for task in tasks:
             sandboxes = list(
                 _sandboxes(
-                    task, snapshot=snapshots, solver=solvers, timeouts=self.settings.timeouts
+                    task,
+                    snapshot=snapshots,
+                    solver=solvers,
+                    timeouts=self.settings.timeouts,
+                    linux_arch=self.settings.sandbox.linux_container_arch,
                 )
             )
             groups: list[tuple[list[_Planned], Sequence[str]]]
@@ -391,7 +460,11 @@ class ProviderRegistry:
         first: dict[tuple[str, frozenset[ContainerFeature]], SandboxRequest] = {}
         for task in tasks:
             planned = _sandboxes(
-                task, snapshot=False, solver=solvers, timeouts=self.settings.timeouts
+                task,
+                snapshot=False,
+                solver=solvers,
+                timeouts=self.settings.timeouts,
+                linux_arch=self.settings.sandbox.linux_container_arch,
             )
             for role, user, needs, prepared in planned:
                 verifier = role is SandboxRole.VERIFIER
@@ -429,12 +502,15 @@ class ProviderRegistry:
                 if check is not None and provider_id not in self._shown:
                     checks[provider_id] = check
             self._ready.setdefault(provider_id, set())
+        # A cluster's Sandboxes start only in its episodes' jobs, which check them there.
         probes = {
             (provider_id, features): request
             for (provider_id, features), request in first.items()
-            if features and features not in self._ready[provider_id]
+            if features and features not in self._ready[provider_id] and provider_id not in CLUSTERS
         }
         for provider_id in checks:
+            if provider_id in CLUSTERS:
+                continue
             if not any(leaf == provider_id for leaf, _ in probes):
                 probes[(provider_id, frozenset())] = first[(provider_id, frozenset())]
         lacking: dict[str, dict[ContainerFeature, str]] = {}
@@ -517,20 +593,20 @@ async def _watching(provider: Provider, needs: SandboxNeeds) -> list[str]:
     )
 
 
-def provider_named(name: str, slurm: SlurmProviderConfig | None = None) -> Provider:
+def provider_named(name: str, settings: SandboxConfig | None = None) -> Provider:
     """A default-configured Provider, for work on sandboxes it retained earlier.
 
     Retained handles name the Provider that made a sandbox; that name, not the current run
     configuration, decides who can list or destroy it. The Fleet is the one whose control
-    plane ``$ORBIT_FLEET_URL`` names; Slurm's, the cache ``slurm`` names.
+    plane ``$ORBIT_FLEET_URL`` names; a cluster's, the cache its configuration names.
     """
     if name == "docker":
         return leaf("docker:runc")
     if name in {"firecracker", "qemu", "orchard"}:
         return leaf(name)
-    if name == "slurm":
+    if name in CLUSTERS:
         # Its snapshots are listed from its cache, whatever the partitions.
-        return leaf("slurm", slurm=slurm)
+        return leaf(name, cluster=getattr(settings or SandboxConfig(), name))
     if name == "daytona":
         from orbit.run.providers.daytona import DaytonaProvider
 

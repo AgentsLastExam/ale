@@ -7,7 +7,9 @@ an image named alone is used directly ([Source selection](#source-selection-and-
 
 ## What a Linux image needs
 
-A Linux Task may build from any x86-64 image with glibc that has:
+A Linux Task may build from a glibc image for its execution architecture. Linux VMs use
+x86-64. Linux containers default to x86-64 and can target a configured arm64 batch site.
+The image needs:
 
 - the agent account the Task names with `[agent].user`, with a home; a VM build's base must
   have it already, since Orbit installs the framework for it before the build runs;
@@ -565,8 +567,9 @@ which start them with the leaves there, and offers what those leaves do: the Fle
 the leaves its registered Nodes lend, Daytona the one of its own Sandboxes. Which leaves a
 scheduler uses, and in which order, is its own configuration, never a Run's.
 
-A Sandbox needs its image's kind and operating system, the architecture that system implies
-(arm64 for macOS, x86-64 otherwise), its network mode (a verifier's is the verifier's, and a
+A Sandbox needs its image's kind and operating system, the target architecture
+(the execution site's native target for a Linux container, arm64 for macOS, x86-64
+otherwise), its network mode (a verifier's is the verifier's, and a
 solver that serves a shared verifier needs the least open of the agent's and the verifier's,
 since it applies both), its resources (CPUs, memory, the storage it may write, GPUs, the
 models it accepts and the memory it needs on each, container features, the

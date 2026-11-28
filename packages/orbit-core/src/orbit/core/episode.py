@@ -10,21 +10,23 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, Self
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from orbit.core.blob import BlobSink
 from orbit.core.config import LoggingPolicy, VerificationConfig
-from orbit.core.harness import AgentRun, EffectiveAgentResources, HarnessSession
+from orbit.core.harness import AgentRun, EffectiveAgentResources, HarnessSession, NativeContinuation
 from orbit.core.lock import LimitTermination, OrbitVerifyProvenance, ResumedFrom, SandboxProvenance
 from orbit.core.result import PhaseTiming, ResultRecord, SandboxOutcome, Segment, ValidationRound
 from orbit.core.sandbox import (
     PreparedTaskImage,
     ResolvedImage,
     ResourceAllocation,
+    RetainedSandbox,
     Sandbox,
     SandboxRequest,
 )
@@ -34,15 +36,22 @@ from orbit.core.trajectory import AtifTrajectory
 from orbit.core.verdict import Rewards
 
 __all__ = [
+    "AgentTime",
     "ArtifactSink",
     "Budget",
     "EpisodeContext",
+    "EpisodeContinuation",
     "EventSink",
+    "GatewayAccounting",
+    "ModelUsage",
     "Phase",
     "ResultSink",
     "SandboxLease",
     "TrajectorySink",
+    "TurnCursor",
 ]
+
+_STRICT = ConfigDict(frozen=True, extra="forbid")
 
 
 class Phase(StrEnum):
@@ -79,6 +88,17 @@ class SandboxLease(Protocol):
         ...
 
     async def release(self, sandbox: Sandbox) -> None: ...
+
+    async def release_snapshot(self, handle: str) -> None:
+        """Release the snapshot ``handle`` a solver was saved as for a validation round or a
+        move, which goes once no Sandbox booted from it runs."""
+        ...
+
+    def hand_off(self, handle: str) -> tuple[str, RetainedSandbox]:
+        """Give the snapshot ``handle``, saved for a validation round or a move, to the
+        episode's next process, which boots from it: this lease neither destroys nor records
+        it. Return the id of the Provider that holds it, and the snapshot."""
+        ...
 
     async def snapshot(self, sandbox: Sandbox, *, validation: bool = False) -> str:
         """Save a sanitized Sandbox's disk as a snapshot a verifier boots from, which stops
@@ -151,6 +171,149 @@ class Budget:
 
     def remaining_sec(self, now: float) -> float:
         return max(0.0, self.deadline_sec - (now - self.started_at))
+
+
+class ModelUsage(BaseModel):
+    """A Gateway session's model calls the provider answered, and the tokens of all its
+    calls."""
+
+    model_config = _STRICT
+
+    model_calls: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    cache_read_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+
+
+class GatewayAccounting(BaseModel):
+    """What the limits of the agent's Gateway session count, across the episode: its
+    ``usage``, and the first limit that refused one of its calls."""
+
+    model_config = _STRICT
+
+    usage: ModelUsage = ModelUsage()
+    refusal: LimitTermination | None = None
+
+
+class AgentTime(BaseModel):
+    """The agent's time: ``total`` across all its turns, ``None`` where unlimited, of which
+    ``used`` is spent."""
+
+    model_config = _STRICT
+
+    total: float | None = Field(ge=0)
+    used: float = Field(default=0.0, ge=0)
+
+
+class TurnCursor(BaseModel):
+    """Where the episode goes on in the solver booted from a hand-off's snapshot: in the turn
+    a move cut, or kept from starting (``moved``); in the turn after validation round
+    ``round``, which begins there (``round``); at validation round ``round``, whose verifier
+    the earlier process would not have lasted (``validating``); or at the episode's
+    verification, for the same reason (``verifying``). A turn's next run receives ``prompt``,
+    or the instruction where none, in the native ``continuation``, or launches where none."""
+
+    model_config = _STRICT
+
+    began: Literal["moved", "round", "validating", "verifying"]
+    prompt: str | None = None
+    continuation: NativeContinuation | None = None
+    ran: bool = False
+    """Whether the run the move cut had begun, so that ``prompt`` says it was moved."""
+    round: int | None = Field(default=None, ge=1)
+    """The validation round whose result ``prompt`` gives."""
+    segment: int | None = Field(default=None, ge=1)
+    """The segment whose move ``prompt`` marks in the trajectory."""
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _one_way_on(self) -> Self:
+        if self.began == "round" and (
+            self.round is None or self.ran or self.prompt is None or self.continuation is None
+        ):
+            raise ValueError("the turn after a round begins with its prompt, in its session")
+        if self.ran and (self.continuation is None or self.segment is None):
+            raise ValueError("a run a move cut goes on in its session, in a segment of its own")
+        if self.began in ("validating", "verifying") and (
+            self.prompt is not None
+            or self.continuation is not None
+            or self.ran
+            or self.segment is not None
+            or (self.round is None) != (self.began == "verifying")
+        ):
+            raise ValueError(
+                "verification goes on without a turn: a validation round by its number alone"
+            )
+        return self
+
+
+class EpisodeContinuation(BaseModel):
+    """What a later process needs to continue an episode whose Provider could hold no solver
+    past the process that ran it, as a cluster's job holds none past its wall time: the
+    snapshot the agent's work goes on from, where it goes on, and the episode's records so
+    far, which the final ``result.json``, ``lock.json`` and trajectory describe with the rest.
+
+    It holds the earlier processes' episode tokens in ``redacted``, so it is kept where only
+    the episode's next process reads it, and never in a record of the episode.
+    """
+
+    model_config = _STRICT
+
+    schema_version: Literal[1] = 1
+    episode_id: str = Field(min_length=1)
+    trajectory_id: str = Field(min_length=1)
+    started_at: datetime
+    """When the episode's first process began it, which its result's span starts from."""
+
+    snapshot: RetainedSandbox
+    """The snapshot the solver goes on from, which ``provider`` holds."""
+    provider: str = Field(min_length=1)
+    """The id of the Provider that holds ``snapshot``."""
+    image: PreparedTaskImage | None = None
+    """The image the solver's requests name, the snapshot's booted solver's too."""
+    planned_saves: int = Field(ge=0)
+    """How many saves in a row the solver booted from ``snapshot`` plans, as the earlier
+    process would have asked for it."""
+    turn: TurnCursor
+    agent_time: AgentTime
+    session: NativeContinuation | None = None
+    """The native session the agent's work goes on in, once one was reported."""
+
+    agent_started: bool = False
+    agent_version: str | None = None
+    agent_run: AgentRun | None = None
+    """The latest run that returned, which ``result.json``'s continuation names."""
+    failure_phase: Phase | None = None
+    prepared_image: PreparedTaskImage | None = None
+    resolved_image: ResolvedImage | None = None
+    resource_allocation: ResourceAllocation | None = None
+    sandbox_identity: SandboxProvenance | None = None
+    home: str = ""
+    resumed_from: ResumedFrom | None = None
+    """The earlier episode this one continues, where it began with ``--continue-from``."""
+    prepared_validation_image: PreparedTaskImage | None = None
+    validation_resolved_image: ResolvedImage | None = None
+    validation_resource_allocation: ResourceAllocation | None = None
+    orbit_verify_provenance: OrbitVerifyProvenance | None = None
+
+    phases: tuple[PhaseTiming, ...] = ()
+    segments: tuple[Segment, ...] = ()
+    validation_rounds: tuple[ValidationRound, ...] = ()
+    validation_prompts: dict[int, str] = Field(default_factory=dict)
+    move_prompts: dict[int, str] = Field(default_factory=dict)
+    validation_judge_invocations: tuple[dict[str, Any], ...] = ()
+    """What the Judges of the rounds so far recorded, as ``orbit_verify`` writes each
+    invocation."""
+    harness_execution_counter: int = Field(default=0, ge=0)
+    sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
+    """What became of the Sandboxes and snapshots the earlier processes released."""
+    gateway: GatewayAccounting | None = None
+    """The agent's Gateway session's accounting so far, which its limits go on counting."""
+    redacted: tuple[str, ...] = Field(default=(), repr=False)
+    """Secret: the earlier processes' episode tokens, which the episode's records keep out
+    still, as they keep out the current ones; never a model provider's key."""
 
 
 @dataclass
@@ -298,9 +461,20 @@ class EpisodeContext:
     harness_execution_counter: int = 0
     sandbox_outcomes: tuple[SandboxOutcome, ...] = ()
     limit_termination: LimitTermination | None = None
+    continued: EpisodeContinuation | None = None
+    """The record of the episode's earlier process, whose agent's work this process continues
+    from the snapshot it handed off."""
+    earlier_secrets: tuple[str, ...] = ()
+    """The episode tokens of its earlier processes, which its records keep out too."""
 
     @property
     def secrets(self) -> tuple[str, ...]:
         """Every value this episode keeps out of what it records."""
         egress = (self.egress_token,) if self.egress_token else ()
-        return (self.session.token, *egress, *self.verification_secrets, *self.variables.secrets)
+        return (
+            self.session.token,
+            *egress,
+            *self.verification_secrets,
+            *self.variables.secrets,
+            *self.earlier_secrets,
+        )

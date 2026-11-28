@@ -1,5 +1,5 @@
-"""Slurm episodes, run on a login node of an explicitly configured cluster, which shares
-Orbit's cache with its compute nodes; no Docker is needed there."""
+"""Slurm episodes, run as Orbit runs each, in a batch job of an explicitly configured cluster,
+on its first node (``tests.support.provider_in_job``); no Docker is needed there."""
 
 from __future__ import annotations
 
@@ -15,9 +15,8 @@ from orbit.run.episode import run_episode
 from orbit.run.gateway.server import Gateway
 from orbit.run.harnesses.base import CliCommand
 from orbit.run.protocol.episode_protocol import EpisodeProtocol
-from orbit.run.providers.slurm import SlurmProvider
-from orbit.run.providers.slurm import provider as slurm_provider
-from orbit.run.providers.slurm.job import Job
+from orbit.run.providers.cluster import provider as slurm_provider
+from orbit.run.providers.cluster.job import Allocation
 from orbit.run.secrets import resolve_task_variables
 from orbit.run.tasksets.manifest import load_tasks
 from tests.integration.scripted_model import ScriptedModel
@@ -26,7 +25,7 @@ from tests.integration.test_validation_rounds import _episode as rounds_episode
 from tests.integration.test_validation_rounds import _task as rounds_task
 from tests.integration.test_volume_artifacts import _check as check_volume
 from tests.integration.test_volume_artifacts import _episode as volume_episode
-from tests.support import CONTAINER_BASE, ScriptedCliHarness, provider_registry, slurm_config
+from tests.support import CONTAINER_BASE, ScriptedCliHarness, provider_in_job, provider_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.needs_slurm]
 
@@ -63,58 +62,40 @@ class GatewayCliHarness(ScriptedCliHarness):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("mode", "jobs"), [("shared", 1), ("snapshot", 1), ("separate", 4)])
-async def test_an_agent_improves_over_validation_rounds_in_one_slurm_allocation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, jobs: int
+@pytest.mark.parametrize("mode", ["shared", "snapshot", "separate"])
+async def test_an_agent_improves_over_validation_rounds_in_one_slurm_job(
+    tmp_path: Path, mode: str
 ) -> None:
-    """Every turn's solver and every verifier booted from a round's snapshot run in the
-    first solver's allocation, from its node's own store: only a separate verifier, from
-    an image of its own, gets another."""
-    provider = SlurmProvider(slurm_config())
-    submitted: list[str] = []
-    submit = Job.submit
-
-    async def counted(job: Job, **resources: int | str) -> None:
-        # Allocations, not the jobs that prepare images.
-        if resources.get("command", "supervise") == "supervise":
-            submitted.append(job.name)
-        await submit(job, **resources)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Job, "submit", counted)
-    root = rounds_task(tmp_path / f"rounds-slurm-{mode}", mode)
-    result = await rounds_episode(tmp_path, root, provider)
-    check_rounds(result)
-    assert len(submitted) == jobs
-    assert provider.snapshots == {}
-    kept = await provider.list_retained()
-    assert not [record for record in kept if record["episode"] == result.episode_id]
+    """Every turn's solver and every verifier, booted from a round's snapshot or of an image
+    of its own, runs in the job, from its nodes' own stores."""
+    provider = provider_in_job()
+    try:
+        root = rounds_task(tmp_path / f"rounds-slurm-{mode}", mode)
+        result = await rounds_episode(tmp_path, root, provider)
+        check_rounds(result)
+        assert provider.snapshots == {}
+        kept = await provider.list_retained()
+        assert not [record for record in kept if record["episode"] == result.episode_id]
+    finally:
+        await provider.close()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "validation"), [("separate", None), ("snapshot", None), ("shared", "separate")]
 )
-async def test_an_agent_works_in_a_volume_in_one_slurm_allocation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, validation: str | None
+async def test_an_agent_works_in_a_volume_in_one_slurm_job(
+    tmp_path: Path, mode: str, validation: str | None
 ) -> None:
     """Every turn's solver and every verifier, a separate one of the verifier's image
-    included, runs in the first solver's allocation, viewing its volume in the node's
-    store."""
-    provider = SlurmProvider(slurm_config())
-    submitted: list[str] = []
-    submit = Job.submit
-
-    async def counted(job: Job, **resources: int | str) -> None:
-        # Allocations, not the jobs that prepare images.
-        if resources.get("command", "supervise") == "supervise":
-            submitted.append(job.name)
-        await submit(job, **resources)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Job, "submit", counted)
-    result = await volume_episode(tmp_path, mode, validation, provider)
-    check_volume(result, mode, validation)
-    assert len(submitted) == 1
-    assert provider.snapshots == {}
+    included, runs in the job, viewing its volume in the node's store."""
+    provider = provider_in_job()
+    try:
+        result = await volume_episode(tmp_path, mode, validation, provider)
+        check_volume(result, mode, validation)
+        assert provider.snapshots == {}
+    finally:
+        await provider.close()
 
 
 @pytest.mark.asyncio
@@ -124,6 +105,7 @@ async def test_every_turn_reaches_the_gateway_through_its_tunnel_over_slurm_roun
     """Each turn's solver reaches the Gateway through its node's tunnel, and the save of each
     solver whose tunnel is open succeeds."""
     model = ScriptedModel()
+    provider = provider_in_job()
     gateway = Gateway(
         api_key="host-only",
         upstream=await model.start(),
@@ -137,7 +119,7 @@ async def test_every_turn_reaches_the_gateway_through_its_tunnel_over_slurm_roun
         result = await run_episode(
             task,
             EpisodeProtocol(GatewayCliHarness(), validation_rounds=task.spec.validation_rounds),
-            provider_registry(SlurmProvider(slurm_config())),
+            provider_registry(provider),
             run_dir=tmp_path / "runs",
             gateway=gateway,
             gateway_url=gateway_url,
@@ -146,16 +128,17 @@ async def test_every_turn_reaches_the_gateway_through_its_tunnel_over_slurm_roun
     finally:
         await gateway.stop()
         await model.stop()
+        await provider.close()
     check_rounds(result)
     assert len(model.requests) == 3
 
 
 @pytest.mark.asyncio
 async def test_a_save_outlasts_a_guest_session_whose_srun_was_killed() -> None:
-    """A guest session whose srun on the login node was killed leaves Podman a session it
+    """A guest session whose process on Orbit's side was killed leaves Podman a session it
     never saw end, which fails the save's first ``podman stop``: the save still keeps the
     Sandbox's disk (the Provider's AGENTS.md)."""
-    provider = SlurmProvider(slurm_config())
+    provider = provider_in_job()
     request = SandboxRequest(
         episode_id="slurm-lost-session",
         prepared_image=await provider.prepare_image(
@@ -181,6 +164,7 @@ async def test_a_save_outlasts_a_guest_session_whose_srun_was_killed() -> None:
             assert await booted.read_file(kept) == b"kept"
     finally:
         await provider.destroy_retained(retained.handle)
+        await provider.close()
 
 
 @pytest.mark.asyncio
@@ -192,18 +176,21 @@ async def test_a_snapshot_slurm_flattens_keeps_the_agents_work_and_volume(
     left on its disk and in its volume."""
     monkeypatch.setattr(slurm_provider, "MAX_LAYERS", 1)
     saved: list[dict[str, object]] = []
-    save = Job.save
+    save = Allocation.save
 
-    async def recorded(job: Job, index: str, *, nodes: int, timeout: int = 1800):  # type: ignore[no-untyped-def]
+    async def recorded(job: Allocation, index: str, *, nodes: int, timeout: int = 1800):  # type: ignore[no-untyped-def]
         done = await save(job, index, nodes=nodes, timeout=timeout)
         for rank in range(nodes):
             record = job.directory / "sandboxes" / index / "nodes" / str(rank) / "saved"
             saved.append(json.loads(record.read_text()))
         return done
 
-    monkeypatch.setattr(Job, "save", recorded)
-    provider = SlurmProvider(slurm_config())
-    result = await volume_episode(tmp_path, "snapshot", None, provider)
+    monkeypatch.setattr(Allocation, "save", recorded)
+    provider = provider_in_job()
+    try:
+        result = await volume_episode(tmp_path, "snapshot", None, provider)
+    finally:
+        await provider.close()
     check_volume(result, "snapshot", None)
     # Each round's save and the final one, each one layer; a volume viewed a stack below the
     # first is a merged layer of its own.

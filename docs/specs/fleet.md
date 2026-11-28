@@ -1,7 +1,8 @@
 # Fleet
 
-A Run drives every Sandbox from the one machine that runs it, and a machine can hold only
-so many: a Mac starts at most two macOS VMs, and a Linux machine is bounded by its CPUs,
+A Run drives every Sandbox from the one machine that runs it, or, on a cluster, from the
+[episode job](lexicon.md) that runs each of its episodes; and a machine can hold only so
+many: a Mac starts at most two macOS VMs, and a Linux machine is bounded by its CPUs,
 memory and disk. The Fleet pools many machines behind one control plane. Each machine is a
 **Node**; its **node agent** drives the machine's own leaves, and the control plane
 keeps the ledger of what every Node holds, places each Sandbox, queues what does not fit
@@ -271,8 +272,8 @@ machines, so neither the Harness nor the episode protocol knows it is there.
   leaves' own rules, which a Node's leaf applies as it creates the Sandbox. Which Node
   serves a request is placement's decision, and a request no registered Node could serve
   fails when the control plane receives it, before anything is created. A Task names no
-  architecture, so a container or a Linux or Windows VM asks for an x86-64 Node and a macOS
-  VM for an arm64 one.
+  architecture. Prepared native container images target their recorded instruction set;
+  macOS VMs target arm64 and other VMs target x86-64.
 - **Retention** happens on the Sandbox's Node and in the ledger ([Lifecycle](#lifecycle),
   [Node agent](#node-agent)). The handle is `fleet:<sandbox>` or `fleet:snapshot:<sandbox>`.
   - `--continue-from` continues in a kept Sandbox through the Run's own Fleet connection, so

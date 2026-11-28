@@ -148,7 +148,9 @@ class Gateway:
 
     async def start(self) -> str:
         """Start serving and return the base URL."""
-        self._client = ClientSession(timeout=_REQUEST_TIMEOUT)
+        # Upstreams are reached as the Host's own programs reach them: through the proxy
+        # its environment names, as a cluster's compute nodes need.
+        self._client = ClientSession(timeout=_REQUEST_TIMEOUT, trust_env=True)
         self._runner = web.AppRunner(self._app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)

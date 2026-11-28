@@ -15,10 +15,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from orbit.core.episode import GatewayAccounting, ModelUsage
+from orbit.core.lock import LimitTermination
 from orbit.core.taskspec import NetworkPolicy
 from orbit.core.trace import UpstreamError
 
@@ -180,6 +182,34 @@ class GatewaySession:
     _inflight: dict[str, asyncio.Future[Any]] = field(default_factory=dict, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _reserved_calls: int = field(default=0, repr=False)
+
+    def accounting(self) -> GatewayAccounting:
+        """What its limits count, for the session of its episode's next process to go on
+        from: its usage and its first refusal."""
+        refusal = self.refusal
+        return GatewayAccounting(
+            usage=ModelUsage(**asdict(self.usage)),
+            refusal=None
+            if refusal is None
+            else LimitTermination(
+                layer="gateway",
+                name=refusal.limit,
+                configured_value=refusal.value,
+                observed_value=refusal.observed,
+                reason="the Gateway refused a model call",
+            ),
+        )
+
+    def restore(self, accounting: GatewayAccounting) -> None:
+        """Count on from ``accounting``, an earlier process's session's of the same episode,
+        whose limits cover the whole episode: a limit it reached holds."""
+        refusal = accounting.refusal
+        self.usage = Usage(**accounting.usage.model_dump())
+        self.refusal = (
+            None
+            if refusal is None
+            else LimitReached(refusal.name, float(refusal.configured_value), refusal.observed_value)
+        )
 
     async def reserve(self) -> GatewayReservation:
         """Refuse reached limits, then reserve one model call."""

@@ -161,7 +161,8 @@ class PhaseFinished(_ExecutionEvent):
     kind: Literal["phase_finished"] = "phase_finished"
     phase: str
     outcome: Literal["succeeded", "failed", "timed_out", "cancelled", "moved"]
-    """``moved`` for an agent's run its Sandbox's deadline cut, as the solver moves."""
+    """``moved`` for an agent's run its Sandbox's deadline cut, as the solver moves, and for
+    the boot of a solver that goes on in the episode's next process."""
     duration_ms: int = Field(ge=0)
 
 

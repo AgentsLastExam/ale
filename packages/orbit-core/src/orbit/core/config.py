@@ -20,29 +20,36 @@ import os
 import tomllib
 from copy import deepcopy
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from orbit.core.capability import GpuModel
+from orbit.core.capability import Arch, GpuModel
 from orbit.core.errors import ConfigError
 from orbit.core.ids import content_hash
 from orbit.core.sandbox import DesktopResolution
 from orbit.core.taskspec import McpSource, SkillSource, TaskEnv, TaskSpec, env_problem
 
 __all__ = [
+    "CLUSTER_PROVIDERS",
     "GPU_MEMORY_MARGIN_MB",
     "AgentConfig",
     "AgentJudgeConfig",
     "ArtifactPolicy",
     "AssetCollectionConfig",
+    "ClusterPartition",
+    "ClusterProviderConfig",
     "DaytonaProviderConfig",
     "DockerProviderConfig",
     "FleetConfig",
     "GatewayLimits",
     "LLMJudgeConfig",
+    "LSFProviderConfig",
+    "LSFQueue",
     "LoggingPolicy",
     "ModelProvider",
+    "PBSProviderConfig",
+    "PBSQueue",
     "ProviderId",
     "RunConfig",
     "RunTimeouts",
@@ -280,6 +287,10 @@ class SandboxRetentionConfig(BaseModel):
     verifier: Literal["destroy", "keep"] = "destroy"
 
 
+#: The batch clusters' Providers: each of a Run's episodes runs in a job of the cluster, which
+#: holds every Sandbox of the episode.
+CLUSTER_PROVIDERS = ("slurm", "pbs", "lsf")
+
 #: Every Provider a Run can select. A leaf starts the final Sandbox directly. A scheduler
 #: places the request on machines it manages.
 ProviderId = Literal[
@@ -287,6 +298,8 @@ ProviderId = Literal[
     "docker:kata",
     "docker:gvisor",
     "slurm",
+    "pbs",
+    "lsf",
     "qemu",
     "firecracker",
     "orchard",
@@ -320,22 +333,22 @@ class DockerProviderConfig(BaseModel):
         return values
 
 
-class SlurmPartition(BaseModel):
-    """The allocations a partition of the cluster Orbit runs on offers, of up to
-    ``max_nodes`` alike nodes, each limited as below."""
+_NAME = r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+
+
+class ClusterPartition(BaseModel):
+    """What one job of a partition, or queue, of a cluster may hold: up to ``max_nodes``
+    alike nodes, each limited as below."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    name: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
-    qos: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+    name: str = Field(pattern=_NAME)
     max_cpus: int = Field(ge=1)
     max_memory_mb: int = Field(ge=1)
     gpu_model: GpuModel | None = None
     max_gpus: int = Field(default=0, ge=0)
     max_nodes: int = Field(default=1, ge=1)
-    """How many of its nodes one allocation, and one Sandbox, may span."""
-    constraint: str | None = Field(default=None, min_length=1)
-    """The node features its jobs ask for (``sbatch --constraint``)."""
+    """How many of its nodes one job, and one Sandbox, may span."""
 
     # --- validation ---
 
@@ -346,39 +359,126 @@ class SlurmPartition(BaseModel):
         return self
 
 
-class SlurmProviderConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class SlurmPartition(ClusterPartition):
+    qos: str | None = Field(default=None, pattern=_NAME)
+    constraint: str | None = Field(default=None, min_length=1)
+    """The node features its jobs ask for (``sbatch --constraint``)."""
 
-    partitions: tuple[SlurmPartition, ...] = ()
-    """In preference order. One Sandbox fits on up to ``max_nodes`` nodes of one partition."""
-    account: str | None = Field(default=None, min_length=1)
-    """The account jobs are charged to (``sbatch --account``), where the cluster asks for one."""
-    shared_fs_dir: str = Field(default="~/.cache/orbit/slurm", min_length=1)
-    """Orbit's directory on the cluster's shared file system, at the same path on the login
-    node and every compute node: the images prepared for the cluster, each allocation's
-    files, snapshots written out, and the shared directories of Sandboxes of several nodes,
-    so one on a large shared file system rather than a home with a small quota."""
-    node_local_dir: str | None = Field(default=None, min_length=1)
-    """Where on each compute node's own disk an allocation keeps its Podman store, which
-    holds its images and what its Sandboxes write, expanded on the node: by default
-    ``$SLURM_TMPDIR``, else ``/tmp``."""
-    walltime_minutes: int = Field(default=180, ge=1)
-    """Each allocation's wall time, within its QoS's limit."""
-    drain_minutes: int = Field(default=10, ge=1)
-    """What saving a solver and writing it out for the next allocation takes at most, which
-    each allocation keeps before its wall time ends."""
-    queue_timeout_sec: int = Field(default=900, ge=1)
-    """How long an allocation that boots no snapshot and is no separate verifier's, such as
-    an episode's first, waits in the queue. Any other comes mid-episode, behind the agent's
-    work, and waits for as long as Slurm keeps it pending, which spends none of its time."""
+
+class PBSQueue(ClusterPartition):
+    """A PBS queue, whose jobs hold one node; its select chunk names ``chunk_resources``, and
+    a job holds the queue's whole of each resource it leaves out."""
+
+    max_nodes: Literal[1] = 1
+    min_gpus: int = Field(default=0, ge=0)
+    """Whole GPUs the queue charges each job, a CPU-only one's included."""
+    chunk_resources: tuple[Literal["ncpus", "mem", "ngpus"], ...] = ("ncpus", "mem", "ngpus")
 
     # --- validation ---
 
     @model_validator(mode="after")
-    def _drains_within_its_wall_time(self) -> Self:
-        if self.drain_minutes >= self.walltime_minutes:
-            raise ValueError("sandbox.slurm.drain_minutes must be below walltime_minutes")
+    def _queue(self) -> Self:
+        if self.min_gpus > self.max_gpus:
+            raise ValueError("min_gpus must fit the GPU capacity of the queue")
+        if len(set(self.chunk_resources)) != len(self.chunk_resources):
+            raise ValueError("chunk_resources must name each PBS resource once")
         return self
+
+
+class LSFQueue(ClusterPartition):
+    """An LSF queue, whose jobs hold one node."""
+
+    max_nodes: Literal[1] = 1
+    min_gpus: int = Field(default=0, ge=0)
+    """Whole GPUs the queue charges each job, a CPU-only one's included."""
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _queue(self) -> Self:
+        if self.min_gpus > self.max_gpus:
+            raise ValueError("min_gpus must fit the GPU capacity of the queue")
+        return self
+
+
+class ClusterProviderConfig(BaseModel):
+    """A cluster whose workload manager runs each episode in a batch job of its own,
+    submitted from a login node that shares ``shared_fs_dir`` with every compute node."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The Provider id, which names the cluster's workload manager.
+    workload_manager: ClassVar[str]
+
+    partitions: tuple[ClusterPartition, ...] = ()
+    """In preference order. One Sandbox fits on up to ``max_nodes`` nodes of one partition."""
+    account: str | None = Field(default=None, min_length=1)
+    """The account jobs are charged to, where the cluster asks for one."""
+    shared_fs_dir: str = Field(min_length=1)
+    """Orbit's directory on the cluster's shared file system, at the same path on the login
+    node and every compute node: the images prepared for the cluster, the engine, each job's
+    files, snapshots written out, and the shared directories of Sandboxes of several nodes,
+    so one on a large shared file system rather than a home with a small quota."""
+    node_local_dir: str | None = Field(default=None, min_length=1)
+    """Where on each compute node's own disk a job keeps its Podman store, which holds its
+    images and what its Sandboxes write, expanded on the node: by default the job's own
+    temporary directory, else ``/tmp``."""
+    walltime_minutes: int = Field(default=180, ge=1)
+    """Each job's wall time, within its queue's limit."""
+    drain_minutes: int = Field(default=10, ge=1)
+    """What saving a solver and writing it out for the episode's next job takes at most,
+    which each job keeps before its wall time ends."""
+    queue_timeout_sec: int = Field(default=900, ge=1)
+    """How long an episode's first job, or an image's preparation, waits in the queue; a
+    later job of the episode waits as long as the queue keeps it, as that spends none of the
+    agent's time."""
+    architecture: Arch = Arch.X86_64
+    """The compute nodes' architecture, which the engine and every image are prepared for."""
+    build_queue: str | None = None
+    """The partition images are prepared in: by default the first without GPUs."""
+    build_gpus: int = Field(default=0, ge=0)
+    """The GPUs an image's preparation asks for, where its partition charges them."""
+    podman: str | None = None
+    """Podman's absolute path on the compute nodes, where it is not on a job's ``PATH``."""
+
+    # --- validation ---
+
+    @model_validator(mode="after")
+    def _site(self) -> Self:
+        if self.drain_minutes >= self.walltime_minutes:
+            raise ValueError("drain_minutes must be below walltime_minutes")
+        if not Path(os.path.expandvars(self.shared_fs_dir)).expanduser().is_absolute():
+            raise ValueError("shared_fs_dir must resolve to an absolute path")
+        if self.podman is not None and not Path(self.podman).is_absolute():
+            raise ValueError("podman must be an absolute path on the compute nodes")
+        partitions = {partition.name: partition for partition in self.partitions}
+        if len(partitions) != len(self.partitions):
+            raise ValueError("partition names must be unique within a cluster")
+        if self.build_queue is not None and self.build_queue not in partitions:
+            raise ValueError("build_queue must name a configured partition")
+        if self.build_gpus and (
+            not self.build_queue or self.build_gpus > partitions[self.build_queue].max_gpus
+        ):
+            raise ValueError("build_gpus must fit the configured build_queue")
+        return self
+
+
+class SlurmProviderConfig(ClusterProviderConfig):
+    workload_manager: ClassVar[str] = "slurm"
+    partitions: tuple[SlurmPartition, ...] = ()
+    shared_fs_dir: str = Field(default="~/.cache/orbit/slurm", min_length=1)
+
+
+class PBSProviderConfig(ClusterProviderConfig):
+    workload_manager: ClassVar[str] = "pbs"
+    partitions: tuple[PBSQueue, ...] = ()
+    shared_fs_dir: str = Field(default="~/.cache/orbit/pbs", min_length=1)
+
+
+class LSFProviderConfig(ClusterProviderConfig):
+    workload_manager: ClassVar[str] = "lsf"
+    partitions: tuple[LSFQueue, ...] = ()
+    shared_fs_dir: str = Field(default="~/.cache/orbit/lsf", min_length=1)
 
 
 class DaytonaProviderConfig(BaseModel):
@@ -417,8 +517,27 @@ class SandboxConfig(BaseModel):
     same way; a scheduler's own leaves are its deployment's to configure."""
     docker: DockerProviderConfig = DockerProviderConfig()
     slurm: SlurmProviderConfig = SlurmProviderConfig()
+    pbs: PBSProviderConfig = PBSProviderConfig()
+    lsf: LSFProviderConfig = LSFProviderConfig()
     daytona: DaytonaProviderConfig = DaytonaProviderConfig()
     fleet: FleetConfig = FleetConfig()
+
+    @property
+    def cluster(self) -> ClusterProviderConfig | None:
+        """The cluster the Run's Provider runs its episodes on, where it names one."""
+        return next(
+            (
+                site
+                for site in (self.slurm, self.pbs, self.lsf)
+                if site.workload_manager in self.providers
+            ),
+            None,
+        )
+
+    @property
+    def linux_container_arch(self) -> Arch:
+        """Native target of this Run's cluster images, independent of the controller's CPU."""
+        return self.cluster.architecture if self.cluster is not None else Arch.X86_64
 
     # --- validation ---
 
@@ -433,8 +552,14 @@ class SandboxConfig(BaseModel):
 
     @model_validator(mode="after")
     def _settings_have_their_provider(self) -> Self:
-        if "slurm" in self.providers and not self.slurm.partitions:
-            raise ValueError("the slurm Provider needs sandbox.slurm.partitions")
+        if set(self.providers) & set(CLUSTER_PROVIDERS) and len(self.providers) > 1:
+            raise ValueError(
+                "a cluster's Provider runs each episode in a job of its own, so it is the "
+                "Run's only Provider"
+            )
+        if (site := self.cluster) is not None and not site.partitions:
+            name = site.workload_manager
+            raise ValueError(f"the {name} Provider needs sandbox.{name}.partitions")
         if self.docker.gpus and not any(name.startswith("docker:") for name in self.providers):
             raise ValueError(
                 "sandbox.docker.gpus selects Docker devices; sandbox.providers names no Docker leaf"

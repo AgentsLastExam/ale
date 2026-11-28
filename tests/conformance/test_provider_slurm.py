@@ -1,17 +1,18 @@
-"""Slurm conformance, run on a login node of an explicitly configured cluster, which shares
-Orbit's cache with its compute nodes."""
+"""Slurm conformance, run as Orbit runs each episode, in a batch job of an explicitly
+configured cluster, on its first node (``tests.support.provider_in_job``)."""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
-from tests.support import CONTAINER_BASE, LIST_POLICIES, check_a_sealed_list, slurm_config
+from tests.support import CONTAINER_BASE, LIST_POLICIES, check_a_sealed_list, provider_in_job
 
 from orbit.core.sandbox import Identity, ImageRef, SandboxRequest
 from orbit.core.taskspec import NetworkPolicy, Resources
 from orbit.core.testkit import ProviderConformance
 from orbit.run.framework import framework_identity
 from orbit.run.providers import missing_features
-from orbit.run.providers.slurm import SlurmProvider
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_slurm]
 
@@ -28,8 +29,12 @@ class TestSlurmProvider(ProviderConformance):
         return await super().request(**overrides)
 
     @pytest.fixture(autouse=True)
-    def cluster(self) -> None:
-        self.provider = SlurmProvider(slurm_config())
+    async def cluster(self) -> AsyncIterator[None]:
+        self.provider = provider_in_job()
+        try:
+            yield
+        finally:
+            await self.provider.close()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("policy", LIST_POLICIES)

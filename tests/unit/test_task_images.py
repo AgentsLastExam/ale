@@ -1142,7 +1142,7 @@ async def test_an_undecided_kind_is_never_prepared(write_task_repo) -> None:  # 
 
 
 def _slurm(monkeypatch: pytest.MonkeyPatch) -> tuple[Provider, list[object]]:
-    """A Slurm Provider whose cluster prepares nothing, recording each recipe it gets."""
+    """A cluster Provider whose cluster prepares nothing, recording each recipe it gets."""
     config = RunConfig.model_validate(
         {
             "sandbox": {

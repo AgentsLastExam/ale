@@ -332,7 +332,7 @@ can set `validation_rounds = 0`.
 A Provider that holds a Sandbox only until a set time, as a scheduler holds an allocation
 for its wall time, gives the Sandbox a deadline: the latest time to begin saving it, which
 leaves what the save and writing it where another Sandbox can boot from it take
-([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#slurm)), and
+([Providers](../../packages/orbit-run/src/orbit/run/providers/README.md#clusters)), and
 declares how long it holds one at most. A run of the agent is bounded, as it launches, by
 that deadline less 120 s for stopping the agent, copying its logs and sanitizing the solver,
 as by the agent's time. Where the deadline ends a run first, the turn is not over: the
@@ -360,21 +360,38 @@ unscored.
 Each verifier is held for its limit: selection gives a Sandbox that runs one, or whose
 snapshot one boots from on the same leaf, only a leaf that holds a Sandbox that long, and a
 verifier's request names its limit, so that such a Provider starts it where it lasts that
-long. A shared verifier runs in the solver, where the agent's processes still run, so the
-agent's last turn, after which no round saves the solver, leaves its Sandbox the verifier's
-limit too: its run is bounded that much sooner, and one cut there moves, so that `tests/`
-never runs in a solver a move stopped them in. Only where the Run leaves verification
-unlimited, or the turn ended too late, does the solver move first to a Sandbox that lasts
-that long. A round's verifier that its Sandbox's scheduler ended, rather than its own
-failure, runs once more on the round's snapshot where that outlived it, and only that run is
-the round's. A Sandbox lost without warning, to a preemption or its node's failure, ends the
-episode as a guest that stopped replying does, without verification, its error saying how it
-was lost; episode retries start the episode again.
+long. A shared `tests/` runs where the agent's processes still do, so every run of the agent
+leaves its Sandbox that limit, as the run may be the last: it is bounded that much sooner,
+and one cut there moves. Every other verifier, a validation round's included, boots from a
+snapshot, so the agent works until the deadline, and where the solver's Sandbox would not
+last a verifier's limit the solver moves first, to one that lasts it. A round's verifier
+that its Sandbox's scheduler ended, rather than its own failure, runs once more on the
+round's snapshot where that outlived it, and only that run is the round's. A Sandbox lost
+without warning, to a preemption or its node's failure, ends the episode as a guest that
+stopped replying does, without verification, its error saying how it was lost; episode
+retries start the episode again.
+
+A Provider that holds no Sandbox past the process that runs the episode, as a batch job
+holds none past its wall time, boots the moved solver, or the solver of the turn after a
+round, only in a later process where this one would not last it: it makes the snapshot
+durable for that process and hands the episode off, so that an episode stays one sample
+however long its agent works. This process then releases its other Sandboxes and ends its
+part unverified and with no result, leaving the native logs copied so far, and returns a
+continuation record of that point: the snapshot and its Provider, where the turn goes on,
+the agent's time spent, the Gateway's count of the agent's limits, the episode's phases,
+segments, rounds and Sandbox outcomes so far, and its episode tokens, which the episode's
+records keep out still. A new process continues the same episode from the record, in its
+directory: it boots the solver from the snapshot without setup, owns the snapshot as a
+move's, goes on with the cut turn as a move does, or begins the next, or verifies, then with
+the rounds still to come and verification, and its result, RunLock and trajectory describe
+the whole episode. A move before a verifier hands off the same way, and the new process
+begins with that round or the episode's verification; one that would still not last the
+verifier ends the episode with the Provider's error.
 
 The result records each solver Sandbox the agent worked in as a
 [segment](trace.md#result-and-run-status), the agent's phase that a move cut as `moved`, and
-the trajectory marks the prompt that resumed it with `extra.orbit.moved`, the segment it
-resumed in.
+the boot that goes on in the episode's next process too, and the trajectory marks the prompt
+that resumed it with `extra.orbit.moved`, the segment it resumed in.
 
 ## Reverification
 

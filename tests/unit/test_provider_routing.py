@@ -447,12 +447,12 @@ async def test_feature_probe_keeps_gpus_when_the_leaf_requires_them(
         def refusals(self, needs, *, user, role):
             return () if needs.resources.gpus else ("this partition requires a GPU",)
 
-    leaf = GpuOnlyLeaf("slurm", "mount")
+    leaf = GpuOnlyLeaf("docker:kata", "mount")
     registry = ProviderRegistry(_settings("docker:runc"))
-    registry._instances["slurm"] = leaf
+    registry._instances["docker:kata"] = leaf
     task = _selected(
         _task(tmp_path / "gpu", {"environment": {"gpus": 2, "container_features": ["mount"]}}),
-        "slurm",
+        "docker:kata",
     )
 
     async def probe(sandbox, features):
@@ -462,6 +462,21 @@ async def test_feature_probe_keeps_gpus_when_the_leaf_requires_them(
     monkeypatch.setattr("orbit.run.providers.missing_features", probe)
     await registry.preflight([task])
     assert len(leaf.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_clusters_sandboxes_are_never_probed_from_the_machine_that_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its Sandboxes start only in its episodes' jobs, which check them there."""
+    leaf = _Leaf("slurm", "mount")
+    registry = ProviderRegistry(_settings("docker:runc"))
+    registry._instances["slurm"] = leaf
+    task = _selected(
+        _task(tmp_path / "t", {"environment": {"container_features": ["mount"]}}), "slurm"
+    )
+    await registry.preflight([task])
+    assert leaf.requests == []
 
 
 @pytest.mark.asyncio
@@ -831,8 +846,12 @@ async def test_retained_sandbox_commands_route_by_the_provider_named_in_the_hand
         "docker:z",
         "firecracker:a",
         "firecracker:z",
+        "lsf:a",
+        "lsf:z",
         "orchard:a",
         "orchard:z",
+        "pbs:a",
+        "pbs:z",
         "qemu:a",
         "qemu:z",
         "slurm:a",
@@ -938,10 +957,79 @@ def test_prepare_accepts_only_config_and_set_options() -> None:
 async def test_retained_slurm_snapshots_are_found_in_the_cache_a_run_configuration_names(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from orbit.core.config import SlurmProviderConfig
+    from orbit.core.config import SandboxConfig, SlurmProviderConfig
     from orbit.run.providers import provider_named
-    from orbit.run.providers.slurm import SlurmProvider
+    from orbit.run.providers.cluster import ClusterProvider
 
-    named = provider_named("slurm", SlurmProviderConfig(shared_fs_dir=str(tmp_path)))
-    assert isinstance(named, SlurmProvider) and named.config.shared_fs_dir == str(tmp_path)
+    named = provider_named(
+        "slurm", SandboxConfig(slurm=SlurmProviderConfig(shared_fs_dir=str(tmp_path)))
+    )
+    assert isinstance(named, ClusterProvider) and named.config.shared_fs_dir == str(tmp_path)
     assert provider_named("slurm").config.shared_fs_dir == "~/.cache/orbit/slurm"  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_flow2_uses_the_native_target_for_solver_and_snapshot_verifier(
+    tmp_path: Path,
+) -> None:
+    from orbit.core.capability import Arch
+    from orbit.run.providers import _sandboxes
+    from orbit.run.providers.cluster.images import build_partition, key
+    from orbit.run.providers.cluster.managers import create_job
+
+    preset = Path(__file__).resolve().parents[2] / "docs/guides/sites/flow2.toml"
+    site = load_run_config(run_path=preset)
+    registry = ProviderRegistry(site)
+    pbs = registry.get("pbs")
+    options = site.sandbox.pbs
+    assert build_partition(options).name == "t2-share" and options.build_gpus == 1
+    profiles = await pbs.profiles()
+    assert {profile.arch for profile in profiles} == {Arch.ARM64}
+    assert {profile.max_nodes for profile in profiles} == {1}
+
+    for cards, queue in ((0, "t2-share"), (1, "t2-share"), (2, "t2-single"), (4, "t2-single")):
+        task = _task(
+            tmp_path / f"cards-{cards}",
+            {
+                "environment": {"gpus": cards},
+                "verifier": {"environment_mode": "snapshot"},
+            },
+        )
+        await registry.select([task])
+        assert task.provider == "pbs"
+        planned = list(
+            _sandboxes(
+                task, snapshot=True, solver=True, timeouts=site.timeouts, linux_arch=Arch.ARM64
+            )
+        )
+        assert all(need.arch is Arch.ARM64 for _, _, need, _ in planned)
+        solver = planned[0][2]
+        assert solver.verifier and solver.verifier.arch is Arch.ARM64
+        chosen = pbs._partition(solver)
+        assert chosen and chosen.name == queue
+        assert create_job(options, chosen).workload_manager == "pbs"
+
+    arguments = dict(
+        reference="registry/image@sha256:" + "9" * 64,
+        context=None,
+        user="user",
+        keep_alive=False,
+        multinode=False,
+    )
+    assert key("external-ref", **arguments) != key("external-ref", **arguments, arch=Arch.ARM64)
+
+
+def test_batch_settings_survive_serialization_and_reject_unsupported_allocations() -> None:
+    lsf = _settings(
+        "lsf", lsf={"partitions": [{"name": "cpu", "max_cpus": 4, "max_memory_mb": 8192}]}
+    )
+    assert RunConfig.model_validate(lsf.model_dump()).sandbox.lsf == lsf.sandbox.lsf
+    with pytest.raises(ValidationError, match="max_nodes"):
+        _settings(
+            "pbs",
+            pbs={
+                "partitions": [
+                    {"name": "gpu", "max_cpus": 4, "max_memory_mb": 8192, "max_nodes": 2}
+                ]
+            },
+        )

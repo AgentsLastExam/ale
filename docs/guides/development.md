@@ -107,7 +107,8 @@ write between two measurements, a few GiB at a fast disk's speed
 | Provider id | Starts |
 |---|---|
 | `docker:runc` | Linux containers in local Docker |
-| `slurm` | Linux containers, on one node or several, in batch allocations of the cluster whose login node Orbit runs on, one per solver and the Sandboxes booted from its snapshots ([configure partitions](../../packages/orbit-run/src/orbit/run/providers/README.md#slurm)) |
+| `pbs`, `lsf` | Linux containers in the single-node batch job each episode runs in, on PBS Professional or Spectrum LSF ([queue configuration and the Flow2 preset](../../packages/orbit-run/src/orbit/run/providers/README.md#pbs-professional-and-spectrum-lsf)) |
+| `slurm` | Linux containers, on one node or several, in the batch job each episode runs in, submitted from the login node Orbit runs on ([configure partitions](../../packages/orbit-run/src/orbit/run/providers/README.md#clusters)) |
 | `docker:kata` | each Linux container in a Kata microVM of its own, in local Docker |
 | `docker:gvisor` | each Linux container on gVisor's kernel in user space, in local Docker |
 | `firecracker` | each Linux container as a Firecracker microVM |
