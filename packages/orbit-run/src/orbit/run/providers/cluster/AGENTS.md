@@ -1,9 +1,9 @@
 # Cluster provider
 
 Decided: one Provider, `ClusterProvider`, serves every workload manager, named by the one a
-Run's configuration selects (`slurm`, `pbs`, `lsf`), as everything but a job's commands and
+Run's configuration selects (`slurm`, `pbs`, `lsf`, `kubernetes`), as everything but a job's commands and
 how a Sandbox is held to its share of the job is the same on each. A workload manager's
-module (`slurm.py`, `pbs.py`, `lsf.py`) says how a job is submitted, watched, found by its
+module (`slurm.py`, `pbs.py`, `lsf.py`, `kubernetes.py`) says how a job is submitted, watched, found by its
 unique name and cancelled, and what in its environment names it; Slurm holds each Sandbox in
 a step of the job, and PBS and LSF, which start no steps, delegate the job's cgroup, which
 `delegated.py` and the worker's `delegated_worker.py` split for Orbit and each Sandbox. A
@@ -315,3 +315,15 @@ kills as it ends is Orbit's. A job whose cgroup holds another process, or that t
 may not write, is refused before any Sandbox starts, naming why, rather than run Sandboxes
 the job's limit alone holds. A job on a PBS queue whose select chunk leaves out a resource
 holds the queue's whole of it, which the job's Orbit admits Sandboxes to.
+
+## Kubernetes worker Pods
+
+The dispatcher owns the Job. Each indexed Pod owns a distinct node's GPU allocation and
+local image store, so replacing a Pod after placement ends the attempt. Rank zero runs the
+episode and Gateway. Only peer Pods use the shared volume for worker commands. Keep the
+kubeconfig on the submit host and the Sandbox inside its own gVisor PID namespace. In the
+nested k3s tests the Podman networking helpers needed the worker Pod's PID namespace to
+mount procfs. Configure forwarding inside the private router namespace.
+
+Exercise GPU placement by comparing CUDA and NVML UUIDs on every rank with the allocation
+record. See the [site requirements](../README.md#kubernetes-jobs).

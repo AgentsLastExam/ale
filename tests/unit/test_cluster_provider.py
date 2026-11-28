@@ -19,8 +19,10 @@ from orbit.core.errors import (
     ProviderCapacityError,
     ProviderStartError,
     SandboxHandOff,
+    TaskDefinitionError,
 )
 from orbit.core.sandbox import (
+    GpuDevice,
     ImageKind,
     ImageRef,
     PreparedTaskImage,
@@ -46,6 +48,7 @@ from orbit.run.providers.cluster.provider import (
     EpisodeJob,
     _capacity,
     _Chain,
+    _gpu_allocation,
     _handle,
     _parse,
     _profiles,
@@ -1609,3 +1612,54 @@ async def test_an_image_named_without_a_task_carries_the_nodes_openssh(monkeypat
     shape = dict(reference=recipe.reference, context=None, user=recipe.user, keep_alive=False)
     assert recipe.key == images.key("external-ref", **shape, multinode=True)
     assert recipe.key != images.key("external-ref", **shape, multinode=False)
+
+
+async def test_two_nodes_cannot_report_the_same_whole_gpu():
+    gpu = GpuDevice(
+        id="GPU-a",
+        model="NVIDIA H100 80GB HBM3",
+        driver_version="570.195.03",
+        memory_total_mb=81559,
+    )
+    nodes = [
+        job_module.StepReady(image="i", devices=(gpu,), step="1", node=n) for n in ("n0", "n1")
+    ]
+
+    class Guest:
+        async def exec(self, args):
+            return (0, "" if args == ["ldconfig"] else gpu.id, "", False)
+
+    with pytest.raises(ProviderStartError, match="same whole GPU"):
+        await _gpu_allocation(
+            [Guest(), Guest()], nodes, Resources(gpus=1, nodes=2), chain(nodes=2), None
+        )
+
+
+@pytest.mark.parametrize(
+    ("phase", "failure"),
+    [("build", TaskDefinitionError), ("framework", ProviderStartError), ("", ProviderStartError)],
+)
+@pytest.mark.parametrize("plain", [False, True], ids=["worker-json", "plain-text"])
+async def test_image_preparation_attributes_the_worker_failure(tmp_path, phase, failure, plain):
+    config = provider().config
+    job = job_module.Job(config, config.partitions[0])
+    job.directory = tmp_path
+    job.id = "241"
+    message = 'build command failed:\n"missing-file"'
+    for name, value in (("error", message), ("failed", phase)):
+        if value:
+            path = tmp_path / name
+            if plain:
+                path.write_text(value)
+            else:
+                worker.write(path, value)
+    (tmp_path / "job.log").write_text("worker stderr")
+    recipe = images.Recipe(key="key", source="solver-local", context=tmp_path)
+    with pytest.raises(failure) as caught:
+        await images._prepared(job, 1, recipe)
+    detail = str(caught.value)
+    assert "slurm job 241" in detail and message in detail and "worker stderr" in detail
+    if phase:
+        assert f"during {phase}" in detail
+    if phase == "build":
+        assert str(tmp_path / "Dockerfile") in detail

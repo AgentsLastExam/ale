@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 
 from orbit.core.capability import CapabilityProfile, SandboxNeeds
 from orbit.core.config import RunConfig, SandboxRetentionConfig, load_run_config
-from orbit.core.errors import ProviderCapabilityError, ProviderStartError
+from orbit.core.errors import ConfigError, ProviderCapabilityError, ProviderStartError
 from orbit.core.sandbox import (
     DesktopResolution,
     ExecResult,
@@ -1033,3 +1033,160 @@ def test_batch_settings_survive_serialization_and_reject_unsupported_allocations
                 ]
             },
         )
+
+
+def _kubernetes_site(cache: Path, **overrides: object) -> dict:
+    return {
+        "worker_image": "registry.example/orbit-worker:1",
+        "namespace": "research",
+        "shared_claim": "orbit-cache",
+        "shared_fs_dir": str(cache),
+        "partitions": [{"name": "cpu", "max_cpus": 8, "max_memory_mb": 16384}],
+        **overrides,
+    }
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_routes_images_solver_and_snapshot_through_its_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orbit.core.capability import Arch
+    from orbit.core.config import KubernetesProviderConfig, KubernetesQueue
+    from orbit.run.providers.cluster import kubernetes as job
+    from orbit.run.providers.cluster.managers import create_job
+
+    config = _settings("kubernetes", kubernetes=_kubernetes_site(tmp_path, architecture="arm64"))
+    assert RunConfig.model_validate(config.model_dump()) == config
+    registry = ProviderRegistry(config)
+    provider = registry.get("kubernetes")
+    task = _task(
+        tmp_path / "snapshot",
+        {"verifier": {"environment_mode": "snapshot"}},
+    )
+    await registry.select([task])
+    profiles = await provider.profiles()
+    assert task.provider == provider.name == "kubernetes"
+    assert all(p.arch is Arch.ARM64 and p.snapshot and p.max_nodes == 1 for p in profiles)
+    site = config.sandbox.kubernetes
+    assert site and site.node_labels == {"kubernetes.io/os": "linux", "kubernetes.io/arch": "arm64"}
+    assert isinstance(create_job(site, site.partitions[0]), job.KubernetesJob)
+
+    calls: list[str] = []
+
+    async def preflight(
+        config: KubernetesProviderConfig, queues: tuple[KubernetesQueue, ...]
+    ) -> None:
+        assert config is site
+        assert tuple(queues) == site.partitions
+        calls.append(config.namespace)
+
+    monkeypatch.setattr(job.KubernetesJob, "preflight", staticmethod(preflight))
+    await provider.preflight()
+    assert calls == ["research"]
+
+
+async def test_kubernetes_places_a_two_node_gpu_task_only_in_a_capable_pool(tmp_path: Path) -> None:
+    pool = {
+        "name": "gpu",
+        "max_cpus": 8,
+        "max_memory_mb": 16384,
+        "max_gpus": 1,
+        "gpu_model": {"name": "NVIDIA H100", "memory_mb": 81920},
+    }
+    task = _task(tmp_path / "distributed", {"environment": {"nodes": 2, "gpus": 1}})
+
+    def registry(max_nodes: int) -> ProviderRegistry:
+        site = _kubernetes_site(tmp_path, partitions=[pool | {"max_nodes": max_nodes}])
+        return ProviderRegistry(_settings("kubernetes", kubernetes=site))
+
+    with pytest.raises(ProviderCapabilityError):
+        await registry(1).select([task])
+    await registry(2).select([task])
+    assert task.provider == "kubernetes"
+    with pytest.raises(ValidationError, match="max_nodes"):
+        registry(255)
+
+
+def test_kubernetes_site_is_explicit_and_describes_a_single_native_platform(tmp_path: Path) -> None:
+    from orbit.run.providers import leaf
+
+    with pytest.raises(ValidationError, match=r"sandbox\.kubernetes"):
+        _settings("kubernetes")
+    for settings, reason in (
+        ({"namespace": "invalid/name"}, "namespace"),
+        ({"worker_image": ""}, "worker_image"),
+        ({"shared_claim": "../../claim"}, "shared_claim"),
+        ({"shared_fs_dir": "."}, "shared_fs_dir"),
+        ({"shared_fs_dir": "/"}, "shared_fs_dir"),
+        ({"node_local_dir": "scratch"}, "node_local_dir"),
+        ({"node_local_dir": "/etc/worker"}, "node_local_dir"),
+        ({"node_local_dir": str(tmp_path / "store")}, "separate mount paths"),
+        ({"account": "pbs-account"}, "account"),
+        ({"node_selector": {"kubernetes.io/os": "windows"}}, "node_selector"),
+        ({"node_selector": {"kubernetes.io/arch": "arm64"}}, "kubernetes.io/arch"),
+        ({"partitions": []}, "partitions"),
+    ):
+        with pytest.raises(ValidationError, match=reason):
+            _settings("kubernetes", kubernetes=_kubernetes_site(tmp_path, **settings))
+    pool = {"name": "cpu", "max_cpus": 4, "max_memory_mb": 8192}
+    site = _kubernetes_site(
+        tmp_path,
+        node_selector={"zone": "one"},
+        partitions=[pool | {"node_selector": {"zone": "two"}}],
+    )
+    with pytest.raises(ValidationError, match="conflicts"):
+        _settings("kubernetes", kubernetes=site)
+    for other in ("pbs", "lsf"):
+        with pytest.raises(ValidationError, match="only Provider"):
+            _settings(
+                other,
+                "kubernetes",
+                **{other: {"partitions": [pool]}},
+                kubernetes=_kubernetes_site(tmp_path),
+            )
+    with pytest.raises(ConfigError, match="kubernetes needs its own cluster configuration"):
+        leaf("kubernetes")
+    with pytest.raises(ConfigError, match="own cluster configuration"):
+        leaf(
+            "pbs",
+            cluster=_settings(
+                "kubernetes", kubernetes=_kubernetes_site(tmp_path)
+            ).sandbox.kubernetes,
+        )
+
+
+@pytest.mark.asyncio
+async def test_retained_kubernetes_snapshot_uses_its_sites_volume_without_kubectl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from orbit.run.providers import provider_named
+    from orbit.run.providers.cluster.job import SNAPSHOTS
+
+    monkeypatch.setenv("PATH", "")
+    sandbox = _settings("qemu", kubernetes=_kubernetes_site(tmp_path)).sandbox
+    handle = "kubernetes:orbit-abcd/1"
+    saved = tmp_path / SNAPSHOTS / "orbit-abcd-1.json"
+    saved.parent.mkdir()
+    saved.write_text(
+        json.dumps({"handle": handle, "episode": "e1", "roles": ["solver"], "images": ["image"]})
+    )
+    assert [
+        item["handle"] for item in await provider_named("kubernetes", sandbox).list_retained()
+    ] == [handle]
+    with pytest.raises(ConfigError, match="kubernetes needs its own cluster configuration"):
+        await _destroy_retained_sandbox(handle)
+    await _destroy_retained_sandbox(handle, sandbox)
+    assert not saved.exists()
+
+
+def test_kubernetes_job_uses_the_controllers_resolved_cache_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORBIT_TEST_SHARED_ROOT", str(tmp_path / "controller"))
+    config = _settings(
+        "kubernetes",
+        kubernetes=_kubernetes_site(tmp_path, shared_fs_dir="$ORBIT_TEST_SHARED_ROOT/cache"),
+    )
+    data = config.model_dump(mode="json")
+    monkeypatch.setenv("ORBIT_TEST_SHARED_ROOT", str(tmp_path / "pod"))
+    site = RunConfig.model_validate(data).sandbox.kubernetes
+    assert site and site.shared_fs_dir == str(tmp_path / "controller/cache")

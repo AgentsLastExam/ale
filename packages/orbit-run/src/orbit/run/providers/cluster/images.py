@@ -215,6 +215,17 @@ async def _prepare(config: ClusterProviderConfig, recipe: Recipe) -> dict[str, o
             )
 
 
+def _worker_text(path: Path) -> str:
+    """A worker's JSON string, or the plain text of an older job directory."""
+    raw = read(path)
+    if raw.startswith('"'):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+    return raw
+
+
 async def _prepared(job: Job, queue_timeout: int, recipe: Recipe) -> dict[str, object]:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + queue_timeout
@@ -223,13 +234,17 @@ async def _prepared(job: Job, queue_timeout: int, recipe: Recipe) -> dict[str, o
     while True:
         if prepared := read(job.directory / "prepared"):
             return dict(json.loads(prepared))
-        if error := read(job.directory / "error"):
+        if error := _worker_text(job.directory / "error"):
+            phase = _worker_text(job.directory / "failed")
             what = recipe.reference or "the Task's image"
-            # The Task's own build failing is the Task's; any other step's, the cluster's.
-            build = read(job.directory / "failed") == "build"
-            failure = TaskDefinitionError if build else ProviderStartError
+            failure = ProviderStartError
+            if phase == "build":
+                failure = TaskDefinitionError
+                if recipe.context is not None:
+                    what = str(recipe.context / "Dockerfile")
+            where = f" during {phase}" if phase else ""
             raise failure(
-                f"{job.job_label} could not prepare {what}: {error}\n"
+                f"{job.job_label} could not prepare {what}{where}: {error}\n"
                 + tail(job.directory / "job.log")
             )
         state = "" if ended is not None else await job.state()

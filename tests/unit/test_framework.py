@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from tests.support import FakeQemuImg, write_qcow2
 
+from orbit.core.capability import Arch
 from orbit.core.errors import ProviderStartError, TaskDefinitionError
 from orbit.core.sandbox import PreparedTaskImage
 from orbit.core.taskspec import OperatingSystem
@@ -65,17 +66,24 @@ def test_the_layer_identity_follows_everything_it_is_built_from(
     assert framework_identity(user="user", vm=False) != base
 
 
-def test_only_a_multinode_task_s_layer_adds_the_nodes_openssh() -> None:
-    plain = framework_identity(user="user", vm=False)
-    assert framework_identity(user="user", vm=False, multinode=False) == plain
-    multinode = framework_identity(user="user", vm=False, multinode=True)
+@pytest.mark.parametrize(
+    ("arch", "repository"),
+    [(Arch.X86_64, "orbit-multinode-ssh"), (Arch.ARM64, "orbit-multinode-ssh-arm64")],
+)
+def test_only_a_multinode_task_s_layer_adds_the_nodes_native_openssh(
+    arch: Arch, repository: str
+) -> None:
+    plain = framework_identity(user="user", vm=False, arch=arch)
+    assert framework_identity(user="user", vm=False, multinode=False, arch=arch) == plain
+    multinode = framework_identity(user="user", vm=False, multinode=True, arch=arch)
     assert multinode != plain
     assert f"ghcr.io/agentslastexam/orbit-multinode-ssh:{__version__}" == MULTINODE_SSH_IMAGE
-    body, tail = container_framework(user="user", keep_alive=False, multinode=True)
+    body, tail = container_framework(user="user", keep_alive=False, multinode=True, arch=arch)
     # Where the agent's ssh runs too, not root's /opt/orbit.
-    assert f"COPY --from={MULTINODE_SSH_IMAGE} /openssh/ /opt/orbit-ssh/" in body
+    image = f"ghcr.io/agentslastexam/{repository}:{__version__}"
+    assert f"COPY --from={image} /openssh/ /opt/orbit-ssh/" in body
     assert tail[-1] == f"LABEL {LABEL}={json.dumps(multinode)}"
-    body, tail = container_framework(user="user", keep_alive=False)
+    body, tail = container_framework(user="user", keep_alive=False, arch=arch)
     assert not any("multinode" in line for line in body)
     assert tail[-1] == f"LABEL {LABEL}={json.dumps(plain)}"
 

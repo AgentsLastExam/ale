@@ -457,6 +457,8 @@ Retained handles are always provider-qualified: `docker:<runtime-id>` for contai
 `qemu:<runtime-id>` for QEMU VMs, `firecracker:<runtime-id>` for Firecracker microVMs,
 `daytona:<sandbox-id>` for Daytona, `orchard:<vm>:<uid>` for Orchard VMs and `fleet:<sandbox>`
 for a Sandbox kept on the [Fleet](fleet.md#lifecycle), whichever leaf its Node used.
+A [cluster](../../packages/orbit-run/src/orbit/run/providers/README.md#clusters) snapshot
+uses its workload manager as the provider prefix, including `kubernetes` for a Job.
 Unqualified handles are rejected. Listing, destroying and attaching are Provider
 operations, routed by the Provider a handle or RunLock names, so a new backend needs no CLI
 change, apart from the Fleet, which `orbit sandbox` reaches at `$ORBIT_FLEET_URL` and

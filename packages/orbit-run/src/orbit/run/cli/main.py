@@ -434,6 +434,8 @@ async def _list_retained_sandboxes(
     for name in RETAINING_PROVIDERS:
         if name == "fleet" and not os.environ.get("ORBIT_FLEET_URL"):
             continue  # no Fleet named here
+        if name == "kubernetes" and (settings is None or settings.kubernetes is None):
+            continue  # no Kubernetes volume named here
         provider = provider_named(name, settings)
         try:
             records.extend(await provider.list_retained())

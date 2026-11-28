@@ -58,6 +58,7 @@ markers = [
     "needs_slurm: allocates real batch jobs on a configured Slurm cluster",
     "needs_pbs: allocates real batch jobs on a configured PBS Pro cluster",
     "needs_lsf: allocates real batch jobs on a configured LSF cluster",
+    "needs_kubernetes: submits Jobs to a configured Kubernetes cluster",
     "needs_gui: requires the desktop base image, which is large",
     "needs_llm: requires provider credentials and makes real model calls",
     "needs_kvm: VM work: requires hardware virtualisation (/dev/kvm) or builds VM disks",

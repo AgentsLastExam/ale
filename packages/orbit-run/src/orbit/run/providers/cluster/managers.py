@@ -9,23 +9,27 @@ from datetime import datetime
 from orbit.core.config import (
     ClusterPartition,
     ClusterProviderConfig,
+    KubernetesProviderConfig,
     LSFProviderConfig,
     PBSProviderConfig,
     SlurmProviderConfig,
 )
 from orbit.run.providers.cluster.job import Allocation, CurrentAllocation, Job
+from orbit.run.providers.cluster.kubernetes import KubernetesAllocation, KubernetesJob
 from orbit.run.providers.cluster.lsf import LSFAllocation, LSFJob
 from orbit.run.providers.cluster.pbs import PBSAllocation, PBSJob
 from orbit.run.providers.cluster.slurm import SlurmAllocation, SlurmJob
 
 #: By the cluster's configuration.
-JOBS: dict[type[ClusterProviderConfig], type[SlurmJob | PBSJob | LSFJob]] = {
+JOBS: dict[type[ClusterProviderConfig], type[SlurmJob | PBSJob | LSFJob | KubernetesJob]] = {
     SlurmProviderConfig: SlurmJob,
+    KubernetesProviderConfig: KubernetesJob,
     PBSProviderConfig: PBSJob,
     LSFProviderConfig: LSFJob,
 }
 ALLOCATIONS: dict[type[ClusterProviderConfig], type[Allocation]] = {
     SlurmProviderConfig: SlurmAllocation,
+    KubernetesProviderConfig: KubernetesAllocation,
     PBSProviderConfig: PBSAllocation,
     LSFProviderConfig: LSFAllocation,
 }

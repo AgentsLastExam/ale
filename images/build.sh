@@ -27,16 +27,31 @@ command -v "$runtime" >/dev/null 2>&1 || {
 
 engine=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/orbit-run/pyproject.toml)
 images=("$@")
-(( ${#images[@]} )) || images=(container-ubuntu22-base orbit-vm-materializer vm-ubuntu24-base orbit-qemu-runner orbit-firecracker-runner orbit-multinode-ssh)
+if (( ${#images[@]} == 0 )); then
+    ssh_image=orbit-multinode-ssh
+    case "$(uname -m)" in
+        aarch64|arm64) ssh_image=orbit-multinode-ssh-arm64 ;;
+    esac
+    images=(container-ubuntu22-base orbit-vm-materializer vm-ubuntu24-base orbit-qemu-runner orbit-firecracker-runner "$ssh_image")
+fi
 
 for repository in "${images[@]}"; do
+    platform=()
     case "$repository" in
         container-ubuntu22-base)  dockerfile=images/base/container-ubuntu22/Dockerfile context=images/base/container-ubuntu22 ;;
         vm-ubuntu24-base)         dockerfile="" context="" ;;
         orbit-vm-materializer)    dockerfile=images/builders/vm-materializer/Dockerfile context=images/builders/vm-materializer ;;
         orbit-qemu-runner)        dockerfile=images/runtimes/qemu-runner/Dockerfile context=images/runtimes/qemu-runner ;;
         orbit-firecracker-runner) dockerfile=images/runtimes/firecracker-runner/Dockerfile context=images/runtimes/firecracker-runner ;;
-        orbit-multinode-ssh)      dockerfile=images/framework/multinode-ssh/Dockerfile context=images/framework/multinode-ssh ;;
+        orbit-multinode-ssh|orbit-multinode-ssh-arm64)
+            dockerfile=images/framework/multinode-ssh/Dockerfile
+            context=images/framework/multinode-ssh
+            if [[ $repository == *-arm64 ]]; then
+                platform=(--platform linux/arm64)
+            else
+                platform=(--platform linux/amd64)
+            fi
+            ;;
         *) echo "ERROR: unknown image: $repository" >&2; exit 1 ;;
     esac
     case "$repository" in
@@ -59,9 +74,9 @@ for repository in "${images[@]}"; do
         echo ">> name $disk as a Task's [environment].image to test it"
     elif $published; then
         echo ">> pulling published $name"
-        "$runtime" pull "$name"
+        "$runtime" pull "${platform[@]}" "$name"
     else
         echo ">> building unpublished $name"
-        "$runtime" build --file "$dockerfile" --tag "$name" "$context"
+        "$runtime" build "${platform[@]}" --file "$dockerfile" --tag "$name" "$context"
     fi
 done

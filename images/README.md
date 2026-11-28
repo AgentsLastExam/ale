@@ -37,6 +37,9 @@ Every image but the gVisor runtime, which
 and never overwritten. The builder and runners run the engine's own logic, and
 `framework/` holds pieces of the framework layer, so they share the engine's version
 (`packages/orbit-run/pyproject.toml`) and a changed one ships with the next engine version.
+The multi-node OpenSSH image builds from one Dockerfile on native runners and has a
+separate repository for each architecture, `orbit-multinode-ssh` (amd64) and
+`orbit-multinode-ssh-arm64` (arm64). The local build script selects its host's version.
 A base carries no part of the framework and has its own version: the Linux bases' are in
 `BASES` in `packages/orbit-run/src/orbit/run/__init__.py`, the Windows base's in its README.
 Raise a base's version to publish it changed.

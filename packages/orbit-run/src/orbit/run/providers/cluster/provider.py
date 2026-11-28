@@ -416,6 +416,10 @@ async def _gpu_allocation(
             )
     devices = tuple(device for ready in readies for device in ready.devices)
     ids = tuple(device.id for device in devices)
+    if len(ids) != len(set(ids)):
+        raise ProviderStartError(
+            f"{chain.job.workload_manager} assigned the same whole GPU to multiple nodes: {ids}"
+        )
     return GpuAllocation(
         requested_count=resources.gpus * len(readies),
         provider_addresses=ids,
