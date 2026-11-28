@@ -5,7 +5,7 @@ Providers turn prepared Task images into Sandboxes. Orbit ships the following ba
 | Package | Backend | Prepared input |
 |---|---|---|
 | `docker/` | local Docker container, a Kata microVM per container ([Kata](#docker-on-kata-containers)), or a container on gVisor ([gVisor](#docker-on-gvisor)) | immutable OCI image identity |
-| `cluster/` | a Linux gVisor container on each node a Sandbox spans, in the batch job its episode runs in, beside the episode's other Sandboxes, on a cluster of Slurm, PBS Professional or Spectrum LSF ([Clusters](#clusters)) | immutable OCI image identity |
+| `cluster/` | a Linux gVisor container on each node a Sandbox spans, in the batch job its episode runs in, beside the episode's other Sandboxes, on Slurm, PBS Professional, Spectrum LSF or Kubernetes ([Clusters](#clusters)) | immutable OCI image identity |
 | `qemu/` | QEMU/KVM guest runner | qcow2 disk, or a chain of [layers](#disk-layers) on one |
 | `firecracker/` | Linux microVM on Firecracker/KVM | immutable OCI image identity, converted once to an ext4 disk |
 | `daytona/` | Daytona cloud container | immutable OCI image identity, pushed by digest |
@@ -947,10 +947,9 @@ the preflight's check: about 15 s with that image.
 
 ## Clusters
 
-On a cluster of Slurm, PBS Professional or Spectrum LSF, one Provider, `ClusterProvider`,
-whose name is the workload manager's, runs each episode in a batch job of its own; each
-workload manager's commands are its module's (`cluster/slurm.py`, `cluster/pbs.py`,
-`cluster/lsf.py`), and what follows holds for each, Slurm's configuration standing for them.
+On Slurm, PBS Professional, Spectrum LSF and Kubernetes, `ClusterProvider` runs each
+episode in its own job. The workload manager supplies job submission and allocation.
+The following example uses Slurm.
 Orbit submits each episode as a batch job of its own from a login node of the cluster, where
 Slurm's commands work, and keeps its files in a directory of the cluster's shared file
 system, its cache, which every compute node sees at the same path; a Run drives that one
@@ -1150,6 +1149,75 @@ runtime reads the limit and usage of the nearest cgroup above the step that has 
 sandbox. Confirm a site from inside a job of it, on the job's first node, as a job's script
 runs: `ORBIT_TEST_SLURM_CONFIG=run.toml uv run pytest -m needs_slurm tests`; the tests of
 [several nodes](#slurm-nodes) need a job of two.
+
+### Kubernetes Jobs
+
+Use a namespace and a dedicated PVC backed by a POSIX file system with locking and atomic
+renames. The submitting account needs `kubectl`, and the submit host and worker Pods must
+see the PVC at the same absolute `shared_fs_dir`. Put the Task, Run directory and any
+`--continue-from` episode on that volume so the episode process can open them. Each Pod
+gets its own `emptyDir` for the Podman store at `node_local_dir` (default `/scratch`).
+
+```toml
+[sandbox]
+providers = ["kubernetes"]
+
+[sandbox.kubernetes]
+namespace = "orbit"
+worker_image = "registry.example.org/orbit/batch-worker:1"
+shared_claim = "orbit-shared"
+shared_fs_dir = "/srv/orbit"
+runtime_class = "orbit-worker"
+# context = "research"
+
+[[sandbox.kubernetes.partitions]]
+name = "cpu"
+max_cpus = 8
+max_memory_mb = 32768
+```
+
+Image preparation runs in a single-Pod Job. An episode runs in its own Job, with the
+Harness and Gateway in the first Pod. For a multi-node allocation, the Job is indexed
+and required Pod anti-affinity places one worker per node. CPU, memory and whole GPUs
+are requested **per node**. For example, a Task with `nodes = 2`, `gpus = 1` requests
+two nodes with one GPU each. Set `max_nodes` on the partition and use `node_selector`
+to choose an eligible node pool. GPU pools also set `gpu_model` and `max_gpus` and
+require the NVIDIA device plugin, the userspace driver and Podman CDI entries. Orbit
+checks the GPU UUIDs visible inside each Sandbox and records them in rank order.
+If the pinned gVisor omits the exact ABI for NVIDIA driver `570.211.01`, the worker
+uses the supported `570.195.03` ABI. [Upstream driver guidance](https://github.com/gvisor/gvisor/pull/12774#issuecomment-4113776813).
+
+Use a ReadWriteMany PVC, IPv4 Pod-to-Pod UDP connectivity and WireGuard for multiple
+nodes. Tasks use the usual `node0`, `node1`, SSH and `/shared`. A snapshot verifier
+can restore each rank or run on one node with zero GPUs. ARM64 pools use the
+`orbit-multinode-ssh-arm64` image at the engine version for multinode SSH.
+
+Build the [worker image](../../../../../../images/runtimes/kubernetes-worker/Dockerfile)
+for the submitting account and set `worker_image` to a digest the cluster can pull.
+
+```sh
+docker build --build-arg WORKER_UID="$(id -u)" --build-arg WORKER_GID="$(id -g)" \
+  -t registry.example.org/orbit/batch-worker:1 images/runtimes/kubernetes-worker
+```
+
+The worker RuntimeClass must support nested user namespaces, rootless Podman, overlay
+storage, `/dev/net/tun` and a writable cgroup v2 subtree delegated only to the Pod.
+Orbit uses the subtree to enforce CPU, memory and zero-swap limits inside the Pod's own
+limit. The worker account needs subordinate UID and GID mappings. Only trusted operators
+should have access to the worker RuntimeClass and the claim. The dispatcher uses its
+kubeconfig to manage Jobs and inspect Pods and the PVC. Worker Pods run without a
+Kubernetes service account token. Grant the dispatcher `create`, `get` and `delete`
+on Jobs, `list` on Pods, and `get` on the PVC. Optional `list` access to Events adds
+Pod admission diagnostics.
+
+Run the site checks with the same configuration used for episodes. The single-node
+test uses a CPU by default. Set `ORBIT_TEST_BATCH_GPUS=1` to exercise a GPU on that
+path. The two-node checks use the configured pools for Gloo and per-rank GPU visibility.
+
+```sh
+ORBIT_TEST_KUBERNETES_CONFIG=/absolute/path/to/run.toml \
+  uv run pytest -q tests/integration/test_kubernetes_nodes.py
+```
 
 ### PBS Professional and Spectrum LSF
 
