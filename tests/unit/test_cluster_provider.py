@@ -1434,8 +1434,10 @@ async def test_a_job_runs_its_command_in_its_directory_as_the_account_and_queue_
     for wanted in ("--account=project-a", "--constraint=ib", "--qos=short", "--gres=gpu:1"):
         assert wanted in sbatch
     assert "--no-requeue" in sbatch and job.id == "4242"
-    # What a site's epilog leaves in the job's working directory stays out of the cache.
-    assert "--chdir=/tmp" in sbatch and f"--output={job.directory}/job.log" in sbatch
+    # What a site's epilog leaves in the job's working directory or beside its output file
+    # stays out of the cache, while what Slurm says of the job reaches its log.
+    assert "--chdir=/tmp" in sbatch and "--output=/tmp/orbit-%u.out" in sbatch
+    assert f"--error={job.directory}/job.log" in sbatch
     assert (
         f"--wrap=cd {shlex.quote(str(job.directory))} && test ! -s stop && exec "
         + ("/engine/bin/python3 -I worker.py prepare >>job.log 2>&1")

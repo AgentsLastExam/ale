@@ -1,0 +1,282 @@
+gofer: one Mappable per file, whatever its names
+
+What: a regular file the gofer serves is mapped through its inode, which every
+name (hard link) of the file shares while any is in use, instead of through
+the dentry of the name it was opened by. The memmap.Mappable methods
+(AddMapping, RemoveMapping, CopyMapping, Translate, InvalidateUnsavable) move
+from dentry to inode, whose state they already used alone.
+
+Why: the Sentry keys a futex in a shared file mapping by the mapping's
+Mappable. glibc's sem_open creates a POSIX semaphore under a temporary name,
+maps it, links it to its own name and unlinks the temporary one, so a process
+that opens the semaphore by its name, as Python's multiprocessing does in its
+spawn context, mapped it through another dentry than its creator: both saw the
+count change, and neither woke the other. Where /dev/shm is a tmpfs on the
+host bound into the container, as rootless Podman's --shm-size and Docker's
+--ipc=shareable make it, a spawned child's release never woke its parent, and
+SGLang-Omni's server never became ready.
+
+Verified on OpenRSI's H100 nodes (Linux 6.8, rootless Podman 4.9.3) and on a
+Docker host (Linux 7.0, rootful Docker), /dev/shm a tmpfs on the host bound
+into the container by Podman's --shm-size or Docker's --ipc=shareable:
+- A process that mapped a file under its name woke, through a futex, one that
+  had mapped it under a temporary name since linked to it, in 1.1 s; without
+  the patch the waiter was not woken within 5 s, though each saw the other's
+  writes.
+- A semaphore Python's multiprocessing created in its spawn context woke the
+  child and the parent alike, in a container and in a pod; without the patch
+  the parent's wait for its child's release ended unanswered after 10 s.
+- PyTorch's DataLoader passing 64 images of 3x224x224 float32 at a time
+  through /dev/shm ran as fast as without the patch: 4622 to 5260 samples a
+  second on one H100 against 4608 to 4946 (gVisor release-20261116.0).
+diff --git a/pkg/sentry/fsimpl/gofer/gofer.go b/pkg/sentry/fsimpl/gofer/gofer.go
+index b680af7..70d0055 100644
+--- a/pkg/sentry/fsimpl/gofer/gofer.go
++++ b/pkg/sentry/fsimpl/gofer/gofer.go
+@@ -341,7 +341,7 @@ type filesystemOptions struct {
+ 	forcePageCache bool
+ 
+ 	// If limitHostFDTranslation is true, apply maxFillRange() constraints to
+-	// host FD mappings returned by dentry.(memmap.Mappable).Translate(). This
++	// host FD mappings returned by inode.(memmap.Mappable).Translate(). This
+ 	// makes memory accounting behavior more consistent between cases where
+ 	// host FDs are / are not available, but may increase the frequency of
+ 	// sentry-handled page faults on files for which a host FD is available.
+@@ -950,10 +950,13 @@ func inoKeyFromStat(stat *unix.Stat_t) inoKey {
+ 	}
+ }
+ 
+-// inode represents a filesystem object.
++// inode represents a filesystem object. A regular file's inode implements
++// memmap.Mappable.
+ //
+ // +stateify savable
+ type inode struct {
++	memmap.MappableNoHugepages
++
+ 	// fs is the owning filesystem. fs is immutable.
+ 	fs *filesystem
+ 
+@@ -1194,8 +1197,6 @@ func (i *inode) destroy(ctx context.Context, d *dentry) {
+ //
+ // +stateify savable
+ type dentry struct {
+-	memmap.MappableNoHugepages
+-
+ 	vfsd vfs.Dentry
+ 
+ 	// refs is the reference count. Each dentry holds a reference on its
+@@ -2536,8 +2537,8 @@ func (d *dentry) ensureSharedHandle(ctx context.Context, read, write, trunc bool
+ 	if invalidateTranslations {
+ 		// Invalidate application mappings that may be using an old FD; they
+ 		// will be replaced with mappings using the new FD after future calls
+-		// to d.Translate(). This requires holding d.inode.mapsMu, which precedes
+-		// d.inode.handleMu in the lock order.
++		// to d.inode.Translate(). This requires holding d.inode.mapsMu, which
++		// precedes d.inode.handleMu in the lock order.
+ 		d.inode.mapsMu.Lock()
+ 		d.inode.mappings.InvalidateAll(memmap.InvalidateOpts{})
+ 		d.inode.mapsMu.Unlock()
+diff --git a/pkg/sentry/fsimpl/gofer/regular_file.go b/pkg/sentry/fsimpl/gofer/regular_file.go
+index 65f8944..7e42565 100644
+--- a/pkg/sentry/fsimpl/gofer/regular_file.go
++++ b/pkg/sentry/fsimpl/gofer/regular_file.go
+@@ -688,7 +688,11 @@ func (fd *regularFileFD) ConfigureMMap(ctx context.Context, opts *memmap.MMapOpt
+ 		}
+ 	}
+ 	opts.SentryOwnedContent = d.inode.fs.opts.forcePageCache
+-	return vfs.GenericConfigureMMap(&fd.vfsfd, d, opts)
++	// The inode, not the dentry, is the Mappable: a file has one inode under
++	// all its names (hard links), and futexes in a shared mapping are keyed by
++	// its Mappable, so a process that maps a file under one name must wake one
++	// that waits on it under another.
++	return vfs.GenericConfigureMMap(&fd.vfsfd, d.inode, opts)
+ }
+ 
+ func (fs *filesystem) mayCachePagesInMemoryFile() bool {
+@@ -696,64 +700,64 @@ func (fs *filesystem) mayCachePagesInMemoryFile() bool {
+ }
+ 
+ // AddMapping implements memmap.Mappable.AddMapping.
+-func (d *dentry) AddMapping(ctx context.Context, ms memmap.MappingSpace, ar hostarch.AddrRange, offset uint64, writable bool) error {
++func (i *inode) AddMapping(ctx context.Context, ms memmap.MappingSpace, ar hostarch.AddrRange, offset uint64, writable bool) error {
+ 	// Do this unconditionally since whether we have a host FD can change
+ 	// across save/restore.
+-	d.inode.mmapFile.AddMapping(ar, offset)
+-	d.inode.mapsMu.Lock()
+-	defer d.inode.mapsMu.Unlock()
+-	mapped := d.inode.mappings.AddMapping(ms, ar, offset, writable)
+-	if d.inode.fs.mayCachePagesInMemoryFile() {
+-		// d.Evict() will refuse to evict memory-mapped pages, so tell the
++	i.mmapFile.AddMapping(ar, offset)
++	i.mapsMu.Lock()
++	defer i.mapsMu.Unlock()
++	mapped := i.mappings.AddMapping(ms, ar, offset, writable)
++	if i.fs.mayCachePagesInMemoryFile() {
++		// i.Evict() will refuse to evict memory-mapped pages, so tell the
+ 		// MemoryFile to not bother trying.
+-		mf := d.inode.fs.mf
++		mf := i.fs.mf
+ 		for _, r := range mapped {
+-			mf.MarkUnevictable(d.inode, pgalloc.EvictableRange{Start: r.Start, End: r.End})
++			mf.MarkUnevictable(i, pgalloc.EvictableRange{Start: r.Start, End: r.End})
+ 		}
+ 	}
+ 	return nil
+ }
+ 
+ // RemoveMapping implements memmap.Mappable.RemoveMapping.
+-func (d *dentry) RemoveMapping(ctx context.Context, ms memmap.MappingSpace, ar hostarch.AddrRange, offset uint64, writable bool) {
+-	d.inode.mmapFile.RemoveMapping(ar, offset)
+-	d.inode.mapsMu.Lock()
+-	defer d.inode.mapsMu.Unlock()
+-	unmapped := d.inode.mappings.RemoveMapping(ms, ar, offset, writable)
+-	if d.inode.fs.mayCachePagesInMemoryFile() {
++func (i *inode) RemoveMapping(ctx context.Context, ms memmap.MappingSpace, ar hostarch.AddrRange, offset uint64, writable bool) {
++	i.mmapFile.RemoveMapping(ar, offset)
++	i.mapsMu.Lock()
++	defer i.mapsMu.Unlock()
++	unmapped := i.mappings.RemoveMapping(ms, ar, offset, writable)
++	if i.fs.mayCachePagesInMemoryFile() {
+ 		// Pages that are no longer referenced by any application memory
+ 		// mappings are now considered unused; allow MemoryFile to evict them
+ 		// when necessary.
+-		mf := d.inode.fs.mf
+-		d.inode.dataMu.Lock()
+-		defer d.inode.dataMu.Unlock()
++		mf := i.fs.mf
++		i.dataMu.Lock()
++		defer i.dataMu.Unlock()
+ 		for _, r := range unmapped {
+ 			// Since these pages are no longer mapped, they are no longer
+ 			// concurrently dirtyable by a writable memory mapping.
+-			d.inode.dirty.AllowClean(r)
+-			mf.MarkEvictable(d.inode, pgalloc.EvictableRange{Start: r.Start, End: r.End})
++			i.dirty.AllowClean(r)
++			mf.MarkEvictable(i, pgalloc.EvictableRange{Start: r.Start, End: r.End})
+ 		}
+ 	}
+ }
+ 
+ // CopyMapping implements memmap.Mappable.CopyMapping.
+-func (d *dentry) CopyMapping(ctx context.Context, ms memmap.MappingSpace, srcAR, dstAR hostarch.AddrRange, offset uint64, writable bool) error {
+-	return d.AddMapping(ctx, ms, dstAR, offset, writable)
++func (i *inode) CopyMapping(ctx context.Context, ms memmap.MappingSpace, srcAR, dstAR hostarch.AddrRange, offset uint64, writable bool) error {
++	return i.AddMapping(ctx, ms, dstAR, offset, writable)
+ }
+ 
+ // Translate implements memmap.Mappable.Translate.
+-func (d *dentry) Translate(ctx context.Context, required, optional memmap.MappableRange, at hostarch.AccessType) ([]memmap.Translation, error) {
+-	d.inode.handleMu.RLock()
+-	defer d.inode.handleMu.RUnlock()
+-	if d.inode.mmapFD.RacyLoad() >= 0 && !d.inode.fs.opts.forcePageCache {
++func (i *inode) Translate(ctx context.Context, required, optional memmap.MappableRange, at hostarch.AccessType) ([]memmap.Translation, error) {
++	i.handleMu.RLock()
++	defer i.handleMu.RUnlock()
++	if i.mmapFD.RacyLoad() >= 0 && !i.fs.opts.forcePageCache {
+ 		mr := optional
+-		if d.inode.fs.opts.limitHostFDTranslation {
++		if i.fs.opts.limitHostFDTranslation {
+ 			mr = maxFillRange(required, optional)
+ 		}
+ 		return []memmap.Translation{
+ 			{
+ 				Source: mr,
+-				File:   &d.inode.mmapFile,
++				File:   &i.mmapFile,
+ 				Offset: mr.Start,
+ 				Perms:  hostarch.AnyAccess,
+ 			},
+@@ -761,12 +765,12 @@ func (d *dentry) Translate(ctx context.Context, required, optional memmap.Mappab
+ 	}
+ 
+ 	memCgID := pgalloc.MemoryCgroupIDFromContext(ctx)
+-	d.inode.dataMu.Lock()
+-	defer d.inode.dataMu.Unlock()
++	i.dataMu.Lock()
++	defer i.dataMu.Unlock()
+ 
+-	// Constrain translations to d.inode.size (rounded up) to prevent translation to
++	// Constrain translations to i.size (rounded up) to prevent translation to
+ 	// pages that may be concurrently truncated.
+-	pgend, _ := hostarch.PageRoundUp(d.inode.size.Load())
++	pgend, _ := hostarch.PageRoundUp(i.size.Load())
+ 	var beyondEOF bool
+ 	if required.End > pgend {
+ 		if required.Start >= pgend {
+@@ -779,9 +783,9 @@ func (d *dentry) Translate(ctx context.Context, required, optional memmap.Mappab
+ 		optional.End = pgend
+ 	}
+ 
+-	mf := d.inode.fs.mf
+-	h := d.inode.readHandle()
+-	_, cerr := d.inode.cache.Fill(ctx, required, maxFillRange(required, optional), d.inode.size.Load(), mf, pgalloc.AllocOpts{
++	mf := i.fs.mf
++	h := i.readHandle()
++	_, cerr := i.cache.Fill(ctx, required, maxFillRange(required, optional), i.size.Load(), mf, pgalloc.AllocOpts{
+ 		Kind:    usage.PageCache,
+ 		MemCgID: memCgID,
+ 		Mode:    pgalloc.AllocateAndWritePopulate,
+@@ -789,7 +793,7 @@ func (d *dentry) Translate(ctx context.Context, required, optional memmap.Mappab
+ 
+ 	var ts []memmap.Translation
+ 	var translatedEnd uint64
+-	for seg := d.inode.cache.FindSegment(required.Start); seg.Ok() && seg.Start() < required.End; seg, _ = seg.NextNonEmpty() {
++	for seg := i.cache.FindSegment(required.Start); seg.Ok() && seg.Start() < required.End; seg, _ = seg.NextNonEmpty() {
+ 		segMR := seg.Range().Intersect(optional)
+ 		// TODO(jamieliu): Make Translations writable even if writability is
+ 		// not required if already kept-dirty by another writable translation.
+@@ -797,7 +801,7 @@ func (d *dentry) Translate(ctx context.Context, required, optional memmap.Mappab
+ 		if at.Write {
+ 			// From this point forward, this memory can be dirtied through the
+ 			// mapping at any time.
+-			d.inode.dirty.KeepDirty(segMR)
++			i.dirty.KeepDirty(segMR)
+ 			perms.Write = true
+ 		}
+ 		ts = append(ts, memmap.Translation{
+@@ -837,31 +841,31 @@ func maxFillRange(required, optional memmap.MappableRange) memmap.MappableRange
+ }
+ 
+ // InvalidateUnsavable implements memmap.Mappable.InvalidateUnsavable.
+-func (d *dentry) InvalidateUnsavable(ctx context.Context) error {
++func (i *inode) InvalidateUnsavable(ctx context.Context) error {
+ 	// Whether we have a host fd (and consequently what memmap.File is
+ 	// mapped) can change across save/restore, so invalidate all translations
+ 	// unconditionally.
+-	d.inode.mapsMu.Lock()
+-	defer d.inode.mapsMu.Unlock()
+-	d.inode.mappings.InvalidateAll(memmap.InvalidateOpts{})
++	i.mapsMu.Lock()
++	defer i.mapsMu.Unlock()
++	i.mappings.InvalidateAll(memmap.InvalidateOpts{})
+ 
+ 	// Write the cache's contents back to the remote file so that if we have a
+ 	// host fd after restore, the remote file's contents are coherent.
+-	mf := d.inode.fs.mf
+-	d.inode.handleMu.RLock()
+-	defer d.inode.handleMu.RUnlock()
+-	h := d.inode.writeHandle()
+-	d.inode.dataMu.Lock()
+-	defer d.inode.dataMu.Unlock()
+-	if err := fsutil.SyncDirtyAll(ctx, &d.inode.cache, &d.inode.dirty, d.inode.size.Load(), mf, h.writeFromBlocksAt); err != nil {
++	mf := i.fs.mf
++	i.handleMu.RLock()
++	defer i.handleMu.RUnlock()
++	h := i.writeHandle()
++	i.dataMu.Lock()
++	defer i.dataMu.Unlock()
++	if err := fsutil.SyncDirtyAll(ctx, &i.cache, &i.dirty, i.size.Load(), mf, h.writeFromBlocksAt); err != nil {
+ 		return err
+ 	}
+ 
+ 	// Discard the cache so that it's not stored in saved state. This is safe
+ 	// because per InvalidateUnsavable invariants, no new translations can have
+ 	// been returned after we invalidated all existing translations above.
+-	d.inode.cache.DropAll(mf)
+-	d.inode.dirty.RemoveAllAndAccount()
++	i.cache.DropAll(mf)
++	i.dirty.RemoveAllAndAccount()
+ 
+ 	return nil
+ }

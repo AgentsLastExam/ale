@@ -108,6 +108,18 @@ left after its release, turns SIGTERM into an exit so that its cleanup runs, and
 starts, removes the stores on its node of this account's jobs that have ended, which each
 store names in its `job` file.
 
+OpenRSI's epilog (`/data/slurm/etc/epilog.d/70-dcgm_jobstats.epi.sh`) writes each GPU job's
+DCGM statistics as root into `<job id>.gpu_stats/` beside the job's Slurm output file, or in
+its working directory without one. In the job's directory on the shared home that directory
+stayed root's, and since the account cannot remove what it holds, Orbit could not remove the
+job's directory (`PermissionError`) after any GPU job. A job's Slurm output file and working
+directory are therefore on the node's `/tmp` (`/tmp/orbit-<account>.out`, which Slurm fills
+with nothing, as the job's command writes its own log), and Slurm's own messages about the
+job, such as its cancellation at its wall time, reach `job.log` as its error file. Measured
+on OpenRSI (November 2026): a GPU job cut at its wall time wrote that message into
+`job.log`, its directory held nothing else, and its statistics went to the node's `/tmp`,
+the account's.
+
 A commit chain of 200, each booted from the one before, worked under rootless Podman 4.9.3
 on Linux 6.8, which is the declared `max_saves`.
 
@@ -131,24 +143,43 @@ its worker starts, or, once it runs, by a control command on each node.
 
 A Sandbox's `/dev/shm` is Podman's `--shm-size` of half its Task's memory
 ([`memory.shm_mb`](../memory.py)). Podman makes it a tmpfs on the node and binds it into the
-container, so runsc reaches it through its gofer (`9p`), where it mounts Docker's as a tmpfs
-of the Sentry; its pages are charged to the step's cgroup all the same. A `--tmpfs` at
-`/dev/shm`, which replaces Podman's with a tmpfs of the Sentry as under Docker, was slower.
-Measured on OpenRSI (Podman 4.9.3, Orbit's runsc 0.1.4, November 2026), with PyTorch's
-DataLoader of 8 workers and batches of 64 images of 3×224×224 float32 on one H100, in a
-Sandbox of 16 CPUs and 16 GiB, three passes each, in both orders:
+container, so runsc reaches it through its gofer (`9p`), as it does Docker's under
+`docker:gvisor`; its pages are charged to the step's cgroup all the same. A POSIX semaphore
+there works between processes only with Orbit's gVisor patch 0015: without it, a process
+that opened one by name, as Python's multiprocessing does in its spawn context, never woke
+the process that created it, nor was woken by it, and in a Task that serves a model with
+SGLang-Omni the server never became ready. A `--tmpfs` at `/dev/shm`, which replaces
+Podman's with a tmpfs of the Sentry and needs no patch, passes less than half as many
+samples. Measured on OpenRSI (Podman 4.9.3, Orbit's runsc 0.1.0 with and without patch 0015,
+gVisor release-20261116.0, November 2026), with PyTorch's DataLoader of 8 workers passing
+batches of 64 images of 3×224×224 float32 to the main process, which copies each to one
+H100, in a Sandbox of 16 CPUs with 8 GiB of `/dev/shm`, three passes of forked workers and
+one of spawned ones each, in both orders:
 
-| `/dev/shm` | Samples per second |
-|---|---|
-| 64 MiB | none: a bus error in a worker at the first batch |
-| `--shm-size`, 8 GiB over `9p` | 1795, 2170, 2155; 1720, 2152, 2152 |
-| `--tmpfs`, 8 GiB in the Sentry | 1231, 1507, 1494; 1232, 1497, 1497 |
+| `/dev/shm` | Samples per second, forked | Spawned |
+|---|---|---|
+| 64 MiB | none: a bus error in a worker at the first batch | none |
+| `--shm-size` over `9p`, patch 0015 | 4680, 4709, 5260; 4622, 4930, 4739 | 3793; 4103 |
+| `--shm-size` over `9p`, without it | 4608, 4685, 4809; 4677, 4946, 4781 | 4079; 4174 |
+| `--tmpfs` in the Sentry | 2158, 2117, 2203; 2218, 2082, 1924 | 1944; 1998 |
 
 In a 2048 MiB Sandbox, 1024 MiB were written before a write failed with `ENOSPC`; with
 `/dev/shm` full, one process allocating held 568 MiB and was killed alone, and the Sandbox
 answered after it; 400 processes of 16 MiB ended the whole Sandbox as `MemoryExhaustedError`
 (the Sentry counted 63 to 67 kills, then the step exited 137) with `/dev/shm` full or empty,
-under either flag.
+under `--shm-size` and `--tmpfs` alike.
+
+Decided: a Sandbox's processes keep the `oom_score_adj` they inherit, 0, rather than the 500
+Docker gives its gVisor containers (`gvisor.FLAGS`). With 500, every process's stub ranked
+above the Sentry, which stays at 0, for the Host's OOM killer, and killing a stub frees
+nothing, as the memory is the Sentry's. Measured on OpenRSI with the 400 processes of 16 MiB
+above and the Sandbox left alone for 20 s after its loss: with 500, its Sentry stopped
+answering in 12 of 21 runs, its threads all asleep and its log silent, while the Host's OOM
+killer went on taking stubs at the step's limit, so Podman's removal waited without end and
+the job held its node; with 0, the Host's OOM killer took the Sentry, the largest process,
+and the Sandbox ended as `MemoryExhaustedError` and was removed, in 10 of 10. One process
+past the memory still dies alone, to the Sentry's own OOM killer. Docker's gVisor Sandboxes
+left alone the same way all lived (6 of 6, rootful Docker), so Docker keeps 500.
 
 Podman uses NVIDIA CDI devices by UUID. Setting NVIDIA_VISIBLE_DEVICES to void disables
 the duplicate NVIDIA hook. Register the injected libraries inside the sandbox. For nested

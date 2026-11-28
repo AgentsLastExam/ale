@@ -542,12 +542,12 @@ stops.
 under gVisor on Slurm, where a Linux VM of the same memory ran it (November 2026).
 
 **Context.** Docker gives every container a 64 MiB `/dev/shm` (`size=65536k`), whatever its
-`--memory`. runsc mounts Docker's as a tmpfs of the Sentry of the size Docker gave
-(`--shm-size 512m` gave `size=524288k`; Orbit's runsc 0.1.0, by `docker run`). Kata's
-guest mounts its own `/dev/shm` without a size, half the microVM, and ignores `--shm-size`
-(Kata 4.3.1). A tmpfs's pages are charged to the cgroup of whoever writes them, under gVisor
-the Sentry, so `--memory` holds them as it holds a process's. Linux sizes a tmpfs at half its
-memory by default.
+`--memory`. Without `--ipc=shareable`, runsc mounts Docker's as a tmpfs of the Sentry of the
+size Docker gave (`--shm-size 512m` gave `size=524288k`; Orbit's runsc 0.1.0, by `docker
+run`). Kata's guest mounts its own `/dev/shm` without a size, half the microVM, and ignores
+`--shm-size` (Kata 4.3.1). A tmpfs's pages are charged to the cgroup of whoever writes them,
+so `--memory` holds them as it holds a process's. Linux sizes a tmpfs at half its memory by
+default.
 
 **Solution.** Every Sandbox gets `--shm-size` of half its Task's `memory_mb`
 ([`memory.shm_mb`](../memory.py)). Measured with the container base at 2048 MiB (rootful
@@ -563,6 +563,25 @@ Docker 29.1.3, Linux 7.0, Kata 4.3.1, November 2026):
 The DataLoader above, on CPU with 8 CPUs under runc, failed at 64 MiB and ran at 2320
 samples/s in a 16 GiB Sandbox (8 GiB of `/dev/shm`) and 2745 in a 4 GiB one (2 GiB).
 
+Under gVisor, a Sandbox's IPC namespace is shareable (`--ipc=shareable`): Docker then mounts
+its `/dev/shm` as a tmpfs on the Host and binds it in, which runsc reaches through its
+gofer, as it does rootless Podman's on Slurm, rather than the private namespace's tmpfs,
+which runsc keeps in the Sentry. Measured on a Host of 128 CPUs (Docker 26.1.5, Linux 6.12,
+Orbit's runsc 0.1.0, November 2026), with the DataLoader above on CPU in a Sandbox of 16
+CPUs and 24 GiB with 8 GiB of `/dev/shm`, three passes of forked workers and one of spawned
+ones each, in both orders:
+
+| `/dev/shm` | Samples per second, forked | Spawned |
+|---|---|---|
+| gVisor, `--ipc=shareable`, over `9p` | 4176, 3875, 4003; 3981, 4089, 4157 | 3407; 3406 |
+| gVisor, private, in the Sentry | 2054, 2092, 2263; 2230, 2113, 2140 | 2065; 2053 |
+
+A POSIX semaphore there works between processes only with Orbit's gVisor patch 0015
+([gVisor](../../../../../../../images/runtimes/gvisor/README.md)). What it holds is the
+container's memory either way: in a 2048 MiB Sandbox (`--memory 2158m`, Docker 29.1.3, Linux
+7.0) with `/dev/shm` written full, one process allocating held 1024 MiB and was killed
+alone, and the Sandbox answered, with the shareable namespace and the private one alike.
+
 **Decisions.**
 - Half the memory, not a fixed size: what `/dev/shm` holds is the Sandbox's memory either
   way, and half is what a Linux machine of that memory gives, so a Task has the same room in
@@ -572,6 +591,9 @@ samples/s in a 16 GiB Sandbox (8 GiB of `/dev/shm`) and 2745 in a 4 GiB one (2 G
   allowance.
 - Passed under Kata too, which ignores it, so that every runtime starts from one argument
   list.
+- Under gVisor, a tmpfs on the Host rather than the Sentry's: a DataLoader passes about
+  twice as much through it, charged to the container as before; its semaphores need patch
+  0015.
 
 ## guestd's replies under gVisor
 

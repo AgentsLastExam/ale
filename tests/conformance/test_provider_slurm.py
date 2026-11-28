@@ -13,6 +13,7 @@ from orbit.core.taskspec import NetworkPolicy, Resources
 from orbit.core.testkit import ProviderConformance
 from orbit.run.framework import framework_identity
 from orbit.run.providers import missing_features
+from orbit.run.providers.cluster import managers
 
 pytestmark = [pytest.mark.conformance, pytest.mark.needs_slurm]
 
@@ -20,7 +21,6 @@ pytestmark = [pytest.mark.conformance, pytest.mark.needs_slurm]
 class TestSlurmProvider(ProviderConformance):
     image = ImageRef(kind="container", reference=CONTAINER_BASE)
     gui_image = image
-    framework = framework_identity(user="user", vm=False)
     missing_features = staticmethod(missing_features)
 
     async def request(self, **overrides: object) -> SandboxRequest:
@@ -31,6 +31,14 @@ class TestSlurmProvider(ProviderConformance):
     @pytest.fixture(autouse=True)
     async def cluster(self) -> AsyncIterator[None]:
         self.provider = provider_in_job()
+        # An image the cluster prepares from a reference carries the nodes' OpenSSH wherever
+        # its Sandboxes may span nodes, as nothing says whether one of them does.
+        self.framework = framework_identity(
+            user="user",
+            vm=False,
+            multinode=managers.spans_nodes(self.provider.config),
+            arch=self.provider.architecture,
+        )
         try:
             yield
         finally:

@@ -91,12 +91,15 @@ class SlurmJob(Job):
             f"--cpus-per-task={cpus}",
             f"--mem={memory_mb}M",
             f"--time={minutes}",
-            # The job runs in its directory (command_line); Slurm's working directory for
-            # it is the node's /tmp, where a site's epilog may leave files of root's, as
-            # OpenRSI's GPU statistics, which in the job's directory would outlive it.
+            # The job runs in its directory (command_line), its output in its log. Slurm's
+            # working directory and output file for it, which it fills no further, are the
+            # node's /tmp, beside which a site's epilog may leave files of root's, as
+            # OpenRSI's GPU statistics beside the output file, which in the job's directory
+            # would outlive it.
             "--chdir=/tmp",
-            # What Slurm itself says of the job, beside what it runs.
-            "--output=" + str(self.directory / "job.log").replace("%", "%%"),
+            "--output=/tmp/orbit-%u.out",
+            # What Slurm itself says of the job, such as why it ended, beside what it runs.
+            "--error=" + str(self.directory / "job.log").replace("%", "%%"),
             "--open-mode=append",
         ]
         if self.partition.qos:
